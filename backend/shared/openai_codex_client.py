@@ -91,7 +91,15 @@ class OpenAICodexClient:
     DEFAULT_ORIGINATOR = "moto-autonomous-asi"
     DEFAULT_INSTRUCTIONS = "Follow the user's instructions and produce the requested response."
     REFRESH_SKEW_SECONDS = 60
-    REASONING_EFFORT_LEVELS = {"xhigh", "high", "medium", "low", "none"}
+    REASONING_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+    REASONING_EFFORT_LEVELS = set(REASONING_EFFORT_ORDER)
+    # Exact documented IDs only; provider variants must use their own catalog row.
+    KNOWN_MODEL_REASONING = {
+        "gpt-5.5": {
+            "supported_reasoning_levels": ["low", "medium", "high", "xhigh"],
+            "default_reasoning_level": "medium",
+        },
+    }
     MAX_RETRIES = 4
     RETRY_DELAY = 2.0
     RETRY_MAX_DELAY = 30.0
@@ -145,6 +153,8 @@ class OpenAICodexClient:
 
     def __init__(self) -> None:
         self._refresh_lock = asyncio.Lock()
+        self._model_reasoning_cache: Dict[str, Dict[str, Any]] = {}
+        self._model_catalog_lock = asyncio.Lock()
         self.client = httpx.AsyncClient(
             timeout=None,
             limits=httpx.Limits(
@@ -390,6 +400,26 @@ class OpenAICodexClient:
         return None
 
     @classmethod
+    def _normalize_reasoning_metadata(cls, model: Dict[str, Any]) -> Dict[str, Any]:
+        """Accept catalog strings or Codex effort/description objects without inventing levels."""
+        metadata: Dict[str, Any] = {}
+        raw_levels = model.get("supported_reasoning_levels")
+        if isinstance(raw_levels, list):
+            levels = []
+            for entry in raw_levels:
+                value = entry.get("effort") if isinstance(entry, dict) else entry
+                if isinstance(value, str) and value.strip().lower() in cls.REASONING_EFFORT_LEVELS:
+                    effort = value.strip().lower()
+                    if effort not in levels:
+                        levels.append(effort)
+            if levels or not raw_levels:
+                metadata["supported_reasoning_levels"] = levels
+        default = model.get("default_reasoning_level")
+        if isinstance(default, str) and default.strip().lower() in cls.REASONING_EFFORT_LEVELS:
+            metadata["default_reasoning_level"] = default.strip().lower()
+        return metadata
+
+    @classmethod
     def _normalize_model_metadata(cls, model: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Normalize Codex model-catalog fields into the frontend model shape."""
         slug = model.get("slug") or model.get("id")
@@ -458,6 +488,16 @@ class OpenAICodexClient:
         if model_reasoning_effort:
             normalized["reasoning_effort"] = str(model_reasoning_effort)
             normalized["provider_metadata"]["reasoning_effort"] = str(model_reasoning_effort)
+        reasoning_metadata = cls._normalize_reasoning_metadata(model)
+        if slug == cls.CODEX_SPARK_HIGH_MODEL_ID:
+            reasoning_metadata = {
+                "supported_reasoning_levels": ["high"],
+                "default_reasoning_level": "high",
+            }
+        elif not reasoning_metadata and "supported_reasoning_levels" not in model:
+            reasoning_metadata = cls.KNOWN_MODEL_REASONING.get(slug, {})
+        normalized.update(reasoning_metadata)
+        normalized["provider_metadata"].update(reasoning_metadata)
         if context_length:
             normalized["context_length"] = context_length
         if max_output_tokens:
@@ -482,6 +522,7 @@ class OpenAICodexClient:
             except Exception:
                 logger.debug("OpenAI Codex token revoke failed; clearing local credential anyway.")
         clear_openai_codex_oauth_tokens()
+        self._model_reasoning_cache.clear()
 
     def _headers(self, tokens: Dict[str, Any], *, accept_stream: bool = False) -> Dict[str, str]:
         headers = {
@@ -529,22 +570,27 @@ class OpenAICodexClient:
             if normalized and normalized["id"] not in seen_model_ids:
                 models.append(normalized)
                 seen_model_ids.add(normalized["id"])
+        self._model_reasoning_cache = {
+            row["id"]: self._normalize_reasoning_metadata(row) for row in models
+        }
         return models
+
+    async def _model_reasoning_metadata(self, model: str) -> Dict[str, Any]:
+        if model in self._model_reasoning_cache:
+            return self._model_reasoning_cache[model]
+        if model in self.KNOWN_MODEL_REASONING:
+            return self.KNOWN_MODEL_REASONING[model]
+        async with self._model_catalog_lock:
+            if model not in self._model_reasoning_cache:
+                await self.list_models()
+                self._model_reasoning_cache.setdefault(model, {})
+        return self._model_reasoning_cache[model]
 
     @classmethod
     def _resolve_model_request(cls, model: str, reasoning_effort: Optional[str]) -> tuple[str, Optional[str]]:
         """Map user-facing Codex aliases onto the backend model id/request knobs."""
         if model == cls.CODEX_SPARK_HIGH_MODEL_ID:
             return cls.CODEX_SPARK_MODEL_ID, "high"
-        # Some Codex catalogs expose named variants as selectable entries while
-        # the Responses backend accepts the base model plus a reasoning effort.
-        # Keep the selected alias in MOTO metadata, but normalize the request.
-        named_effort = {
-            "gpt-5.6-luna": "high",
-            "gpt-5.6-terra": "medium",
-        }.get(model)
-        if named_effort:
-            return "gpt-5.6-sol", named_effort
         return model, reasoning_effort
 
     @staticmethod
@@ -732,19 +778,28 @@ class OpenAICodexClient:
         return min(cls.RETRY_MAX_DELAY, cls.RETRY_DELAY * (2 ** max(0, retry_index)))
 
     @classmethod
-    def _reasoning_config(cls, reasoning_effort: Optional[str]) -> Optional[Dict[str, str]]:
+    def _reasoning_config(
+        cls, reasoning_effort: Optional[str], metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, str]]:
         if not reasoning_effort:
             return None
         effort = str(reasoning_effort).strip().lower()
-        if effort in {"auto", "max", "maximum", "highest"}:
-            effort = "xhigh"
-        elif effort == "minimal":
-            effort = "low"
-        if effort == "none":
-            return None
+        supported = (metadata or {}).get("supported_reasoning_levels", [])
+        if effort in {"auto", "maximum", "highest"}:
+            if metadata is not None and metadata.get("supported_reasoning_levels") == []:
+                return None
+            effort = next((level for level in reversed(cls.REASONING_EFFORT_ORDER) if level in supported), "")
+            if not effort:
+                raise OpenAICodexRequestError(
+                    "OpenAI Codex reasoning capabilities are unknown for this model. "
+                    "Refresh the model catalog or select an explicit reasoning effort.",
+                    error_code="reasoning_capabilities_unknown", failure_kind="configuration",
+                )
         if effort not in cls.REASONING_EFFORT_LEVELS:
-            logger.warning("Unknown OpenAI Codex reasoning effort '%s'; defaulting to xhigh", reasoning_effort)
-            effort = "xhigh"
+            raise OpenAICodexRequestError(
+                "Unsupported OpenAI Codex reasoning effort. Select a catalog-supported effort.",
+                error_code="unsupported_reasoning_effort", failure_kind="configuration",
+            )
         return {"effort": effort}
 
     @staticmethod
@@ -935,7 +990,10 @@ class OpenAICodexClient:
         payload["instructions"] = instructions or self.DEFAULT_INSTRUCTIONS
         # ChatGPT's Codex backend rejects standard Responses knobs such as
         # max_output_tokens and temperature; keep them compatibility-only here.
-        reasoning = self._reasoning_config(reasoning_effort)
+        reasoning_metadata = None
+        if str(reasoning_effort or "").strip().lower() in {"auto", "maximum", "highest"}:
+            reasoning_metadata = await self._model_reasoning_metadata(requested_model)
+        reasoning = self._reasoning_config(reasoning_effort, reasoning_metadata)
         if reasoning:
             payload["reasoning"] = reasoning
         text_format = self._response_format(response_format)

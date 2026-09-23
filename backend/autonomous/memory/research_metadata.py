@@ -14,6 +14,7 @@ from backend.shared.config import system_config
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import BrainstormMetadata, PaperMetadata
 from backend.shared.path_safety import resolve_path_within_root
+from backend.autonomous.memory.session_write_authority import autonomous_session_write
 
 logger = logging.getLogger(__name__)
 
@@ -648,7 +649,7 @@ class ResearchMetadata:
     
     async def generate_topic_id(self) -> str:
         """Generate a new unique topic ID."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             topic_id = f"topic_{self._data['next_topic_id']:03d}"
             self._data['next_topic_id'] += 1
             await self._save_metadata()
@@ -656,7 +657,7 @@ class ResearchMetadata:
     
     async def generate_paper_id(self) -> str:
         """Generate a new unique paper ID."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             paper_id = f"paper_{self._data['next_paper_id']:03d}"
             self._data['next_paper_id'] += 1
             await self._save_metadata()
@@ -678,7 +679,7 @@ class ResearchMetadata:
     
     async def set_user_prompt(self, prompt: str) -> None:
         """Persist only the canonical user-authored research prompt."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             self._data["user_research_prompt"] = prompt
             self._data["base_user_research_prompt"] = prompt
             await self._save_metadata()
@@ -693,7 +694,7 @@ class ResearchMetadata:
         reasoning: str,
     ) -> None:
         """Persist proof framing separately from the canonical user prompt."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             self._data["base_user_research_prompt"] = base_user_prompt
             self._data["user_research_prompt"] = base_user_prompt
             self._data["proof_framing_active"] = active
@@ -709,7 +710,7 @@ class ResearchMetadata:
 
     async def set_proof_runtime_config(self, config: Dict[str, Any]) -> None:
         """Persist the proof runtime model configuration snapshot."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             self._data["proof_runtime_config"] = config if isinstance(config, dict) else {}
             await self._save_metadata()
     
@@ -719,7 +720,7 @@ class ResearchMetadata:
     
     async def register_brainstorm(self, metadata: BrainstormMetadata) -> None:
         """Register a new brainstorm in central metadata."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             # Check if already exists
             existing_ids = [b.get("topic_id") for b in self._data.get("brainstorms", [])]
             if metadata.topic_id in existing_ids:
@@ -743,7 +744,7 @@ class ResearchMetadata:
     
     async def update_brainstorm(self, topic_id: str, **kwargs) -> None:
         """Update brainstorm metadata in central registry."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             for i, b in enumerate(self._data.get("brainstorms", [])):
                 if b.get("topic_id") == topic_id:
                     for key, value in kwargs.items():
@@ -788,7 +789,7 @@ class ResearchMetadata:
     
     async def register_paper(self, metadata: PaperMetadata) -> None:
         """Register a new paper in central metadata."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             # Check if already exists
             existing_ids = [p.get("paper_id") for p in self._data.get("papers", [])]
             if metadata.paper_id in existing_ids:
@@ -839,7 +840,7 @@ class ResearchMetadata:
         pruned_by: str = "system",
     ) -> None:
         """Mark a paper as pruned in central metadata."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             for i, p in enumerate(self._data.get("papers", [])):
                 if p.get("paper_id") == paper_id:
                     self._data["papers"][i]["status"] = "pruned"
@@ -939,7 +940,7 @@ class ResearchMetadata:
     async def increment_stat(self, stat_name: str, amount: int = 1) -> None:
         """Increment a statistic."""
         await self._ensure_initialized()
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             if self._stats and stat_name in self._stats:
                 self._stats[stat_name] += amount
                 
@@ -953,7 +954,7 @@ class ResearchMetadata:
     async def set_stat(self, stat_name: str, value: Any) -> None:
         """Set a statistic value."""
         await self._ensure_initialized()
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             if self._stats:
                 self._stats[stat_name] = value
                 await self._save_stats()
@@ -980,7 +981,7 @@ class ResearchMetadata:
         Returns:
             True if removal successful, False otherwise
         """
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             try:
                 # Remove from brainstorms list
                 brainstorms = self._data.get("brainstorms", [])
@@ -1023,7 +1024,7 @@ class ResearchMetadata:
         Returns:
             True if removal successful, False otherwise
         """
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             try:
                 # Get paper info before removal
                 paper_entry = None
@@ -1078,7 +1079,7 @@ class ResearchMetadata:
     
     async def clear_all(self) -> None:
         """Clear all research metadata, statistics, and workflow state."""
-        async with self._lock:
+        async with autonomous_session_write(self._metadata_path), self._lock:
             self._data = {
                 "user_research_prompt": "",
                 "base_user_research_prompt": "",

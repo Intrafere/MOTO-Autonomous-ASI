@@ -10,7 +10,6 @@ PHASE ORDER (enforced):
 """
 from typing import Optional
 
-from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 from backend.shared.config import system_config
 
 
@@ -1003,7 +1002,8 @@ async def build_construction_prompt(
     is_first_portion: bool = False,
     section_phase: Optional[str] = None,
     rejection_feedback: Optional[str] = None,
-    brainstorm_content: Optional[str] = None
+    brainstorm_content: Optional[str] = None,
+    rejection_history: str = "",
 ) -> str:
     """
     Build complete prompt for construction mode.
@@ -1046,8 +1046,6 @@ async def build_construction_prompt(
         parts.append(wolfram_guidance)
         parts.append("\n---\n")
     
-    # Add rejection history (DIRECT INJECTION - almost always fits)
-    rejection_history = await compiler_rejection_log.get_rejections_text()
     if rejection_history:
         parts.append(f"""YOUR RECENT REJECTION HISTORY (Last 10 rejections):
 {rejection_history}
@@ -1120,7 +1118,8 @@ async def build_phase_construction_prompt(
     phase: str,
     is_first_in_phase: bool = False,
     rejection_feedback: Optional[str] = None,
-    brainstorm_content: Optional[str] = None
+    brainstorm_content: Optional[str] = None,
+    rejection_history: str = "",
 ) -> str:
     """
     Build prompt for a specific construction phase.
@@ -1148,7 +1147,8 @@ async def build_phase_construction_prompt(
         is_first_portion=is_first_in_phase,
         section_phase=phase,
         rejection_feedback=rejection_feedback,
-        brainstorm_content=brainstorm_content
+        brainstorm_content=brainstorm_content,
+        rejection_history=rejection_history,
     )
 
 
@@ -1163,7 +1163,8 @@ async def build_body_construction_prompt(
     rag_evidence: str,
     is_first_portion: bool = False,
     rejection_feedback: Optional[str] = None,
-    brainstorm_content: Optional[str] = None
+    brainstorm_content: Optional[str] = None,
+    rejection_history: str = "",
 ) -> str:
     """
     Build prompt for BODY section construction phase.
@@ -1185,7 +1186,8 @@ async def build_body_construction_prompt(
         phase="body",
         is_first_in_phase=is_first_portion,
         rejection_feedback=rejection_feedback,
-        brainstorm_content=brainstorm_content
+        brainstorm_content=brainstorm_content,
+        rejection_history=rejection_history,
     )
 
 
@@ -1195,7 +1197,8 @@ async def build_conclusion_construction_prompt(
     current_paper: str,
     rag_evidence: str,
     rejection_feedback: Optional[str] = None,
-    brainstorm_content: Optional[str] = None
+    brainstorm_content: Optional[str] = None,
+    rejection_history: str = "",
 ) -> str:
     """Build prompt for CONCLUSION section construction phase."""
     return await build_phase_construction_prompt(
@@ -1206,7 +1209,8 @@ async def build_conclusion_construction_prompt(
         phase="conclusion",
         is_first_in_phase=True,
         rejection_feedback=rejection_feedback,
-        brainstorm_content=brainstorm_content
+        brainstorm_content=brainstorm_content,
+        rejection_history=rejection_history,
     )
 
 
@@ -1216,7 +1220,8 @@ async def build_introduction_construction_prompt(
     current_paper: str,
     rag_evidence: str,
     rejection_feedback: Optional[str] = None,
-    brainstorm_content: Optional[str] = None
+    brainstorm_content: Optional[str] = None,
+    rejection_history: str = "",
 ) -> str:
     """Build prompt for INTRODUCTION section construction phase."""
     return await build_phase_construction_prompt(
@@ -1227,7 +1232,8 @@ async def build_introduction_construction_prompt(
         phase="introduction",
         is_first_in_phase=True,
         rejection_feedback=rejection_feedback,
-        brainstorm_content=brainstorm_content
+        brainstorm_content=brainstorm_content,
+        rejection_history=rejection_history,
     )
 
 
@@ -1237,7 +1243,8 @@ async def build_abstract_construction_prompt(
     current_paper: str,
     rag_evidence: str,
     rejection_feedback: Optional[str] = None,
-    brainstorm_content: Optional[str] = None
+    brainstorm_content: Optional[str] = None,
+    rejection_history: str = "",
 ) -> str:
     """Build prompt for ABSTRACT section construction phase."""
     return await build_phase_construction_prompt(
@@ -1248,5 +1255,6 @@ async def build_abstract_construction_prompt(
         phase="abstract",
         is_first_in_phase=True,
         rejection_feedback=rejection_feedback,
-        brainstorm_content=brainstorm_content
+        brainstorm_content=brainstorm_content,
+        rejection_history=rejection_history,
     )

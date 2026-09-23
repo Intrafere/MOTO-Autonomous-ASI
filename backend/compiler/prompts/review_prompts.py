@@ -2,7 +2,6 @@
 Review prompts for rigorous solution-document cleanup and error correction.
 """
 
-from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 
 
 EMPIRICAL_PROVENANCE_REVIEW_RULES = """EMPIRICAL PROVENANCE AND CITATION RULES:
@@ -227,7 +226,8 @@ async def build_review_prompt(
     user_prompt: str,
     current_paper: str,
     current_outline: str,
-    review_focus: str = "general"
+    review_focus: str = "general",
+    rejection_history: str = "",
 ) -> str:
     """
     Build complete prompt for review mode.
@@ -250,8 +250,6 @@ async def build_review_prompt(
         "\n---\n"
     ]
     
-    # Add rejection history (DIRECT INJECTION - almost always fits)
-    rejection_history = await compiler_rejection_log.get_rejections_text()
     if rejection_history:
         parts.append(f"""YOUR RECENT REJECTION HISTORY (Last 10 rejections):
 {rejection_history}

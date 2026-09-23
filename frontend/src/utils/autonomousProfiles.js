@@ -9,6 +9,28 @@ import {
   normalizeOpenRouterReasoningEffort,
 } from './openRouterSelection';
 
+export function enabledCompetitionSecondaries(value) {
+  return value?.enabled === true && Array.isArray(value.secondaries) ? value.secondaries : [];
+}
+
+export function normalizeProofCompetition(value = {}) {
+  return {
+    enabled: value?.enabled === true,
+    secondaries: (Array.isArray(value?.secondaries) ? value.secondaries : [])
+      .filter(role => role && typeof role === 'object' && !Array.isArray(role))
+      .map(role => ({
+        provider: role.provider || 'lm_studio',
+        model_id: role.model_id || '',
+        context_window: role.context_window ?? DEFAULT_CONTEXT_WINDOW,
+        max_tokens: role.max_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+        openrouter_provider: role.openrouter_provider || null,
+        openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(role.openrouter_reasoning_effort, role.provider),
+        lm_studio_fallback_id: role.lm_studio_fallback_id || null,
+        supercharge_enabled: role.supercharge_enabled === true,
+      })),
+  };
+}
+
 export const AUTONOMOUS_SETTINGS_STORAGE_KEY = 'autonomous_research_settings';
 export const AUTONOMOUS_PROFILES_STORAGE_KEY = 'autonomous_research_profiles';
 export const STARTUP_PROVIDER_CHOICE_STORAGE_KEY = 'startup_provider_choice';
@@ -544,7 +566,7 @@ function publicSubmitterConfigForStorage(config = {}, index = 0) {
   return {
     ...pickPublicFields(config, PUBLIC_ROLE_STORAGE_KEYS),
     submitterId: config.submitterId || index + 1,
-    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort),
+    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort, config.provider),
     superchargeEnabled: Boolean(config.superchargeEnabled),
   };
 }
@@ -552,7 +574,7 @@ function publicSubmitterConfigForStorage(config = {}, index = 0) {
 function publicRoleProfileForStorage(profile = {}) {
   return {
     ...pickPublicFields(profile, PUBLIC_ROLE_STORAGE_KEYS),
-    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(profile.openrouterReasoningEffort),
+    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(profile.openrouterReasoningEffort, profile.provider),
     superchargeEnabled: Boolean(profile.superchargeEnabled),
   };
 }
@@ -560,11 +582,12 @@ function publicRoleProfileForStorage(profile = {}) {
 function publicLocalConfigForStorage(localConfig = {}) {
   return {
     ...pickPublicFields(localConfig, PUBLIC_LOCAL_CONFIG_STORAGE_KEYS),
-    validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.validator_openrouter_reasoning_effort),
-    assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.assistant_openrouter_reasoning_effort),
-    writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.writer_openrouter_reasoning_effort),
-    high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
-    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.critique_submitter_openrouter_reasoning_effort),
+    proof_competition: normalizeProofCompetition(localConfig.proof_competition),
+    validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.validator_openrouter_reasoning_effort, localConfig.validator_provider),
+    assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.assistant_openrouter_reasoning_effort, localConfig.assistant_provider),
+    writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.writer_openrouter_reasoning_effort, localConfig.writer_provider),
+    high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort, localConfig.high_param_provider),
+    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.critique_submitter_openrouter_reasoning_effort, localConfig.critique_submitter_provider),
     validator_supercharge_enabled: Boolean(localConfig.validator_supercharge_enabled),
     assistant_supercharge_enabled: Boolean(localConfig.assistant_supercharge_enabled),
     writer_supercharge_enabled: Boolean(localConfig.writer_supercharge_enabled),
@@ -577,9 +600,7 @@ export function publicAutonomousSettingsForStorage(settings = {}) {
   const normalized = normalizeStoredSettings(settings);
   return {
     numSubmitters: normalized.numSubmitters,
-    submitterConfigs: normalized.submitterConfigs
-      .slice(0, normalized.numSubmitters)
-      .map(publicSubmitterConfigForStorage),
+    submitterConfigs: normalized.submitterConfigs.map(publicSubmitterConfigForStorage),
     localConfig: publicLocalConfigForStorage(normalized.localConfig),
     freeOnly: Boolean(normalized.freeOnly),
     freeModelLooping: Boolean(normalized.freeModelLooping),
@@ -607,6 +628,7 @@ export function publicAutonomousProfilesForStorage(profiles = {}) {
         assistant: profile.assistant ? publicRoleProfileForStorage(profile.assistant) : undefined,
         writer: publicRoleProfileForStorage(writerProfile),
         highParam: publicRoleProfileForStorage(rigorProfile),
+        proof_competition: normalizeProofCompetition(profile.proof_competition),
       };
       return [profileKey, stripSecretLikeStorageFields(publicProfile)];
     })
@@ -618,10 +640,7 @@ function hasOwnSetting(settings = {}, key) {
 }
 
 function normalizeSelectedProfile(selectedProfile) {
-  if (selectedProfile === undefined || selectedProfile === null) {
-    return DEFAULT_AUTONOMOUS_SETTINGS.selectedProfile;
-  }
-  if (selectedProfile === '') {
+  if (selectedProfile === undefined || selectedProfile === null || selectedProfile === '') {
     return '';
   }
   if (typeof selectedProfile !== 'string') {
@@ -638,7 +657,7 @@ function mirrorCritiqueFromRigor(localConfig = {}) {
     critique_submitter_provider: localConfig.high_param_provider,
     critique_submitter_model: localConfig.high_param_model,
     critique_submitter_openrouter_provider: localConfig.high_param_openrouter_provider,
-    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
+    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort, localConfig.high_param_provider),
     critique_submitter_lm_studio_fallback: localConfig.high_param_lm_studio_fallback,
     critique_submitter_context_window: localConfig.high_param_context_window,
     critique_submitter_max_tokens: localConfig.high_param_max_tokens,
@@ -647,16 +666,29 @@ function mirrorCritiqueFromRigor(localConfig = {}) {
 }
 
 function normalizeStoredSettings(settings = {}) {
+  // Missing persisted role fields stay invalid; recommended routes are fresh-install only.
+  const emptyLocalConfig = Object.fromEntries(Object.keys(DEFAULT_LOCAL_CONFIG).map(key => [key,
+    key.endsWith('_model') || key.endsWith('_provider') ? '' : undefined,
+  ]));
   const submitterConfigs = Array.isArray(settings.submitterConfigs) && settings.submitterConfigs.length > 0
-    ? settings.submitterConfigs.map((cfg, index) => ({
-        ...DEFAULT_SUBMITTER_CONFIG,
+    ? settings.submitterConfigs.map((value, index) => {
+      const cfg = value && typeof value === 'object' ? value : {};
+      return ({
         ...cfg,
         submitterId: cfg.submitterId || index + 1,
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort),
-      }))
-    : DEFAULT_AUTONOMOUS_SETTINGS.submitterConfigs;
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort, cfg.provider),
+      });
+    })
+    : [];
 
-  const inputLocalConfig = settings.localConfig || {};
+  const storedLocalConfig = settings.localConfig || {};
+  // Legacy settings predate the Assistant role; migrate only an entirely absent role.
+  const inputLocalConfig = { ...storedLocalConfig };
+  if (!Object.keys(storedLocalConfig).some(key => key.startsWith('assistant_'))) {
+    Object.entries(storedLocalConfig).forEach(([key, value]) => {
+      if (key.startsWith('validator_')) inputLocalConfig[key.replace('validator_', 'assistant_')] = value;
+    });
+  }
   const migratedWriterLocalConfig = {
     writer_provider: readWriterLocal(inputLocalConfig, 'provider'),
     writer_model: readWriterLocal(inputLocalConfig, 'model'),
@@ -668,35 +700,38 @@ function normalizeStoredSettings(settings = {}) {
     writer_supercharge_enabled: readWriterLocal(inputLocalConfig, 'supercharge_enabled'),
   };
   const baseLocalConfig = {
-    ...DEFAULT_LOCAL_CONFIG,
+    ...emptyLocalConfig,
     ...inputLocalConfig,
     ...Object.fromEntries(
       Object.entries(migratedWriterLocalConfig).filter(([, value]) => value !== undefined)
     ),
-    validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(inputLocalConfig.validator_openrouter_reasoning_effort),
-    assistant_provider: inputLocalConfig.assistant_provider || inputLocalConfig.validator_provider || DEFAULT_LOCAL_CONFIG.assistant_provider,
-    assistant_model: inputLocalConfig.assistant_model || inputLocalConfig.validator_model || DEFAULT_LOCAL_CONFIG.assistant_model,
-    assistant_openrouter_provider: inputLocalConfig.assistant_openrouter_provider ?? inputLocalConfig.validator_openrouter_provider ?? DEFAULT_LOCAL_CONFIG.assistant_openrouter_provider,
-    assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(inputLocalConfig.assistant_openrouter_reasoning_effort || inputLocalConfig.validator_openrouter_reasoning_effort),
-    assistant_lm_studio_fallback: inputLocalConfig.assistant_lm_studio_fallback ?? inputLocalConfig.validator_lm_studio_fallback ?? DEFAULT_LOCAL_CONFIG.assistant_lm_studio_fallback,
-    assistant_context_window: inputLocalConfig.assistant_context_window || inputLocalConfig.validator_context_window || DEFAULT_LOCAL_CONFIG.assistant_context_window,
-    assistant_max_tokens: inputLocalConfig.assistant_max_tokens || inputLocalConfig.validator_max_tokens || DEFAULT_LOCAL_CONFIG.assistant_max_tokens,
-    assistant_supercharge_enabled: inputLocalConfig.assistant_model
-      ? Boolean(inputLocalConfig.assistant_supercharge_enabled)
-      : Boolean(inputLocalConfig.validator_supercharge_enabled ?? DEFAULT_LOCAL_CONFIG.assistant_supercharge_enabled),
-    writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(
-      migratedWriterLocalConfig.writer_openrouter_reasoning_effort
+    validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(inputLocalConfig.validator_openrouter_reasoning_effort, inputLocalConfig.validator_provider),
+    assistant_provider: inputLocalConfig.assistant_provider ?? '',
+    assistant_model: inputLocalConfig.assistant_model ?? '',
+    assistant_openrouter_provider: inputLocalConfig.assistant_openrouter_provider ?? null,
+    assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(
+      inputLocalConfig.assistant_openrouter_reasoning_effort, inputLocalConfig.assistant_provider
     ),
-    high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(inputLocalConfig.high_param_openrouter_reasoning_effort),
+    assistant_lm_studio_fallback: inputLocalConfig.assistant_lm_studio_fallback ?? null,
+    assistant_context_window: inputLocalConfig.assistant_context_window,
+    assistant_max_tokens: inputLocalConfig.assistant_max_tokens,
+    assistant_supercharge_enabled: Boolean(inputLocalConfig.assistant_supercharge_enabled),
+    writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(
+      migratedWriterLocalConfig.writer_openrouter_reasoning_effort, migratedWriterLocalConfig.writer_provider
+    ),
+    high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(inputLocalConfig.high_param_openrouter_reasoning_effort, inputLocalConfig.high_param_provider),
   };
 
   return {
     ...DEFAULT_AUTONOMOUS_SETTINGS,
     ...settings,
-    numSubmitters: settings.numSubmitters || submitterConfigs.length || DEFAULT_AUTONOMOUS_SETTINGS.numSubmitters,
+    numSubmitters: Number.isInteger(Number(settings.numSubmitters))
+      ? Number(settings.numSubmitters)
+      : submitterConfigs.length,
     submitterConfigs,
     localConfig: {
       ...baseLocalConfig,
+      proof_competition: normalizeProofCompetition(inputLocalConfig.proof_competition),
       ...mirrorCritiqueFromRigor(baseLocalConfig),
     },
     freeOnly: settings.freeOnly ?? DEFAULT_AUTONOMOUS_SETTINGS.freeOnly,
@@ -717,10 +752,11 @@ export function getStoredAutonomousSettings() {
   try {
     const raw = localStorage.getItem(AUTONOMOUS_SETTINGS_STORAGE_KEY);
     if (!raw) {
-      return normalizeStoredSettings();
+      return normalizeStoredSettings(DEFAULT_AUTONOMOUS_SETTINGS);
     }
 
-    return normalizeStoredSettings(JSON.parse(raw));
+    const saved = JSON.parse(raw);
+    return normalizeStoredSettings(saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {});
   } catch (error) {
     console.error('Failed to load autonomous research settings:', error);
     return normalizeStoredSettings();
@@ -772,37 +808,73 @@ export function persistAutonomousProfiles(profiles) {
   return publicProfiles;
 }
 
+export function mergeAutonomousConfig(current, update) {
+  return { ...current, ...update };
+}
+
+export function validateAutonomousConfig(config, { assistantEnabled = true } = {}) {
+  const providers = new Set(['openrouter', 'lm_studio', 'openai_codex_oauth', 'xai_grok_oauth', 'sakana_fugu']);
+  const errors = [];
+  const checkRole = (label, provider, model, context, output) => {
+    if (!providers.has(provider) || typeof model !== 'string' || !model.trim()) {
+      errors.push(`${label}: select a provider and model`);
+    }
+    if (![context, output].every(value => Number.isInteger(Number(value)) && Number(value) > 0)
+        || Number(output) >= Number(context)) {
+      errors.push(`${label}: set positive context/output limits with output smaller than context`);
+    }
+  };
+  const submitters = Array.isArray(config.submitter_configs) ? config.submitter_configs : [];
+  if (submitters.length < 1 || submitters.length > 10) {
+    errors.push('Select 1–10 brainstorm submitters');
+  }
+  if (config.num_submitters != null && Number(config.num_submitters) !== submitters.length) {
+    errors.push('Submitter count does not match configured roles');
+  }
+  submitters.forEach((role, index) => checkRole(
+    `Submitter ${index + 1}`, role?.provider, role?.modelId, role?.contextWindow, role?.maxOutputTokens,
+  ));
+  const roles = ['validator', 'writer', 'high_param', ...(assistantEnabled ? ['assistant'] : [])];
+  roles.forEach(role => checkRole(role, config[`${role}_provider`], config[`${role}_model`],
+    config[`${role}_context_window`], config[`${role}_max_tokens`]));
+  if (errors.length) {
+    throw new Error(`Invalid Autonomous settings. Correct your roles or explicitly load a profile in Settings. ${errors.join('; ')}. Built-in defaults were not substituted.`);
+  }
+}
+
 export function settingsToAutonomousConfig(settings) {
   const normalized = normalizeStoredSettings(settings);
   const localConfig = normalized.localConfig || {};
 
   return {
-    submitter_configs: normalized.submitterConfigs.slice(0, normalized.numSubmitters).map(cfg => ({
+    num_submitters: normalized.numSubmitters,
+    submitter_configs: normalized.submitterConfigs.map(cfg => ({
       ...cfg,
-      openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort),
+      openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort, cfg.provider),
       supercharge_enabled: Boolean(cfg.superchargeEnabled),
     })),
+    proof_competition: normalizeProofCompetition(localConfig.proof_competition),
     creativity_emphasis_boost_enabled: Boolean(normalized.creativityEmphasisBoostEnabled),
     validator_provider: localConfig.validator_provider,
     validator_model: localConfig.validator_model,
     validator_openrouter_provider: localConfig.validator_openrouter_provider,
-    validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.validator_openrouter_reasoning_effort),
+    validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.validator_openrouter_reasoning_effort, localConfig.validator_provider),
     validator_lm_studio_fallback: localConfig.validator_lm_studio_fallback,
     validator_context_window: localConfig.validator_context_window,
     validator_max_tokens: localConfig.validator_max_tokens,
     validator_supercharge_enabled: Boolean(localConfig.validator_supercharge_enabled),
-    assistant_provider: localConfig.assistant_provider || localConfig.validator_provider,
-    assistant_model: localConfig.assistant_model || localConfig.validator_model,
-    assistant_openrouter_provider: localConfig.assistant_openrouter_provider ?? localConfig.validator_openrouter_provider,
-    assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.assistant_openrouter_reasoning_effort || localConfig.validator_openrouter_reasoning_effort),
-    assistant_lm_studio_fallback: localConfig.assistant_lm_studio_fallback ?? localConfig.validator_lm_studio_fallback,
-    assistant_context_window: localConfig.assistant_context_window || localConfig.validator_context_window,
-    assistant_max_tokens: localConfig.assistant_max_tokens || localConfig.validator_max_tokens,
+    assistant_provider: localConfig.assistant_provider,
+    assistant_model: localConfig.assistant_model,
+    assistant_openrouter_provider: localConfig.assistant_openrouter_provider ?? null,
+    assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.assistant_openrouter_reasoning_effort, localConfig.assistant_provider),
+    assistant_lm_studio_fallback: localConfig.assistant_lm_studio_fallback ?? null,
+    assistant_context_window: localConfig.assistant_context_window,
+    assistant_max_tokens: localConfig.assistant_max_tokens,
     assistant_supercharge_enabled: Boolean(localConfig.assistant_supercharge_enabled),
     writer_provider: localConfig.writer_provider,
     writer_model: localConfig.writer_model,
     writer_openrouter_provider: localConfig.writer_openrouter_provider,
-    writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.writer_openrouter_reasoning_effort),
+    writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.writer_openrouter_reasoning_effort, localConfig.writer_provider),
     writer_lm_studio_fallback: localConfig.writer_lm_studio_fallback,
     writer_context_window: localConfig.writer_context_window,
     writer_max_tokens: localConfig.writer_max_tokens,
@@ -810,7 +882,7 @@ export function settingsToAutonomousConfig(settings) {
     high_param_provider: localConfig.high_param_provider,
     high_param_model: localConfig.high_param_model,
     high_param_openrouter_provider: localConfig.high_param_openrouter_provider,
-    high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
+    high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort, localConfig.high_param_provider),
     high_param_lm_studio_fallback: localConfig.high_param_lm_studio_fallback,
     high_param_context_window: localConfig.high_param_context_window,
     high_param_max_tokens: localConfig.high_param_max_tokens,
@@ -818,7 +890,7 @@ export function settingsToAutonomousConfig(settings) {
     critique_submitter_provider: localConfig.high_param_provider,
     critique_submitter_model: localConfig.high_param_model,
     critique_submitter_openrouter_provider: localConfig.high_param_openrouter_provider,
-    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
+    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort, localConfig.high_param_provider),
     critique_submitter_lm_studio_fallback: localConfig.high_param_lm_studio_fallback,
     critique_submitter_context_window: localConfig.high_param_context_window,
     critique_submitter_max_tokens: localConfig.high_param_max_tokens,
@@ -913,8 +985,34 @@ function buildStartupLocalConfig(roleDefaults = buildStartupRoleDefaults()) {
   };
 }
 
+export function shouldApplyStartupRoleDefaults(settings = getStoredAutonomousSettings()) {
+  if (settings.selectedProfile !== RECOMMENDED_PROFILE_KEY) {
+    return false;
+  }
+  const recommended = settingsToAutonomousConfig(DEFAULT_AUTONOMOUS_SETTINGS);
+  const current = settingsToAutonomousConfig(settings);
+  const roleKeys = [
+    'validator_provider', 'validator_model',
+    'writer_provider', 'writer_model',
+    'high_param_provider', 'high_param_model',
+  ];
+  if (roleKeys.some((key) => current[key] !== recommended[key])) {
+    return false;
+  }
+  const recommendedSubmitters = (recommended.submitter_configs || []).map((role) => `${role.provider}:${role.modelId}`);
+  const currentSubmitters = (current.submitter_configs || []).map((role) => `${role.provider}:${role.modelId}`);
+  return recommendedSubmitters.length === currentSubmitters.length
+    && recommendedSubmitters.every((value, index) => value === currentSubmitters[index]);
+}
+
 export function applyLmStudioStartupDefaults(modelId = '') {
   const currentSettings = getStoredAutonomousSettings();
+  if (!shouldApplyStartupRoleDefaults(currentSettings)) {
+    return {
+      settings: currentSettings,
+      config: settingsToAutonomousConfig(currentSettings),
+    };
+  }
   const nextSettings = persistAutonomousSettings({
     ...currentSettings,
     numSubmitters: 3,
@@ -944,6 +1042,13 @@ export function applyCloudAccessStartupDefaults(providerId = OPENAI_CODEX_STARTU
     submitterId,
   }));
   const currentSettings = getStoredAutonomousSettings();
+  if (!shouldApplyStartupRoleDefaults(currentSettings)) {
+    return {
+      settings: currentSettings,
+      config: settingsToAutonomousConfig(currentSettings),
+      modelId: selectedModel.id || (providerId === XAI_GROK_STARTUP_CHOICE ? DEFAULT_XAI_GROK_STARTUP_MODEL.id : DEFAULT_CODEX_STARTUP_MODEL.id),
+    };
+  }
   const nextSettings = persistAutonomousSettings({
     ...currentSettings,
     numSubmitters: 3,
@@ -972,6 +1077,22 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
     throw new Error(`Profile not found: ${profileKey}`);
   }
 
+  if (!Number.isInteger(profile.numSubmitters) || profile.numSubmitters < 1 || profile.numSubmitters > 10
+      || !Array.isArray(profile.submitters) || profile.submitters.length !== profile.numSubmitters) {
+    throw new Error('Invalid Autonomous profile: submitter count must match the configured roles (1–10).');
+  }
+
+  if (!isRecommended) {
+    const roleConfig = {};
+    for (const [prefix, role] of Object.entries({ validator: profile.validator, writer: normalizeProfileWriter(profile), high_param: normalizeProfileRigor(profile), assistant: profile.assistant === undefined ? profile.validator : profile.assistant })) {
+      roleConfig[`${prefix}_provider`] = role?.provider;
+      roleConfig[`${prefix}_model`] = role?.modelId;
+      roleConfig[`${prefix}_context_window`] = role?.contextWindow;
+      roleConfig[`${prefix}_max_tokens`] = role?.maxOutputTokens;
+    }
+    validateAutonomousConfig({ ...roleConfig, submitter_configs: profile.submitters });
+  }
+
   await loadModelCache();
 
   const convertToApiId = (displayNameOrId) => {
@@ -986,7 +1107,7 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
       ? convertToApiId(submitterProfile.modelId || '')
       : (submitterProfile.modelId || ''),
     openrouterProvider: submitterProfile.openrouterProvider || null,
-    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(submitterProfile.openrouterReasoningEffort),
+    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(submitterProfile.openrouterReasoningEffort, submitterProfile.provider),
     lmStudioFallbackId: isRecommended ? null : (submitterProfile.lmStudioFallbackId || null),
     contextWindow: submitterProfile.contextWindow,
     maxOutputTokens: submitterProfile.maxOutputTokens,
@@ -1000,7 +1121,7 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
   );
 
   const getOpenRouterProvider = (roleProfile = {}) => roleProfile.openrouterProvider || null;
-  const getOpenRouterReasoningEffort = (roleProfile = {}) => normalizeOpenRouterReasoningEffort(roleProfile.openrouterReasoningEffort);
+  const getOpenRouterReasoningEffort = (roleProfile = {}) => normalizeOpenRouterReasoningEffort(roleProfile.openrouterReasoningEffort, roleProfile.provider);
   const writerProfile = normalizeProfileWriter(profile);
   const rigorProfile = normalizeProfileRigor(profile);
 
@@ -1011,6 +1132,7 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
     submitterConfigs,
     localConfig: {
       ...currentSettings.localConfig,
+      proof_competition: normalizeProofCompetition(profile.proof_competition),
       validator_provider: isRecommended ? 'openrouter' : (profile.validator.provider || 'openrouter'),
       validator_model: getModelId(profile.validator),
       validator_openrouter_provider: getOpenRouterProvider(profile.validator),

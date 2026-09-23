@@ -98,6 +98,41 @@ describe('lifecycle API errors', () => {
     });
   });
 
+  test('sends one atomic bulk live-context request with scope and typed items', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      proof_set_revision: 8,
+      updated: 2,
+    }), { status: 200 })));
+
+    await autonomousAPI.updateProofLiveContextBulk({
+      scope: 'manual',
+      proofSetRevision: 7,
+      items: [{
+        proofId: 'proof-1',
+        status: 'pruned',
+        runId: 'run-1',
+        reason: 'Batch cleanup',
+        theoremHash: 'theorem-hash',
+        leanHash: 'lean-hash',
+      }],
+    });
+
+    expect(fetch.mock.calls[0][0]).toContain('/proofs/live-context/bulk?scope=manual');
+    expect(fetch.mock.calls[0][1].method).toBe('PATCH');
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+      expected_proof_set_revision: 7,
+      items: [{
+        proof_id: 'proof-1',
+        status: 'pruned',
+        actor: 'user',
+        expected_run_id: 'run-1',
+        reason: 'Batch cleanup',
+        expected_theorem_hash: 'theorem-hash',
+        expected_lean_hash: 'lean-hash',
+      }],
+    });
+  });
+
   test('classifies stale-generation conflicts and old proof-run contracts actionably', async () => {
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'Lifecycle generation changed' }), {

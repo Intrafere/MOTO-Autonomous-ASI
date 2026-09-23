@@ -25,6 +25,8 @@ from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
 from backend.shared.models import CertaintyAssessment
+from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.autonomous.prompts.final_answer_prompts import (
     build_certainty_assessment_prompt,
     build_certainty_validation_prompt
@@ -140,7 +142,7 @@ class CertaintyAssessor:
         
         # Step 3: Assess certainties with validation loop
         attempt = 0
-        rejection_context = ""
+        rejection_entries = tuple((await final_answer_memory.get_rejections("assessment"))[-5:])
         
         while attempt < self.MAX_RETRIES:
             attempt += 1
@@ -151,7 +153,7 @@ class CertaintyAssessor:
                 user_research_prompt,
                 all_papers,
                 expanded_papers,
-                rejection_context
+                rejection_entries
             )
             
             if assessment is None:
@@ -178,7 +180,7 @@ class CertaintyAssessor:
                     rejection_summary=feedback,
                     submission_preview=assessment.known_certainties_summary[:500]
                 )
-                rejection_context = await final_answer_memory.get_rejection_context_async("assessment")
+                rejection_entries = tuple((await final_answer_memory.get_rejections("assessment"))[-5:])
         
         logger.error(f"CertaintyAssessor: Failed after {self.MAX_RETRIES} attempts")
         return None
@@ -353,32 +355,49 @@ USER'S RESEARCH QUESTION:
         user_research_prompt: str,
         all_papers: List[Dict[str, Any]],
         expanded_papers: List[Dict[str, Any]] = None,
-        rejection_context: str = ""
+        rejection_entries=(),
     ) -> Optional[CertaintyAssessment]:
         """Generate certainty assessment from papers."""
         try:
-            # Build prompt
-            prompt = build_certainty_assessment_prompt(
-                user_research_prompt=user_research_prompt,
-                papers_summary=all_papers,
-                expanded_papers=expanded_papers,
-                rejection_context=rejection_context
-            )
-            
-            # Validate prompt size
-            prompt_tokens = count_tokens(prompt)
             max_input = self._calculate_max_input_tokens()
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+
+            active_expanded_papers = expanded_papers
+
+            def build_prompt(entries):
+                prompt = build_certainty_assessment_prompt(
+                    user_research_prompt=user_research_prompt,
+                    papers_summary=all_papers,
+                    expanded_papers=active_expanded_papers,
+                    rejection_context=final_answer_memory.render_rejection_context(
+                        "assessment", entries
+                    ),
+                )
+                return with_budgeted_solver_plan(
+                    prompt, getattr(self, "solution_path_manager", None), max_input
+                )
+
+            fit = fit_prompt_with_feedback(
+                rejection_entries,
+                build_prompt=build_prompt,
+                available_tokens=max_input,
+            )
+            prompt = fit.prompt
+            retained_rejections = fit.retained_entries
+            prompt_tokens = fit.prompt_tokens
             
             if prompt_tokens > max_input:
                 if expanded_papers:
                     # RAG the expanded papers instead of dropping them entirely
-                    base_prompt = build_certainty_assessment_prompt(
-                        user_research_prompt=user_research_prompt,
-                        papers_summary=all_papers,
-                        expanded_papers=None,
-                        rejection_context=rejection_context
+                    active_expanded_papers = None
+                    base_fit = fit_prompt_with_feedback(
+                        retained_rejections,
+                        build_prompt=build_prompt,
+                        available_tokens=max_input,
                     )
-                    mandatory_tokens = count_tokens(base_prompt)
+                    base_prompt = base_fit.prompt
+                    retained_rejections = base_fit.retained_entries
+                    mandatory_tokens = base_fit.prompt_tokens
                     paper_budget = max_input - mandatory_tokens - 500
                     
                     if paper_budget > 2000:
@@ -396,13 +415,15 @@ USER'S RESEARCH QUESTION:
                                 "title": f"RAG-retrieved content from {len(expanded_papers)} papers",
                                 "content": rag_content
                             }]
-                            prompt = build_certainty_assessment_prompt(
-                                user_research_prompt=user_research_prompt,
-                                papers_summary=all_papers,
-                                expanded_papers=rag_papers,
-                                rejection_context=rejection_context
+                            active_expanded_papers = rag_papers
+                            rag_fit = fit_prompt_with_feedback(
+                                retained_rejections,
+                                build_prompt=build_prompt,
+                                available_tokens=max_input,
                             )
-                            prompt_tokens = count_tokens(prompt)
+                            prompt = rag_fit.prompt
+                            retained_rejections = rag_fit.retained_entries
+                            prompt_tokens = rag_fit.prompt_tokens
                         else:
                             logger.warning("CertaintyAssessor: RAG returned empty, falling back to abstracts-only")
                             prompt = base_prompt
@@ -412,23 +433,19 @@ USER'S RESEARCH QUESTION:
                         prompt = base_prompt
                         prompt_tokens = mandatory_tokens
                 else:
-                    prompt = build_certainty_assessment_prompt(
-                        user_research_prompt=user_research_prompt,
-                        papers_summary=all_papers,
-                        expanded_papers=None,
-                        rejection_context=rejection_context
+                    active_expanded_papers = None
+                    summary_fit = fit_prompt_with_feedback(
+                        retained_rejections,
+                        build_prompt=build_prompt,
+                        available_tokens=max_input,
                     )
-                    prompt_tokens = count_tokens(prompt)
+                    prompt = summary_fit.prompt
+                    retained_rejections = summary_fit.retained_entries
+                    prompt_tokens = summary_fit.prompt_tokens
                 
                 if prompt_tokens > max_input:
                     logger.error("CertaintyAssessor: Cannot fit even summary-only prompt")
                     return None
-            from backend.shared.solution_path.integration import with_budgeted_solver_plan
-            prompt = with_budgeted_solver_plan(
-                prompt, getattr(self, "solution_path_manager", None), max_input
-            )
-            prompt_tokens = count_tokens(prompt)
-            
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
                 task_id=task_id,
@@ -443,14 +460,22 @@ USER'S RESEARCH QUESTION:
             
             logger.info(f"CertaintyAssessor: Generating assessment (prompt={prompt_tokens}t, task_id={task_id})")
             
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.submitter_model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_output_tokens,
-                temperature=0.0
-            )
+            while True:
+                try:
+                    response = await api_client_manager.generate_completion(
+                        task_id=task_id,
+                        role_id=self.role_id,
+                        model=self.submitter_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=self.max_output_tokens,
+                        temperature=0.0
+                    )
+                    break
+                except ProviderContextLengthError:
+                    if len(retained_rejections) <= 1:
+                        raise
+                    retained_rejections = retained_rejections[1:]
+                    prompt = build_prompt(retained_rejections)
             
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)

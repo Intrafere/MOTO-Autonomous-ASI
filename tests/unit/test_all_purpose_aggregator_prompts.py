@@ -4,6 +4,10 @@ from unittest.mock import AsyncMock
 from backend.aggregator.agents import submitter as submitter_module
 from backend.aggregator.agents.submitter import SubmitterAgent, _requires_lean_retry_schema
 from backend.shared.brainstorm_proof_gate import BrainstormProofGateResult
+from backend.shared.provider_errors import (
+    ProviderContextLengthError,
+    ProviderRouteIdentity,
+)
 from backend.aggregator.prompts.submitter_prompts import (
     CREATIVITY_EMPHASIS_BOOST_PROMPT,
     build_submitter_prompt,
@@ -219,6 +223,7 @@ def _patch_submitter_dependencies(monkeypatch, agent: SubmitterAgent, responses:
         AsyncMock(return_value=""),
     )
     monkeypatch.setattr(agent.local_memory, "get_all_content", AsyncMock(return_value=""))
+    monkeypatch.setattr(agent.local_memory, "get_rejection_entries", AsyncMock(return_value=()))
     monkeypatch.setattr(agent.local_memory, "add_rejection", AsyncMock())
     monkeypatch.setattr(
         submitter_module.context_allocator,
@@ -245,6 +250,77 @@ def _patch_submitter_dependencies(monkeypatch, agent: SubmitterAgent, responses:
         "cache_model_load_config",
         AsyncMock(),
     )
+
+
+@pytest.mark.asyncio
+async def test_provider_context_rejection_sheds_oldest_whole_feedback(monkeypatch) -> None:
+    agent = SubmitterAgent(
+        submitter_id=1,
+        model_name="model-a",
+        user_prompt="Solve the target",
+        user_files_content={},
+        context_window=32_000,
+        max_output_tokens=2_000,
+    )
+    entries = tuple(
+        {"validator_summary": f"reason-{index}", "submission_preview": f"body-{index}"}
+        for index in range(3)
+    )
+    monkeypatch.setattr(
+        submitter_module.shared_training_memory,
+        "get_all_content",
+        AsyncMock(return_value=""),
+    )
+    monkeypatch.setattr(
+        agent.local_memory,
+        "get_rejection_entries",
+        AsyncMock(return_value=entries),
+    )
+    monkeypatch.setattr(agent.local_memory, "add_rejection", AsyncMock())
+    seen_feedback = []
+
+    async def allocate(**kwargs):
+        seen_feedback.append(kwargs["rejection_log_content"])
+        return {"direct": kwargs["rejection_log_content"], "rag_context": None}
+
+    monkeypatch.setattr(
+        submitter_module.context_allocator,
+        "allocate_submitter_context",
+        allocate,
+    )
+    monkeypatch.setattr(
+        submitter_module.api_client_manager,
+        "prewarm_assistant_memory_context",
+        AsyncMock(),
+    )
+    route = ProviderRouteIdentity(provider="test", model="model-a")
+    generate = AsyncMock(
+        side_effect=[
+            ProviderContextLengthError("too large", route=route),
+            _completion(
+                '{"submission_type":"idea","submission":"A complete mechanism.",'
+                '"reasoning":"It directly addresses the target."}'
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        submitter_module.api_client_manager,
+        "generate_completion",
+        generate,
+    )
+    monkeypatch.setattr(
+        submitter_module.api_client_manager,
+        "extract_call_metadata",
+        lambda response: {},
+    )
+
+    submission = await agent._generate_submission()
+
+    assert submission is not None
+    assert "reason-0" in seen_feedback[0]
+    assert "reason-0" not in seen_feedback[-1]
+    assert "reason-1" in seen_feedback[-1]
+    assert "reason-2" in seen_feedback[-1]
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import LatexRenderer from '../LatexRenderer';
+import PaperProofViewer, { PaperProofMetrics } from '../PaperProofViewer';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
 import {
@@ -38,7 +38,6 @@ function FinalAnswerLibrary({ capabilities }) {
   const [expandedContent, setExpandedContent] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterFormat, setFilterFormat] = useState('all'); // 'all', 'short_form', 'long_form'
-  const [showLatex, setShowLatex] = useState(true);
   const [downloadingPDF, setDownloadingPDF] = useState(null); // Track which answer is generating PDF
   const [expandedPrunedRuns, setExpandedPrunedRuns] = useState({});
   const [expandedPrunedPaperId, setExpandedPrunedPaperId] = useState(null);
@@ -516,7 +515,10 @@ function FinalAnswerLibrary({ capabilities }) {
                           >
                             {formatCertaintyLevel(answer.certainty_level)}
                           </span>
-                          <span className="word-count">{answer.word_count.toLocaleString()} words</span>
+                          <PaperProofMetrics
+                            content={expandedId === answer.answer_id ? expandedContent?.content || '' : ''}
+                            metrics={answer}
+                          />
                           {answer.format === 'long_form' && (
                             <span className="chapter-count">{answer.chapter_count} chapters</span>
                           )}
@@ -582,21 +584,6 @@ function FinalAnswerLibrary({ capabilities }) {
                             >
                               ⭐ Ask Validator to Critique
                             </button>
-                            {/* View toggle for LaTeX rendering */}
-                            <div className="view-toggle">
-                              <button
-                                className={`btn ${showLatex ? '' : 'btn-secondary'}`}
-                                onClick={() => setShowLatex(true)}
-                              >
-                                Rendered View
-                              </button>
-                              <button
-                                className={`btn ${!showLatex ? '' : 'btn-secondary'}`}
-                                onClick={() => setShowLatex(false)}
-                              >
-                                Raw Text
-                              </button>
-                            </div>
                           </div>
 
                           {/* Chapter list (for volumes) */}
@@ -618,7 +605,10 @@ function FinalAnswerLibrary({ capabilities }) {
 
                           {/* Full content */}
                           <div className="full-content">
-                            <LatexRenderer content={prependDisclaimer(expandedContent.content, 'paper')} showLatex={showLatex} />
+                            <PaperProofViewer
+                              content={prependDisclaimer(expandedContent.content, 'paper')}
+                              metrics={{ ...answer, ...expandedContent }}
+                            />
                           </div>
                         </div>
                       )}
@@ -647,7 +637,10 @@ function FinalAnswerLibrary({ capabilities }) {
                             <div className="pruned-paper-card-header">
                               <span className="stage2-history-pruned-badge">Pruned Paper</span>
                               <span>{paper.paper_id}</span>
-                              <span>{paper.word_count?.toLocaleString()} words</span>
+                              <PaperProofMetrics
+                                content={expandedPrunedPaperId === paper.history_id ? expandedPrunedContent?.content || '' : ''}
+                                metrics={paper}
+                              />
                             </div>
                             <h4>{paper.title}</h4>
                             <p>{paper.pruned_note || 'The system decided autonomously that this paper hurt context cumulation.'}</p>
@@ -666,14 +659,10 @@ function FinalAnswerLibrary({ capabilities }) {
                             </div>
                             {expandedPrunedPaperId === paper.history_id && expandedPrunedContent && (
                               <div className="full-content pruned-paper-content">
-                                <LatexRenderer
-                                  content={
-                                    expandedPrunedContent.outline
-                                      ? `${expandedPrunedContent.outline}\n\n${'='.repeat(80)}\n\n${expandedPrunedContent.content || ''}`
-                                      : expandedPrunedContent.content || ''
-                                  }
-                                  showToggle={true}
-                                  defaultRaw={false}
+                                <PaperProofViewer
+                                  prefixContent={expandedPrunedContent.outline ? `${expandedPrunedContent.outline}\n\n${'='.repeat(80)}\n\n` : ''}
+                                  content={expandedPrunedContent.content || ''}
+                                  metrics={{ ...paper, ...expandedPrunedContent }}
                                 />
                               </div>
                             )}

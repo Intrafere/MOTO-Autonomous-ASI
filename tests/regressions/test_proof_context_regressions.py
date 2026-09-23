@@ -2809,7 +2809,11 @@ class AutonomousProofFailedHintCleanupTests(unittest.IsolatedAsyncioTestCase):
                         "clear_logs",
                         new=mock.AsyncMock(),
                     ),
-                    mock.patch.object(coordinator_module.autonomous_rag_manager, "reset"),
+                    mock.patch.object(
+                        coordinator_module.autonomous_rag_manager,
+                        "reset",
+                        new=mock.AsyncMock(),
+                    ),
                     mock.patch.object(
                         coordinator_module.rag_manager,
                         "clear_all_documents_async",

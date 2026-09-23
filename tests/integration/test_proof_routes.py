@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path
 import tempfile
@@ -11,6 +12,7 @@ from backend.autonomous.memory.proof_database import ProofDatabase
 from backend.shared.models import (
     ProofCandidate,
     ProofCheckRequest,
+    ProofLiveContextBulkMutationRequest,
     ProofRecord,
     ProofRunCollectionResponse,
     ProofRunSnapshot,
@@ -73,6 +75,28 @@ class ProofBuild01ModelTests(TestCase):
 
 
 class ProofBuild01PersistenceTests(IsolatedAsyncioTestCase):
+    @staticmethod
+    async def _add_live_context_proof(
+        database: ProofDatabase,
+        proof_id: str,
+        theorem_name: str,
+    ) -> ProofRecord:
+        return await database.add_proof_occurrence(
+            ProofRecord(
+                proof_id=proof_id,
+                theorem_statement="True",
+                theorem_name=theorem_name,
+                source_type="paper",
+                source_id="paper_bulk",
+                run_id="owning-run",
+                lean_code=f"theorem {theorem_name} : True := by trivial",
+                novel=True,
+                novelty_tier="mathematical_discovery",
+                canonical_theorem_statement_hash=f"{proof_id}-theorem",
+                canonical_lean_code_hash=f"{proof_id}-lean",
+            )
+        )
+
     async def test_prune_preserves_lean_and_syntheticlib_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             database = ProofDatabase()
@@ -157,6 +181,282 @@ class ProofBuild01PersistenceTests(IsolatedAsyncioTestCase):
             self.assertEqual(restored.live_context_status, "active")
             self.assertEqual(await reloaded.get_proof_set_revision(), revision)
 
+    async def test_bulk_live_context_mutation_commits_once_and_allows_blank_user_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = ProofDatabase()
+            database.set_base_dir(Path(tmpdir))
+            await database.initialize()
+            first = await self._add_live_context_proof(database, "proof_bulk_1", "bulk_one")
+            second = await self._add_live_context_proof(database, "proof_bulk_2", "bulk_two")
+            revision = await database.get_proof_set_revision()
+
+            updated, changed_ids, next_revision = await database.set_live_context_status_bulk(
+                expected_proof_set_revision=revision,
+                items=[
+                    {
+                        "proof_id": first.proof_id,
+                        "status": "pruned",
+                        "actor": "user",
+                        "expected_run_id": "owning-run",
+                        "reason": "",
+                        "expected_theorem_hash": first.canonical_theorem_statement_hash,
+                        "expected_lean_hash": first.canonical_lean_code_hash,
+                    },
+                    {
+                        "proof_id": second.proof_id,
+                        "status": "pruned",
+                        "actor": "user",
+                        "expected_run_id": "owning-run",
+                        "reason": "Shared batch rationale.",
+                        "expected_theorem_hash": second.canonical_theorem_statement_hash,
+                        "expected_lean_hash": second.canonical_lean_code_hash,
+                    },
+                ],
+            )
+
+            self.assertEqual(next_revision, revision + 1)
+            self.assertEqual(changed_ids, [first.proof_id, second.proof_id])
+            self.assertTrue(all(record.live_context_status == "pruned" for record in updated))
+            self.assertEqual(updated[0].live_context_prune_reason, "")
+
+    async def test_automatic_pruning_still_requires_nonempty_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = ProofDatabase()
+            database.set_base_dir(Path(tmpdir))
+            await database.initialize()
+            stored = await self._add_live_context_proof(
+                database,
+                "proof_automatic_reason",
+                "automatic_reason",
+            )
+            revision = await database.get_proof_set_revision()
+
+            with self.assertRaisesRegex(ValueError, "automatic prune reason"):
+                await database.set_live_context_status(
+                    proof_id=stored.proof_id,
+                    status="pruned",
+                    expected_run_id="owning-run",
+                    expected_proof_set_revision=revision,
+                    actor="automatic_proof_pruning",
+                    reason="",
+                )
+
+    async def test_bulk_live_context_validation_failure_changes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = ProofDatabase()
+            database.set_base_dir(Path(tmpdir))
+            await database.initialize()
+            first = await self._add_live_context_proof(database, "proof_atomic_1", "atomic_one")
+            second = await self._add_live_context_proof(database, "proof_atomic_2", "atomic_two")
+            revision = await database.get_proof_set_revision()
+
+            with self.assertRaisesRegex(RuntimeError, "Lean identity changed"):
+                await database.set_live_context_status_bulk(
+                    expected_proof_set_revision=revision,
+                    items=[
+                        {
+                            "proof_id": first.proof_id,
+                            "status": "pruned",
+                            "actor": "user",
+                            "expected_run_id": "owning-run",
+                            "reason": "",
+                        },
+                        {
+                            "proof_id": second.proof_id,
+                            "status": "pruned",
+                            "actor": "user",
+                            "expected_run_id": "owning-run",
+                            "reason": "",
+                            "expected_lean_hash": "stale-hash",
+                        },
+                    ],
+                )
+
+            self.assertEqual(
+                (await database.get_proof(first.proof_id)).live_context_status,
+                "active",
+            )
+            self.assertEqual(
+                (await database.get_proof(second.proof_id)).live_context_status,
+                "active",
+            )
+            self.assertEqual(await database.get_proof_set_revision(), revision)
+
+    async def test_bulk_live_context_rolls_back_all_records_on_index_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = ProofDatabase()
+            database.set_base_dir(Path(tmpdir))
+            await database.initialize()
+            first = await self._add_live_context_proof(database, "proof_rollback_1", "rollback_one")
+            second = await self._add_live_context_proof(database, "proof_rollback_2", "rollback_two")
+            revision = await database.get_proof_set_revision()
+
+            with mock.patch.object(
+                database,
+                "_save_index",
+                mock.AsyncMock(side_effect=OSError("index publication failed")),
+            ):
+                with self.assertRaises(OSError):
+                    await database.set_live_context_status_bulk(
+                        expected_proof_set_revision=revision,
+                        items=[
+                            {
+                                "proof_id": first.proof_id,
+                                "status": "pruned",
+                                "actor": "user",
+                                "expected_run_id": "owning-run",
+                                "reason": "",
+                            },
+                            {
+                                "proof_id": second.proof_id,
+                                "status": "pruned",
+                                "actor": "user",
+                                "expected_run_id": "owning-run",
+                                "reason": "",
+                            },
+                        ],
+                    )
+
+            reloaded = ProofDatabase()
+            reloaded.set_base_dir(Path(tmpdir))
+            await reloaded.initialize()
+            self.assertEqual(
+                (await reloaded.get_proof(first.proof_id)).live_context_status,
+                "active",
+            )
+            self.assertEqual(
+                (await reloaded.get_proof(second.proof_id)).live_context_status,
+                "active",
+            )
+            self.assertEqual(await reloaded.get_proof_set_revision(), revision)
+
+    async def test_bulk_live_context_finishes_atomic_commit_when_cancelled_mid_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = ProofDatabase()
+            database.set_base_dir(Path(tmpdir))
+            await database.initialize()
+            first = await self._add_live_context_proof(database, "proof_cancel_1", "cancel_one")
+            second = await self._add_live_context_proof(database, "proof_cancel_2", "cancel_two")
+            revision = await database.get_proof_set_revision()
+            original_write = database._atomic_write_json
+            first_write_finished = asyncio.Event()
+            release_second_write = asyncio.Event()
+            write_count = 0
+
+            async def controlled_write(path, payload):
+                nonlocal write_count
+                if path.name.startswith("proof_") and path.name.endswith(".json"):
+                    write_count += 1
+                    if write_count == 2:
+                        first_write_finished.set()
+                        await release_second_write.wait()
+                await original_write(path, payload)
+
+            database._atomic_write_json = controlled_write
+            task = asyncio.create_task(
+                database.set_live_context_status_bulk(
+                    expected_proof_set_revision=revision,
+                    items=[
+                        {
+                            "proof_id": first.proof_id,
+                            "status": "pruned",
+                            "actor": "user",
+                            "expected_run_id": "owning-run",
+                        },
+                        {
+                            "proof_id": second.proof_id,
+                            "status": "pruned",
+                            "actor": "user",
+                            "expected_run_id": "owning-run",
+                        },
+                    ],
+                )
+            )
+            await first_write_finished.wait()
+            task.cancel()
+            release_second_write.set()
+            await task
+
+            reloaded = ProofDatabase()
+            reloaded.set_base_dir(Path(tmpdir))
+            await reloaded.initialize()
+            self.assertEqual((await reloaded.get_proof(first.proof_id)).live_context_status, "pruned")
+            self.assertEqual((await reloaded.get_proof(second.proof_id)).live_context_status, "pruned")
+            self.assertEqual(await reloaded.get_proof_set_revision(), revision + 1)
+
+    async def test_bulk_route_invalidates_each_changed_id_rebuilds_once_and_keeps_event_shape(self) -> None:
+        records = [
+            ProofRecord(
+                proof_id=f"proof_route_{index}",
+                theorem_statement="True",
+                theorem_name=f"route_{index}",
+                source_type="paper",
+                source_id="paper_route",
+                run_id="owning-run",
+                lean_code=f"theorem route_{index} : True := by trivial",
+                live_context_status="pruned",
+                live_context_owner_run_id="owning-run",
+                live_context_pruned_at=datetime.now(),
+                live_context_pruned_by="user",
+            )
+            for index in (1, 2)
+        ]
+        database = mock.Mock()
+        database.set_live_context_status_bulk = mock.AsyncMock(
+            return_value=(records, [record.proof_id for record in records], 9)
+        )
+        database.get_proofs_depending_on = mock.AsyncMock(return_value=[])
+        request = ProofLiveContextBulkMutationRequest(
+            expected_proof_set_revision=8,
+            items=[
+                {
+                    "proof_id": record.proof_id,
+                    "status": "pruned",
+                    "expected_run_id": "owning-run",
+                }
+                for record in records
+            ],
+        )
+
+        with (
+            mock.patch.object(proofs_route, "_get_scoped_proof_database", return_value=database),
+            mock.patch.object(
+                proofs_route.assistant_proof_search_coordinator,
+                "invalidate_live_context_occurrence",
+            ) as invalidate,
+            mock.patch.object(
+                proofs_route.proof_search_service,
+                "rebuild_index",
+                mock.AsyncMock(),
+            ) as rebuild,
+            mock.patch.object(
+                proofs_route.websocket,
+                "broadcast_event",
+                mock.AsyncMock(),
+            ) as broadcast,
+        ):
+            response = await proofs_route.update_proof_live_context_bulk(request, "manual")
+            await asyncio.sleep(0)
+
+        self.assertEqual(response.changed_proof_ids, [record.proof_id for record in records])
+        self.assertEqual(response.proof_set_revision, 9)
+        self.assertEqual(invalidate.call_count, 2)
+        rebuild.assert_awaited_once_with()
+        self.assertEqual(broadcast.await_count, 2)
+        for call, record in zip(broadcast.await_args_list, records):
+            self.assertEqual(call.args[0], "proof_live_context_updated")
+            self.assertEqual(
+                set(call.args[1]),
+                {
+                    "scope",
+                    "proof_id",
+                    "run_id",
+                    "live_context_status",
+                    "proof_set_revision",
+                },
+            )
+            self.assertEqual(call.args[1]["proof_id"], record.proof_id)
+
 
 class ManualProofScopeRouteTests(TestCase):
     def setUp(self) -> None:
@@ -224,6 +524,32 @@ class ManualProofScopeRouteTests(TestCase):
         self.assertEqual(
             set(scope_parameter["schema"]["enum"]),
             {"autonomous", "manual"},
+        )
+        bulk_mutation = paths["/api/proofs/live-context/bulk"]["patch"]
+        self.assertEqual(
+            bulk_mutation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ProofLiveContextBulkMutationRequest",
+        )
+        self.assertEqual(
+            bulk_mutation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ProofLiveContextBulkMutationResponse",
+        )
+        reason_schema = schema["components"]["schemas"]["ProofLiveContextMutationRequest"][
+            "properties"
+        ]["reason"]
+        self.assertEqual(reason_schema["default"], "")
+        self.assertNotIn(
+            "reason",
+            schema["components"]["schemas"]["ProofLiveContextMutationRequest"]["required"],
+        )
+        bulk_mutation = paths["/api/proofs/live-context/bulk"]["patch"]
+        self.assertEqual(
+            bulk_mutation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ProofLiveContextBulkMutationRequest",
+        )
+        self.assertEqual(
+            bulk_mutation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ProofLiveContextBulkMutationResponse",
         )
 
     def test_proof_run_collection_and_source_lookup_are_no_store(self) -> None:

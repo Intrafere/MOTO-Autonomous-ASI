@@ -34,6 +34,7 @@ import {
   applyLeanOJProfileSelection,
   persistLeanOJSettings,
 } from '../../utils/leanojProfiles';
+import CodexReasoningControl from '../CodexReasoningControl';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
@@ -241,6 +242,7 @@ function ModelSelector({
         </div>
       )}
 
+      {provider === 'openai_codex_oauth' && config.modelId && <CodexReasoningControl model={models.find(item => item.id === config.modelId)} modelId={config.modelId} value={config.openrouterReasoningEffort} disabled={isRunning} onChange={effort => onChange({ ...config, provider, openrouterReasoningEffort: effort })} />}
       {provider === SAKANA_FUGU_PROVIDER && config.modelId && (
         <div className="settings-row">
           <label>Reasoning Effort</label>

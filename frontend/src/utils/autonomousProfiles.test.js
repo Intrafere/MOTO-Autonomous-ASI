@@ -391,6 +391,7 @@ test('OAuth startup defaults use known public model metadata from availability o
   expect(codex.modelId).toBe('gpt-5.4');
   expect(codex.config.validator_model).toBe('gpt-5.4');
 
+  localStorage.clear();
   const codexSpark = applyCloudAccessStartupDefaults(OPENAI_CODEX_STARTUP_CHOICE, []);
   expect(codexSpark.modelId).toBe('gpt-5.3-codex-spark-high');
   expect(codexSpark.config.validator_context_window).toBe(128000);
@@ -401,6 +402,7 @@ test('OAuth startup defaults use known public model metadata from availability o
   expect(codexSpark.config.high_param_openrouter_reasoning_effort).toBe('high');
   expect(codexSpark.config.submitter_configs[0].openrouter_reasoning_effort).toBe('high');
 
+  localStorage.clear();
   const xai = applyCloudAccessStartupDefaults(XAI_GROK_STARTUP_CHOICE, [
     { id: 'grok-4', accountScopedField: 'must-not-persist' },
   ]);

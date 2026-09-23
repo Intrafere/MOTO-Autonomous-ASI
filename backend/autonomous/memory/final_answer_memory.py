@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 from datetime import datetime
 import aiofiles
 
@@ -20,6 +20,7 @@ from backend.shared.path_safety import (
     resolve_path_within_root,
     validate_single_path_component,
 )
+from backend.shared.paper_proofs import analyze_paper_content, paper_metric_fields
 from backend.shared.models import (
     FinalAnswerState,
     CertaintyAssessment,
@@ -569,12 +570,18 @@ class FinalAnswerMemory:
     async def get_rejection_context_async(self, phase: str) -> str:
         """Format rejections for prompt context."""
         rejections = await self.get_rejections(phase)
-        if not rejections:
+        return self.render_rejection_context(phase, rejections[-5:])
+
+    @staticmethod
+    def render_rejection_context(
+        phase: str,
+        rejections: Iterable[Mapping[str, Any]],
+    ) -> str:
+        """Render a caller-selected whole-entry Tier 3 rejection projection."""
+        recent = tuple(rejections)
+        if not recent:
             return ""
-        
-        # Keep last 5 for context
-        recent = rejections[-5:]
-        
+
         lines = [f"PREVIOUS TIER 3 {phase.upper()} REJECTIONS (learn from these):\n"]
         for i, r in enumerate(recent, 1):
             lines.append(f"\n--- Rejection {i} ---")
@@ -986,6 +993,14 @@ class FinalAnswerMemory:
                 async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
                     content = await f.read()
                     data = json.loads(content)
+                    paper_id = str(data.get("paper_id") or "")
+                    if paper_id:
+                        paper_path = self._get_archived_paper_paths(paper_id)["content"]
+                        if paper_path.exists():
+                            async with aiofiles.open(paper_path, "r", encoding="utf-8") as paper_file:
+                                metrics = paper_metric_fields(await paper_file.read())
+                            data.update(metrics)
+                            data["word_count"] = metrics["total_word_count"]
                     papers.append(data)
             except Exception as e:
                 logger.error(f"Failed to read archived paper metadata: {e}")
@@ -1035,13 +1050,20 @@ class FinalAnswerMemory:
             if metadata_path.exists():
                 async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
                     metadata = json.loads(await f.read())
+            metrics = paper_metric_fields(content)
+            analysis = analyze_paper_content(content)
+            metadata.update(metrics)
+            metadata["word_count"] = metrics["total_word_count"]
             
             return {
                 "paper_id": paper_id,
                 "content": content,
                 "abstract": abstract,
                 "outline": outline,
-                "metadata": metadata
+                "metadata": metadata,
+                "paper_content": analysis["paper_content"],
+                "proofs": analysis["proofs"],
+                **metrics,
             }
         except Exception as e:
             logger.error(
@@ -1454,8 +1476,11 @@ class FinalAnswerMemory:
                             if volume_path.exists():
                                 async with aiofiles.open(volume_path, 'r', encoding='utf-8') as f:
                                     content = await f.read()
-                                    word_count = len(content.split())
+                                    metrics = paper_metric_fields(content)
+                                    word_count = metrics["total_word_count"]
                             else:
+                                content = ""
+                                metrics = paper_metric_fields(content)
                                 word_count = 0
                             
                             volume_org = state_data.get("volume_organization", {})
@@ -1466,8 +1491,11 @@ class FinalAnswerMemory:
                             if paper_path.exists():
                                 async with aiofiles.open(paper_path, 'r', encoding='utf-8') as f:
                                     content = await f.read()
-                                    word_count = len(content.split())
+                                    metrics = paper_metric_fields(content)
+                                    word_count = metrics["total_word_count"]
                             else:
+                                content = ""
+                                metrics = paper_metric_fields(content)
                                 word_count = 0
                             
                             title = state_data.get("short_form_title", "Untitled Paper")
@@ -1490,6 +1518,7 @@ class FinalAnswerMemory:
                             "user_prompt": user_prompt,
                             "certainty_level": certainty_level,
                             "word_count": word_count,
+                            **metrics,
                             "chapter_count": chapter_count,
                             "completion_date": completion_date,
                             "location": "legacy",
@@ -1530,8 +1559,11 @@ class FinalAnswerMemory:
                             if volume_path.exists():
                                 async with aiofiles.open(volume_path, 'r', encoding='utf-8') as f:
                                     content = await f.read()
-                                    word_count = len(content.split())
+                                    metrics = paper_metric_fields(content)
+                                    word_count = metrics["total_word_count"]
                             else:
+                                content = ""
+                                metrics = paper_metric_fields(content)
                                 word_count = 0
                             
                             volume_org = state_data.get("volume_organization", {})
@@ -1542,8 +1574,11 @@ class FinalAnswerMemory:
                             if paper_path.exists():
                                 async with aiofiles.open(paper_path, 'r', encoding='utf-8') as f:
                                     content = await f.read()
-                                    word_count = len(content.split())
+                                    metrics = paper_metric_fields(content)
+                                    word_count = metrics["total_word_count"]
                             else:
+                                content = ""
+                                metrics = paper_metric_fields(content)
                                 word_count = 0
                             
                             title = state_data.get("short_form_title", "Untitled Paper")
@@ -1569,6 +1604,7 @@ class FinalAnswerMemory:
                             "user_prompt": user_prompt,
                             "certainty_level": certainty_level,
                             "word_count": word_count,
+                            **metrics,
                             "chapter_count": chapter_count,
                             "completion_date": completion_date,
                             "location": session_folder.name,
@@ -1649,6 +1685,8 @@ class FinalAnswerMemory:
             certainty_level = state_data.get("certainty_assessment", {}).get("certainty_level", "unknown")
             completion_date = state_data.get("timestamp", datetime.now().isoformat())
             
+            analysis = analyze_paper_content(full_content)
+            metrics = paper_metric_fields(full_content)
             return {
                 "metadata": {
                     "answer_id": answer_id,
@@ -1656,13 +1694,16 @@ class FinalAnswerMemory:
                     "title": title,
                     "user_prompt": user_prompt,
                     "certainty_level": certainty_level,
-                    "word_count": len(full_content.split()),
+                    "word_count": metrics["total_word_count"],
+                    **metrics,
                     "chapter_count": len(chapters),
                     "completion_date": completion_date,
                     "location": answer_id,
                     "session_id": answer_id
                 },
                 "content": full_content,
+                "paper_content": analysis["paper_content"],
+                "proofs": analysis["proofs"],
                 "chapters": chapters
             }
         except Exception as e:

@@ -4,7 +4,8 @@ Maintains last 10 rejections and acceptances (appended as text, not embedded).
 """
 import aiofiles
 import asyncio
-from typing import List, Dict
+from copy import deepcopy
+from typing import Dict, Iterable, List, Mapping
 from pathlib import Path
 from datetime import datetime
 import logging
@@ -261,10 +262,20 @@ Reasoning: {reasoning}"""
     
     async def get_rejections_text(self) -> str:
         """Get rejections as text for context injection."""
+        return self.render_rejections(await self.get_rejection_entries())
+
+    async def get_rejection_entries(self, limit: int = 5) -> tuple[Dict, ...]:
+        """Return a copied chronological model-facing rejection snapshot."""
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
         async with self._lock:
-            if not self.rejections:
-                return ""
-            return '\n\n---\n\n'.join([entry['text'] for entry in self.rejections])
+            selected = self.rejections[-limit:] if limit else []
+            return tuple(deepcopy(selected))
+
+    @staticmethod
+    def render_rejections(entries: Iterable[Mapping[str, str]]) -> str:
+        """Render a caller-selected whole-entry rejection projection."""
+        return '\n\n---\n\n'.join(entry['text'] for entry in entries)
     
     async def get_acceptances_text(self) -> str:
         """Get acceptances as text for context injection."""

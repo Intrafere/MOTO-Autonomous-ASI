@@ -1,8 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import LatexRenderer from '../LatexRenderer';
+import PaperProofViewer, { PaperProofMetrics } from '../PaperProofViewer';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import ProofCheckModeModal from './ProofCheckModeModal';
 import ProofRunStatusControls from './ProofRunStatusControls';
+import PaperBatchPruneControls, {
+  isPaperBatchPruneEligible,
+  paperTargetKey,
+} from './PaperBatchPruneControls';
 import { autonomousAPI } from '../../services/api';
 import {
   PDF_UNAVAILABLE_MESSAGE,
@@ -57,6 +61,9 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
   const [proofActionMessage, setProofActionMessage] = useState('');
   const [proofCheckTarget, setProofCheckTarget] = useState(null);
   const [proofCheckStarting, setProofCheckStarting] = useState(false);
+  const [selectedPaperKeys, setSelectedPaperKeys] = useState(() => new Set());
+  const [batchPruning, setBatchPruning] = useState(false);
+  const [batchPruneMessage, setBatchPruneMessage] = useState('');
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   const {
     getSourceState,
@@ -211,6 +218,73 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
       }))
       .filter((runGroup) => runGroup.visibleStage2Papers.length > 0);
   }, [runGroups, searchTerm]);
+
+  const visibleEligibleTargets = useMemo(() => (
+    visibleRunGroups.flatMap((runGroup) => (
+      runGroup.visibleStage2Papers
+        .filter(isPaperBatchPruneEligible)
+        .map(({ session_id, paper_id }) => ({ session_id, paper_id }))
+    ))
+  ), [visibleRunGroups]);
+
+  useEffect(() => {
+    const eligibleKeys = new Set(visibleEligibleTargets.map(paperTargetKey));
+    setSelectedPaperKeys((current) => {
+      const reconciled = new Set([...current].filter((key) => eligibleKeys.has(key)));
+      return reconciled.size === current.size ? current : reconciled;
+    });
+  }, [visibleEligibleTargets]);
+
+  const togglePaperSelection = (event, paper) => {
+    event.stopPropagation();
+    const key = paperTargetKey(paper);
+    setSelectedPaperKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setBatchPruneMessage('');
+  };
+
+  const handleBatchPrune = async () => {
+    const targets = visibleEligibleTargets.filter((target) => selectedPaperKeys.has(paperTargetKey(target)));
+    if (targets.length === 0) return false;
+    setBatchPruning(true);
+    setBatchPruneMessage('');
+    try {
+      const result = await autonomousAPI.prunePapersBatch(targets);
+      setSelectedPaperKeys(new Set());
+      setBatchPruneMessage(`Pruned ${result.pruned_count ?? targets.length} selected ${targets.length === 1 ? 'paper' : 'papers'}.`);
+      const refreshes = [loadPaperHistory()];
+      if (onCurrentSessionDataChanged) {
+        refreshes.push(onCurrentSessionDataChanged());
+      }
+      const refreshResults = await Promise.allSettled(refreshes);
+      if (refreshResults.some((entry) => entry.status === 'rejected')) {
+        setBatchPruneMessage(`Pruned ${result.pruned_count ?? targets.length} selected ${targets.length === 1 ? 'paper' : 'papers'}, but refreshing history failed. Reload to reconcile current state.`);
+      }
+      return true;
+    } catch (err) {
+      console.error('Failed to prune selected papers:', err);
+      const stale = err?.status === 404 || err?.status === 409;
+      const unknown = err?.kind === 'ambiguous_transport';
+      setBatchPruneMessage(
+        unknown
+          ? 'The batch outcome is unknown because no backend response was received. Refreshing current state before another attempt.'
+          : `Failed to prune selected papers. ${err.message}`
+      );
+      if (stale || unknown) {
+        setSelectedPaperKeys(new Set());
+        const refreshes = [loadPaperHistory()];
+        if (onCurrentSessionDataChanged) refreshes.push(onCurrentSessionDataChanged());
+        await Promise.allSettled(refreshes);
+      }
+      return false;
+    } finally {
+      setBatchPruning(false);
+    }
+  };
 
   const handleCardClick = async (paper) => {
     if (expandedId === paper.history_id) {
@@ -466,6 +540,19 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
         )}
       </div>
 
+      <PaperBatchPruneControls
+        visibleTargets={visibleEligibleTargets}
+        selectedKeys={selectedPaperKeys}
+        onSelectAllVisible={() => setSelectedPaperKeys(new Set(visibleEligibleTargets.map(paperTargetKey)))}
+        onClear={() => {
+          setSelectedPaperKeys(new Set());
+          setBatchPruneMessage('');
+        }}
+        onPruneSelected={handleBatchPrune}
+        pruning={batchPruning}
+        message={batchPruneMessage}
+      />
+
       {visibleRunGroups.length === 0 ? (
         <div className="fal-empty-state">
           <span className="empty-icon">📭</span>
@@ -524,6 +611,16 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
                     >
                       <div className="paper-card-header">
                         <div className="stage2-history-card-identifiers">
+                          {isPaperBatchPruneEligible(paper) && (
+                            <label className="paper-selection-control" onClick={(event) => event.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={selectedPaperKeys.has(paperTargetKey(paper))}
+                                onChange={(event) => togglePaperSelection(event, paper)}
+                                aria-label={`Select ${paper.title || paper.paper_id} for batch pruning`}
+                              />
+                            </label>
+                          )}
                           <span className="paper-card-id">{paper.paper_id}</span>
                           <span className="stage2-history-session-badge">
                             {paper.session_id === 'legacy' ? 'Legacy' : paper.session_id}
@@ -532,7 +629,10 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
                             <span className="stage2-history-pruned-badge">Pruned Paper</span>
                           )}
                         </div>
-                        <span className="paper-word-count">{paper.word_count?.toLocaleString()} words</span>
+                        <PaperProofMetrics
+                          content={expandedContent?.history_id === paper.history_id ? expandedContent.content || '' : ''}
+                          metrics={paper}
+                        />
                       </div>
 
                       <div className="paper-card-title">
@@ -678,15 +778,11 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
                             ) : expandedContent && expandedContent.history_id === paper.history_id ? (
                               <div className="paper-section">
                                 <h4>Paper Content</h4>
-                                <LatexRenderer
-                                  content={
-                                    expandedContent.outline
-                                      ? `${expandedContent.outline}\n\n${'='.repeat(80)}\n\n${expandedContent.content || 'No content available'}`
-                                      : expandedContent.content || 'No content available'
-                                  }
+                                <PaperProofViewer
+                                  prefixContent={expandedContent.outline ? `${expandedContent.outline}\n\n${'='.repeat(80)}\n\n` : ''}
+                                  content={expandedContent.content || 'No content available'}
+                                  metrics={{ ...paper, ...expandedContent }}
                                   className="paper-content-renderer"
-                                  showToggle={true}
-                                  defaultRaw={false}
                                 />
                               </div>
                             ) : (

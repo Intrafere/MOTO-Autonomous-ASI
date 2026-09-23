@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
 import TextFileUploader from '../TextFileUploader';
+import { normalizeOpenRouterReasoningEffort } from '../../utils/openRouterSelection';
 import '../autonomous/AutonomousResearch.css';
 import '../settings-common.css';
 
@@ -114,7 +115,7 @@ export default function AggregatorInterface({
         provider: lmStudioEnabled ? (s.provider || 'lm_studio') : 'openrouter',
         model_id: s.modelId,
         openrouter_provider: s.openrouterProvider || null,
-        openrouter_reasoning_effort: s.openrouterReasoningEffort || 'auto',
+        openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(s.openrouterReasoningEffort, lmStudioEnabled ? s.provider : 'openrouter'),
         lm_studio_fallback_id: lmStudioEnabled ? (s.lmStudioFallbackId || null) : null,
         context_window: s.contextWindow,
         max_output_tokens: s.maxOutputTokens,
@@ -130,7 +131,7 @@ export default function AggregatorInterface({
         validator_provider: lmStudioEnabled ? (config.validatorProvider || 'lm_studio') : 'openrouter',
         validator_model: config.validatorModel,
         validator_openrouter_provider: config.validatorOpenrouterProvider || null,
-        validator_openrouter_reasoning_effort: config.validatorOpenrouterReasoningEffort || 'auto',
+        validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(config.validatorOpenrouterReasoningEffort, lmStudioEnabled ? config.validatorProvider : 'openrouter'),
         validator_lm_studio_fallback: lmStudioEnabled ? (config.validatorLmStudioFallback || null) : null,
         validator_context_size: config.validatorContextSize,
         validator_max_output_tokens: config.validatorMaxOutput,
@@ -143,7 +144,7 @@ export default function AggregatorInterface({
           ? (config.assistantOpenrouterProvider || null)
           : null,
         assistant_openrouter_reasoning_effort: assistantMemoryEnabled
-          ? (config.assistantOpenrouterReasoningEffort || config.validatorOpenrouterReasoningEffort || 'auto')
+          ? normalizeOpenRouterReasoningEffort(config.assistantOpenrouterReasoningEffort || config.validatorOpenrouterReasoningEffort, lmStudioEnabled ? (config.assistantProvider || config.validatorProvider) : 'openrouter')
           : 'auto',
         assistant_lm_studio_fallback: assistantMemoryEnabled && lmStudioEnabled
           ? (config.assistantLmStudioFallback || config.validatorLmStudioFallback || null)

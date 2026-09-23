@@ -9,7 +9,7 @@
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { websocket } from '../../services/websocket';
-import LatexRenderer from '../LatexRenderer';
+import PaperProofViewer, { PaperProofMetrics } from '../PaperProofViewer';
 import {
   PDF_UNAVAILABLE_MESSAGE,
   downloadRawText,
@@ -35,31 +35,33 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
     return readBooleanStorage('banner_shimmer_enabled', true);
   };
 
+  const paperRequestSequence = useRef(0);
+  const volumeRequestSequence = useRef(0);
+  const mounted = useRef(false);
+
   // Load paper progress from API
   const loadPaperProgress = useCallback(async () => {
-    if (!api || status?.current_tier !== 'tier3_final_answer') return;
-    
+    if (!api || status?.current_tier !== 'tier3_final_answer' || !mounted.current) return;
+    const sequence = ++paperRequestSequence.current;
     try {
       const data = await api.getCurrentPaperProgress();
-      if (data.tier === 'tier3') {
-        setPaperData(data);
-      }
+      if (!mounted.current || sequence !== paperRequestSequence.current) return;
+      setPaperData(data.tier === 'tier3' ? data : null);
     } catch (error) {
-      console.error('Failed to load Tier 3 paper progress:', error);
+      if (mounted.current && sequence === paperRequestSequence.current) console.error('Failed to load Tier 3 paper progress:', error);
     }
   }, [api, status?.current_tier]);
 
   // Load volume progress for long-form answers
   const loadVolumeProgress = useCallback(async () => {
-    if (!api || status?.current_tier !== 'tier3_final_answer') return;
-    
+    if (!api || status?.current_tier !== 'tier3_final_answer' || !mounted.current) return;
+    const sequence = ++volumeRequestSequence.current;
     try {
       const data = await api.getVolumeProgress();
-      if (data.is_long_form) {
-        setVolumeProgress(data);
-      }
+      if (!mounted.current || sequence !== volumeRequestSequence.current) return;
+      setVolumeProgress(data.is_long_form ? data : null);
     } catch (error) {
-      console.error('Failed to load volume progress:', error);
+      if (mounted.current && sequence === volumeRequestSequence.current) console.error('Failed to load volume progress:', error);
     }
   }, [api, status?.current_tier]);
 
@@ -69,7 +71,11 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
   }, [loadPaperProgress, loadVolumeProgress]);
 
   useEffect(() => {
+    mounted.current = true;
+    paperRequestSequence.current += 1;
+    volumeRequestSequence.current += 1;
     if (status?.current_tier !== 'tier3_final_answer') {
+      mounted.current = false;
       setPaperData(null);
       setVolumeProgress(null);
       return;
@@ -96,6 +102,9 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
     ];
 
     return () => {
+      mounted.current = false;
+      paperRequestSequence.current += 1;
+      volumeRequestSequence.current += 1;
       clearInterval(interval);
       unsubscribers.forEach(unsub => unsub());
     };
@@ -271,9 +280,7 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
         <div className="tier3-meta">
           {getStatusBadge()}
           {getFormatBadge()}
-          {paperData?.word_count > 0 && (
-            <span className="word-count">{paperData.word_count?.toLocaleString()} words</span>
-          )}
+          {paperData?.content && <PaperProofMetrics content={paperData.content} metrics={paperData} />}
         </div>
       </div>
 
@@ -339,15 +346,12 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
             {paperData?.content ? (
               <div className="paper-section">
                 <h4>{paperData.title || 'Final Answer Content'}</h4>
-                <LatexRenderer 
-                  content={
-                    paperData.outline
-                      ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n${prependDisclaimer(paperData.content, 'paper')}`
-                      : prependDisclaimer(paperData.content, 'paper')
-                  }
+                <PaperProofViewer
+                  documentId={`tier3:${paperData.session_id || status?.session_id || ''}:${paperData.paper_id || paperData.chapter_index || paperData.title || 'final'}`}
+                  prefixContent={paperData.outline ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n` : ''}
+                  content={prependDisclaimer(paperData.content, 'paper')}
+                  metrics={paperData}
                   className="live-tier3-latex-renderer"
-                  defaultRaw={false}
-                  showToggle={true}
                 />
               </div>
             ) : (

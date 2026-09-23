@@ -3,7 +3,7 @@
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { websocket } from '../../services/websocket';
-import LatexRenderer from '../LatexRenderer';
+import PaperProofViewer, { PaperProofMetrics } from '../PaperProofViewer';
 import {
   PDF_UNAVAILABLE_MESSAGE,
   downloadRawText,
@@ -22,20 +22,24 @@ const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
   const containerRef = useRef(null);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
 
-  // Memoize loadPaperProgress with useCallback
+  const requestSequence = useRef(0);
+  const mounted = useRef(false);
   const loadPaperProgress = useCallback(async () => {
-    if (!api || !isCompiling) return;
-    
+    if (!api || !isCompiling || !mounted.current) return;
+    const sequence = ++requestSequence.current;
     try {
       const data = await api.getCurrentPaperProgress();
-      setPaperData(data);
+      if (mounted.current && sequence === requestSequence.current) setPaperData(data);
     } catch (error) {
-      console.error('Failed to load paper progress:', error);
+      if (mounted.current && sequence === requestSequence.current) console.error('Failed to load paper progress:', error);
     }
   }, [api, isCompiling]);  // Dependencies: api and isCompiling
 
   useEffect(() => {
+    mounted.current = true;
+    requestSequence.current += 1;
     if (!isCompiling) {
+      mounted.current = false;
       setPaperData(null);
       return;
     }
@@ -54,6 +58,8 @@ const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
     ];
 
     return () => {
+      mounted.current = false;
+      requestSequence.current += 1;
       clearInterval(interval);
       unsubscribers.forEach(unsub => unsub());
     };
@@ -143,7 +149,7 @@ const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
         </h3>
         <div className="paper-meta">
           <span className="paper-id">{paperData.paper_id}</span>
-          <span className="word-count">{paperData.word_count?.toLocaleString()} words</span>
+          <PaperProofMetrics content={paperData.content || ''} metrics={paperData} />
         </div>
       </div>
 
@@ -191,15 +197,12 @@ const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
             {paperData.content ? (
               <div className="paper-section">
                 <h4>Paper Content</h4>
-                <LatexRenderer 
-                  content={
-                    paperData.outline
-                      ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n${prependDisclaimer(paperData.content, 'paper')}`
-                      : prependDisclaimer(paperData.content, 'paper')
-                  }
+                <PaperProofViewer
+                  documentId={`paper:${paperData.session_id || ''}:${paperData.paper_id || ''}`}
+                  prefixContent={paperData.outline ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n` : ''}
+                  content={prependDisclaimer(paperData.content, 'paper')}
+                  metrics={paperData}
                   className="live-paper-latex-renderer"
-                  defaultRaw={false}
-                  showToggle={true}
                 />
               </div>
             ) : (

@@ -6,6 +6,7 @@
 import React, { useRef, useEffect, useMemo, useState } from 'react';
 import { autonomousAPI } from '../../services/api';
 import ApiCallLogs from '../ApiCallLogs';
+import ProofCompetitionBenchmarkReport from './ProofCompetitionBenchmarkReport';
 import {
   formatEmptyProofDiscoveryMessage,
   formatProofRunEventMessage,
@@ -367,6 +368,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
 
   return (
     <div className="autonomous-logs">
+      <ProofCompetitionBenchmarkReport current />
       {/* Metrics Grid */}
       <div className="logs-metrics">
         <div className="metric-card">

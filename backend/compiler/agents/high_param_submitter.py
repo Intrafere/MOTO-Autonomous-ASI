@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from backend.shared.models import ModelConfig
 from backend.autonomous.memory.paper_library import PaperLibrary
 from backend.autonomous.agents.proof_formalization_agent import (
     _MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX as MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX,
@@ -36,6 +37,7 @@ from backend.autonomous.agents.proof_formalization_agent import (
 from backend.autonomous.memory.proof_database import proof_database as autonomous_proof_database
 from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
 from backend.compiler.memory.critique_rejection_memory import CritiqueRejectionMemory
+from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import (
     paper_memory,
@@ -53,6 +55,11 @@ from backend.shared.model_error_utils import (
     is_transient_model_call_error,
 )
 from backend.shared.response_extraction import extract_message_text
+from backend.shared.prompt_feedback_budget import (
+    fit_prompt_with_feedback,
+    fit_prompt_with_feedback_async,
+)
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
@@ -209,7 +216,14 @@ class HighParamSubmitter:
         validator_max_tokens: Optional[int] = None,
         proof_database_store=None,
         proof_context_requesting_run_id: str = "",
+        proof_competition=None,
     ):
+        from backend.shared.models import ProofCompetitionConfig
+        self.proof_competition = ProofCompetitionConfig.model_validate(proof_competition or {}).model_copy(deep=True)
+        self._unavailable_proof_competitors: set[int] = set()
+        self._competition_state = None
+        self._competition_reporter = None
+        self._competition_winner_event = None
         self.model_name = model_name
         self.proof_database = proof_database_store or autonomous_proof_database
         self.proof_context_requesting_run_id = proof_context_requesting_run_id
@@ -344,17 +358,27 @@ class HighParamSubmitter:
     ) -> Optional[Submission]:
         """Generate post-body critique or a validated decline assessment."""
         try:
-            rejection_feedback = await self.critique_rejection_memory.get_all_content()
-            prompt = build_critique_prompt(
-                user_prompt=user_prompt,
-                current_body=current_body,
-                current_outline=current_outline,
-                aggregator_db=aggregator_db,
-                reference_papers=reference_papers,
-                critique_feedback=existing_critiques,
-                rejection_feedback=rejection_feedback,
-                accumulated_history=accumulated_history,
+            rejection_entries = await self.critique_rejection_memory.get_rejection_entries()
+
+            def assemble(selected):
+                return build_critique_prompt(
+                    user_prompt=user_prompt,
+                    current_body=current_body,
+                    current_outline=current_outline,
+                    aggregator_db=aggregator_db,
+                    reference_papers=reference_papers,
+                    critique_feedback=existing_critiques,
+                    rejection_feedback=self.critique_rejection_memory.render_rejections(selected),
+                    accumulated_history=accumulated_history,
+                )
+
+            fit = fit_prompt_with_feedback(
+                rejection_entries,
+                build_prompt=assemble,
+                available_tokens=self.available_input_tokens,
             )
+            prompt = fit.prompt
+            visible_rejections = fit.retained_entries
 
             prompt_tokens = count_tokens(prompt)
             max_allowed = rag_config.get_available_input_tokens(
@@ -374,14 +398,22 @@ class HighParamSubmitter:
             if self.task_tracking_callback:
                 self.task_tracking_callback("started", task_id)
 
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=self.max_output_tokens,
-            )
+            while True:
+                try:
+                    response = await api_client_manager.generate_completion(
+                        task_id=task_id,
+                        role_id=self.role_id,
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        max_tokens=self.max_output_tokens,
+                    )
+                    break
+                except ProviderContextLengthError:
+                    if len(visible_rejections) <= 1:
+                        raise
+                    visible_rejections = visible_rejections[1:]
+                    prompt = assemble(visible_rejections)
 
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
@@ -554,7 +586,11 @@ class HighParamSubmitter:
             return None
 
         logger.info("Rigor cycle: Stage 1 - theorem discovery")
-        discovery = await self._step_discovery()
+        await self._load_competition_state()
+        discovery = (self._competition_state.data.get("discovery")
+                     if self._competition_state else None)
+        if discovery is None:
+            discovery = await self._step_discovery()
         if discovery is None:
             logger.info("Rigor cycle: discovery declined")
             return None
@@ -628,8 +664,17 @@ class HighParamSubmitter:
             origin_source_id=self._compiler_source_id() if retry_failure_id else "",
         )
 
+        if self._competition_state:
+            saved_candidate = self._competition_state.data.get("candidate")
+            if saved_candidate:
+                candidate = ProofCandidate.model_validate(saved_candidate)
+            else:
+                self._competition_state.data = {"discovery": discovery, "competitors": {}}
+                self._competition_state.data["candidate"] = candidate.model_dump(mode="json")
+                await self._competition_state.save()
         formalizer_result = await self._step_formalize(candidate, theorem_statement)
         if formalizer_result is None:
+            await self.complete_competition_placement()
             return None
 
         theorem_name, lean_code, attempts, integrity = formalizer_result
@@ -670,7 +715,7 @@ class HighParamSubmitter:
             )
 
         logger.info("Rigor cycle: Stage 3 - novelty classification + persistence")
-        novelty_result = await self._step_assess_novelty_and_store(
+        novelty_result = await self._competition_registration(
             theorem_statement=stored_theorem_statement,
             theorem_name=stored_theorem_name,
             lean_code=lean_code,
@@ -811,17 +856,28 @@ class HighParamSubmitter:
         max_allowed = rag_config.get_available_input_tokens(
             self.context_window, self.max_output_tokens
         )
+        rejection_entries = await compiler_rejection_log.get_rejection_entries(limit=5)
 
-        base_prompt = await build_rigor_theorem_discovery_prompt(
-            user_prompt=self.user_prompt,
-            current_outline=current_outline,
-            current_paper=current_paper,
-            rag_evidence="",
-            existing_verified_proofs=existing_proofs,
-            recent_failure_hints=failure_hints,
-            source_material_context=source_material_context,
-            source_material_label=self._source_material_label,
+        async def assemble_discovery(selected, evidence=""):
+            return await build_rigor_theorem_discovery_prompt(
+                user_prompt=self.user_prompt,
+                current_outline=current_outline,
+                current_paper=current_paper,
+                rag_evidence=evidence,
+                existing_verified_proofs=existing_proofs,
+                recent_failure_hints=failure_hints,
+                source_material_context=source_material_context,
+                source_material_label=self._source_material_label,
+                rejection_history=compiler_rejection_log.render_rejections(selected),
+            )
+
+        base_fit = await fit_prompt_with_feedback_async(
+            rejection_entries,
+            build_prompt=assemble_discovery,
+            available_tokens=max_allowed,
         )
+        base_prompt = base_fit.prompt
+        visible_rejections = base_fit.retained_entries
         if count_tokens(base_prompt) > max_allowed:
             raise ValueError(
                 "Rigor discovery prompt exceeds available input budget with mandatory full source context "
@@ -836,16 +892,7 @@ class HighParamSubmitter:
             reserved_tokens=mandatory_tokens,
         )
 
-        prompt = await build_rigor_theorem_discovery_prompt(
-            user_prompt=self.user_prompt,
-            current_outline=current_outline,
-            current_paper=current_paper,
-            rag_evidence=rag_evidence,
-            existing_verified_proofs=existing_proofs,
-            recent_failure_hints=failure_hints,
-            source_material_context=source_material_context,
-            source_material_label=self._source_material_label,
-        )
+        prompt = await assemble_discovery(visible_rejections, rag_evidence)
         from backend.shared.solution_path.integration import with_budgeted_solver_plan
         prompt = with_budgeted_solver_plan(
             prompt,
@@ -866,6 +913,11 @@ class HighParamSubmitter:
         data = await self._call_llm_and_parse(
             prompt=prompt,
             task_label="rigor_discovery",
+            provider_overflow_rebuild=(
+                (lambda: assemble_discovery(visible_rejections[1:], ""))
+                if len(visible_rejections) > 1
+                else None
+            ),
         )
         if data is None:
             return None
@@ -878,6 +930,57 @@ class HighParamSubmitter:
         return data
 
     # --------------------------------------------------------- stage 2
+
+    async def _competition_registration(self, **kwargs):
+        saved = self._competition_state.data.get("registration") if self._competition_state else None
+        if self._competition_state and not saved:
+            # Registration may have committed immediately before cancellation.
+            # Recover only this occurrence, not an arbitrary canonical duplicate.
+            theorem_id = self._competition_state.data.get("candidate", {}).get("theorem_id")
+            if theorem_id:
+                for record in await self.proof_database.get_all_proofs():
+                    if (record.theorem_id == theorem_id and record.source_id == self._compiler_source_id()
+                            and record.run_id == self._competition_state.identity["run_id"]
+                            and record.lean_code == kwargs["lean_code"]):
+                        saved = {"record": record.model_dump(mode="json"), "duplicate": False}
+                        self._competition_state.data["registration"] = saved
+                        await self._competition_state.save()
+                        break
+        if saved:
+            from backend.shared.models import ProofRecord
+            record = ProofRecord.model_validate(saved["record"])
+            result = record.novel, record.novelty_reasoning, record, saved["duplicate"]
+        else:
+            result = await self._step_assess_novelty_and_store(**kwargs)
+            if result and self._competition_state:
+                self._competition_state.data["registration"] = {
+                    "record": result[2].model_dump(mode="json"), "duplicate": result[3],
+                }
+                await self._competition_state.save()
+        if result and self._competition_reporter and self._competition_winner_event:
+            await self._competition_reporter.registered(
+                winner=self._competition_winner_event, proof_id=result[2].proof_id,
+            )
+        return result
+
+    async def _load_competition_state(self):
+        if not self.proof_competition.enabled:
+            return
+        from pathlib import Path
+        from backend.compiler.memory.proof_competition_state import CompilerCompetitionState
+        base = Path(getattr(self.proof_database, "_base_dir", ""))
+        if base.name != "proofs" or base.parent.parent.resolve() != Path(system_config.auto_sessions_base_dir).resolve():
+            return
+        self._competition_state = CompilerCompetitionState(
+            base.parent, self.proof_context_requesting_run_id or self._resolve_session_id(),
+            self._compiler_source_id(),
+        )
+        await self._competition_state.load()
+
+    async def complete_competition_placement(self):
+        if self._competition_state:
+            self._competition_state.data = {}
+            await self._competition_state.save()
 
     async def _step_formalize(
         self,
@@ -893,6 +996,11 @@ class HighParamSubmitter:
         current_paper_raw = await paper_memory.get_paper()
         current_paper = _strip_paper_markers_for_llm(current_paper_raw)
         proof_source_content = self._get_paper_proof_source_content(current_paper)
+        if self._competition_state:
+            if "source_content" not in self._competition_state.data:
+                self._competition_state.data["source_content"] = proof_source_content
+                await self._competition_state.save()
+            proof_source_content = self._competition_state.data["source_content"]
 
         # Imported lazily to avoid a circular-import chain through the
         # autonomous agents package at module load time.
@@ -905,8 +1013,114 @@ class HighParamSubmitter:
             context_window=self.context_window,
             max_output_tokens=self.max_output_tokens,
             role_id="compiler_rigor_formalization",
+            **({"strict_execution_errors": True} if self.proof_competition.enabled else {}),
         )
         proof_label = "A"
+        competition_reporter = None
+        competitor_index = 0
+        competitor_attempts = 0
+        if self.proof_competition.enabled:
+            from backend.autonomous.core.proof_competition_reporting import CompetitionReporter
+            from backend.autonomous.core.proof_competition import fingerprint
+            from pathlib import Path
+            store_path = Path(getattr(self.proof_database, "_base_dir", ""))
+            if store_path.name == "proofs" and store_path.parent.parent.resolve() == Path(system_config.auto_sessions_base_dir).resolve():
+                primary_route = api_client_manager.get_role_config("compiler_rigor_formalization")
+                competition_reporter = CompetitionReporter(
+                    session_id=store_path.parent.name,
+                    run_id=self.proof_context_requesting_run_id or self._resolve_session_id(),
+                    primary_route=primary_route or {"provider": "unknown", "model_id": self.model_name},
+                    secondaries=self.proof_competition.secondaries,
+                )
+
+        active_state = {}
+        competition_execution_id = None
+        if competition_reporter:
+            from uuid import uuid4
+            if self._competition_state:
+                competition_execution_id = self._competition_state.data.setdefault("execution_id", uuid4().hex)
+                await self._competition_state.save()
+            else:
+                competition_execution_id = uuid4().hex
+
+        async def run_competitor(agent):
+            nonlocal active_state, competitor_attempts, competitor_index
+            if not self.proof_competition.enabled:
+                return await agent.prove_candidate(
+                    user_research_prompt=self.raw_user_prompt, source_type="paper",
+                    theorem_candidate=candidate, source_content=proof_source_content,
+                    max_attempts=5, attempt_callback=_on_attempt_feedback,
+                    attempt_start_callback=_on_attempt_started,
+                    source_title=self._compiler_source_title(),
+                )
+            from backend.autonomous.core.proof_competition import fingerprint
+            route = (api_client_manager.get_role_config("compiler_rigor_formalization")
+                     if competitor_index == 0 else self.proof_competition.secondaries[competitor_index - 1])
+            route = route.model_dump(mode="json") if hasattr(route, "model_dump") else route
+            route = route or {"provider": "unknown", "model_id": self.model_name}
+            key = f"{competitor_index}:{fingerprint(route)}"
+            states = self._competition_state.data.setdefault("competitors", {}) if self._competition_state else {}
+            # Accepted artifacts survive route edits; never generate another proof
+            # merely because post-Lean classification/placement was interrupted.
+            if competitor_index == 0:
+                for saved_key, saved in states.items():
+                    accepted = next((item for item in saved["attempts"] if item.get("success")), None)
+                    if accepted:
+                        competitor_index = int(saved_key.split(":", 1)[0])
+                        active_state = saved
+                        if competition_reporter and saved.get("route"):
+                            while len(competition_reporter.routes) <= competitor_index:
+                                competition_reporter.routes.append(saved["route"])
+                            competition_reporter.routes[competitor_index] = saved["route"]
+                        recovered = [ProofAttemptFeedback.model_validate(item) for item in saved["attempts"]]
+                        competitor_attempts = len(recovered)
+                        return True, saved.get("theorem_name", ""), accepted["lean_code"], recovered
+            active_state = states.setdefault(key, {"attempts": [], "route": route})
+            prior = [ProofAttemptFeedback.model_validate(item) for item in active_state["attempts"]]
+            competitor_attempts = len(prior)
+            accepted = next((item for item in prior if item.success), None)
+            if accepted:
+                return True, active_state.get("theorem_name", ""), accepted.lean_code, prior
+            if len(prior) >= 5 or active_state.get("status") in {"unavailable", "blocked"}:
+                return False, "", "", prior
+            agent.model_attempt_callback = _on_model_attempt_started
+            agent.completion_route_callback = _on_completion_route
+            result = await agent.prove_candidate(
+                user_research_prompt=self.raw_user_prompt,
+                source_type="paper",
+                theorem_candidate=candidate.model_copy(deep=True),
+                source_content=proof_source_content,
+                max_attempts=5 - len(prior),
+                prior_attempts=prior,
+                attempt_callback=_on_attempt_feedback,
+                attempt_start_callback=_on_attempt_started,
+                source_title=self._compiler_source_title(),
+            )
+            active_state["theorem_name"] = result[1]
+            active_state["attempts"] = [item.model_dump(mode="json") for item in result[3]]
+            if self._competition_state:
+                await self._competition_state.save()
+            return result
+
+        async def report_competitor(status, error_type=None, *, attempt_started=False):
+            if active_state:
+                active_state["status"] = status
+                if self._competition_state:
+                    await self._competition_state.save()
+            if competition_reporter:
+                route = competition_reporter.routes[competitor_index]
+                route = route.model_dump(mode="json") if hasattr(route, "model_dump") else route
+                await competition_reporter({
+                    "execution_id": competition_execution_id,
+                    "run_id": competition_reporter.run_id,
+                    "source_type": "compiler_rigor", "source_id": self._compiler_source_id(),
+                    "theorem_id": candidate.theorem_id,
+                    "candidate_fingerprint": fingerprint([candidate.theorem_id, candidate.statement, candidate.formal_sketch]),
+                    "competitor_index": competitor_index, "route_revision": fingerprint(route),
+                    "status": status, "attempts_consumed": competitor_attempts, "error_type": error_type,
+                    "attempt_started": attempt_started,
+                    "effective_routes": active_state.get("effective_routes", []),
+                })
 
         def _lean_response_summary(feedback: ProofAttemptFeedback) -> str:
             if feedback.success:
@@ -920,6 +1134,17 @@ class HighParamSubmitter:
                 return f"Lean 4 response: {error} - proof not verified."
             return "Lean 4 response: proof not verified."
 
+        async def _on_completion_route(metadata):
+            from backend.autonomous.core.proof_competition_reporting import observed_route
+            observed = observed_route(metadata)
+            routes = active_state.setdefault("effective_routes", [])
+            if observed and observed not in routes and len(routes) < 100:
+                routes.append(observed)
+                await report_competitor("running")
+
+        async def _on_model_attempt_started(attempt_number: int, strategy: str) -> None:
+            await report_competitor("running", attempt_started=True)
+
         async def _on_attempt_started(attempt_number: int, strategy: str) -> None:
             await self._broadcast(
                 "proof_attempt_started",
@@ -931,10 +1156,20 @@ class HighParamSubmitter:
                     "proof_label": proof_label,
                     "attempt": attempt_number,
                     "strategy": strategy,
+                    **({"competitor_index": competitor_index,
+                        "competitor_id": f"competitor_{competitor_index}"}
+                       if self.proof_competition.enabled else {}),
                 },
             )
 
         async def _on_attempt_feedback(feedback: ProofAttemptFeedback) -> None:
+            nonlocal competitor_attempts
+            competitor_attempts += 1
+            if active_state:
+                active_state["attempts"].append(feedback.model_dump(mode="json"))
+                if self._competition_state:
+                    await self._competition_state.save()
+            await report_competitor("success" if feedback.success else "running")
             event = "proof_lean_accepted" if feedback.success else "proof_attempt_failed"
             await self._broadcast(
                 event,
@@ -949,6 +1184,9 @@ class HighParamSubmitter:
                     "error_output": feedback.error_output[:500] if feedback.error_output else "",
                     "lean_response": _lean_response_summary(feedback),
                     "proof_verified": feedback.success,
+                    **({"competitor_index": competitor_index,
+                        "competitor_id": f"competitor_{competitor_index}"}
+                       if self.proof_competition.enabled else {}),
                 },
             )
 
@@ -962,18 +1200,9 @@ class HighParamSubmitter:
         )
 
         try:
-            success, theorem_name, lean_code, attempts = await formalizer.prove_candidate(
-                user_research_prompt=self.raw_user_prompt,
-                source_type="paper",  # ProofCandidate expects "paper" | "brainstorm"
-                theorem_candidate=candidate,
-                source_content=proof_source_content,
-                max_attempts=5,
-                attempt_callback=_on_attempt_feedback,
-                attempt_start_callback=_on_attempt_started,
-                source_title=self._compiler_source_title(),
-            )
+            success, theorem_name, lean_code, attempts = await run_competitor(formalizer)
         except Exception as exc:
-            if _is_rigor_model_call_failure(exc):
+            if self.proof_competition.enabled or _is_rigor_model_call_failure(exc):
                 raise
             logger.error("Rigor formalization raised (%s); declining cycle", exc, exc_info=True)
             await self._broadcast(
@@ -987,7 +1216,82 @@ class HighParamSubmitter:
             )
             return None
 
+        primary_attempts = attempts
+        if self.proof_competition.enabled and any(
+            "LEAN 4 WORKSPACE ERROR" in str(item.error_output).upper() for item in attempts
+        ):
+            raise RuntimeError("LEAN 4 WORKSPACE ERROR during compiler formalization")
+        await report_competitor("success" if success else ("exhausted" if len(attempts) >= 5 else "blocked"))
+        if not success and len(attempts) >= 5 and self.proof_competition.enabled:
+            # Only completed proof-attempt exhaustion authorizes fallback. In particular,
+            # context and shared Lean infrastructure failures are not competitive losses.
+            primary_error = str(attempts[-1].error_output or "")
+            if not any(marker in primary_error.upper() for marker in (
+                "MANDATORY FULL SOURCE CONTEXT OVERFLOW", "LEAN 4 WORKSPACE ERROR"
+            )):
+                for index, route in enumerate(self.proof_competition.secondaries, start=1):
+                    competitor_index = index
+                    competitor_attempts = 0
+                    if index in self._unavailable_proof_competitors:
+                        continue
+                    role_id = f"compiler_rigor_secondary_{self._standalone_session_id}_{index}"
+                    api_client_manager.configure_role(role_id, ModelConfig(
+                        model_id=route.model_id,
+                        provider=route.provider,
+                        openrouter_provider=route.openrouter_provider,
+                        openrouter_reasoning_effort=route.openrouter_reasoning_effort,
+                        lm_studio_fallback_id=route.lm_studio_fallback_id,
+                        context_window=route.context_window,
+                        max_output_tokens=route.max_output_tokens,
+                        supercharge_enabled=route.supercharge_enabled,
+                    ))
+                    secondary = ProofFormalizationAgent(
+                        model_id=route.model_id,
+                        context_window=route.context_window,
+                        max_output_tokens=route.max_output_tokens,
+                        role_id=role_id,
+                        strict_execution_errors=True,
+                    )
+                    try:
+                        success, theorem_name, lean_code, attempts = await run_competitor(secondary)
+                    except Exception as exc:
+                        from backend.autonomous.core.proof_competition import secondary_provider_failure
+                        if "LEAN 4 WORKSPACE ERROR" in str(exc).upper() or not (
+                            secondary_provider_failure(exc)
+                            or type(exc).__name__ == "ProofFormalizationContextOverflowError"
+                        ):
+                            raise
+                        self._unavailable_proof_competitors.add(index)
+                        await report_competitor("unavailable", type(exc).__name__)
+                        await self._broadcast("proof_competition_unavailable", {
+                            "source_type": "compiler_rigor",
+                            "source_id": self._compiler_source_id(),
+                            "competitor_index": index,
+                            "configured_model": route.model_id,
+                            "configured_provider": route.provider,
+                            "message": "Secondary proof model unavailable; research continues.",
+                        })
+                        continue
+                    await report_competitor("success" if success else ("exhausted" if len(attempts) >= 5 else "blocked"))
+                    if success:
+                        break
+                    if attempts and "LEAN 4 WORKSPACE ERROR" in str(attempts[-1].error_output).upper():
+                        raise RuntimeError("LEAN 4 WORKSPACE ERROR during secondary formalization")
+                    if len(attempts) < 5 or any(
+                        feedback.failure_kind == "context_overflow" for feedback in attempts
+                    ):
+                        self._unavailable_proof_competitors.add(index)
+                        await self._broadcast("proof_competition_unavailable", {
+                            "source_type": "compiler_rigor",
+                            "source_id": self._compiler_source_id(),
+                            "competitor_index": index,
+                            "message": "Secondary proof model interrupted; research continues.",
+                        })
+                        attempts = []
+
         if not success:
+            # Durable discovery hints remain primary-owned, never another route's feedback.
+            attempts = primary_attempts
             last_feedback = attempts[-1] if attempts else None
             last_error = last_feedback.error_output if last_feedback else ""
             if MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX.lower() in last_error.lower():
@@ -1019,6 +1323,17 @@ class HighParamSubmitter:
             )
             return None
 
+        if competition_reporter:
+            self._competition_reporter = competition_reporter
+            winner_route = competition_reporter.routes[competitor_index]
+            winner_route = winner_route.model_dump(mode="json") if hasattr(winner_route, "model_dump") else winner_route
+            self._competition_winner_event = {
+                "execution_id": competition_execution_id,
+                "run_id": competition_reporter.run_id,
+                "source_type": "compiler_rigor", "source_id": self._compiler_source_id(),
+                "candidate_fingerprint": fingerprint([candidate.theorem_id, candidate.statement, candidate.formal_sketch]),
+                "competitor_index": competitor_index, "route_revision": fingerprint(winner_route),
+            }
         integrity = await validate_full_lean_proof_integrity(
             user_prompt=self.raw_user_prompt,
             theorem_statement=theorem_statement,
@@ -1102,6 +1417,8 @@ class HighParamSubmitter:
                 source_type="paper",
                 source_id=self._compiler_source_id(),
                 source_title=self._compiler_source_title(),
+                **({"theorem_id": self._competition_state.data.get("candidate", {}).get("theorem_id", ""),
+                    "run_id": self._competition_state.identity["run_id"]} if self._competition_state else {}),
                 theorem_name=theorem_name,
                 formal_sketch=formal_sketch,
                 solver="Lean 4",
@@ -1190,18 +1507,32 @@ class HighParamSubmitter:
         current_outline = await outline_memory.get_outline()
         current_paper_raw = await paper_memory.get_paper()
         current_paper = _strip_paper_markers_for_llm(current_paper_raw)
+        rejection_entries = await compiler_rejection_log.get_rejection_entries(limit=5)
 
-        base_prompt = await build_rigor_placement_prompt(
-            user_prompt=self.user_prompt,
-            current_outline=current_outline,
-            current_paper=current_paper,
-            rag_evidence="",
-            theorem_statement=theorem_statement,
-            lean_code=lean_code,
-            proof_id=proof_id,
-            placement_attempt=placement_attempt,
-            validator_rejection_feedback=validator_rejection_feedback,
+        async def assemble_placement(selected, evidence=""):
+            return await build_rigor_placement_prompt(
+                user_prompt=self.user_prompt,
+                current_outline=current_outline,
+                current_paper=current_paper,
+                rag_evidence=evidence,
+                theorem_statement=theorem_statement,
+                lean_code=lean_code,
+                proof_id=proof_id,
+                placement_attempt=placement_attempt,
+                validator_rejection_feedback=validator_rejection_feedback,
+                rejection_history=compiler_rejection_log.render_rejections(selected),
+            )
+
+        max_allowed = rag_config.get_available_input_tokens(
+            self.context_window, self.max_output_tokens
         )
+        base_fit = await fit_prompt_with_feedback_async(
+            rejection_entries,
+            build_prompt=assemble_placement,
+            available_tokens=max_allowed,
+        )
+        base_prompt = base_fit.prompt
+        visible_rejections = base_fit.retained_entries
         mandatory_tokens = count_tokens(base_prompt)
         query_seed = (theorem_statement + " " + current_paper[-1500:]).strip()
         rag_evidence = await self._build_rigor_rag_context(
@@ -1209,17 +1540,7 @@ class HighParamSubmitter:
             reserved_tokens=mandatory_tokens,
         )
 
-        prompt = await build_rigor_placement_prompt(
-            user_prompt=self.user_prompt,
-            current_outline=current_outline,
-            current_paper=current_paper,
-            rag_evidence=rag_evidence,
-            theorem_statement=theorem_statement,
-            lean_code=lean_code,
-            proof_id=proof_id,
-            placement_attempt=placement_attempt,
-            validator_rejection_feedback=validator_rejection_feedback,
-        )
+        prompt = await assemble_placement(visible_rejections, rag_evidence)
         from backend.shared.solution_path.integration import with_budgeted_solver_plan
         prompt = with_budgeted_solver_plan(
             prompt,
@@ -1227,9 +1548,6 @@ class HighParamSubmitter:
             self.available_input_tokens,
         )
 
-        max_allowed = rag_config.get_available_input_tokens(
-            self.context_window, self.max_output_tokens
-        )
         if count_tokens(prompt) > max_allowed:
             logger.warning("Rigor placement prompt too large; retrying without RAG evidence")
             prompt = base_prompt
@@ -1237,6 +1555,11 @@ class HighParamSubmitter:
         data = await self._call_llm_and_parse(
             prompt=prompt,
             task_label=f"rigor_placement_{placement_attempt}",
+            provider_overflow_rebuild=(
+                (lambda: assemble_placement(visible_rejections[1:], ""))
+                if len(visible_rejections) > 1
+                else None
+            ),
         )
         if data is None:
             return None
@@ -1292,6 +1615,7 @@ class HighParamSubmitter:
         *,
         prompt: str,
         task_label: str,
+        provider_overflow_rebuild: Optional[Callable[[], Awaitable[str]]] = None,
     ) -> Optional[Any]:
         """Send `prompt` to the Rigor & Proofs model and return parsed JSON.
 
@@ -1306,6 +1630,18 @@ class HighParamSubmitter:
             await lm_studio_client.cache_model_load_config(
                 self.model_name,
                 {"context_length": self.context_window, "model_path": self.model_name},
+            )
+        except ProviderContextLengthError:
+            if provider_overflow_rebuild is None:
+                raise
+            prompt = await provider_overflow_rebuild()
+            response = await api_client_manager.generate_completion(
+                task_id=task_id,
+                role_id=self.role_id,
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=self.max_output_tokens,
             )
         except Exception as exc:
             logger.debug("LM Studio cache warmup skipped for Rigor & Proofs Submitter: %s", exc)

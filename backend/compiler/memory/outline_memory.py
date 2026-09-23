@@ -4,7 +4,7 @@ Handles outline file I/O, re-chunking triggers, and version tracking.
 """
 import aiofiles
 import asyncio
-from typing import Optional, Callable
+from typing import Callable, Iterable, Optional
 from pathlib import Path
 import logging
 from datetime import datetime
@@ -240,45 +240,44 @@ class OutlineMemory:
             Formatted feedback string for inclusion in outline_create prompt,
             or empty string if no feedback exists.
         """
+        outline, feedbacks = await self.get_creation_feedback_entries()
+        return self.render_creation_feedback(outline, feedbacks)
+
+    async def get_creation_feedback_entries(self) -> tuple[Optional[str], tuple[str, ...]]:
+        """Separate mandatory accepted outline state from disposable comments."""
         async with self._lock:
             feedback_path = Path(system_config.data_dir) / OUTLINE_CREATION_FEEDBACK_FILE
-            
             if not feedback_path.exists():
-                return ""
-            
+                return None, ()
             async with aiofiles.open(feedback_path, 'r', encoding='utf-8') as f:
                 content = await f.read()
-            
             if not content.strip():
-                return ""
-            
-            # Parse feedbacks and find last accepted outline
-            feedbacks = content.strip().split("\n\n---FEEDBACK SEPARATOR---\n\n")
-            formatted = []
-            last_accepted_outline = None
-            
-            for i, feedback in enumerate(feedbacks, 1):
-                # Extract outline content if present
-                if "---YOUR OUTLINE---" in feedback:
-                    # Use maxsplit=1 to handle edge case where outline contains the separator
-                    parts = feedback.split("---YOUR OUTLINE---", 1)
-                    reasoning_part = parts[0].strip()
-                    outline_part = parts[1].strip() if len(parts) > 1 else ""
-                    
-                    # Store the last accepted outline
-                    if "ACCEPTED" in reasoning_part:
-                        last_accepted_outline = outline_part
-                    
-                    # Show feedback without inline outline (outline shown separately at top)
-                    formatted.append(f"FEEDBACK {i}:\n{reasoning_part}")
-                else:
-                    formatted.append(f"FEEDBACK {i}:\n{feedback}")
-            
-            # Build result with last accepted outline prominently displayed first
-            result_parts = []
-            
-            if last_accepted_outline:
-                result_parts.append(f"""YOUR LAST ACCEPTED OUTLINE (from previous iteration):
+                return None, ()
+
+        feedbacks = content.strip().split("\n\n---FEEDBACK SEPARATOR---\n\n")
+        comments = []
+        last_accepted_outline = None
+        for feedback in feedbacks:
+            if "---YOUR OUTLINE---" in feedback:
+                parts = feedback.split("---YOUR OUTLINE---", 1)
+                reasoning_part = parts[0].strip()
+                outline_part = parts[1].strip() if len(parts) > 1 else ""
+                if "ACCEPTED" in reasoning_part:
+                    last_accepted_outline = outline_part
+                comments.append(reasoning_part)
+            else:
+                comments.append(feedback)
+        return last_accepted_outline, tuple(comments)
+
+    @staticmethod
+    def render_creation_feedback(
+        last_accepted_outline: Optional[str],
+        feedbacks: Iterable[str],
+    ) -> str:
+        """Render mandatory outline plus a caller-selected feedback projection."""
+        result_parts = []
+        if last_accepted_outline:
+            result_parts.append(f"""YOUR LAST ACCEPTED OUTLINE (from previous iteration):
 This outline was ACCEPTED by the validator. You can:
 - Set outline_complete=true to LOCK this outline and begin paper construction
 - Set outline_complete=false to continue refining (generate improved version)
@@ -286,10 +285,13 @@ This outline was ACCEPTED by the validator. You can:
 ---BEGIN OUTLINE---
 {last_accepted_outline}
 ---END OUTLINE---""")
-            
+        formatted = [
+            f"FEEDBACK {i}:\n{feedback}"
+            for i, feedback in enumerate(feedbacks, 1)
+        ]
+        if formatted:
             result_parts.append("\n".join(formatted))
-            
-            return "\n\n".join(result_parts)
+        return "\n\n".join(result_parts)
     
     async def clear_creation_feedback(self) -> None:
         """

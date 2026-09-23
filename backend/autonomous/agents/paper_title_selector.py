@@ -19,6 +19,8 @@ from backend.shared.model_error_utils import (
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.models import PaperTitleSelection
+from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
 from backend.autonomous.prompts.paper_title_prompts import (
@@ -117,15 +119,6 @@ class PaperTitleSelectorAgent:
             attempt += 1
             logger.info(f"PaperTitleSelector: Attempt {attempt}")
 
-            # Build accumulated rejection feedback string (keep last 5 for context budget)
-            rejection_feedback = ""
-            if rejection_history:
-                recent = rejection_history[-5:]
-                lines = []
-                for i, r in enumerate(recent):
-                    lines.append(f"Attempt {attempt - len(recent) + i}: {r}")
-                rejection_feedback = "\n".join(lines)
-
             # Generate title selection (pass feedback so model learns from failures)
             selection = await self._generate_title(
                 user_research_prompt,
@@ -133,7 +126,8 @@ class PaperTitleSelectorAgent:
                 brainstorm_summary,
                 existing_papers_from_brainstorm,
                 reference_papers,
-                rejection_feedback=rejection_feedback,
+                rejection_feedback_entries=tuple(rejection_history[-5:]),
+                rejection_attempt=attempt,
                 candidate_titles=candidate_titles
             )
 
@@ -173,52 +167,45 @@ class PaperTitleSelectorAgent:
         existing_papers_from_brainstorm: List[Dict[str, Any]],
         reference_papers: List[Dict[str, Any]] = None,
         rejection_feedback: str = "",
+        rejection_feedback_entries: Tuple[str, ...] = (),
+        rejection_attempt: int = 1,
         candidate_titles: str = ""
     ) -> Optional[PaperTitleSelection]:
         """Generate a paper title selection."""
         try:
             max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
 
-            # Build prompt with full rejection feedback first
-            prompt = build_paper_title_prompt(
-                user_research_prompt=user_research_prompt,
-                topic_prompt=topic_prompt,
-                brainstorm_summary=brainstorm_summary,
-                existing_papers_from_brainstorm=existing_papers_from_brainstorm,
-                reference_papers=reference_papers,
-                rejection_feedback=rejection_feedback,
-                candidate_titles=candidate_titles
-            )
+            feedback_entries = tuple(rejection_feedback_entries)
+            if not feedback_entries and rejection_feedback:
+                feedback_entries = (rejection_feedback,)
+            prompt_existing_papers = existing_papers_from_brainstorm
+            prompt_brainstorm_summary = brainstorm_summary
 
-            # If prompt is too large, shed oldest rejection entries one at a time until it fits
-            if rejection_feedback and count_tokens(prompt) > max_input_tokens:
-                feedback_lines = [l for l in rejection_feedback.split("\n") if l.strip()]
-                while feedback_lines and count_tokens(prompt) > max_input_tokens:
-                    feedback_lines.pop(0)  # drop oldest entry
-                    trimmed_feedback = "\n".join(feedback_lines)
-                    prompt = build_paper_title_prompt(
-                        user_research_prompt=user_research_prompt,
-                        topic_prompt=topic_prompt,
-                        brainstorm_summary=brainstorm_summary,
-                        existing_papers_from_brainstorm=existing_papers_from_brainstorm,
-                        reference_papers=reference_papers,
-                        rejection_feedback=trimmed_feedback,
-                        candidate_titles=candidate_titles
-                    )
-                if count_tokens(prompt) > max_input_tokens:
-                    logger.warning(
-                        "PaperTitleSelector: Prompt still exceeds context even with no rejection "
-                        "feedback - sending without feedback"
-                    )
-                    prompt = build_paper_title_prompt(
-                        user_research_prompt=user_research_prompt,
-                        topic_prompt=topic_prompt,
-                        brainstorm_summary=brainstorm_summary,
-                        existing_papers_from_brainstorm=existing_papers_from_brainstorm,
-                        reference_papers=reference_papers,
-                        rejection_feedback="",
-                        candidate_titles=candidate_titles
-                    )
+            def render_feedback(entries):
+                start = rejection_attempt - len(entries)
+                return "\n".join(
+                    f"Attempt {start + index}: {entry}"
+                    for index, entry in enumerate(entries)
+                )
+
+            def build_prompt(entries):
+                return build_paper_title_prompt(
+                    user_research_prompt=user_research_prompt,
+                    topic_prompt=topic_prompt,
+                    brainstorm_summary=prompt_brainstorm_summary,
+                    existing_papers_from_brainstorm=prompt_existing_papers,
+                    reference_papers=reference_papers,
+                    rejection_feedback=render_feedback(entries),
+                    candidate_titles=candidate_titles,
+                )
+
+            fit = fit_prompt_with_feedback(
+                feedback_entries,
+                build_prompt=build_prompt,
+                available_tokens=max_input_tokens,
+            )
+            prompt = fit.prompt
+            retained_feedback = fit.retained_entries
 
             # Progressive truncation if still too large after shedding rejection feedback
             if count_tokens(prompt) > max_input_tokens:
@@ -231,27 +218,15 @@ class PaperTitleSelectorAgent:
                     if tp.get("abstract") and len(tp["abstract"]) > 200:
                         tp["abstract"] = tp["abstract"][:200] + "..."
                     truncated_existing.append(tp)
-                prompt = build_paper_title_prompt(
-                    user_research_prompt=user_research_prompt,
-                    topic_prompt=topic_prompt,
-                    brainstorm_summary=brainstorm_summary,
-                    existing_papers_from_brainstorm=truncated_existing,
-                    reference_papers=reference_papers,
-                    rejection_feedback="",
-                    candidate_titles=candidate_titles
-                )
+                prompt_existing_papers = truncated_existing
+                prompt = build_prompt(retained_feedback)
             
             if count_tokens(prompt) > max_input_tokens:
                 logger.warning("PaperTitleSelector: Truncating brainstorm summary to fit")
-                prompt = build_paper_title_prompt(
-                    user_research_prompt=user_research_prompt,
-                    topic_prompt=topic_prompt,
-                    brainstorm_summary=brainstorm_summary[:2000] + "\n... [truncated for context fit]",
-                    existing_papers_from_brainstorm=truncated_existing,
-                    reference_papers=reference_papers,
-                    rejection_feedback="",
-                    candidate_titles=candidate_titles
+                prompt_brainstorm_summary = (
+                    brainstorm_summary[:2000] + "\n... [truncated for context fit]"
                 )
+                prompt = build_prompt(retained_feedback)
             
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -281,14 +256,22 @@ class PaperTitleSelectorAgent:
             # Call LLM via api_client_manager (handles boost and fallback)
             logger.info(f"PaperTitleSelector: Generating title with model {self.model_id} (task_id={task_id})")
             
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_id,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_output_tokens,
-                temperature=0.0  # Deterministic generation - evolving context provides diversity
-            )
+            while True:
+                try:
+                    response = await api_client_manager.generate_completion(
+                        task_id=task_id,
+                        role_id=self.role_id,
+                        model=self.model_id,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=self.max_output_tokens,
+                        temperature=0.0  # Deterministic generation - evolving context provides diversity
+                    )
+                    break
+                except ProviderContextLengthError:
+                    if len(retained_feedback) <= 1:
+                        raise
+                    retained_feedback = retained_feedback[1:]
+                    prompt = build_prompt(retained_feedback)
             
             if not response:
                 return None

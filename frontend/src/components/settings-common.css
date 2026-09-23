@@ -235,10 +235,16 @@
 }
 
 .ps-badge {
-  padding: 0.15rem 0.35rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 1.5rem;
+  height: 0.95rem;
+  padding: 0;
   border-radius: 3px;
   font-size: 0.58rem;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1;
   color: #2c1700;
   letter-spacing: 0.04em;

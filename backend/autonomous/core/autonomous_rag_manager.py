@@ -7,6 +7,7 @@ CRITICAL: This manager follows the "DIRECT INJECTION FIRST, RAG SECOND" principl
 - Content that doesn't fit is retrieved via RAG semantic search
 - NO truncation is used as fallback
 """
+import asyncio
 import logging
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -38,8 +39,10 @@ class AutonomousRAGManager:
         self._brainstorms_indexed: set = set()
         # Track which papers have been indexed for RAG
         self._papers_indexed: set = set()
+        self._lifecycle_lock = asyncio.Lock()
+        self._lifecycle_generation = 0
     
-    def reset(self) -> None:
+    async def reset(self) -> None:
         """
         Reset tracking state for a fresh session.
         
@@ -47,12 +50,17 @@ class AutonomousRAGManager:
         cause stale content to persist between sessions. Call this when
         starting a new autonomous research session or when RAG is cleared.
         """
-        logger.info("Resetting AutonomousRAGManager tracking state...")
-        self._brainstorms_indexed.clear()
-        self._papers_indexed.clear()
-        self._current_topic_id = None
-        self._initialized = False  # Force re-initialization
-        logger.info("AutonomousRAGManager state reset")
+        async with self._lifecycle_lock:
+            logger.info("Resetting AutonomousRAGManager tracking state...")
+            self._lifecycle_generation += 1
+            self._brainstorms_indexed.clear()
+            self._papers_indexed.clear()
+            self._current_topic_id = None
+            self._initialized = False  # Force re-initialization
+            logger.info("AutonomousRAGManager state reset")
+
+    def lifecycle_snapshot(self) -> int:
+        return self._lifecycle_generation
     
     async def initialize(self) -> None:
         """Initialize the autonomous RAG manager."""
@@ -317,34 +325,34 @@ class AutonomousRAGManager:
     
     async def _ensure_paper_indexed(self, paper_id: str, content: str, title: str) -> None:
         """Ensure paper content is indexed in RAG for retrieval."""
-        source_name = f"reference_paper_{paper_id}"
-        has_document_entry = source_name in rag_manager.document_access_order
-        has_validator_chunks = any(
-            chunk.source_file == source_name
-            for chunk in rag_manager.chunks_by_size[rag_config.validator_chunk_size]
-        )
-
-        if paper_id in self._papers_indexed and has_document_entry and has_validator_chunks:
-            return
-        
         try:
-            # If the tracking set says this paper was indexed but its active RAG entry
-            # has been evicted, remove any partial remnants and rebuild it.
-            if paper_id in self._papers_indexed:
-                self._papers_indexed.discard(paper_id)
+            async with self._lifecycle_lock:
+                source_name = f"reference_paper_{paper_id}"
+                has_document_entry = source_name in rag_manager.document_access_order
+                has_validator_chunks = any(
+                    chunk.source_file == source_name
+                    for chunk in rag_manager.chunks_by_size[rag_config.validator_chunk_size]
+                )
 
-            if has_document_entry:
-                await rag_manager.remove_document(source_name)
+                if paper_id in self._papers_indexed and has_document_entry and has_validator_chunks:
+                    return
 
-            await rag_manager.add_text(
-                content,
-                source_name,
-                chunk_sizes=rag_config.submitter_chunk_intervals,
-                is_permanent=False
-            )
-            self._papers_indexed.add(paper_id)
-            logger.debug(f"Indexed reference paper {paper_id}: {title}")
-            
+                # If the tracking set says this paper was indexed but its active RAG entry
+                # has been evicted, remove any partial remnants and rebuild it.
+                if paper_id in self._papers_indexed:
+                    self._papers_indexed.discard(paper_id)
+
+                if has_document_entry:
+                    await rag_manager.remove_document(source_name)
+
+                await rag_manager.add_text(
+                    content,
+                    source_name,
+                    chunk_sizes=rag_config.submitter_chunk_intervals,
+                    is_permanent=False
+                )
+                self._papers_indexed.add(paper_id)
+                logger.debug(f"Indexed reference paper {paper_id}: {title}")
         except Exception as e:
             logger.error(f"Failed to index reference paper {paper_id}: {e}")
     
@@ -534,23 +542,35 @@ class AutonomousRAGManager:
             except Exception as e:
                 logger.error(f"Failed to remove brainstorm {topic_id} from RAG: {e}")
 
-    async def remove_paper_from_rag(self, paper_id: str) -> None:
+    async def remove_paper_from_rag(
+        self,
+        paper_id: str,
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> bool:
         """Remove a pruned paper from any active paper RAG sources."""
-        self._papers_indexed.discard(paper_id)
-        for source_name in (
-            f"reference_paper_{paper_id}",
-            f"reference_paper_{paper_id}.txt",
-            f"prior_paper_{paper_id}.txt",
-        ):
-            try:
-                await rag_manager.remove_document(source_name)
-                logger.info("Removed pruned paper RAG source %s", redact_log_text(source_name, 160))
-            except Exception as e:
-                logger.debug(
-                    "Reference paper RAG source %s not removed: %s",
-                    redact_log_text(source_name, 160),
-                    redact_log_text(e, 240),
-                )
+        async with self._lifecycle_lock:
+            if (
+                expected_generation is not None
+                and expected_generation != self._lifecycle_generation
+            ):
+                return False
+            self._papers_indexed.discard(paper_id)
+            for source_name in (
+                f"reference_paper_{paper_id}",
+                f"reference_paper_{paper_id}.txt",
+                f"prior_paper_{paper_id}.txt",
+            ):
+                try:
+                    await rag_manager.remove_document(source_name)
+                    logger.info("Removed pruned paper RAG source %s", redact_log_text(source_name, 160))
+                except Exception as e:
+                    logger.debug(
+                        "Reference paper RAG source %s not removed: %s",
+                        redact_log_text(source_name, 160),
+                        redact_log_text(e, 240),
+                    )
+            return True
 
 
 # Global instance

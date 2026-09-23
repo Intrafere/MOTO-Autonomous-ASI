@@ -160,18 +160,6 @@ def test_outline_contract_allows_only_unnumbered_optional_abstract() -> None:
 async def test_active_outline_builders_preserve_abstract_and_update_contracts(
     monkeypatch,
 ) -> None:
-    from backend.compiler.prompts import outline_prompts
-
-    monkeypatch.setattr(
-        outline_prompts.compiler_rejection_log,
-        "get_rejections_text",
-        AsyncMock(return_value=""),
-    )
-    monkeypatch.setattr(
-        "backend.compiler.memory.outline_memory.outline_memory.get_creation_feedback",
-        AsyncMock(return_value=""),
-    )
-
     create_prompt = await build_outline_create_prompt("Solve it.", "Evidence")
     update_prompt = await build_outline_update_prompt(
         "Solve it.",

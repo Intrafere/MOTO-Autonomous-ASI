@@ -28,6 +28,7 @@ import {
   SAKANA_FUGU_PROVIDER,
   XAI_GROK_PROVIDER,
 } from '../../utils/oauthProviders';
+import CodexReasoningControl from '../CodexReasoningControl';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
@@ -54,6 +55,7 @@ const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer 
 const formatRawSettings = (value) => JSON.stringify(value, null, 2);
 
 function AggregatorModelSelector({
+  isRunning = false,
   provider,
   modelId,
   openrouterProvider: orProvider,
@@ -213,6 +215,7 @@ function AggregatorModelSelector({
         </div>
       )}
 
+      {effectiveProvider === 'openai_codex_oauth' && modelId && <CodexReasoningControl model={models.find(item => item.id === modelId)} modelId={modelId} value={openrouterReasoningEffort} disabled={isRunning} onChange={onOpenrouterReasoningEffortChange} />}
       {effectiveProvider === SAKANA_FUGU_PROVIDER && modelId && (
         <div className="settings-row">
           <label>Reasoning Effort</label>
@@ -255,6 +258,7 @@ function AggregatorModelSelector({
 }
 
 export default function AggregatorSettings({
+  isRunning = false,
   config,
   setConfig,
   capabilities,
@@ -285,7 +289,7 @@ export default function AggregatorSettings({
   // Validator OpenRouter state
   const [validatorProvider, setValidatorProvider] = useState(config.validatorProvider || 'lm_studio');
   const [validatorOpenrouterProvider, setValidatorOpenrouterProvider] = useState(config.validatorOpenrouterProvider || null);
-  const [validatorOpenrouterReasoningEffort, setValidatorOpenrouterReasoningEffort] = useState(normalizeOpenRouterReasoningEffort(config.validatorOpenrouterReasoningEffort));
+  const [validatorOpenrouterReasoningEffort, setValidatorOpenrouterReasoningEffort] = useState(normalizeOpenRouterReasoningEffort(config.validatorOpenrouterReasoningEffort, config.validatorProvider));
   const [validatorLmStudioFallback, setValidatorLmStudioFallback] = useState(config.validatorLmStudioFallback || null);
   const [validatorSuperchargeEnabled, setValidatorSuperchargeEnabled] = useState(Boolean(config.validatorSuperchargeEnabled));
   
@@ -338,12 +342,12 @@ export default function AggregatorSettings({
           if (settings.submitterConfigs) {
             setSubmitterConfigs(settings.submitterConfigs.map((item) => ({
               ...item,
-              openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(item.openrouterReasoningEffort),
+              openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(item.openrouterReasoningEffort, item.provider),
             })));
           }
           if (settings.validatorProvider) setValidatorProvider(settings.validatorProvider);
           if (settings.validatorOpenrouterProvider) setValidatorOpenrouterProvider(settings.validatorOpenrouterProvider);
-          if (settings.validatorOpenrouterReasoningEffort) setValidatorOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.validatorOpenrouterReasoningEffort));
+          if (settings.validatorOpenrouterReasoningEffort) setValidatorOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.validatorOpenrouterReasoningEffort, settings.validatorProvider));
           if (settings.validatorLmStudioFallback) setValidatorLmStudioFallback(settings.validatorLmStudioFallback);
           if (settings.validatorSuperchargeEnabled !== undefined) setValidatorSuperchargeEnabled(settings.validatorSuperchargeEnabled);
           if (settings.validatorMaxOutput) setValidatorMaxOutput(settings.validatorMaxOutput);
@@ -408,7 +412,7 @@ export default function AggregatorSettings({
       assistantModel: config.assistantModel || config.validatorModel || '',
       assistantProvider: config.assistantProvider || validatorProvider,
       assistantOpenrouterProvider: config.assistantOpenrouterProvider || null,
-      assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.assistantOpenrouterReasoningEffort || validatorOpenrouterReasoningEffort),
+      assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.assistantOpenrouterReasoningEffort || validatorOpenrouterReasoningEffort, config.assistantProvider || validatorProvider),
       assistantLmStudioFallback: config.assistantLmStudioFallback || null,
       assistantContextSize: config.assistantContextSize || config.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
       assistantMaxOutput: config.assistantMaxOutput || validatorMaxOutput,
@@ -922,7 +926,7 @@ export default function AggregatorSettings({
           provider: template.provider,
           modelId: template.modelId,
           openrouterProvider: template.openrouterProvider,
-          openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(template.openrouterReasoningEffort),
+          openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(template.openrouterReasoningEffort, template.provider),
           lmStudioFallbackId: template.lmStudioFallbackId,
           contextWindow: template.contextWindow,
           maxOutputTokens: template.maxOutputTokens,
@@ -1008,7 +1012,7 @@ export default function AggregatorSettings({
       provider: source.provider,
       modelId: source.modelId,
       openrouterProvider: source.openrouterProvider,
-      openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(source.openrouterReasoningEffort),
+      openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(source.openrouterReasoningEffort, source.provider),
       lmStudioFallbackId: source.lmStudioFallbackId,
       contextWindow: source.contextWindow,
       maxOutputTokens: source.maxOutputTokens,
@@ -1052,7 +1056,7 @@ export default function AggregatorSettings({
     assistantModel: config.assistantModel || config.validatorModel || '',
     assistantProvider: config.assistantProvider || validatorProvider,
     assistantOpenrouterProvider: config.assistantOpenrouterProvider || null,
-    assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.assistantOpenrouterReasoningEffort || validatorOpenrouterReasoningEffort),
+    assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.assistantOpenrouterReasoningEffort || validatorOpenrouterReasoningEffort, config.assistantProvider || validatorProvider),
     assistantLmStudioFallback: config.assistantLmStudioFallback || null,
     assistantContextSize: config.assistantContextSize || config.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
     assistantMaxOutput: config.assistantMaxOutput || validatorMaxOutput,
@@ -1067,13 +1071,13 @@ export default function AggregatorSettings({
     const nextSubmitters = Array.isArray(rawSettings.submitterConfigs) && rawSettings.submitterConfigs.length > 0
       ? rawSettings.submitterConfigs.map((item) => ({
           ...item,
-          openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(item.openrouterReasoningEffort),
+          openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(item.openrouterReasoningEffort, item.provider),
         }))
       : submitterConfigs;
     const nextNumSubmitters = Number(rawSettings.numSubmitters || nextSubmitters.length || 3);
     const nextValidatorProvider = rawSettings.validatorProvider || 'lm_studio';
     const nextValidatorOpenrouterProvider = rawSettings.validatorOpenrouterProvider || null;
-    const nextValidatorOpenrouterReasoningEffort = normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort);
+    const nextValidatorOpenrouterReasoningEffort = normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort, rawSettings.validatorProvider);
     const nextValidatorLmStudioFallback = rawSettings.validatorLmStudioFallback || null;
     const nextValidatorSuperchargeEnabled = Boolean(rawSettings.validatorSuperchargeEnabled);
     const nextValidatorContextSize = rawSettings.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW;
@@ -1112,7 +1116,7 @@ export default function AggregatorSettings({
       assistantModel: rawSettings.assistantModel || rawSettings.validatorModel || '',
       assistantProvider: rawSettings.assistantProvider || nextValidatorProvider,
       assistantOpenrouterProvider: rawSettings.assistantOpenrouterProvider || null,
-      assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.assistantOpenrouterReasoningEffort || rawSettings.validatorOpenrouterReasoningEffort),
+      assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.assistantOpenrouterReasoningEffort || rawSettings.validatorOpenrouterReasoningEffort, rawSettings.assistantProvider || rawSettings.validatorProvider),
       assistantLmStudioFallback: rawSettings.assistantLmStudioFallback || null,
       assistantContextSize: rawSettings.assistantContextSize || nextValidatorContextSize,
       assistantMaxOutput: rawSettings.assistantMaxOutput || nextValidatorMaxOutput,
@@ -1294,6 +1298,7 @@ export default function AggregatorSettings({
                 </h5>
 
                   <AggregatorModelSelector
+                    isRunning={isRunning}
                     provider={cfg.provider}
                     modelId={cfg.modelId}
                     openrouterProvider={cfg.openrouterProvider}
@@ -1385,6 +1390,7 @@ export default function AggregatorSettings({
               </h5>
 
               <AggregatorModelSelector
+                isRunning={isRunning}
                 provider={validatorProvider}
                 modelId={config.validatorModel}
                 openrouterProvider={validatorOpenrouterProvider}
@@ -1394,7 +1400,7 @@ export default function AggregatorSettings({
                 onModelChange={handleValidatorModelChange}
                 onOpenrouterProviderChange={handleValidatorOpenRouterProviderChange}
                 onOpenrouterReasoningEffortChange={(effort) => {
-                  const normalized = normalizeOpenRouterReasoningEffort(effort);
+                  const normalized = normalizeOpenRouterReasoningEffort(effort, validatorProvider);
                   setValidatorOpenrouterReasoningEffort(normalized);
                   setConfig({ ...config, validatorOpenrouterReasoningEffort: normalized });
                 }}
@@ -1505,6 +1511,7 @@ export default function AggregatorSettings({
               )}
               <fieldset disabled={!assistantMemoryEnabled} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
                 <AggregatorModelSelector
+                  isRunning={isRunning}
                   provider={config.assistantProvider || validatorProvider}
                   modelId={config.assistantModel || config.validatorModel || ''}
                   openrouterProvider={config.assistantOpenrouterProvider || null}
@@ -1546,7 +1553,7 @@ export default function AggregatorSettings({
                   }}
                   onOpenrouterReasoningEffortChange={(effort) => setConfig({
                     ...config,
-                    assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(effort),
+                    assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(effort, config.assistantProvider || validatorProvider),
                   })}
                   onFallbackChange={(fallback) => setConfig({ ...config, assistantLmStudioFallback: fallback })}
                   label="Assistant Model"

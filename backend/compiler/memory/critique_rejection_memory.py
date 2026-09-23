@@ -3,8 +3,9 @@ Critique rejection feedback memory.
 Tracks last 5 rejections to help critique submitter learn from mistakes.
 """
 import aiofiles
+from copy import deepcopy
 from pathlib import Path
-from typing import List
+from typing import Iterable, List, Mapping
 import asyncio
 import logging
 
@@ -102,18 +103,23 @@ class CritiqueRejectionMemory:
         Returns:
             Formatted rejection log for prompt context
         """
+        return self.render_rejections(await self.get_rejection_entries())
+
+    async def get_rejection_entries(self) -> tuple[dict, ...]:
+        """Return an immutable snapshot of chronological critique rejections."""
         async with self._lock:
-            if not self.rejections:
-                return ""
-            
-            sections = []
-            for i, rejection in enumerate(self.rejections, 1):
-                section = f"[REJECTION {i}]\n"
-                section += f"Validator Feedback: {rejection['validator_summary']}\n"
-                section += f"Your Submission Preview: {rejection['submission_preview']}\n"
-                sections.append(section)
-            
-            return '\n---\n'.join(sections)
+            return tuple(deepcopy(self.rejections))
+
+    @staticmethod
+    def render_rejections(rejections: Iterable[Mapping[str, str]]) -> str:
+        """Render a caller-selected whole-entry critique feedback projection."""
+        sections = []
+        for i, rejection in enumerate(rejections, 1):
+            section = f"[REJECTION {i}]\n"
+            section += f"Validator Feedback: {rejection['validator_summary']}\n"
+            section += f"Your Submission Preview: {rejection['submission_preview']}\n"
+            sections.append(section)
+        return '\n---\n'.join(sections)
     
     async def _save(self) -> None:
         """Save rejections to file."""

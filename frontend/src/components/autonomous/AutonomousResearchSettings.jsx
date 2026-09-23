@@ -4,7 +4,7 @@
  * Compiler settings expose Writing and Rigor & Proofs roles.
  * Now supports per-role OpenRouter model selection with provider and fallback options.
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { cloudAccessAPI, openRouterAPI, api, autonomousAPI } from '../../services/api';
 import {
   computeCodexAutoSettings,
@@ -12,8 +12,6 @@ import {
   computeOpenRouterAutoSettings,
   computeSakanaFuguAutoSettings,
   computeXAIGrokAutoSettings,
-  DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
   formatOpenRouterProviderLabel,
@@ -43,7 +41,9 @@ import {
   persistAutonomousProfiles,
   persistAutonomousSettings,
   settingsToAutonomousConfig,
+  normalizeProofCompetition,
 } from '../../utils/autonomousProfiles';
+import CodexReasoningControl from '../CodexReasoningControl';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
@@ -52,18 +52,6 @@ import RawSettingsEditor from '../RawSettingsEditor';
 import { readBooleanStorage } from '../../utils/safeStorage';
 import './AutonomousResearch.css';
 import '../settings-common.css';
-
-const DEFAULT_SUBMITTER_CONFIG = {
-  submitterId: 1,
-  provider: 'lm_studio',
-  modelId: '',
-  openrouterProvider: null,
-  openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-  lmStudioFallbackId: null,
-  contextWindow: DEFAULT_CONTEXT_WINDOW,
-  maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
-  superchargeEnabled: false
-};
 
 const RAW_VIEW_EXIT_WARNING = 'Switching back to the GUI view will restore your last GUI settings/profile and discard raw-only changes. Continue?';
 const formatRawSettings = (value) => JSON.stringify(value, null, 2);
@@ -249,6 +237,7 @@ const ModelSelector = ({
         </div>
       )}
 
+      {effectiveProvider === 'openai_codex_oauth' && modelId && <CodexReasoningControl model={currentModels.find(item => item.id === modelId)} modelId={modelId} value={openrouterReasoningEffort} disabled={isRunning} onChange={onOpenrouterReasoningEffortChange} />}
       {effectiveProvider === SAKANA_FUGU_PROVIDER && modelId && (
         <div className="settings-row">
           <label>Reasoning Effort</label>
@@ -315,14 +304,14 @@ const RoleConfig = ({
   showProofStrengthBadge = false,
   disabled = false,
 }) => {
-  const storedProvider = localConfig[`${rolePrefix}_provider`] || 'lm_studio';
+  const storedProvider = localConfig[`${rolePrefix}_provider`] || '';
   const provider = lmStudioEnabled ? storedProvider : 'openrouter';
   const modelId = localConfig[`${rolePrefix}_model`] || '';
   const openrouterProv = localConfig[`${rolePrefix}_openrouter_provider`];
   const openrouterReasoningEffort = localConfig[`${rolePrefix}_openrouter_reasoning_effort`];
   const fallback = localConfig[`${rolePrefix}_lm_studio_fallback`];
-  const contextWindow = localConfig[`${rolePrefix}_context_window`] ?? DEFAULT_CONTEXT_WINDOW;
-  const maxTokens = localConfig[`${rolePrefix}_max_tokens`] ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  const contextWindow = localConfig[`${rolePrefix}_context_window`] ?? '';
+  const maxTokens = localConfig[`${rolePrefix}_max_tokens`] ?? '';
   const superchargeEnabled = Boolean(localConfig[`${rolePrefix}_supercharge_enabled`]);
 
   return (
@@ -354,7 +343,7 @@ const RoleConfig = ({
         onProviderChange={(p) => handleProviderChange(rolePrefix, p)}
         onModelChange={(m) => handleModelChange(rolePrefix, m)}
         onOpenrouterProviderChange={(p) => handleOpenRouterProviderChange(rolePrefix, p)}
-        onOpenrouterReasoningEffortChange={(effort) => handleChange(`${rolePrefix}_openrouter_reasoning_effort`, normalizeOpenRouterReasoningEffort(effort))}
+        onOpenrouterReasoningEffortChange={(effort) => handleChange(`${rolePrefix}_openrouter_reasoning_effort`, normalizeOpenRouterReasoningEffort(effort, provider))}
         onFallbackChange={(f) => handleChange(`${rolePrefix}_lm_studio_fallback`, f)}
         lmStudioModels={lmStudioModels}
         openRouterModels={openRouterModels}
@@ -421,6 +410,100 @@ const RoleConfig = ({
       )}
     </div>
   );
+};
+
+const COMPETITION_FIELDS = {
+  provider: 'provider', model: 'model_id', context_window: 'context_window',
+  max_tokens: 'max_tokens', openrouter_provider: 'openrouter_provider',
+  openrouter_reasoning_effort: 'openrouter_reasoning_effort',
+  lm_studio_fallback: 'lm_studio_fallback_id', supercharge_enabled: 'supercharge_enabled',
+};
+
+export const ProofCompetitionSettings = ({ localConfig, onChange, getAutoSettingsForModel,
+  getCloudAccessAutoSettingsForModel, ...roleProps }) => {
+  const competition = normalizeProofCompetition(localConfig.proof_competition);
+  const requestGeneration = useRef(0);
+  useEffect(() => { requestGeneration.current += 1; }, [localConfig.high_param_model]);
+  useEffect(() => () => { requestGeneration.current += 1; }, []);
+  const primary = Object.fromEntries(Object.entries(COMPETITION_FIELDS)
+    .map(([suffix, field]) => [field, localConfig[`high_param_${suffix}`]]));
+  const update = (index, patch, expected) => onChange(current => {
+    const state = normalizeProofCompetition(current);
+    if (!state.secondaries[index] || (expected && Object.entries(expected)
+      .some(([key, value]) => state.secondaries[index][key] !== value))) return state;
+    return { ...state, secondaries: state.secondaries.map((role, i) => i === index ? { ...role, ...patch } : role) };
+  });
+  const selectModel = async (index, model_id, openrouter_provider = null) => {
+    const generation = ++requestGeneration.current;
+    const provider = competition.secondaries[index].provider;
+    update(index, { model_id, openrouter_provider });
+    if (!model_id || (provider !== 'openrouter' && !isCloudAccessProvider(provider))) return;
+    let settings;
+    try {
+      settings = provider === 'openrouter'
+        ? await getAutoSettingsForModel(model_id, openrouter_provider)
+        : getCloudAccessAutoSettingsForModel(provider, model_id);
+    } catch {
+      // Metadata is optional: retain the selected route and explicit token settings.
+      return;
+    }
+    if (!settings || generation !== requestGeneration.current) return;
+    update(index, {
+      ...(settings.contextWindowKnown ? { context_window: settings.contextWindow } : {}),
+      ...(settings.outputCapKnown ? { max_tokens: settings.maxOutputTokens } : {}),
+    }, { provider, model_id, openrouter_provider });
+  };
+  const renderRole = (role, index, locked = false) => <RoleConfig
+    {...roleProps}
+    title={locked ? 'Primary proof model (mirrors Rigor & Proofs)' : `Secondary proof model ${index + 1}`}
+    rolePrefix="competitor"
+    localConfig={Object.fromEntries(Object.entries(COMPETITION_FIELDS)
+      .map(([suffix, field]) => [`competitor_${suffix}`, role[field]]))}
+    isRunning={roleProps.isRunning || locked}
+    handleChange={(field, value) => update(index, { [COMPETITION_FIELDS[field.replace('competitor_', '')]]: value })}
+    handleNumericBlur={(field, value) => update(index, { [COMPETITION_FIELDS[field.replace('competitor_', '')]]: value === '' ? '' : Number(value) })}
+    handleProviderChange={(_, provider) => update(index, { provider, model_id: '', openrouter_provider: null,
+      openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT, lm_studio_fallback_id: null })}
+    handleModelChange={(_, model) => selectModel(index, model)}
+    handleOpenRouterProviderChange={(_, host) => selectModel(index, role.model_id, host)}
+  />;
+  return <section aria-label="Proof model competition">
+    <label className="settings-checkbox-label">
+      <input type="checkbox" checked={competition.enabled} disabled={roleProps.isRunning}
+        onChange={event => {
+          const enabled = event.target.checked;
+          onChange(current => {
+            const state = normalizeProofCompetition(current);
+            return { enabled, secondaries: enabled && !state.secondaries.length
+              ? [{ ...primary, model_id: '', supercharge_enabled: false }] : state.secondaries };
+          });
+        }} />
+      Duplicate role to compete against other AI(s)
+    </label>
+    <HelpTooltip label="Learn about proof model competition" useFixedPosition>
+      Each model gets up to five proof attempts. A secondary tries only after the preceding model exhausts its attempts;
+      the first Lean success ends that candidate's chain. Models keep private failure feedback. Pipelined handoffs let
+      the primary move ahead while secondaries work, increasing concurrent model work and potentially API usage and cost.
+      Added models perform formalization only; discovery and critique remain with Rigor & Proofs. Lean checks stay serialized.
+    </HelpTooltip>
+    {competition.enabled && !primary.model_id && <p>Select a primary Rigor & Proofs model to configure competitors.</p>}
+    {competition.enabled && primary.model_id && <>
+      {renderRole(primary, -1, true)}
+      {competition.secondaries.map((role, index) => <div key={index}>
+        {renderRole(role, index)}
+        <button type="button" disabled={roleProps.isRunning} aria-label={`Remove secondary proof model ${index + 1}`}
+          onClick={() => {
+            requestGeneration.current += 1;
+            onChange(current => ({ ...current, secondaries: current.secondaries.filter((_, i) => i !== index) }));
+          }}>
+          Remove secondary
+        </button>
+      </div>)}
+      <button type="button" disabled={roleProps.isRunning} onClick={() => onChange(current => ({ ...current,
+        secondaries: [...current.secondaries, { ...primary, model_id: '', supercharge_enabled: false }],
+      }))}>+ Add secondary proof model</button>
+    </>}
+  </section>;
 };
 
 const AutonomousResearchSettings = ({
@@ -506,67 +589,24 @@ const AutonomousResearchSettings = ({
 
   // Parse submitter configs from config
   const parseSubmitterConfigs = (cfg) => {
-    if (cfg?.submitter_configs && Array.isArray(cfg.submitter_configs)) {
-      return cfg.submitter_configs.map((c, idx) => ({
-        ...DEFAULT_SUBMITTER_CONFIG,
-        ...c,
-        submitterId: c.submitterId ?? (idx + 1),
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(c.openrouterReasoningEffort || c.openrouter_reasoning_effort),
-      }));
+    if (!Array.isArray(cfg?.submitter_configs)) {
+      return [];
     }
-    return [
-      { ...DEFAULT_SUBMITTER_CONFIG, submitterId: 1 },
-      { ...DEFAULT_SUBMITTER_CONFIG, submitterId: 2 },
-      { ...DEFAULT_SUBMITTER_CONFIG, submitterId: 3 }
-    ];
+    return cfg.submitter_configs.map((c, idx) => ({
+      ...c,
+      submitterId: c.submitterId ?? (idx + 1),
+      openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(c.openrouterReasoningEffort || c.openrouter_reasoning_effort, c.provider),
+    }));
   };
 
   const [numSubmitters, setNumSubmitters] = useState(
-    config?.submitter_configs?.length || 3
+    Array.isArray(config?.submitter_configs) ? config.submitter_configs.length : 0
   );
   const [submitterConfigs, setSubmitterConfigs] = useState(
     parseSubmitterConfigs(config)
   );
   
-  const [localConfig, setLocalConfig] = useState({
-    // Validator
-    validator_provider: 'lm_studio',
-    validator_model: '',
-    validator_openrouter_provider: null,
-    validator_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-    validator_lm_studio_fallback: null,
-    validator_context_window: DEFAULT_CONTEXT_WINDOW,
-    validator_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-    validator_supercharge_enabled: false,
-    // Assistant
-    assistant_provider: config.assistant_provider || config.validator_provider || 'lm_studio',
-    assistant_model: config.assistant_model || config.validator_model || '',
-    assistant_openrouter_provider: config.assistant_openrouter_provider || config.validator_openrouter_provider || null,
-    assistant_openrouter_reasoning_effort: config.assistant_openrouter_reasoning_effort || config.validator_openrouter_reasoning_effort || DEFAULT_OPENROUTER_REASONING_EFFORT,
-    assistant_lm_studio_fallback: config.assistant_lm_studio_fallback || config.validator_lm_studio_fallback || null,
-    assistant_context_window: config.assistant_context_window || config.validator_context_window || DEFAULT_CONTEXT_WINDOW,
-    assistant_max_tokens: config.assistant_max_tokens || config.validator_max_tokens || DEFAULT_MAX_OUTPUT_TOKENS,
-    assistant_supercharge_enabled: Boolean(config.assistant_supercharge_enabled),
-    // Writing
-    writer_provider: 'lm_studio',
-    writer_model: '',
-    writer_openrouter_provider: null,
-    writer_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-    writer_lm_studio_fallback: null,
-    writer_context_window: DEFAULT_CONTEXT_WINDOW,
-    writer_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-    writer_supercharge_enabled: false,
-    // Rigor & Proofs
-    high_param_provider: 'lm_studio',
-    high_param_model: '',
-    high_param_openrouter_provider: null,
-    high_param_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-    high_param_lm_studio_fallback: null,
-    high_param_context_window: DEFAULT_CONTEXT_WINDOW,
-    high_param_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-    high_param_supercharge_enabled: false,
-    ...config
-  });
+  const [localConfig, setLocalConfig] = useState(() => ({ ...config }));
 
   // Normalize profile models (fix common issues like blank submitters)
   const normalizeProfile = (profile) => {
@@ -584,22 +624,10 @@ const AutonomousResearchSettings = ({
       delete normalized[LEGACY_WRITER_PROFILE_KEY];
     }
     
-    // Normalize submitters: fix blank submitter 3
+    // Remove obsolete metadata without inventing missing role selections.
     if (normalized.submitters && Array.isArray(normalized.submitters)) {
-      normalized.submitters = normalized.submitters.map((submitter, idx) => {
+      normalized.submitters = normalized.submitters.map((submitter) => {
         let normalized_submitter = { ...submitter };
-        
-        // Fix blank submitter 3 - copy from submitter 1
-        if (idx === 2 && (!normalized_submitter.modelId || normalized_submitter.modelId.trim() === '')) {
-          if (normalized.submitters[0] && normalized.submitters[0].modelId) {
-            normalized_submitter.modelId = normalized.submitters[0].modelId;
-            normalized_submitter.provider = normalized.submitters[0].provider || 'openrouter';
-            normalized_submitter.openrouterProvider = normalized.submitters[0].openrouterProvider || null;
-            normalized_submitter.openrouterReasoningEffort = normalizeOpenRouterReasoningEffort(normalized.submitters[0].openrouterReasoningEffort);
-            normalized_submitter.lmStudioFallbackId = normalized.submitters[0].lmStudioFallbackId || null;
-            console.log(`[Profile Normalization] Fixed blank submitter 3: using "${normalized_submitter.modelId}"`);
-          }
-        }
         
         // Remove any legacy modelPattern field
         delete normalized_submitter.modelPattern;
@@ -652,8 +680,8 @@ const AutonomousResearchSettings = ({
       }
 
       const settings = getStoredAutonomousSettings();
-      if (settings.numSubmitters) setNumSubmitters(settings.numSubmitters);
-      if (settings.submitterConfigs) setSubmitterConfigs(settings.submitterConfigs);
+      if (Number.isInteger(settings.numSubmitters)) setNumSubmitters(settings.numSubmitters);
+      if (Array.isArray(settings.submitterConfigs)) setSubmitterConfigs(settings.submitterConfigs);
       if (settings.localConfig) {
         setLocalConfig(prev => ({ ...prev, ...settings.localConfig }));
       }
@@ -807,6 +835,10 @@ const AutonomousResearchSettings = ({
       fetchProvidersForModel(localConfig.writer_model);
     }
     
+    normalizeProofCompetition(localConfig.proof_competition).secondaries.forEach(role => {
+      if (role.provider === 'openrouter' && role.model_id) fetchProvidersForModel(role.model_id);
+    });
+
     // Fetch providers for Rigor & Proofs
     if (localConfig.high_param_provider === 'openrouter' && localConfig.high_param_model) {
       fetchProvidersForModel(localConfig.high_param_model);
@@ -824,7 +856,7 @@ const AutonomousResearchSettings = ({
     
     const settings = {
       numSubmitters,
-      submitterConfigs: submitterConfigs.slice(0, numSubmitters),
+      submitterConfigs,
       localConfig,
       freeOnly,
       freeModelLooping,
@@ -858,7 +890,15 @@ const AutonomousResearchSettings = ({
       };
     });
 
-    const normalizedLocalConfig = { ...localConfig };
+    const competition = normalizeProofCompetition(localConfig.proof_competition);
+    const normalizedLocalConfig = { ...localConfig, proof_competition: {
+      ...competition,
+      secondaries: competition.secondaries.map(role => ({ ...role, provider: 'openrouter',
+        model_id: role.provider === 'openrouter' ? role.model_id : '',
+        openrouter_provider: role.provider === 'openrouter' ? role.openrouter_provider : null,
+        lm_studio_fallback_id: null,
+      })),
+    } };
     ['validator', 'assistant', 'writer', 'high_param', 'critique_submitter'].forEach((rolePrefix) => {
       const providerKey = `${rolePrefix}_provider`;
       const modelKey = `${rolePrefix}_model`;
@@ -910,6 +950,14 @@ const AutonomousResearchSettings = ({
     onConfigChange,
   ]);
 
+  useEffect(() => {
+    if (!isLoadedFromStorage) return;
+    const competition = normalizeProofCompetition(localConfig.proof_competition);
+    onConfigChange({ proof_competition: { ...competition, secondaries: competition.secondaries.map(role => ({
+      ...role, supercharge_enabled: developerModeEnabled && role.supercharge_enabled,
+    })) } });
+  }, [isLoadedFromStorage, localConfig.proof_competition, developerModeEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Update LM Studio models when prop changes
   useEffect(() => {
     if (!lmStudioEnabled) {
@@ -941,7 +989,7 @@ const AutonomousResearchSettings = ({
       setLocalConfig(prev => ({ ...prev, ...config }));
       if (config.submitter_configs) {
         setSubmitterConfigs(parseSubmitterConfigs(config));
-        setNumSubmitters(config.submitter_configs.length);
+        setNumSubmitters(Number.isInteger(config.num_submitters) ? config.num_submitters : config.submitter_configs.length);
       }
       setInitialized(true);
     }
@@ -1340,11 +1388,17 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     // Expand or contract submitter configs
     const newConfigs = [...submitterConfigs];
     while (newConfigs.length < count) {
+      const template = submitterConfigs[0];
       newConfigs.push({
-        ...DEFAULT_SUBMITTER_CONFIG,
         submitterId: newConfigs.length + 1,
-        provider: submitterConfigs[0]?.provider || 'lm_studio',
-        modelId: submitterConfigs[0]?.modelId || ''
+        provider: template?.provider || '',
+        modelId: template?.modelId || '',
+        openrouterProvider: template?.openrouterProvider ?? null,
+        openrouterReasoningEffort: template?.openrouterReasoningEffort,
+        lmStudioFallbackId: template?.lmStudioFallbackId ?? null,
+        contextWindow: template?.contextWindow,
+        maxOutputTokens: template?.maxOutputTokens,
+        superchargeEnabled: Boolean(template?.superchargeEnabled),
       });
     }
     setSubmitterConfigs(newConfigs);
@@ -1359,16 +1413,22 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     
     const newConfigs = [...submitterConfigs];
     while (newConfigs.length < count) {
+      const template = submitterConfigs[0];
       newConfigs.push({
-        ...DEFAULT_SUBMITTER_CONFIG,
         submitterId: newConfigs.length + 1,
-        provider: submitterConfigs[0]?.provider || 'lm_studio',
-        modelId: submitterConfigs[0]?.modelId || ''
+        provider: template?.provider || '',
+        modelId: template?.modelId || '',
+        openrouterProvider: template?.openrouterProvider ?? null,
+        openrouterReasoningEffort: template?.openrouterReasoningEffort,
+        lmStudioFallbackId: template?.lmStudioFallbackId ?? null,
+        contextWindow: template?.contextWindow,
+        maxOutputTokens: template?.maxOutputTokens,
+        superchargeEnabled: Boolean(template?.superchargeEnabled),
       });
     }
     const slicedConfigs = newConfigs.slice(0, count);
     setSubmitterConfigs(newConfigs);
-    onConfigChange({ ...localConfig, submitter_configs: slicedConfigs });
+    onConfigChange({ ...localConfig, submitter_configs: slicedConfigs, num_submitters: count });
   };
 
   // Handle per-submitter config change
@@ -1504,7 +1564,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         provider: main.provider,
         modelId: main.modelId,
         openrouterProvider: main.openrouterProvider,
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(main.openrouterReasoningEffort),
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(main.openrouterReasoningEffort, main.provider),
         lmStudioFallbackId: main.lmStudioFallbackId,
         contextWindow: main.contextWindow,
         maxOutputTokens: main.maxOutputTokens,
@@ -1610,12 +1670,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const profileKey = `user_${Date.now()}`;
     const newProfile = {
       name: newProfileName.trim(),
+      proof_competition: normalizeProofCompetition(localConfig.proof_competition),
       numSubmitters,
       submitters: submitterConfigs.slice(0, numSubmitters).map(cfg => ({
         modelId: cfg.modelId,
         provider: cfg.provider,
         openrouterProvider: cfg.openrouterProvider,
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort),
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort, cfg.provider),
         lmStudioFallbackId: cfg.lmStudioFallbackId,
         contextWindow: cfg.contextWindow,
         maxOutputTokens: cfg.maxOutputTokens,
@@ -1625,27 +1686,27 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         modelId: localConfig.validator_model,
         provider: localConfig.validator_provider,
         openrouterProvider: localConfig.validator_openrouter_provider,
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.validator_openrouter_reasoning_effort),
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.validator_openrouter_reasoning_effort, localConfig.validator_provider),
         lmStudioFallbackId: localConfig.validator_lm_studio_fallback,
         contextWindow: localConfig.validator_context_window,
         maxOutputTokens: localConfig.validator_max_tokens,
         superchargeEnabled: Boolean(localConfig.validator_supercharge_enabled)
       },
       assistant: {
-        modelId: localConfig.assistant_model || localConfig.validator_model,
-        provider: localConfig.assistant_provider || localConfig.validator_provider,
+        modelId: localConfig.assistant_model,
+        provider: localConfig.assistant_provider,
         openrouterProvider: localConfig.assistant_openrouter_provider,
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.assistant_openrouter_reasoning_effort),
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.assistant_openrouter_reasoning_effort, localConfig.assistant_provider),
         lmStudioFallbackId: localConfig.assistant_lm_studio_fallback,
-        contextWindow: localConfig.assistant_context_window || localConfig.validator_context_window,
-        maxOutputTokens: localConfig.assistant_max_tokens || localConfig.validator_max_tokens,
+        contextWindow: localConfig.assistant_context_window,
+        maxOutputTokens: localConfig.assistant_max_tokens,
         superchargeEnabled: Boolean(localConfig.assistant_supercharge_enabled)
       },
       writer: {
         modelId: localConfig.writer_model,
         provider: localConfig.writer_provider,
         openrouterProvider: localConfig.writer_openrouter_provider,
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.writer_openrouter_reasoning_effort),
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.writer_openrouter_reasoning_effort, localConfig.writer_provider),
         lmStudioFallbackId: localConfig.writer_lm_studio_fallback,
         contextWindow: localConfig.writer_context_window,
         maxOutputTokens: localConfig.writer_max_tokens,
@@ -1655,7 +1716,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         modelId: localConfig.high_param_model,
         provider: localConfig.high_param_provider,
         openrouterProvider: localConfig.high_param_openrouter_provider,
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort, localConfig.high_param_provider),
         lmStudioFallbackId: localConfig.high_param_lm_studio_fallback,
         contextWindow: localConfig.high_param_context_window,
         maxOutputTokens: localConfig.high_param_max_tokens,
@@ -2051,7 +2112,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               onProviderChange={(p) => handleSubmitterConfigChange(idx, 'provider', p)}
               onModelChange={(m) => handleSubmitterModelChange(idx, m)}
               onOpenrouterProviderChange={(p) => handleSubmitterOpenRouterProviderChange(idx, p)}
-              onOpenrouterReasoningEffortChange={(effort) => handleSubmitterConfigChange(idx, 'openrouterReasoningEffort', normalizeOpenRouterReasoningEffort(effort))}
+              onOpenrouterReasoningEffortChange={(effort) => handleSubmitterConfigChange(idx, 'openrouterReasoningEffort', normalizeOpenRouterReasoningEffort(effort, cfg.provider))}
               onFallbackChange={(f) => handleSubmitterConfigChange(idx, 'lmStudioFallbackId', f)}
               lmStudioModels={lmStudioModels}
               openRouterModels={openRouterModels}
@@ -2237,7 +2298,28 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           developerModeEnabled={developerModeEnabled}
           showProofStrengthBadge
         />
-
+        <ProofCompetitionSettings
+          localConfig={localConfig}
+          onChange={updater => {
+            markProfileAsCustom();
+            setLocalConfig(current => ({ ...current, proof_competition: updater(normalizeProofCompetition(current.proof_competition)) }));
+          }}
+          getAutoSettingsForModel={getAutoSettingsForModel}
+          getCloudAccessAutoSettingsForModel={getCloudAccessAutoSettingsForModel}
+          isRunning={isRunning}
+          lmStudioModels={lmStudioModels}
+          openRouterModels={openRouterModels}
+          openAICodexModels={openAICodexModels}
+          xaiGrokModels={xaiGrokModels}
+          sakanaFuguModels={sakanaFuguModels}
+          modelProviders={modelProviders}
+          hasOpenRouterKey={hasOpenRouterKey}
+          hasOpenAICodexLogin={hasOpenAICodexLogin}
+          hasXAIGrokLogin={hasXAIGrokLogin}
+          hasSakanaFuguKey={hasSakanaFuguKey}
+          lmStudioEnabled={lmStudioEnabled}
+          developerModeEnabled={developerModeEnabled}
+        />
       </div>
 
       <div className="settings-group">

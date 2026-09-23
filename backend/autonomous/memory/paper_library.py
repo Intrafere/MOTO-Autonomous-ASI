@@ -5,8 +5,10 @@ Handles file I/O for completed papers, abstracts, and source brainstorm caching.
 import asyncio
 import json
 import logging
+import os
 import shutil
 import re
+import tempfile
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -19,6 +21,8 @@ from backend.shared.path_safety import (
     validate_single_path_component,
 )
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.paper_proofs import analyze_paper_content, paper_metric_fields, strip_paper_proofs
+from backend.autonomous.memory.session_write_authority import autonomous_session_write
 
 logger = logging.getLogger(__name__)
 
@@ -387,45 +391,7 @@ class PaperLibrary:
     @staticmethod
     def strip_verified_proofs_from_content(content: str) -> str:
         """Remove appended Lean proof sections from paper text for RAG/compiler use."""
-        if not content:
-            return ""
-
-        stripped = content
-        appendix_start = "[HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]"
-        appendix_end = "[HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]"
-        empty_placeholder = "[Theorems appendix - verified Lean 4 theorems not placed inline will appear here]"
-
-        start_idx = stripped.find(appendix_start)
-        end_idx = stripped.find(appendix_end, start_idx if start_idx >= 0 else 0)
-        if start_idx >= 0 and end_idx >= 0:
-            end_idx += len(appendix_end)
-            empty_appendix = f"{appendix_start}\n{empty_placeholder}\n{appendix_end}"
-            stripped = stripped[:start_idx] + empty_appendix + stripped[end_idx:]
-
-        header_positions = [
-            match.start()
-            for match in re.finditer(
-                r"(?m)^=== PROOFS (?:GENERATED FROM|ATTACHED TO) THIS PAPER(?: \(Lean 4 Verified\))? ===\s*$",
-                stripped,
-            )
-            if match.start() > 0
-        ]
-        if header_positions:
-            proof_start = min(header_positions)
-            review_match = re.search(
-                r"(?:^|\n)\s*(?:#+\s*)?AI Self-Review and Limitations\s*\n",
-                stripped[proof_start:],
-                re.IGNORECASE,
-            )
-            if review_match:
-                review_start = proof_start + review_match.start()
-                if review_start > 0 and stripped[review_start] == "\n":
-                    review_start += 1
-                stripped = f"{stripped[:proof_start].rstrip()}\n\n{stripped[review_start:].lstrip()}"
-            else:
-                stripped = stripped[:proof_start]
-
-        return stripped.rstrip()
+        return strip_paper_proofs(content, preserve_appendix_markers=True)
 
     @staticmethod
     def _pruned_banner(
@@ -496,13 +462,50 @@ class PaperLibrary:
             return None
 
     async def _save_metadata_to_path(self, metadata: PaperMetadata, metadata_path: Path) -> None:
-        """Save paper metadata to a specific path."""
+        """Atomically save paper metadata to a specific path."""
         metadata_path = self._ensure_library_path(metadata_path, "metadata path")
-        # codeql[py/path-injection]: metadata_path is constrained to this paper library's roots.
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        # codeql[py/path-injection]: metadata_path is constrained to this paper library's roots.
-        async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(self._metadata_to_dict(metadata), indent=2, default=str))
+        payload = json.dumps(self._metadata_to_dict(metadata), indent=2, default=str)
+
+        def _atomic_write() -> None:
+            fd, temp_name = tempfile.mkstemp(
+                prefix=f".{metadata_path.name}.",
+                suffix=".tmp",
+                dir=str(metadata_path.parent),
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_name, metadata_path)
+            except BaseException:
+                try:
+                    os.unlink(temp_name)
+                except FileNotFoundError:
+                    pass
+                raise
+
+        await asyncio.to_thread(_atomic_write)
+
+    @staticmethod
+    def _apply_content_metrics(metadata: PaperMetadata, content: str) -> PaperMetadata:
+        """Refresh canonical proof/paper totals on a metadata object."""
+        for key, value in paper_metric_fields(content).items():
+            setattr(metadata, key, value)
+        metadata.word_count = metadata.total_word_count
+        return metadata
+
+    async def _metadata_with_content_metrics(
+        self,
+        metadata: PaperMetadata,
+        content_path: Path,
+    ) -> PaperMetadata:
+        """Derive accurate response fields for legacy metadata when content exists."""
+        content = await self._read_text_file(content_path)
+        if content:
+            self._apply_content_metrics(metadata, content)
+        return metadata
 
     async def _read_text_file(self, path: Path) -> str:
         """Read a text file if it exists."""
@@ -550,6 +553,14 @@ class PaperLibrary:
             base_dir=papers_dir
         )
 
+        content_path = (
+            self._get_pruned_paper_path(metadata.paper_id)
+            if pruned and metadata.status != "archived"
+            else self._get_archive_paper_path(metadata.paper_id)
+            if pruned
+            else self._get_paper_path(metadata.paper_id)
+        )
+        await self._metadata_with_content_metrics(metadata, content_path)
         entry = {
             "history_id": f"{session_id}:{metadata.paper_id}",
             "session_id": session_id,
@@ -557,6 +568,13 @@ class PaperLibrary:
             "title": metadata.title,
             "abstract": metadata.abstract,
             "word_count": metadata.word_count,
+            "proof_count": metadata.proof_count,
+            "paper_word_count": metadata.paper_word_count,
+            "proof_word_count": metadata.proof_word_count,
+            "total_word_count": metadata.total_word_count,
+            "paper_character_count": metadata.paper_character_count,
+            "proof_character_count": metadata.proof_character_count,
+            "total_character_count": metadata.total_character_count,
             "source_brainstorm_ids": metadata.source_brainstorm_ids,
             "referenced_papers": metadata.referenced_papers,
             "status": metadata.status,
@@ -705,6 +723,7 @@ class PaperLibrary:
             **entry,
             "content": content,
             "outline": outline,
+            **analyze_paper_content(content),
         }
 
     async def get_pruned_history_paper(self, session_id: str, paper_id: str) -> Optional[Dict[str, Any]]:
@@ -755,6 +774,7 @@ class PaperLibrary:
             **entry,
             "content": content,
             "outline": outline,
+            **analyze_paper_content(content),
         }
 
     @staticmethod
@@ -985,16 +1005,12 @@ class PaperLibrary:
         Returns:
             PaperMetadata for the saved paper
         """
-        async with self._lock:
-            # Count words in paper
-            word_count = len(content.split())
-            
+        async with autonomous_session_write(self._base_dir), self._lock:
             # Create metadata
             metadata = PaperMetadata(
                 paper_id=paper_id,
                 title=title,
                 abstract=abstract,
-                word_count=word_count,
                 source_brainstorm_ids=source_brainstorm_ids,
                 referenced_papers=referenced_papers or [],
                 status=status,  # Use provided status (default "complete")
@@ -1003,6 +1019,7 @@ class PaperLibrary:
                 generation_date=generation_date or datetime.now(),
                 wolfram_calls=wolfram_calls
             )
+            self._apply_content_metrics(metadata, content)
             
             # Save paper content
             paper_path = self._get_paper_path(paper_id)
@@ -1040,7 +1057,7 @@ class PaperLibrary:
                 "Saved paper %s: '%s' (%s words, %s models tracked)",
                 redact_log_text(paper_id, 120),
                 redact_log_text(title, 240),
-                word_count,
+                metadata.total_word_count,
                 model_count,
             )
             return metadata
@@ -1088,7 +1105,7 @@ class PaperLibrary:
             scoped_library = self._build_scoped_library(papers_dir)
             return await scoped_library.append_proofs_section(scoped_paper_id, proofs_data)
 
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             paper_path = self._get_paper_path(paper_id)
             if not paper_path.exists():
                 logger.error("Paper not found for proof append: %s", redact_log_text(paper_id, 120))
@@ -1111,6 +1128,11 @@ class PaperLibrary:
 
                 async with aiofiles.open(paper_path, "w", encoding="utf-8") as handle:
                     await handle.write(updated_content)
+
+                metadata = await self.get_metadata(paper_id, derive_metrics=False)
+                if metadata is not None:
+                    self._apply_content_metrics(metadata, updated_content)
+                    await self._save_metadata(metadata)
 
                 logger.info("Appended %s proof(s) to paper %s", len(proofs), redact_log_text(paper_id, 120))
                 return True
@@ -1150,10 +1172,13 @@ class PaperLibrary:
                 redact_log_text(e, 240),
             )
     
-    async def get_metadata(self, paper_id: str) -> Optional[PaperMetadata]:
-        """Get paper metadata."""
+    async def get_metadata(self, paper_id: str, *, derive_metrics: bool = True) -> Optional[PaperMetadata]:
+        """Get paper metadata, deriving legacy metrics from content when available."""
         metadata_path = self._get_metadata_path(paper_id)
-        return await self._read_metadata_file(metadata_path)
+        metadata = await self._read_metadata_file(metadata_path)
+        if metadata is not None and derive_metrics:
+            await self._metadata_with_content_metrics(metadata, self._get_paper_path(paper_id))
+        return metadata
     
     async def get_all_papers(
         self,
@@ -1201,7 +1226,10 @@ class PaperLibrary:
                         if not is_complete:
                             logger.debug(f"Skipping incomplete paper {metadata.paper_id} (has placeholders or missing sections)")
                             continue
-                    
+                    await self._metadata_with_content_metrics(
+                        metadata,
+                        self._get_paper_path(metadata.paper_id),
+                    )
                     papers.append(metadata)
             except Exception as e:
                 logger.error(
@@ -1288,7 +1316,7 @@ class PaperLibrary:
         pruned_by: str = "system",
     ) -> bool:
         """Soft-prune a paper from model context while preserving it for users."""
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             try:
                 metadata = await self.get_metadata(paper_id)
                 pruned_metadata_path = self._get_pruned_metadata_path(paper_id)
@@ -1454,7 +1482,7 @@ class PaperLibrary:
 
     async def delete_all_pruned_papers(self) -> int:
         """Permanently delete all pruned and legacy archived paper files in this scope."""
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             deleted_count = 0
             try:
                 for directory in (self._pruned_dir, self._archive_dir):
@@ -1490,7 +1518,7 @@ class PaperLibrary:
         Returns:
             bool: True if deleted successfully, False otherwise
         """
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             try:
                 # Check if paper exists in active directory
                 paper_path = self._get_paper_path(paper_id)

@@ -32,6 +32,8 @@ from backend.shared.models import (
     VolumeOrganization,
     VolumeChapter
 )
+from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.autonomous.prompts.final_answer_prompts import (
     build_volume_organization_prompt,
     build_volume_validation_prompt
@@ -133,7 +135,7 @@ class VolumeOrganizer:
         
         iteration = 0
         current_volume: Dict[str, Any] = None
-        rejection_context = ""
+        rejection_entries = tuple((await final_answer_memory.get_rejections("volume"))[-5:])
         validator_feedback = ""
         
         while iteration < self.MAX_ITERATIONS:
@@ -146,7 +148,7 @@ class VolumeOrganizer:
                 certainty_assessment,
                 all_papers,
                 current_volume,
-                rejection_context,
+                rejection_entries,
                 validator_feedback
             )
             
@@ -180,7 +182,7 @@ class VolumeOrganizer:
                     rejection_summary=feedback,
                     submission_preview=f"Title: {organization.volume_title}, Chapters: {len(organization.chapters)}"
                 )
-                rejection_context = await final_answer_memory.get_rejection_context_async("volume")
+                rejection_entries = tuple((await final_answer_memory.get_rejections("volume"))[-5:])
                 current_volume = organization.model_dump()
                 validator_feedback = feedback
         
@@ -196,20 +198,36 @@ class VolumeOrganizer:
         certainty_assessment: CertaintyAssessment,
         all_papers: List[Dict[str, Any]],
         current_volume: Dict[str, Any] = None,
-        rejection_context: str = "",
+        rejection_entries=(),
         validator_feedback: str = ""
     ) -> Optional[VolumeOrganization]:
         """Generate or refine volume organization."""
         try:
-            # Build prompt
-            prompt = build_volume_organization_prompt(
-                user_research_prompt=user_research_prompt,
-                papers_summary=all_papers,
-                certainty_assessment=certainty_assessment.model_dump(),
-                current_volume=current_volume,
-                rejection_context=rejection_context,
-                validator_feedback=validator_feedback
+            max_input = self._calculate_max_input_tokens()
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+
+            def build_prompt(entries):
+                prompt = build_volume_organization_prompt(
+                    user_research_prompt=user_research_prompt,
+                    papers_summary=all_papers,
+                    certainty_assessment=certainty_assessment.model_dump(),
+                    current_volume=current_volume,
+                    rejection_context=final_answer_memory.render_rejection_context(
+                        "volume", entries
+                    ),
+                    validator_feedback=validator_feedback,
+                )
+                return with_budgeted_solver_plan(
+                    prompt, getattr(self, "solution_path_manager", None), max_input
+                )
+
+            fit = fit_prompt_with_feedback(
+                rejection_entries,
+                build_prompt=build_prompt,
+                available_tokens=max_input,
             )
+            prompt = fit.prompt
+            retained_rejections = fit.retained_entries
             
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -219,13 +237,7 @@ class VolumeOrganizer:
             )
 
             # Validate prompt size
-            prompt_tokens = count_tokens(prompt)
-            max_input = self._calculate_max_input_tokens()
-            from backend.shared.solution_path.integration import with_budgeted_solver_plan
-            prompt = with_budgeted_solver_plan(
-                prompt, getattr(self, "solution_path_manager", None), max_input
-            )
-            prompt_tokens = count_tokens(prompt)
+            prompt_tokens = fit.prompt_tokens
             
             if prompt_tokens > max_input:
                 logger.error(f"VolumeOrganizer: Prompt too large ({prompt_tokens} > {max_input})")
@@ -238,14 +250,22 @@ class VolumeOrganizer:
             
             logger.info(f"VolumeOrganizer: Generating organization (prompt={prompt_tokens}t, task_id={task_id})")
             
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.submitter_model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_output_tokens,
-                temperature=0.0
-            )
+            while True:
+                try:
+                    response = await api_client_manager.generate_completion(
+                        task_id=task_id,
+                        role_id=self.role_id,
+                        model=self.submitter_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=self.max_output_tokens,
+                        temperature=0.0
+                    )
+                    break
+                except ProviderContextLengthError:
+                    if len(retained_rejections) <= 1:
+                        raise
+                    retained_rejections = retained_rejections[1:]
+                    prompt = build_prompt(retained_rejections)
             
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)

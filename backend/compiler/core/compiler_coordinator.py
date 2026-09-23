@@ -253,6 +253,8 @@ class CompilerCoordinator:
         critique_submitter_supercharge_enabled: bool = False,
         allow_mathematical_proofs: bool = True,
         proof_context_requesting_run_id: str = "",
+        proof_competition=None,
+        autonomous_proof_owner: bool = False,
     ) -> None:
         """
         Initialize the compiler coordinator.
@@ -441,8 +443,10 @@ class CompilerCoordinator:
             validator_model=validator_model,
             validator_context_window=self.validator_context_window,
             validator_max_tokens=self.validator_max_tokens,
-            proof_database_store=proof_database if self.autonomous_mode else manual_proof_database,
+            proof_database_store=proof_database if self.autonomous_mode or autonomous_proof_owner else manual_proof_database,
             proof_context_requesting_run_id=self.proof_context_requesting_run_id,
+            proof_competition=proof_competition if autonomous_proof_owner and self.allow_mathematical_proofs else None,
+
         )
         self.high_param_submitter.solution_path_manager = self.solution_path_manager
         self.high_param_submitter.set_rigor_proof_source(
@@ -2590,7 +2594,18 @@ INVALID:
 
         # At this point a Lean-4-verified proof exists in proof_database.
         # The submitter may or may not have produced an attempt-1 placement.
-        return await self._place_or_appendix_fallback(lean_result)
+        competition_enabled = getattr(getattr(self.high_param_submitter, "proof_competition", None), "enabled", False)
+        if competition_enabled:
+            # A crash after appendix publication but before cursor clearing must
+            # not repeat an inline edit or append the same theorem again.
+            existing_paper = await paper_memory.get_paper()
+            if f"Theorem ({lean_result.proof_id}) [" in existing_paper:
+                await self.high_param_submitter.complete_competition_placement()
+                return True
+        placed = await self._place_or_appendix_fallback(lean_result)
+        if placed and getattr(getattr(self.high_param_submitter, "proof_competition", None), "enabled", False):
+            await self.high_param_submitter.complete_competition_placement()
+        return placed
 
     async def _place_or_appendix_fallback(self, lean_result) -> bool:
         """Drive the 2-attempt placement validator loop.

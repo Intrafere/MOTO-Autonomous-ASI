@@ -99,6 +99,13 @@ The current contract includes typed durable Autonomous terminal/provider-repair 
 
 Must remain capability-only. Must NOT expose per-user or per-instance state (e.g. whether an OpenRouter key or OAuth login is set).
 
+Codex role reasoning uses existing `openrouter_reasoning_effort` request/snapshot fields with provider-aware validation: literal `max` is Codex-only, while OpenRouter and Boost preserve their existing enums. Desktop Codex model metadata supplies supported reasoning levels; hosted OAuth unavailability remains unchanged.
+
+Paper summary/detail responses expose canonical paper-only, proof-only, and combined
+word/character metrics plus proof count. Existing `word_count` remains the combined
+compatibility total. Rendered clients may collapse embedded proofs without changing raw
+paper or export content.
+
 ## `/api/health` Endpoint
 
 Richer readiness endpoint available in both modes. `/health` remains a minimal health check, while `/api/health` returns readiness plus slim instance/build metadata (`instance_id`, `generic_mode`, `version`, `build_commit`). `/api/features` is the full public build identity/capability contract.
@@ -182,6 +189,10 @@ All RAG pipeline logic, coordinator logic, prompt engineering, WebSocket routing
 
 Any REST shape, auth contract, or WebSocket event change that affects the website must update **code, this rule, the live `/openapi.json` schema, and `api_contract_version` in `/api/features`** in the same approved `main` merge. The live backend's `GET /openapi.json` is the machine-readable REST schema contract.
 
+## Autonomous Proof Competition
+
+Autonomous proof competition is default-off, scoped to its session/run snapshots and Autonomous-owned checkpoints, user/history checks, and child compiler rigor; Manual and LeanOJ behavior is unchanged. Ordered secondary formalizers receive isolated five-attempt budgets only after predecessor exhaustion, with per-model pipelining and serialized Lean/registration. Secondary route failures remain visible but do not stop the parent; cancellation, shared infrastructure, and post-Lean failures retain their existing authority. Durable session-scoped benchmark reports are independent of API logs and compare only shared actually-attempted candidates, separating interrupted outcomes and conditional rescue rates with evolving-context caveats. Authenticated report routes and the fourth Completed Works Benchmarks tab expose these reports without adding work to health/status polling.
+
 ## Proof Integration Contract (Builds 1-6, optional, gated off by default)
 
 Lean 4 and SMT behavior is gated by runtime flags. `lean4_enabled` gates Lean proof execution/model proof work, `lean4_lsp_enabled` gates only the optional persistent LSP optimization, and `smt_enabled` gates Z3/SMT hint generation. All three default false; when disabled they must not invoke their corresponding proof toolchains, spend proof-model calls, or block workflows. Hosted sandboxes ship with them disabled.
@@ -194,6 +205,8 @@ Lean 4 and SMT behavior is gated by runtime flags. `lean4_enabled` gates Lean pr
 - **LeanOJ routes** are additive to the hosted REST contract: start (which resumes matching saved progress when available), stop, status, clear, skip-brainstorm, force-brainstorm, master-proof draft/edit summaries, current-run proofs, and historical completed-run proof-library endpoints live under `/api/leanoj/*`. `GET /api/leanoj/library` excludes the currently loaded run; that run is exposed only by `GET /api/leanoj/proofs`.
 - **Creativity Emphasis Boost** is an optional developer-gated start-request field (`creativity_emphasis_boost_enabled`) for Aggregator, Autonomous Research, and LeanOJ; accepted/rejected brainstorm WebSocket payloads may include `creativity_emphasized`, and prompt-budget overflow falls back to the normal prompt for that slot.
 - **Pruned Stage 2 paper routes** are additive: pruned papers are removed from model context/RAG but remain downloadable under `/api/auto-research/paper-history/pruned*`; hard deletion is limited to explicit delete-all-pruned endpoints.
+- **Bulk paper/proof pruning routes** provide checkbox-driven all-or-none mutation. Paper identities remain session-qualified. Proof batches use one authoritative proof-set revision plus per-occurrence run/artifact fences; user reasons are optional and automatic semantic-prune reasons remain required.
+- Bulk mutation publication is cancellation-safe and storage-scope serialized. Paper rollback touches only selected transaction paths, and process-current RAG eviction is fenced to the same active session generation.
 - **WebSocket progress events** for LeanOJ, compiler critique, provider/OAuth failures, and proof workflows are part of the web-surface contract only when consumed by the hosted wrapper or frontend. Keep them descriptive and stable enough for UI state, but avoid treating every internal progress notification as a permanent rule-level invariant. OAuth provider failures tell desktop users to reconnect the provider in OpenRouter/OAuth after unrecoverable auth/model-call failure; provider max-output truncation before usable Lean code should appear as a failed proof attempt, not as an unrecoverable provider failure. Autonomous proof checkpoint progress events may include `proof_round_index` and `proof_max_rounds`; `proof_verified` must only emit after proof registration/reuse and include `proof_id`; proof novelty and duplicate-registration events include `novelty_tier` and `novelty_reasoning` for live activity display. Manual proof events must remain isolated from autonomous proof activity/notifications/graphs unless event payloads become explicitly scoped.
 - **Proof certificate exports stay text-based** (`.lean` source + JSON metadata). No binary-only proof artifacts.
 - **Proof runtime config snapshot** (`ProofRuntimeConfigSnapshot`) is persisted via `research_metadata` and may also be supplied directly on manual `POST /api/proofs/check`; required state is `lean4_enabled=True` AND either a stored or request-provided snapshot.

@@ -19,8 +19,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
   const [deleting, setDeleting] = useState(false);
   const [autoRefresh] = useState(true);
   const [showLatex, setShowLatex] = useState(true);
-  const [userChoseLatex, setUserChoseLatex] = useState(false);
-  const unsubscribeRef = useRef(null);
+  const contentGenerationRef = useRef(0);
   const [proofActionMessage, setProofActionMessage] = useState('');
   const [proofCheckTarget, setProofCheckTarget] = useState(null);
   const [proofCheckStarting, setProofCheckStarting] = useState(false);
@@ -32,94 +31,62 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
     stopProofRun,
   } = useProofCheckRuntime();
 
-  // Auto-disable LaTeX rendering when brainstorm grows large (>50k chars).
-  // Only fires if the user has not explicitly toggled the LaTeX checkbox.
-  useEffect(() => {
-    if (!userChoseLatex && fileContent && fileContent.length > 50000) {
-      setShowLatex(false);
-    }
-  }, [fileContent, userChoseLatex]);
+  // Depend on the endpoint, not a wrapper object recreated by parent renders.
+  // Resetting this effect unmounts the reader and collapses its scroll geometry.
+  const getBrainstorm = api.getBrainstorm;
 
-  // Auto-refresh expanded brainstorm every 2 seconds
+  // One request owner for initial loads, polling, and live events. Only the
+  // newest request in the current document generation may publish a result.
   useEffect(() => {
-    if (!expandedId || !autoRefresh) return;
+    const generation = ++contentGenerationRef.current;
+    if (!expandedId) return;
+    let requestSequence = 0;
+    let active = true;
+    let hasContent = false;
+    setFileContent('');
+    setLoading(true);
 
     const refreshContent = async () => {
+      const sequence = ++requestSequence;
+      const isCurrent = () => active
+        && generation === contentGenerationRef.current
+        && sequence === requestSequence;
       try {
-        const data = await api.getBrainstorm(expandedId);
+        const data = await getBrainstorm(expandedId);
+        if (!isCurrent()) return;
+        hasContent = true;
         setFileContent(data.content || 'No content yet...');
       } catch (error) {
-        console.error('Auto-refresh failed:', error);
+        if (!isCurrent()) return;
+        console.error('Failed to load brainstorm content:', error);
+        if (!hasContent) setFileContent('Error loading brainstorm');
+      } finally {
+        if (isCurrent()) setLoading(false);
       }
     };
 
-    // Initial load
     refreshContent();
-
-    // Set up interval
-    const interval = setInterval(refreshContent, 5000);
-    return () => clearInterval(interval);
-  }, [expandedId, autoRefresh, api]);
-
-  // Subscribe to WebSocket events for immediate updates
-  useEffect(() => {
-    const refreshExpandedBrainstorm = async () => {
-      try {
-        const refreshedData = await api.getBrainstorm(expandedId);
-        setFileContent(refreshedData.content || 'No content yet...');
-      } catch (error) {
-        console.error('Failed to refresh brainstorm content:', error);
-      }
-    };
-
-    const handleSubmissionAccepted = async (data) => {
-      if (expandedId && data.topic_id === expandedId) {
-        await refreshExpandedBrainstorm();
-      }
-    };
-
-    const handleNovelProofDiscovered = async (data) => {
-      if (
-        expandedId &&
-        data.source_type === 'brainstorm' &&
-        data.source_id === expandedId
-      ) {
-        await refreshExpandedBrainstorm();
-      }
-    };
-
-    const unsubscribeSubmission = websocket.on('brainstorm_submission_accepted', handleSubmissionAccepted);
-    const unsubscribeNovelProof = websocket.on('novel_proof_discovered', handleNovelProofDiscovered);
-    unsubscribeRef.current = () => {
+    const interval = autoRefresh ? setInterval(refreshContent, 5000) : null;
+    const unsubscribeSubmission = websocket.on('brainstorm_submission_accepted', (data) => {
+      if (data.topic_id === expandedId) refreshContent();
+    });
+    const unsubscribeNovelProof = websocket.on('novel_proof_discovered', (data) => {
+      if (data.source_type === 'brainstorm' && data.source_id === expandedId) refreshContent();
+    });
+    return () => {
+      active = false;
+      clearInterval(interval);
       unsubscribeSubmission();
       unsubscribeNovelProof();
     };
-    return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-      }
-    };
-  }, [expandedId, api]);
+  }, [expandedId, autoRefresh, getBrainstorm]);
 
-  const handleCardClick = async (topicId) => {
-    if (expandedId === topicId) {
-      setExpandedId(null);
-      setFileContent('');
-      return;
-    }
-
-    setExpandedId(topicId);
-    setLoading(true);
-
-    try {
-      const data = await api.getBrainstorm(topicId);
-      setFileContent(data.content || 'No content yet...');
-    } catch (error) {
-      console.error('Failed to load brainstorm content:', error);
-      setFileContent('Error loading brainstorm');
-    } finally {
-      setLoading(false);
-    }
+  const handleCardClick = (topicId) => {
+    // Invalidate synchronously, before React runs the prior effect's cleanup.
+    contentGenerationRef.current += 1;
+    setFileContent('');
+    setLoading(expandedId !== topicId);
+    setExpandedId(expandedId === topicId ? null : topicId);
   };
 
   const handleDeleteClick = (e, topicId) => {
@@ -338,7 +305,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
                         <input
                           type="checkbox"
                           checked={showLatex}
-                          onChange={(e) => { setUserChoseLatex(true); setShowLatex(e.target.checked); }}
+                          onChange={(e) => setShowLatex(e.target.checked)}
                         />
                         LaTeX Rendering
                       </label>
@@ -353,6 +320,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
                   </div>
                   <div className="brainstorm-content-viewer" onClick={(e) => e.stopPropagation()}>
                     <LatexRenderer
+                      documentId={`brainstorm:${expandedId}`}
                       content={prependDisclaimer(fileContent, 'brainstorm')}
                       className="brainstorm-latex-renderer"
                       showToggle={false}

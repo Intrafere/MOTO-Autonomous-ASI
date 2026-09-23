@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from pathlib import Path
 import tempfile
 from unittest import IsolatedAsyncioTestCase
@@ -73,6 +74,7 @@ class ProofPruningCoordinatorTests(IsolatedAsyncioTestCase):
         self.events = []
         self.persisted = None
         self.service = HeldReviewService()
+        self.stored_proof_count = 0
         self.coordinator = ProofPruningCoordinator(
             proof_database=self.database,
             runtime_snapshot=runtime_snapshot(),
@@ -114,6 +116,13 @@ class ProofPruningCoordinatorTests(IsolatedAsyncioTestCase):
             novel=novelty_tier != "not_novel",
             novelty_tier=novelty_tier,
         )
+
+    async def _store_active_proofs(self, count: int) -> None:
+        for _index in range(count):
+            self.stored_proof_count += 1
+            await self.database.add_proof_occurrence(
+                self.proof(f"stored-{self.stored_proof_count}")
+            )
 
     async def test_third_eligible_registration_schedules_without_blocking(self):
         await self.coordinator.on_proof_registered(self.proof("p1"))
@@ -160,6 +169,7 @@ class ProofPruningCoordinatorTests(IsolatedAsyncioTestCase):
 
     async def test_failure_event_exposes_safe_diagnostic(self):
         self.coordinator.review_service = FailingReviewService()
+        await self._store_active_proofs(3)
         pressure = ProofPruneContextPressure(
             trigger="context_pressure",
             prompt_tokens=9000,
@@ -197,6 +207,7 @@ class ProofPruningCoordinatorTests(IsolatedAsyncioTestCase):
 
     async def test_failure_event_redacts_secret_like_exception_text(self):
         self.coordinator.review_service = SecretFailingReviewService()
+        await self._store_active_proofs(3)
         pressure = ProofPruneContextPressure(
             trigger="context_pressure",
             active_proof_tokens=1200,
@@ -288,6 +299,7 @@ class ProofPruningCoordinatorTests(IsolatedAsyncioTestCase):
         await rebound.drain(preserve_pending=False)
 
     async def test_unchanged_pressure_same_revision_is_not_rescheduled(self):
+        await self._store_active_proofs(3)
         pressure = ProofPruneContextPressure(
             trigger="context_pressure",
             prompt_tokens=7900,
@@ -296,11 +308,11 @@ class ProofPruningCoordinatorTests(IsolatedAsyncioTestCase):
             active_proof_context_tokens=1200,
             configured_context_window=9000,
             route_config_fingerprint="route-a",
-            proof_set_revision=0,
+            proof_set_revision=3,
         )
         await self.coordinator.on_context_pressure(
             pressure,
-            proof_set_revision=0,
+            proof_set_revision=3,
         )
         await asyncio.wait_for(self.service.started.wait(), timeout=1)
         self.service.release.set()
@@ -309,10 +321,141 @@ class ProofPruningCoordinatorTests(IsolatedAsyncioTestCase):
 
         await self.coordinator.on_context_pressure(
             pressure.model_copy(deep=True),
-            proof_set_revision=0,
+            proof_set_revision=3,
         )
         await asyncio.sleep(0)
         self.assertEqual(self.service.calls, calls_after_first)
+
+    async def test_context_pressure_requires_three_active_novel_proofs(self):
+        pressure = ProofPruneContextPressure(
+            trigger="context_pressure",
+            active_proof_tokens=1200,
+            active_proof_context_tokens=1200,
+        )
+        await self._store_active_proofs(2)
+
+        await self.coordinator.on_context_pressure(
+            pressure,
+            urgent=True,
+            proof_set_revision=2,
+        )
+        await asyncio.sleep(0)
+
+        self.assertIsNone(self.coordinator.active_task)
+        self.assertEqual(self.service.calls, 0)
+        self.assertEqual(self.coordinator.state.queued_trigger_reasons, [])
+
+        await self._store_active_proofs(3 - 2)
+        await self.coordinator.on_context_pressure(
+            pressure,
+            urgent=True,
+            proof_set_revision=3,
+        )
+        await asyncio.wait_for(self.service.started.wait(), timeout=1)
+        self.assertEqual(self.service.calls, 1)
+
+    async def test_context_pressure_counts_cross_run_visible_proofs(self):
+        for index in range(3):
+            await self.database.add_proof_occurrence(
+                self.proof(f"cross-run-{index}").model_copy(
+                    update={
+                        "live_context_status": "pruned",
+                        "live_context_owner_run_id": "earlier-run",
+                        "live_context_pruned_at": datetime.now(),
+                        "live_context_pruned_by": "user",
+                        "live_context_prune_reason": "Earlier-run context cleanup.",
+                    }
+                )
+            )
+        pressure = ProofPruneContextPressure(
+            trigger="context_pressure",
+            active_proof_tokens=1200,
+            active_proof_context_tokens=1200,
+        )
+
+        await self.coordinator.on_context_pressure(pressure, urgent=True)
+        await asyncio.wait_for(self.service.started.wait(), timeout=1)
+
+        self.assertEqual(self.service.calls, 1)
+
+    async def test_context_pressure_counts_legacy_blank_tier_novel_proofs(self):
+        for index in range(3):
+            await self.database.add_proof_occurrence(
+                self.proof(f"legacy-{index}", "")
+            )
+        pressure = ProofPruneContextPressure(
+            trigger="context_pressure",
+            active_proof_tokens=1200,
+            active_proof_context_tokens=1200,
+        )
+
+        await self.coordinator.on_context_pressure(pressure, urgent=True)
+        await asyncio.wait_for(self.service.started.wait(), timeout=1)
+
+        self.assertEqual(self.service.calls, 1)
+
+    async def test_restore_discards_pressure_only_review_below_threshold(self):
+        await self._store_active_proofs(2)
+        payload = self.coordinator.state.model_copy(
+            update={
+                "status": "queued",
+                "queued_trigger_reasons": ["proof_stage_context_maximum"],
+                "context_pressure": ProofPruneContextPressure(
+                    trigger="context_pressure",
+                    active_proof_tokens=1200,
+                    active_proof_context_tokens=1200,
+                ),
+            }
+        ).model_dump(mode="json")
+        restored = ProofPruningCoordinator(
+            proof_database=self.database,
+            runtime_snapshot=runtime_snapshot(),
+            proof_run_id="proof-run-1",
+            run_mode="one_round",
+            run_id="owning-run",
+            lifecycle_generation=2,
+            scope="manual",
+            source_type="paper",
+            source_id="paper-one",
+            canonical_user_prompt="Prove the objective.",
+            proof_store_id="manual:active",
+            load_fn=lambda: asyncio.sleep(0, result=payload),
+            persist_fn=self._persist,
+            review_service=self.service,
+        )
+
+        await restored.restore()
+        await asyncio.wait_for(restored.active_task, timeout=1)
+
+        self.assertEqual(self.service.calls, 0)
+        self.assertEqual(restored.state.status, "idle")
+        self.assertEqual(restored.state.queued_trigger_reasons, [])
+        await restored.drain(preserve_pending=False)
+
+    async def test_pressure_review_rechecks_threshold_during_snapshot_capture(self):
+        await self._store_active_proofs(2)
+        original_get_live = self.database.get_all_proofs_for_live_context
+
+        async def stale_visible_read(requesting_run_id, novel_only=None):
+            stored = await original_get_live(requesting_run_id, novel_only)
+            return [*stored, self.proof("already-removed")]
+
+        self.database.get_all_proofs_for_live_context = stale_visible_read
+        pressure = ProofPruneContextPressure(
+            trigger="context_pressure",
+            active_proof_tokens=1200,
+            active_proof_context_tokens=1200,
+        )
+
+        await self.coordinator.on_context_pressure(pressure, urgent=True)
+        await asyncio.wait_for(self.coordinator.active_task, timeout=1)
+
+        self.assertEqual(self.service.calls, 0)
+        self.assertEqual(self.coordinator.state.status, "idle")
+        self.assertNotIn(
+            "proof_prune_review_started",
+            [event for event, _payload in self.events],
+        )
 
     async def test_notify_registration_is_immediate_and_owned(self):
         for proof_id in ("p1", "p2"):

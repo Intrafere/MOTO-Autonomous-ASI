@@ -61,6 +61,25 @@ beforeEach(() => {
   api.deleteUploadedFile.mockResolvedValue({ status: 'deleted', deleted: true });
 });
 
+test.each(['openai_codex_oauth', 'openrouter'])('normalizes max against the actual manual Aggregator route: %s', async provider => {
+  const config = {
+    ...baseConfig,
+    submitterConfigs: baseConfig.submitterConfigs.map(role => ({ ...role, provider, openrouterReasoningEffort: 'max' })),
+    validatorProvider: provider,
+    validatorOpenrouterReasoningEffort: 'max',
+    assistantProvider: provider,
+    assistantOpenrouterReasoningEffort: 'max',
+  };
+  render(<AggregatorInterface config={config} setConfig={vi.fn()} capabilities={{ lmStudioEnabled: true }} />);
+  fireEvent.click(await screen.findByRole('button', { name: /start aggregator/i }));
+  await waitFor(() => expect(api.startAggregator).toHaveBeenCalled());
+  const payload = api.startAggregator.mock.calls[0][0];
+  const expected = provider === 'openai_codex_oauth' ? 'max' : 'auto';
+  expect(payload.submitter_configs[0].openrouter_reasoning_effort).toBe(expected);
+  expect(payload.validator_openrouter_reasoning_effort).toBe(expected);
+  expect(payload.assistant_openrouter_reasoning_effort).toBe(expected);
+});
+
 test('does not inherit Validator host provider when Assistant host is Auto', async () => {
   render(
     <AggregatorInterface

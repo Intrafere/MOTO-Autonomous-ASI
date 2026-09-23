@@ -168,7 +168,7 @@ class ContextAllocator:
         3. System prompt (ALWAYS direct inject - added by prompt builder)
         4. Shared training → RAG if needed
         5. Local training → RAG if needed
-        6. Rejection logs → RAG if needed
+        6. Caller-selected rejection logs remain direct or fail allocation
         7. User files → RAG only if absolutely necessary
         
         Args:
@@ -228,7 +228,6 @@ class ContextAllocator:
         # Track what needs RAG retrieval based on offload priority
         needs_shared_training_rag = False
         needs_local_training_rag = False
-        needs_rejection_log_rag = False
         needs_user_files_rag = False
         
         # Priority 1: Shared training - direct-first. Do not reserve space for
@@ -256,7 +255,9 @@ class ContextAllocator:
                 needs_local_training_rag = True
                 logger.info(f"Submitter: Local training offloaded to RAG ({tokens} tokens > {remaining_tokens} available)")
         
-        # Priority 3: Rejection logs - try direct injection first
+        # Priority 3: Rejection logs are corrective feedback.  The caller may
+        # retry with a smaller newest suffix, but retained entries never enter
+        # RAG or get split/truncated.
         if rejection_log_content:
             formatted = f"[REJECTION LOG]\n{rejection_log_content}"
             tokens = count_tokens(formatted)
@@ -265,8 +266,13 @@ class ContextAllocator:
                 remaining_tokens -= tokens
                 logger.debug(f"Submitter: Rejection log direct injected ({tokens} tokens)")
             else:
-                needs_rejection_log_rag = True
-                logger.info(f"Submitter: Rejection log offloaded to RAG ({tokens} tokens > {remaining_tokens} available)")
+                raise ContextAllocationError(
+                    "Submitter rejection feedback does not fit as mandatory direct context.",
+                    required_tokens=mandatory_tokens + tokens,
+                    available_tokens=available_tokens,
+                    context_window=ctx_window,
+                    output_reserve=max_output,
+                )
         
         # Priority 4: User files - try direct injection first (LAST priority to offload)
         user_files_str = ""
@@ -285,7 +291,7 @@ class ContextAllocator:
         
         # Perform RAG retrieval ONLY if content was offloaded
         rag_context = None
-        if any([needs_shared_training_rag, needs_local_training_rag, needs_rejection_log_rag, needs_user_files_rag]):
+        if any([needs_shared_training_rag, needs_local_training_rag, needs_user_files_rag]):
             # Available space for RAG (with buffer for RAG formatting overhead)
             # RAG content will be wrapped with "\n---\nRETRIEVED EVIDENCE:\n{rag_text}" which adds tokens
             rag_formatting_overhead = count_tokens("\n---\nRETRIEVED EVIDENCE:\n")

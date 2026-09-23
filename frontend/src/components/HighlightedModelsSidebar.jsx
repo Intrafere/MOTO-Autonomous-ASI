@@ -45,10 +45,11 @@ export default function HighlightedModelsSidebar() {
         <div className="models-list">
           <div className="models-podium">
             <div className="models-podium-label">Leaderboard</div>
-            <div className="model-item model-item--ranked model-item--gold model-item--os">
-              <OsTag />
+            <div className="model-item model-item--ranked model-item--gold model-item--oa">
+              <OauthTag stacked />
               <div className="flex-row-center">
-                <div className="model-item-name">MiniMax M3</div>
+                <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+                <div className="model-item-name">GPT 6 Astra</div>
                 <div
                   className="help-tooltip-anchor"
                   style={{ zIndex: 100 }}
@@ -76,17 +77,16 @@ export default function HighlightedModelsSidebar() {
                   )}
                 </div>
               </div>
-              <div className="model-item-badge">Highly knowledgeable, affordable API cost</div>
+              <div className="model-item-badge">Powerful and affordable OAuth</div>
             </div>
 
-            <div className="model-item model-item--ranked model-item--silver model-item--oa">
-              <OauthTag stacked />
+            <div className="model-item model-item--ranked model-item--silver model-item--os">
+              <OsTag />
               <div className="flex-row-center">
-                <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-                <div className="model-item-name">GPT 5.6</div>
+                <div className="model-item-name">MiniMax M3</div>
                 <div className="ranking-badge ranking-badge--silver">🥈 SILVER</div>
               </div>
-              <div className="model-item-badge">Powerful and affordable OAuth</div>
+              <div className="model-item-badge">Highly knowledgeable, affordable API cost</div>
             </div>
 
             <div className="model-item model-item--ranked model-item--bronze model-item--oa">
@@ -182,7 +182,8 @@ export default function HighlightedModelsSidebar() {
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">OpenAI's GPT OSS</div>
+            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+            <div className="model-item-name">OpenAI's GPT OSS 120b</div>
             <div className="model-item-badge">Balanced knowledge and speed</div>
           </div>
 

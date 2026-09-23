@@ -1,4 +1,14 @@
 /* LatexRenderer Component Styles - Enhanced for Mathematical Typography */
+.latex-print-warning { display: none; }
+.latex-viewport-notice { font-size: 0.85rem; color: var(--text-muted, #aaa); padding: 0.5rem 1rem; border-bottom: 1px solid var(--border-subtle, #444); }
+.latex-render-fallback button { margin: 0.4rem 0; padding: 0.4rem 0.7rem; }
+.latex-render-pending { color: var(--text-muted, #aaa); font-size: 0.85rem; }
+.latex-render-fallback > p { border-left: 3px solid #cc9c38; padding: 0.6rem; }
+.latex-render-fallback pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media print {
+  .latex-renderer .latex-print-warning { display: block !important; border: 2px solid #000; padding: 1rem; color: #000; background: #fff; font-weight: bold; }
+  .latex-renderer .latex-chunk-placeholder { display: none !important; }
+}
 
 .latex-renderer {
   display: flex;

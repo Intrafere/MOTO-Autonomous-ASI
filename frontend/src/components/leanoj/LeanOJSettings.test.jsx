@@ -22,6 +22,17 @@ vi.mock('../../services/api', () => ({
   },
 }));
 
+test.each([false, true])('Codex effort covers every visible LeanOJ role with running=%s', async isRunning => {
+  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: true } });
+  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [{ id: 'codex', supported_reasoning_levels: ['high', 'max'] }] });
+  const role = { provider: 'openai_codex_oauth', modelId: 'codex', openrouterReasoningEffort: 'max', contextWindow: 400000, maxOutputTokens: 32000 };
+  const settings = normalizeLeanOJSettings({ numSubmitters: 1, submitterConfigs: [role], roles: Object.fromEntries(['topic_generator', 'topic_validator', 'brainstorm_validator', 'final_solver', 'assistant'].map(key => [key, role])) });
+  render(<LeanOJSettings settings={settings} onSettingsChange={vi.fn()} capabilities={{ lmStudioEnabled: true }} connectivityStatus={{ skills: { agent_conversation_memory: { enabled: true } } }} isRunning={isRunning} />);
+  await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).length).toBe(4));
+  expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.value === 'max')).toBe(true);
+  await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.disabled === isRunning)).toBe(true));
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();

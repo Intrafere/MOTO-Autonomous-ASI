@@ -32,7 +32,6 @@ and `compiler_paper.txt`.
 
 from typing import Iterable, List, Optional
 
-from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 
 
 # =============================================================================
@@ -343,6 +342,7 @@ async def build_rigor_theorem_discovery_prompt(
     recent_failure_hints: Optional[Iterable] = None,
     source_material_context: str = "",
     source_material_label: str = "",
+    rejection_history: str = "",
 ) -> str:
     """Build the Stage 1 (discovery) prompt.
 
@@ -374,7 +374,6 @@ async def build_rigor_theorem_discovery_prompt(
         "\n---\n",
     ]
 
-    rejection_history = await compiler_rejection_log.get_rejections_text()
     if rejection_history:
         parts.append(
             "YOUR RECENT REJECTION HISTORY (Last 10 rejections - learn from these):\n"
@@ -427,6 +426,7 @@ async def build_rigor_placement_prompt(
     proof_id: str,
     placement_attempt: int = 1,
     validator_rejection_feedback: str = "",
+    rejection_history: str = "",
 ) -> str:
     """Build the Stage 2 (placement) prompt.
 
@@ -454,7 +454,6 @@ async def build_rigor_placement_prompt(
         "\n---\n",
     ]
 
-    rejection_history = await compiler_rejection_log.get_rejections_text()
     if rejection_history:
         parts.append(
             "YOUR RECENT REJECTION HISTORY (Last 10 rejections - learn from these):\n"

@@ -248,6 +248,7 @@ class _LeanVerificationOutcome:
     lean_code: str
     attempts: list[ProofAttemptFeedback] = field(default_factory=list)
     context_overflow_payload: dict[str, Any] = field(default_factory=dict)
+    competition_winner: dict[str, Any] = field(default_factory=dict)
 
 
 class ProofVerificationProviderPause(Exception):
@@ -736,6 +737,9 @@ class ProofVerificationStage:
         proof_pruning_registered_callback: ProofPruningRegisteredCallback = None,
         proof_pruning_pressure_callback: ProofPruningPressureCallback = None,
         proof_pruning_route_fingerprint: str = "",
+        competition_config=None,
+        checkpoint_competition_state: Optional[dict[str, Any]] = None,
+        competition_observer=None,
     ) -> ProofStageResult:
         """Run proof identification, formalization, Lean 4 checking, and novelty review."""
         result = (
@@ -777,6 +781,42 @@ class ProofVerificationStage:
             trigger=trigger,
             proof_round_index=proof_round_index,
             proof_run_context=proof_run_context,
+        )
+        from backend.autonomous.core.proof_competition import ProofCompetition
+        competition_reporter = None
+        competition_data = competition_config.model_dump(mode="json") if hasattr(competition_config, "model_dump") else dict(competition_config or {})
+        if competition_data.get("enabled") and (proof_run_context or {}).get("scope") == "autonomous":
+            from pathlib import Path
+            from backend.autonomous.core.proof_competition_reporting import CompetitionReporter
+            store_path = Path(getattr(novel_proofs_db, "_base_dir", ""))
+            if store_path.name == "proofs" and store_path.parent.parent.resolve() == Path(system_config.auto_sessions_base_dir).resolve():
+                primary_route = api_client_manager.get_role_config(f"autonomous_proof_formalization_{role_suffix}")
+                competition_reporter = CompetitionReporter(
+                    session_id=store_path.parent.name, run_id=run_id,
+                    primary_route=primary_route or {"provider": "unknown", "model_id": submitter_model,
+                        "context_window": submitter_context, "max_output_tokens": submitter_max_tokens},
+                    secondaries=competition_data.get("secondaries", []),
+                )
+        async def observe_competition(event):
+            if competition_reporter:
+                await competition_reporter(event)
+            if event.get("competitor_index", 0) and event.get("status") == "unavailable":
+                await self._broadcast(broadcast_fn, "proof_competitor_unavailable", {
+                    **(proof_run_context or {}), **event,
+                    "message": "Secondary proof model unavailable; research continues with the remaining competitors.",
+                })
+            if competition_observer:
+                await competition_observer(event)
+        competition = ProofCompetition(
+            config=competition_config,
+            scope=str((proof_run_context or {}).get("scope") or ""),
+            identity={"run_id": run_id, "execution_id": (proof_run_context or {}).get("proof_run_id") or run_id,
+                      "source_type": source_type, "source_id": source_id,
+                      "round": proof_round_index, "trigger": trigger,
+                      "primary_route": proof_pruning_route_fingerprint or [submitter_model, submitter_context, submitter_max_tokens]},
+            batch_size=int(getattr(system_config, "proof_max_parallel_candidates", 6) or 0),
+            state=checkpoint_competition_state,
+            checkpoint=lambda: save_checkpoint("running"), observer=observe_competition,
         )
         candidate_list_state = _normalize_candidate_list_checkpoint(
             checkpoint_candidate_list_state,
@@ -842,6 +882,7 @@ class ProofVerificationStage:
                     "fatal_stop_reason": result.fatal_stop_reason,
                     "fatal_stop_payload": dict(result.fatal_stop_payload),
                     "candidate_list_review": dict(candidate_list_state),
+                    **({"competition_state": competition.state} if competition.enabled else {}),
                 }
                 # Keep persistence in the same critical section as snapshot
                 # creation so a slower older write cannot land after a newer
@@ -985,7 +1026,7 @@ class ProofVerificationStage:
                         "feedback": feedback_text,
                     },
                 )
-                feedback = "\n\n".join(
+                feedback_entries = tuple(
                     f"Attempt {item.generation_attempt}: {item.feedback}"
                     for item in semantic_rejections
                 )
@@ -999,7 +1040,8 @@ class ProofVerificationStage:
                         proof_round_index=proof_round_index,
                         proof_max_rounds=proof_max_rounds,
                         prior_round_results=prior_round_results,
-                        candidate_list_rejection_feedback=feedback,
+                        candidate_list_rejection_feedback="\n\n".join(feedback_entries),
+                        candidate_list_rejection_feedback_entries=feedback_entries,
                     )
                 )
                 candidate_list_state["generation_attempt"] = generation_attempt
@@ -1328,7 +1370,20 @@ class ProofVerificationStage:
                 for index in range(0, len(indexed_candidates), batch_size)
             ]
 
-            async def run_phase_a(theorem_candidate: ProofCandidate, proof_label: str) -> _LeanVerificationOutcome:
+            async def run_phase_a(theorem_candidate: ProofCandidate, proof_label: str,
+                                  competitor_index=0, route=None, local_state=None,
+                                  local_save=None) -> _LeanVerificationOutcome:
+                local_suffix = role_suffix
+                local_model, local_context, local_output = submitter_model, submitter_context, submitter_max_tokens
+                if competitor_index:
+                    from backend.shared.models import ModelConfig
+                    from backend.autonomous.core.proof_competition import fingerprint
+                    route_data = route.model_dump(mode="json") if hasattr(route, "model_dump") else dict(route)
+                    local_model = route_data["model_id"]
+                    local_context, local_output = route_data["context_window"], route_data["max_output_tokens"]
+                    local_suffix = f"{role_suffix}_competition_{competitor_index}_{fingerprint(route_data)[:16]}"
+                    role_config = ModelConfig(**route_data, **({"openrouter_model_id": local_model} if route_data.get("provider") == "openrouter" and "openrouter_model_id" not in route_data else {}))
+                    api_client_manager.configure_role(f"autonomous_proof_formalization_{local_suffix}", role_config)
                 if _stop_requested():
                     return _LeanVerificationOutcome(
                         candidate=theorem_candidate,
@@ -1340,6 +1395,20 @@ class ProofVerificationStage:
                     )
 
                 async def record_attempts(updated_candidate: ProofCandidate, attempts: list[ProofAttemptFeedback]) -> None:
+                    if local_save:
+                        update = {"attempts": [a.model_dump(mode="json") for a in attempts],
+                                  "prepared_candidate": updated_candidate.model_dump(mode="json")}
+                        accepted = next((a for a in attempts if a.success), None)
+                        if accepted:
+                            update.update(status="success", outcome={
+                                "candidate": updated_candidate.model_dump(mode="json"),
+                                "success": True,
+                                "theorem_name": self._extract_theorem_name_from_lean(accepted.lean_code),
+                                "lean_code": accepted.lean_code, "attempts": update["attempts"],
+                                "context_overflow_payload": {},
+                            })
+                        await local_save(update)
+                        return
                     async with checkpoint_state_lock:
                         for idx, candidate in enumerate(resolved_candidates):
                             if candidate.theorem_id == updated_candidate.theorem_id:
@@ -1348,26 +1417,45 @@ class ProofVerificationStage:
                         attempts_by_candidate[updated_candidate.theorem_id] = list(attempts)
                     await save_checkpoint("running")
 
+                effective_routes = list((local_state or {}).get("effective_routes", []))
+
+                async def record_route(metadata):
+                    from backend.autonomous.core.proof_competition_reporting import observed_route
+                    observed = observed_route(metadata)
+                    if local_save and observed and observed not in effective_routes:
+                        effective_routes.append(observed)
+                        await local_save({"effective_routes": effective_routes[:100]})
+
+                async def record_start(attempt_number, strategy):
+                    if local_save:
+                        await local_save({"status": "running", "attempt_started": True})
+
                 return await self._run_lean_pipeline_for_candidate(
-                    theorem_candidate=theorem_candidate,
-                    base_event=base_event,
+                    theorem_candidate=(ProofCandidate.model_validate(local_state["prepared_candidate"])
+                        if local_state and local_state.get("prepared_candidate") else theorem_candidate),
+                    base_event={**base_event, **({"competitor_index": competitor_index} if competition.enabled else {})},
                     proof_label=proof_label,
-                    user_prompt=user_prompt,
+                    user_prompt=(canonical_user_prompt if competitor_index else user_prompt),
                     source_type=source_type,
                     source_id=source_id,
                     source_content=content,
                     source_title=source_title,
-                    submitter_model=submitter_model,
-                    submitter_context=submitter_context,
-                    submitter_max_tokens=submitter_max_tokens,
-                    role_suffix=role_suffix,
+                    submitter_model=local_model,
+                    submitter_context=local_context,
+                    submitter_max_tokens=local_output,
+                    role_suffix=local_suffix,
                     trigger=trigger,
                     novel_proofs_db=novel_proofs_db,
                     broadcast_fn=broadcast_fn,
                     should_stop=_stop_requested,
-                    prior_attempts=attempts_by_candidate.get(theorem_candidate.theorem_id, []),
-                    prior_theorem_name=theorem_names_by_candidate.get(theorem_candidate.theorem_id, ""),
+                    prior_attempts=([ProofAttemptFeedback.model_validate(a) for a in local_state.get("attempts", [])]
+                                    if local_state is not None else attempts_by_candidate.get(theorem_candidate.theorem_id, [])),
+                    prior_theorem_name=("" if competitor_index else theorem_names_by_candidate.get(theorem_candidate.theorem_id, "")),
+                    formalization_only=bool(competitor_index),
+                    suppress_exhausted_event=competition.enabled,
                     attempt_checkpoint_callback=record_attempts,
+                    attempt_started_callback=record_start,
+                    completion_route_callback=record_route,
                     proof_pruning_pressure_callback=proof_pruning_pressure_callback,
                     proof_pruning_route_fingerprint=proof_pruning_route_fingerprint,
                     run_id=run_id,
@@ -1391,7 +1479,44 @@ class ProofVerificationStage:
                 await batch_events[batch_index].wait()
                 if _stop_requested():
                     raise asyncio.CancelledError()
-                return batch_index, await run_phase_a(theorem_candidate, proof_label)
+                if not competition.enabled:
+                    return batch_index, await run_phase_a(theorem_candidate, proof_label)
+                if not canonical_user_prompt:
+                    raise ValueError("Autonomous proof competition requires canonical_user_prompt for feedback isolation")
+                def classify(outcome, index):
+                    if outcome.success:
+                        return "success"
+                    if outcome.attempts and (outcome.attempts[-1].error_output or "").startswith(LEAN_WORKSPACE_ERROR_PREFIX):
+                        return "blocked"
+                    if outcome.attempts and ProofFormalizationAgent.is_context_overflow_feedback(outcome.attempts[-1]):
+                        return "unavailable" if index else "blocked"
+                    if not index and _truncation_chain_exhausted(outcome.attempts):
+                        return "blocked"
+                    return "exhausted" if len(outcome.attempts) >= 5 else "blocked"
+                def restore(record):
+                    data = record["outcome"]
+                    return _LeanVerificationOutcome(
+                        candidate=ProofCandidate.model_validate(data["candidate"]),
+                        proof_label=proof_label, success=data["success"],
+                        theorem_name=data["theorem_name"], lean_code=data["lean_code"],
+                        attempts=[ProofAttemptFeedback.model_validate(a) for a in data["attempts"]],
+                        context_overflow_payload=data.get("context_overflow_payload", {}),
+                    )
+                async def execute(index, route, state, save):
+                    return await run_phase_a(theorem_candidate.model_copy(deep=True), proof_label,
+                                             index, route, state, save)
+                outcome = await competition.run_candidate(
+                    theorem_candidate, execute=execute, classify=classify, restore=restore,
+                    primary_finished=lambda: mark_batch_outcome_processed(batch_index),
+                )
+                if outcome is not None and classify(outcome, 0) == "exhausted":
+                    await self._broadcast(broadcast_fn, "proof_attempts_exhausted", {
+                        **base_event, "theorem_id": theorem_candidate.theorem_id,
+                        "theorem_statement": theorem_candidate.statement,
+                        "proof_label": proof_label,
+                        "retry_origin_source_id": theorem_candidate.origin_source_id,
+                    })
+                return -1, outcome
 
             verification_tasks = [
                 asyncio.create_task(
@@ -1862,6 +1987,11 @@ class ProofVerificationStage:
                                 if should_stop and should_stop():
                                     raise asyncio.CancelledError()
                         stored_record = registration.record
+                        if competition_reporter:
+                            await competition_reporter.registered(
+                                winner=outcome.competition_winner,
+                                proof_id=stored_record.proof_id,
+                            )
                         is_novel = stored_record.novel
                         is_prompt_novel = is_prompt_injection_novel_tier(stored_record.novelty_tier)
                         result.verified_count += 1
@@ -2252,6 +2382,10 @@ class ProofVerificationStage:
         proof_pruning_pressure_callback: ProofPruningPressureCallback = None,
         proof_pruning_route_fingerprint: str = "",
         run_id: str = "",
+        formalization_only: bool = False,
+        suppress_exhausted_event: bool = False,
+        attempt_started_callback=None,
+        completion_route_callback=None,
     ) -> _LeanVerificationOutcome:
         """Phase A for one candidate: lemma prep, SMT hint, and Lean 4 attempts.
 
@@ -2279,9 +2413,13 @@ class ProofVerificationStage:
             context_window=submitter_context,
             max_output_tokens=submitter_max_tokens,
             role_id=f"autonomous_proof_formalization_{role_suffix}",
+            **({"strict_execution_errors": True} if formalization_only else {}),
         )
+        formalization_agent.completion_route_callback = completion_route_callback
+        if attempt_started_callback:
+            formalization_agent.model_attempt_callback = attempt_started_callback
 
-        candidate = await self._prepare_candidate(
+        candidate = theorem_candidate.model_copy(deep=True) if formalization_only else await self._prepare_candidate(
             user_prompt=user_prompt,
             source_type=source_type,
             theorem_candidate=theorem_candidate,
@@ -2291,7 +2429,7 @@ class ProofVerificationStage:
         )
         if should_stop and should_stop():
             raise asyncio.CancelledError()
-        smt_hint = await self._run_smt_check(
+        smt_hint = None if formalization_only else await self._run_smt_check(
             user_prompt=user_prompt,
             source_type=source_type,
             source_id=source_id,
@@ -2307,7 +2445,7 @@ class ProofVerificationStage:
             raise asyncio.CancelledError()
         if smt_hint:
             candidate = candidate.model_copy(update={"smt_hint": smt_hint})
-        if trigger == "retry" and candidate.origin_source_id:
+        if not formalization_only and trigger == "retry" and candidate.origin_source_id:
             await novel_proofs_db.mark_retried(
                 candidate.origin_source_id,
                 candidate.theorem_id,
@@ -2654,6 +2792,7 @@ class ProofVerificationStage:
             and not workspace_error
             and not context_overflow
             and not _truncation_chain_exhausted(attempts)
+            and not suppress_exhausted_event
             and not (should_stop and should_stop())
         ):
             await self._broadcast(
@@ -2723,6 +2862,9 @@ class ProofVerificationStage:
         checkpoint_candidate_list_state: Optional[dict[str, Any]] = None,
         checkpoint_processed_candidate_ids: Optional[list[str]] = None,
         checkpoint_callback: ProofCheckpointCallback = None,
+        competition_config=None,
+        checkpoint_competition_state: Optional[dict[str, Any]] = None,
+        competition_observer=None,
     ) -> ProofStageResult:
         """Run a user-triggered proof check using manual proof role IDs."""
         return await self.run(
@@ -2766,4 +2908,7 @@ class ProofVerificationStage:
             checkpoint_candidate_list_state=checkpoint_candidate_list_state,
             checkpoint_processed_candidate_ids=checkpoint_processed_candidate_ids,
             checkpoint_callback=checkpoint_callback,
+            competition_config=competition_config,
+            checkpoint_competition_state=checkpoint_competition_state,
+            competition_observer=competition_observer,
         )

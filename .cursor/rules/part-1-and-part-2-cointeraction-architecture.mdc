@@ -91,6 +91,10 @@ Assistant candidate fusion excludes only occurrences carrying the persisted stan
 
 - The JSON of aggregator-subbmiters and compiler-submitters should include a "reasoning:" request below its "submission:" line. (This forces the submitter to explain the thoughts behind there reasoning and can also reveal deception for additional context for the validator.)
 - MOTO conversational retries must preserve useful failed-output context, but never raw provider/model transcript text. Any assistant replay or reusable feedback/memory excerpt must be sanitized to remove known private thought/channel/control transport scaffolding first while preserving visible mathematical/Lean syntax such as `<|` and literal marker text inside JSON/string content. Parser error strings sent back to models must not include raw output excerpts. Exact tool-call assistant/tool protocol turns are the only exception.
+- Rolling model-visible feedback is a newest-first-preserving projection of durable
+history: include at most five whole chronological entries, remove only the oldest one
+at a time after rebuilding and counting the complete prompt, and stop through the
+existing context-overflow lifecycle if the newest entry still cannot fit.
 
 ## API Call Output Notes (User-Configurable)
 - **All `max_tokens` limits are user-configurable via GUI settings** (like context window sizes). Users can adjust these per model role based on their specific models' capabilities.

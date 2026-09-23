@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tests.workflow_browser_smoke.coverage_records import BROWSER_SMOKE_COVERAGE
+from tests.workflow_browser_smoke.coverage_records import BROWSER_SMOKE_COVERAGE, BROWSER_STRESS_SPECS
 from tests.workflow_harness.coverage_metadata import assert_coverage_records_valid
 
 
@@ -25,6 +25,12 @@ def test_every_browser_smoke_spec_has_exactly_one_coverage_record():
     }
     represented_test_files = [record.test_file for record in BROWSER_SMOKE_COVERAGE]
 
+    stress_test_files = set(BROWSER_STRESS_SPECS)
     assert len(represented_test_files) == len(set(represented_test_files))
-    assert set(represented_test_files) == expected_test_files
+    assert set(represented_test_files).isdisjoint(stress_test_files)
+    assert set(represented_test_files) == expected_test_files - stress_test_files
+    # Every discovered spec must remain accounted for, including stress suites;
+    # a stale classification or a new unclassified spec is still a failure.
+    assert stress_test_files <= expected_test_files
+    assert all(reason.strip() for reason in BROWSER_STRESS_SPECS.values())
     assert all((repository_root / test_file).is_file() for test_file in represented_test_files)

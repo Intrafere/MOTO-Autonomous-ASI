@@ -130,6 +130,9 @@ function MathematicalProofs({
   const [liveContextConfirm, setLiveContextConfirm] = useState(null);
   const [liveContextPendingId, setLiveContextPendingId] = useState(null);
   const [liveContextMessage, setLiveContextMessage] = useState('');
+  const [selectedProofIds, setSelectedProofIds] = useState(() => new Set());
+  const [bulkLiveContextConfirm, setBulkLiveContextConfirm] = useState(null);
+  const [bulkLiveContextPending, setBulkLiveContextPending] = useState(false);
   const {
     proofStatus: sharedProofStatus,
     queueManualProofCheck,
@@ -469,6 +472,27 @@ function MathematicalProofs({
     () => visibleProofs.map((proof) => proof.proof_id),
     [visibleProofs]
   );
+  const selectableVisibleProofs = useMemo(
+    () => visibleProofs.filter((proof) => {
+      const liveContext = classifyProofLiveContext(proof);
+      return liveContext.canPrune || liveContext.canUndo;
+    }),
+    [visibleProofs]
+  );
+  const selectedProofs = useMemo(
+    () => proofs.filter((proof) => selectedProofIds.has(proof.proof_id)),
+    [proofs, selectedProofIds]
+  );
+  const selectedPrunableProofs = useMemo(
+    () => selectedProofs.filter((proof) => classifyProofLiveContext(proof).canPrune),
+    [selectedProofs]
+  );
+  const selectedRestorableProofs = useMemo(
+    () => selectedProofs.filter((proof) => classifyProofLiveContext(proof).canUndo),
+    [selectedProofs]
+  );
+  const allVisibleEligibleSelected = selectableVisibleProofs.length > 0
+    && selectableVisibleProofs.every((proof) => selectedProofIds.has(proof.proof_id));
   const showManualPanel = Boolean(proofStatus?.lean4_path);
   const effectiveProofStatus = sharedProofStatus || proofStatus;
   const sourceRunState = manualSourceId
@@ -556,14 +580,146 @@ function MathematicalProofs({
     await Promise.allSettled(refreshers.map((callback) => callback()));
   };
 
+  useEffect(() => {
+    const selectableIds = new Set(
+      proofs
+        .filter((proof) => {
+          const liveContext = classifyProofLiveContext(proof);
+          return liveContext.canPrune || liveContext.canUndo;
+        })
+        .map((proof) => proof.proof_id)
+    );
+    setSelectedProofIds((current) => {
+      const next = new Set([...current].filter((proofId) => selectableIds.has(proofId)));
+      if (next.size === current.size && [...next].every((proofId) => current.has(proofId))) {
+        return current;
+      }
+      return next;
+    });
+  }, [proofs]);
+
+  const toggleProofSelection = (proofId) => {
+    setSelectedProofIds((current) => {
+      const next = new Set(current);
+      if (next.has(proofId)) next.delete(proofId);
+      else next.add(proofId);
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisible = () => {
+    setSelectedProofIds((current) => {
+      const next = new Set(current);
+      if (allVisibleEligibleSelected) {
+        selectableVisibleProofs.forEach((proof) => next.delete(proof.proof_id));
+      } else {
+        selectableVisibleProofs.forEach((proof) => next.add(proof.proof_id));
+      }
+      return next;
+    });
+  };
+
+  const openBulkLiveContextConfirm = (status) => {
+    const eligibleProofs = status === 'pruned' ? selectedPrunableProofs : selectedRestorableProofs;
+    if (eligibleProofs.length === 0) {
+      setLiveContextMessage(
+        status === 'pruned'
+          ? 'None of the selected proofs are active and eligible for user pruning.'
+          : 'None of the selected proofs are user-pruned and eligible for restore.'
+      );
+      return;
+    }
+    setLiveContextMessage('');
+    setBulkLiveContextConfirm({
+      status,
+      proofSetRevision,
+      proofScope,
+      items: eligibleProofs.map((proof) => {
+        const payload = buildProofLiveContextMutation(proof, {
+          status,
+          reason: status === 'active'
+            ? 'User restored this occurrence to the owning run live context.'
+            : '',
+          proofSetRevision,
+        });
+        return {
+          proofId: proof.proof_id,
+          status: payload.status,
+          runId: payload.expected_run_id,
+          reason: payload.reason,
+          theoremHash: payload.expected_theorem_hash,
+          leanHash: payload.expected_lean_hash,
+        };
+      }),
+      reason: '',
+    });
+  };
+
+  const handleBulkLiveContextMutation = async () => {
+    const status = bulkLiveContextConfirm?.status;
+    const items = bulkLiveContextConfirm?.items || [];
+    if (!status || items.length === 0) {
+      setBulkLiveContextConfirm(null);
+      setLiveContextMessage('No eligible proofs remain in this batch. Refresh and select proofs again.');
+      return;
+    }
+    if (
+      bulkLiveContextConfirm.proofScope !== proofScope
+      || bulkLiveContextConfirm.proofSetRevision !== proofSetRevision
+    ) {
+      setBulkLiveContextConfirm(null);
+      setSelectedProofIds(new Set());
+      setLiveContextMessage('The proof set changed while confirmation was open. Review the refreshed list and select again.');
+      return;
+    }
+    if (typeof api.updateProofLiveContextBulk !== 'function') {
+      setLiveContextMessage('Bulk live-context mutation is unavailable in this frontend/API build.');
+      return;
+    }
+
+    try {
+      setBulkLiveContextPending(true);
+      setLiveContextMessage('');
+      const reason = String(bulkLiveContextConfirm.reason || '').trim();
+      const confirmedItems = items.map((item) => ({
+        ...item,
+        reason: status === 'pruned' ? reason : item.reason,
+      }));
+      const response = await api.updateProofLiveContextBulk({
+        scope: bulkLiveContextConfirm.proofScope,
+        proofSetRevision: bulkLiveContextConfirm.proofSetRevision,
+        items: confirmedItems,
+      });
+      if (Number.isInteger(response?.proof_set_revision)) {
+        setProofSetRevision(response.proof_set_revision);
+      }
+      setBulkLiveContextConfirm(null);
+      setSelectedProofIds(new Set());
+      setLiveContextMessage(
+        `${confirmedItems.length} proof${confirmedItems.length === 1 ? '' : 's'} ${
+          status === 'pruned' ? 'pruned from' : 'restored to'
+        } this run’s live model context.`
+      );
+      await refreshLiveContextSurfaces();
+    } catch (err) {
+      const stale = err?.status === 409 || /revision|stale|changed|conflict/i.test(err?.message || '');
+      setBulkLiveContextConfirm(null);
+      setSelectedProofIds(new Set());
+      setLiveContextMessage(
+        stale
+          ? 'The proof set changed before the batch completed. Selection was cleared and current state is being refreshed.'
+          : `Bulk live-context update failed: ${err.message || 'Unknown error'}`
+      );
+      if (stale) await refreshLiveContextSurfaces();
+    } finally {
+      setBulkLiveContextPending(false);
+    }
+  };
+
   const handleLiveContextMutation = async (proof, status) => {
     const reason = status === 'pruned'
       ? String(liveContextConfirm?.reason || '').trim()
       : 'User restored this occurrence to the owning run live context.';
-    if (status === 'pruned' && !reason) {
-      setLiveContextMessage('Enter a reason before pruning this proof from live context.');
-      return;
-    }
     if (typeof api.updateProofLiveContext !== 'function') {
       setLiveContextMessage('Live-context mutation is unavailable in this frontend/API build.');
       return;
@@ -780,13 +936,95 @@ function MathematicalProofs({
         />
       )}
 
+      {viewMode === 'list' && visibleProofs.length > 0 && (
+        <div className="proof-bulk-toolbar" aria-label="Bulk live-context actions">
+          <label className="proof-bulk-select-all">
+            <input
+              type="checkbox"
+              checked={allVisibleEligibleSelected}
+              onChange={toggleSelectAllVisible}
+              disabled={selectableVisibleProofs.length === 0 || bulkLiveContextPending}
+            />
+            <span>Select all visible eligible ({selectableVisibleProofs.length})</span>
+          </label>
+          <span className="proof-bulk-selection-count">
+            {selectedProofIds.size} selected
+            {selectedProofIds.size > 0 && (
+              <> · {selectedPrunableProofs.length} prunable · {selectedRestorableProofs.length} restorable</>
+            )}
+          </span>
+          <div className="proof-bulk-actions">
+            <button
+              type="button"
+              onClick={() => openBulkLiveContextConfirm('pruned')}
+              disabled={selectedProofIds.size === 0 || bulkLiveContextPending}
+            >
+              Bulk prune
+            </button>
+            <button
+              type="button"
+              className="restore"
+              onClick={() => openBulkLiveContextConfirm('active')}
+              disabled={selectedProofIds.size === 0 || bulkLiveContextPending}
+            >
+              Bulk restore
+            </button>
+            <button
+              type="button"
+              className="clear"
+              onClick={() => setSelectedProofIds(new Set())}
+              disabled={selectedProofIds.size === 0 || bulkLiveContextPending}
+            >
+              Clear selection
+            </button>
+          </div>
+        </div>
+      )}
+
+      {bulkLiveContextConfirm && (
+        <div className="proof-live-context-confirm proof-bulk-confirm" role="dialog" aria-modal="true" aria-label="Confirm bulk live-context update">
+          <strong>
+            {bulkLiveContextConfirm.status === 'pruned' ? 'Prune' : 'Restore'}{' '}
+            {bulkLiveContextConfirm.items.length} selected proof
+            {bulkLiveContextConfirm.items.length === 1 ? '' : 's'}?
+          </strong>
+          <span>
+            Only proofs eligible for this action are included. The other selected proofs are unchanged.
+            Verified records, history, certificates, Lean source, and future-run retrieval remain available.
+          </span>
+          {bulkLiveContextConfirm.status === 'pruned' && (
+            <label>
+              Reason (optional, shared by this batch)
+              <textarea
+                value={bulkLiveContextConfirm.reason}
+                onChange={(event) => setBulkLiveContextConfirm((current) => ({
+                  ...current,
+                  reason: event.target.value,
+                }))}
+                placeholder="Why should these occurrences leave the current run context?"
+              />
+            </label>
+          )}
+          <div className="proof-live-context-confirm-actions">
+            <button type="button" onClick={handleBulkLiveContextMutation} disabled={bulkLiveContextPending}>
+              {bulkLiveContextPending
+                ? 'Updating…'
+                : `Confirm ${bulkLiveContextConfirm.status === 'pruned' ? 'prune' : 'restore'}`}
+            </button>
+            <button type="button" onClick={() => setBulkLiveContextConfirm(null)} disabled={bulkLiveContextPending}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {manualCheckMessage && (
         <div className={`math-proofs-banner ${manualCheckMessage.startsWith('Failed') ? 'error' : 'success'}`}>
           {manualCheckMessage}
         </div>
       )}
       {liveContextMessage && (
-        <div className={`math-proofs-banner ${/failed|unavailable|changed|enter a reason/i.test(liveContextMessage) ? 'error' : 'success'}`}>
+        <div className={`math-proofs-banner ${/failed|unavailable|changed/i.test(liveContextMessage) ? 'error' : 'success'}`}>
           {liveContextMessage}
         </div>
       )}
@@ -853,6 +1091,20 @@ function MathematicalProofs({
                 className={`math-proof-card ${getTierBadge(proof).cardClass} ${liveContext.isPruned && !isExpanded ? 'live-context-pruned-collapsed' : ''} ${liveContext.isPruned && isExpanded ? 'live-context-pruned-expanded' : ''}`}
               >
                 <div className="math-proof-card-header">
+                  {(liveContext.canPrune || liveContext.canUndo) && (
+                    <label
+                      className="math-proof-select"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedProofIds.has(proof.proof_id)}
+                        onChange={() => toggleProofSelection(proof.proof_id)}
+                        disabled={bulkLiveContextPending}
+                        aria-label={`Select proof ${proof.theorem_name || proof.theorem_statement} (${proof.proof_id})`}
+                      />
+                    </label>
+                  )}
                   <div>
                     <div className="math-proof-card-topline">
                       <span className={`math-proof-badge ${getTierBadge(proof).badgeClass}`}>
@@ -916,7 +1168,7 @@ function MathematicalProofs({
                       <span key={warning} className="proof-live-context-warning">Warning: {warning}</span>
                     ))}
                     <label>
-                      Reason
+                      Reason (optional)
                       <textarea
                         value={liveContextConfirm.reason}
                         onChange={(event) => setLiveContextConfirm((current) => ({

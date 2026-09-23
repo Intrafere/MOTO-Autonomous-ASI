@@ -15,7 +15,10 @@ from backend.autonomous.agents.proof_pruning_agent import (
     ProofPruningReviewService,
     ProofPruningStaleSnapshotError,
 )
-from backend.autonomous.memory.proof_database import is_prompt_injection_novel_tier
+from backend.autonomous.memory.proof_database import (
+    ProofPruningMinimumProofsError,
+    is_prompt_injection_novel_tier,
+)
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.model_error_utils import (
@@ -46,6 +49,9 @@ ShouldStopFn = Optional[Callable[[], bool]]
 PRUNING_STATE_SCHEMA_VERSION = 2
 PRUNING_POLICY_VERSION = "proof-pruning-semantic-v2"
 CADENCE_THRESHOLD = 3
+PRESSURE_TRIGGER_REASONS = frozenset(
+    {"proof_context_overflow_urgent", "proof_stage_context_maximum"}
+)
 
 
 class ProofPruningCoordinator:
@@ -317,6 +323,12 @@ class ProofPruningCoordinator:
         """Coalesce proof-memory pressure for the current revision/route."""
         if not self._owns_lifecycle() or pressure.active_proof_context_tokens <= 0:
             return
+        active_proofs = await self.proof_database.get_all_proofs_for_live_context(
+            self.run_id,
+            novel_only=True,
+        )
+        if len(active_proofs) < CADENCE_THRESHOLD:
+            return
         revision = int(
             self.state.proof_set_revision
             if proof_set_revision is None
@@ -404,11 +416,11 @@ class ProofPruningCoordinator:
                 self.state.status = "proposing"
                 await self._persist()
 
-            await self._broadcast(
-                "proof_prune_review_started",
-                trigger_reasons=reasons,
-            )
             try:
+                pressure_only = (
+                    bool(set(reasons) & PRESSURE_TRIGGER_REASONS)
+                    and "three_novel_proofs" not in reasons
+                )
                 snapshot = await self.proof_database.capture_pruning_snapshot(
                     proof_store_id=self.proof_store_id,
                     owning_run_id=self.run_id,
@@ -423,6 +435,13 @@ class ProofPruningCoordinator:
                     trigger_reasons=reasons,
                     accepted_prompt_novel_total=self.state.accepted_prompt_novel_total,
                     context_pressure=self.state.context_pressure,
+                    minimum_prompt_novel_proofs=(
+                        CADENCE_THRESHOLD if pressure_only else 0
+                    ),
+                )
+                await self._broadcast(
+                    "proof_prune_review_started",
+                    trigger_reasons=reasons,
                 )
                 async with self._state_lock:
                     self.state.snapshot_id = snapshot.snapshot_id
@@ -452,6 +471,19 @@ class ProofPruningCoordinator:
                     proposal_generation=proposal_generation,
                     reasons=reasons,
                 )
+            except ProofPruningMinimumProofsError:
+                async with self._state_lock:
+                    self.state.active_trigger_reasons = []
+                    self.state.active_proposal_id = ""
+                    self.state.snapshot_id = ""
+                    self.state.snapshot_revision = None
+                    self.state.status = (
+                        "queued" if self.state.queued_trigger_reasons else "idle"
+                    )
+                    await self._persist()
+                if self.state.status == "idle":
+                    return
+                continue
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

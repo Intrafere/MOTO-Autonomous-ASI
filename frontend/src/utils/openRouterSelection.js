@@ -367,8 +367,9 @@ export function getOpenRouterProviderTitle(providerName) {
   return isOpenRouterUsHostProvider(providerName) ? USA_HOST_TOOLTIP : undefined;
 }
 
-export function normalizeOpenRouterReasoningEffort(value) {
+export function normalizeOpenRouterReasoningEffort(value, provider = 'openrouter') {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (provider === 'openai_codex_oauth' && normalized === 'max') return 'max';
   if (OPENROUTER_REASONING_EFFORT_OPTIONS.some((option) => option.value === normalized)) {
     return normalized;
   }

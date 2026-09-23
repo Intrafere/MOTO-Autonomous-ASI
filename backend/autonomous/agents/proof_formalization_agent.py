@@ -22,6 +22,7 @@ from backend.shared.model_error_utils import (
 from backend.shared.models import ProofAttemptFeedback, ProofCandidate, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.provider_errors import ProviderContextLengthError
+from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
 from backend.shared.proof_search.tool_adapter import execute_search_lean_proofs
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.utils import count_tokens
@@ -211,8 +212,12 @@ def _format_attempt_feedback_for_assistant(attempts: list[ProofAttemptFeedback],
     return text[:5000] + ("..." if len(text) > 5000 else "")
 
 
+class _FormalizationContractError(ValueError):
+    """Model-authored payload failure, never a Lean or infrastructure failure."""
+
+
 def _is_json_parse_error(exc: Exception) -> bool:
-    if isinstance(exc, json.JSONDecodeError):
+    if isinstance(exc, (json.JSONDecodeError, _FormalizationContractError)):
         return True
     if not isinstance(exc, ValueError):
         return False
@@ -293,7 +298,11 @@ class ProofFormalizationAgent:
         context_window: int,
         max_output_tokens: int,
         role_id: str,
+        strict_execution_errors: bool = False,
     ) -> None:
+        self.strict_execution_errors = strict_execution_errors
+        self.model_attempt_callback = None
+        self.completion_route_callback = None
         self.model_id = model_id
         self.context_window = context_window
         self.max_output_tokens = max_output_tokens
@@ -372,13 +381,19 @@ class ProofFormalizationAgent:
         min_excerpt_length: int,
         source_excerpt: str,
         **prompt_kwargs,
-    ) -> tuple[str, str, int, int]:
+    ) -> tuple[str, str, int, int, tuple[ProofAttemptFeedback, ...], Callable]:
+        def build_with_attempts(entries):
+            return prompt_builder(
+                source_excerpt=source_excerpt,
+                **{**prompt_kwargs, "prior_attempts": list(entries)},
+            )
+
         prompt = prompt_builder(source_excerpt=source_excerpt, **prompt_kwargs)
         prompt_tokens = count_tokens(prompt)
         try:
             max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
         except ValueError:
-            return prompt, source_excerpt, 0, prompt_tokens
+            return prompt, source_excerpt, 0, prompt_tokens, tuple(prompt_kwargs.get("prior_attempts") or ()), build_with_attempts
         # Full source content is mandatory proof context. Only the focused
         # excerpt may be reduced to fit the prompt.
         while prompt_tokens > max_input_tokens and len(source_excerpt) > min_excerpt_length:
@@ -393,7 +408,43 @@ class ProofFormalizationAgent:
             prompt_kwargs["retrieved_proofs_context"] = _PROOF_SEARCH_CONTEXT_OMITTED
             prompt = prompt_builder(source_excerpt=source_excerpt, **prompt_kwargs)
             prompt_tokens = count_tokens(prompt)
-        return prompt, source_excerpt, max_input_tokens, prompt_tokens
+        prior_attempts = tuple(prompt_kwargs.get("prior_attempts") or ())
+        if prior_attempts:
+            fit = fit_prompt_with_feedback(
+                prior_attempts,
+                build_prompt=build_with_attempts,
+                available_tokens=max_input_tokens,
+            )
+            prompt = fit.prompt
+            prompt_tokens = fit.prompt_tokens
+            prior_attempts = fit.retained_entries
+        return prompt, source_excerpt, max_input_tokens, prompt_tokens, prior_attempts, build_with_attempts
+
+    async def _generate_with_feedback_retries(
+        self, *, prompt, retained_attempts, build_prompt, max_input_tokens, **completion_kwargs
+    ):
+        """Retry provider context rejection without restoring locally omitted context."""
+        while True:
+            try:
+                response = await api_client_manager.generate_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    **completion_kwargs,
+                )
+                if self.completion_route_callback:
+                    await self.completion_route_callback(api_client_manager.extract_call_metadata(response))
+                return response
+            except ProviderContextLengthError:
+                if len(retained_attempts) <= 1:
+                    raise
+                fit = fit_prompt_with_feedback(
+                    retained_attempts[1:],
+                    build_prompt=build_prompt,
+                    available_tokens=max_input_tokens,
+                )
+                if not fit.fits:
+                    raise
+                prompt = fit.prompt
+                retained_attempts = fit.retained_entries
 
     async def _record_syntheticlib4_context_exposure(
         self,
@@ -481,7 +532,7 @@ class ProofFormalizationAgent:
             if recovering_from_truncation
             else build_proof_formalization_prompt
         )
-        prompt, source_excerpt, max_input_tokens, prompt_tokens = self._fit_prompt_to_context(
+        prompt, source_excerpt, max_input_tokens, prompt_tokens, retained_attempts, rebuild_prompt = self._fit_prompt_to_context(
             prompt_builder,
             min_excerpt_length=1500,
             user_prompt=user_research_prompt,
@@ -525,14 +576,19 @@ class ProofFormalizationAgent:
         task_id = self.get_current_task_id()
         self.task_sequence += 1
 
+        if self.model_attempt_callback:
+            await self.model_attempt_callback(attempt_number, "full_script")
         response_was_truncated = False
         lean_was_invoked = False
         try:
-            response = await api_client_manager.generate_completion(
+            response = await self._generate_with_feedback_retries(
+                prompt=prompt,
+                retained_attempts=retained_attempts,
+                build_prompt=rebuild_prompt,
+                max_input_tokens=max_input_tokens,
                 task_id=task_id,
                 role_id=self.role_id,
                 model=self.model_id,
-                messages=[{"role": "user", "content": prompt}],
                 max_tokens=self.max_output_tokens,
                 temperature=0.0,
                 _moto_disable_supercharge=recovering_from_truncation,
@@ -560,10 +616,11 @@ class ProofFormalizationAgent:
                 data = {}
 
             theorem_name = str(data.get("theorem_name", "")).strip()
-            lean_code = str(data.get("lean_code", "")).strip()
+            lean_code = data.get("lean_code")
             reasoning = str(data.get("reasoning", "")).strip()
-            if not lean_code:
-                raise ValueError("Formalization model did not return Lean 4 code.")
+            if not isinstance(lean_code, str) or not lean_code.strip():
+                raise _FormalizationContractError("Formalization model did not return Lean 4 code.")
+            lean_code = lean_code.strip()
 
             lean_was_invoked = True
             lean_result = await get_lean4_client().check_proof(
@@ -661,6 +718,8 @@ class ProofFormalizationAgent:
                     message=format_transient_provider_error(exc),
                 ) from exc
             is_parse_error = _is_json_parse_error(exc)
+            if self.strict_execution_errors and not is_parse_error:
+                raise
             feedback = ProofAttemptFeedback(
                 attempt=attempt_number,
                 theorem_id=theorem_candidate.theorem_id,
@@ -852,7 +911,7 @@ class ProofFormalizationAgent:
                 if recovering_from_truncation
                 else build_proof_tactic_script_prompt
             )
-            prompt, source_excerpt, max_input_tokens, prompt_tokens = self._fit_prompt_to_context(
+            prompt, source_excerpt, max_input_tokens, prompt_tokens, retained_attempts, rebuild_prompt = self._fit_prompt_to_context(
                 prompt_builder,
                 min_excerpt_length=1500,
                 user_prompt=user_research_prompt,
@@ -899,14 +958,19 @@ class ProofFormalizationAgent:
             task_id = self.get_current_task_id()
             self.task_sequence += 1
 
+            if self.model_attempt_callback:
+                await self.model_attempt_callback(attempt_number, "tactic_script")
             response_was_truncated = False
             lean_was_invoked = False
             try:
-                response = await api_client_manager.generate_completion(
+                response = await self._generate_with_feedback_retries(
+                    prompt=prompt,
+                    retained_attempts=retained_attempts,
+                    build_prompt=rebuild_prompt,
+                    max_input_tokens=max_input_tokens,
                     task_id=task_id,
                     role_id=self.role_id,
                     model=self.model_id,
-                    messages=[{"role": "user", "content": prompt}],
                     max_tokens=self.max_output_tokens,
                     temperature=0.0,
                     _moto_disable_supercharge=recovering_from_truncation,
@@ -1115,6 +1179,8 @@ class ProofFormalizationAgent:
                         message=format_transient_provider_error(exc),
                     ) from exc
                 is_parse_error = _is_json_parse_error(exc)
+                if self.strict_execution_errors and not is_parse_error:
+                    raise
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,
                     theorem_id=theorem_candidate.theorem_id,

@@ -2,8 +2,12 @@
 Autonomous Research API Routes - REST endpoints for autonomous research mode.
 Includes Tier 1 (Brainstorm), Tier 2 (Paper Writing), and Tier 3 (Final Answer) endpoints.
 """
+import asyncio
 import logging
 import hashlib
+import shutil
+import tempfile
+from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any, Dict, List
@@ -14,6 +18,9 @@ from backend.shared.models import (
     AutonomousResearchStatusResponse,
     AutonomousTerminalEvent,
     CritiqueRequest,
+    PaperPruneBatchRequest,
+    PaperPruneBatchResponse,
+    PaperPruneBatchResult,
 )
 from backend.shared.path_safety import (
     resolve_path_within_root,
@@ -25,6 +32,7 @@ from backend.autonomous.memory.brainstorm_memory import brainstorm_memory, Brain
 from backend.autonomous.memory.paper_library import paper_library, PaperLibrary
 from backend.autonomous.memory.final_answer_memory import final_answer_memory, FinalAnswerMemory
 from backend.autonomous.memory.session_manager import session_manager
+from backend.autonomous.memory.session_write_authority import autonomous_session_write
 from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
 from backend.aggregator.core.coordinator import coordinator
 from backend.aggregator.memory.shared_training import shared_training_memory
@@ -423,6 +431,7 @@ def _build_scoped_paper_library(paths: Dict[str, Path]) -> PaperLibrary:
     scoped_library = PaperLibrary()
     scoped_library._base_dir = paths["papers_dir"]
     scoped_library._archive_dir = paths["papers_dir"] / "archive"
+    scoped_library._pruned_dir = paths["papers_dir"] / "pruned"
     return scoped_library
 
 
@@ -656,6 +665,7 @@ async def _delete_autonomous_paper_from_scope(
     scoped_brainstorm_memory: BrainstormMemory,
     scoped_research_metadata: ResearchMetadata,
     paper_id: str,
+    remove_from_rag: bool = True,
 ) -> Dict[str, Any]:
     """Soft-prune a Stage 2 paper and remove it from future model context."""
     state = autonomous_coordinator.get_state()
@@ -706,15 +716,16 @@ async def _delete_autonomous_paper_from_scope(
                 redact_log_text(e, 240),
             )
 
-    try:
-        from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
-        await autonomous_rag_manager.remove_paper_from_rag(paper_id)
-    except Exception as e:
-        logger.warning(
-            "Failed to remove pruned paper %s from RAG: %s",
-            redact_log_text(paper_id, 120),
-            redact_log_text(e, 240),
-        )
+    if remove_from_rag:
+        try:
+            from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
+            await autonomous_rag_manager.remove_paper_from_rag(paper_id)
+        except Exception as e:
+            logger.warning(
+                "Failed to remove pruned paper %s from RAG: %s",
+                redact_log_text(paper_id, 120),
+                redact_log_text(e, 240),
+            )
 
     logger.info(
         "Pruned paper %s from session %s (from brainstorms: %s)",
@@ -731,6 +742,283 @@ async def _delete_autonomous_paper_from_scope(
         "source_brainstorms": source_brainstorms,
         "pruned": True,
     }
+
+
+def _copy_path_for_paper_batch(source: Path, destination: Path) -> None:
+    """Copy one mutable paper-batch path into or out of a rollback snapshot."""
+    if source.is_dir():
+        shutil.copytree(source, destination)
+    elif source.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
+def _restore_path_for_paper_batch(snapshot: Path, destination: Path) -> None:
+    """Restore one path exactly, including its prior absence."""
+    if destination.is_dir():
+        shutil.rmtree(destination)
+    elif destination.exists():
+        destination.unlink()
+    if snapshot.is_dir():
+        shutil.copytree(snapshot, destination)
+    elif snapshot.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(snapshot, destination)
+
+
+def _paper_batch_mutation_paths(
+    paths: Dict[str, Path],
+    library: PaperLibrary,
+    brainstorms: BrainstormMemory,
+    targets: List[tuple[str, List[str]]],
+) -> List[Path]:
+    """Return only paths the selected paper transaction can mutate."""
+    selected: set[Path] = {paths["metadata_path"], paths["stats_path"]}
+    for paper_id, topic_ids in targets:
+        selected.update(
+            {
+                library._get_paper_path(paper_id),
+                library._get_abstract_path(paper_id),
+                library._get_outline_path(paper_id),
+                library._get_source_brainstorm_path(paper_id),
+                library._get_rejections_path(paper_id),
+                library._get_metadata_path(paper_id),
+                library._get_pruned_paper_path(paper_id),
+                library._get_pruned_abstract_path(paper_id),
+                library._get_pruned_outline_path(paper_id),
+                library._get_pruned_source_brainstorm_path(paper_id),
+                library._get_pruned_rejections_path(paper_id),
+                library._get_pruned_metadata_path(paper_id),
+            }
+        )
+        selected.update(brainstorms._get_metadata_path(topic_id) for topic_id in topic_ids)
+    return sorted(selected, key=lambda item: str(item).casefold())
+
+
+async def _finish_transaction_task(
+    task: asyncio.Task,
+    *,
+    propagate_cancellation: bool = True,
+) -> Any:
+    """Finish rollback/cleanup even if the request receives repeated cancellation."""
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            if cancelled and propagate_cancellation:
+                raise asyncio.CancelledError
+            return result
+        except asyncio.CancelledError:
+            cancelled = True
+            if task.done():
+                result = task.result()
+                if propagate_cancellation:
+                    raise
+                return result
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+
+
+async def _restore_paper_batch(
+    entries: List[tuple[Path, Path, bool]],
+) -> None:
+    for snapshot, destination, existed in reversed(entries):
+        if existed:
+            await asyncio.to_thread(
+                _restore_path_for_paper_batch,
+                snapshot,
+                destination,
+            )
+        elif destination.is_dir():
+            await asyncio.to_thread(shutil.rmtree, destination)
+        elif destination.exists():
+            await asyncio.to_thread(destination.unlink)
+
+
+async def _publish_paper_batch_commit(
+    *,
+    committed: List[tuple[str, str]],
+    active_session_id: str,
+    rag_generation: int,
+    scoped: Dict[str, tuple[Any, ...]],
+) -> None:
+    """Finish cache and RAG publication after the durable paper commit."""
+    from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
+
+    for session_id, paper_id in committed:
+        if (
+            session_id == active_session_id
+            and _get_active_autonomous_session_id() == active_session_id
+        ):
+            await autonomous_rag_manager.remove_paper_from_rag(
+                paper_id,
+                expected_generation=rag_generation,
+            )
+    if (
+        active_session_id in scoped
+        and _get_active_autonomous_session_id() == active_session_id
+    ):
+        research_metadata._data = None
+        research_metadata._stats = None
+        await research_metadata.initialize()
+
+
+@router.post(
+    "/papers/prune-batch",
+    response_model=PaperPruneBatchResponse,
+)
+async def prune_papers_batch(request: PaperPruneBatchRequest):
+    """Atomically prune selected session-qualified Stage 2 papers."""
+    normalized_targets = []
+    seen = set()
+    for target in request.targets:
+        try:
+            session_id = (
+                "legacy"
+                if target.session_id == "legacy"
+                else validate_single_path_component(target.session_id, "session ID")
+            )
+            paper_id = validate_single_path_component(target.paper_id, "paper ID")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        identity = (session_id, paper_id)
+        if identity in seen:
+            raise HTTPException(status_code=409, detail="Duplicate paper target in batch.")
+        seen.add(identity)
+        normalized_targets.append(identity)
+
+    session_paths = {
+        session_id: _resolve_history_session_paths(session_id)
+        for session_id, _ in normalized_targets
+    }
+    async with AsyncExitStack() as stack:
+        for session_id in sorted(session_paths):
+            await stack.enter_async_context(
+                autonomous_session_write(session_paths[session_id]["papers_dir"])
+            )
+        scoped = {}
+        state = autonomous_coordinator.get_state()
+        active_session_id = _get_active_autonomous_session_id()
+        from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
+        rag_generation = autonomous_rag_manager.lifecycle_snapshot()
+        session_targets: Dict[str, List[tuple[str, List[str]]]] = {}
+        for session_id, paper_id in normalized_targets:
+            if session_id not in scoped:
+                paths = session_paths[session_id]
+                scoped[session_id] = (
+                    paths,
+                    _build_scoped_paper_library(paths),
+                    _build_scoped_brainstorm_memory(paths),
+                    await _build_scoped_research_metadata(paths),
+                )
+            _, library, _, _ = scoped[session_id]
+            metadata = await library.get_metadata(paper_id)
+            if metadata is None or metadata.status != "complete":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Paper is no longer eligible for pruning: {session_id}/{paper_id}",
+                )
+            if (
+                state.is_running
+                and state.current_tier == "tier2_paper_writing"
+                and autonomous_coordinator._current_paper_id == paper_id
+                and active_session_id == session_id
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="The active paper cannot be pruned while it is being compiled.",
+                )
+            session_targets.setdefault(session_id, []).append(
+                (paper_id, list(metadata.source_brainstorm_ids or []))
+            )
+
+        rollback_root = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="moto-paper-prune-"))
+        committed = []
+        try:
+            snapshot_entries = []
+            for index, session_id in enumerate(sorted(scoped)):
+                paths, library, brainstorms, _ = scoped[session_id]
+                mutation_paths = _paper_batch_mutation_paths(
+                    paths,
+                    library,
+                    brainstorms,
+                    session_targets[session_id],
+                )
+                for path_index, source in enumerate(mutation_paths):
+                    snapshot = rollback_root / str(index) / str(path_index)
+                    existed = source.exists()
+                    if existed:
+                        await asyncio.to_thread(_copy_path_for_paper_batch, source, snapshot)
+                    snapshot_entries.append((snapshot, source, existed))
+
+            try:
+                for session_id, paper_id in normalized_targets:
+                    _, library, brainstorms, metadata = scoped[session_id]
+                    await _delete_autonomous_paper_from_scope(
+                        session_id=session_id,
+                        scoped_paper_library=library,
+                        scoped_brainstorm_memory=brainstorms,
+                        scoped_research_metadata=metadata,
+                        paper_id=paper_id,
+                        remove_from_rag=False,
+                    )
+                    committed.append((session_id, paper_id))
+            except BaseException as exc:
+                rollback_task = asyncio.create_task(
+                    _restore_paper_batch(snapshot_entries),
+                    name="paper-prune-batch-rollback",
+                )
+                await _finish_transaction_task(rollback_task)
+                for _, _, _, metadata in scoped.values():
+                    metadata._data = None
+                    metadata._stats = None
+                if isinstance(exc, HTTPException):
+                    raise
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise HTTPException(
+                    status_code=500,
+                    detail="Paper batch pruning failed; no selected papers were changed.",
+                ) from exc
+        finally:
+            cleanup_task = asyncio.create_task(
+                asyncio.to_thread(shutil.rmtree, rollback_root, True),
+                name="paper-prune-batch-snapshot-cleanup",
+            )
+            await _finish_transaction_task(
+                cleanup_task,
+                propagate_cancellation=not bool(committed),
+            )
+
+        # Complete process-current publication before cancellation may escape.
+        try:
+            publication_task = asyncio.create_task(
+                _publish_paper_batch_commit(
+                    committed=committed,
+                    active_session_id=active_session_id,
+                    rag_generation=rag_generation,
+                    scoped=scoped,
+                ),
+                name="paper-prune-batch-publication",
+            )
+            await _finish_transaction_task(
+                publication_task,
+                propagate_cancellation=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Post-commit paper batch RAG cleanup failed: %s",
+                redact_log_text(exc, 240),
+            )
+
+        return PaperPruneBatchResponse(
+            pruned_count=len(committed),
+            results=[
+                PaperPruneBatchResult(session_id=session_id, paper_id=paper_id)
+                for session_id, paper_id in committed
+            ],
+        )
 
 
 @router.post("/start")
@@ -750,6 +1038,10 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
                     status_code=400,
                     detail="At least one allowed output must be enabled.",
                 )
+            if system_config.generic_mode and request.proof_competition.enabled:
+                if any(route.provider != "openrouter" or route.lm_studio_fallback_id
+                       for route in request.proof_competition.secondaries):
+                    raise HTTPException(status_code=400, detail="Hosted proof competitors must use OpenRouter without LM Studio fallback.")
             effective_allow_mathematical_proofs = bool(
                 request.allow_mathematical_proofs and not system_config.generic_mode
             )
@@ -857,6 +1149,7 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
                 tier3_enabled=request.tier3_enabled,
                 creativity_emphasis_boost_enabled=request.creativity_emphasis_boost_enabled,
                 allow_mathematical_proofs=effective_allow_mathematical_proofs,
+                proof_competition=request.proof_competition,
                 allow_research_papers=request.allow_research_papers,
                 validator_supercharge_enabled=request.validator_supercharge_enabled,
                 writer_supercharge_enabled=request.writer_supercharge_enabled,
@@ -1115,7 +1408,15 @@ async def get_autonomous_status(response: Response):
             if paper_meta:
                 current_paper = {
                     "paper_id": paper_meta.paper_id,
-                    "title": paper_meta.title
+                    "title": paper_meta.title,
+                    "word_count": paper_meta.total_word_count,
+                    "proof_count": paper_meta.proof_count,
+                    "paper_word_count": paper_meta.paper_word_count,
+                    "proof_word_count": paper_meta.proof_word_count,
+                    "total_word_count": paper_meta.total_word_count,
+                    "paper_character_count": paper_meta.paper_character_count,
+                    "proof_character_count": paper_meta.proof_character_count,
+                    "total_character_count": paper_meta.total_character_count,
                 }
         
         # Get Tier 3 final answer info if available
@@ -1218,6 +1519,13 @@ async def get_all_papers():
                 "title": p.title,
                 "abstract": p.abstract,
                 "word_count": p.word_count,
+                "proof_count": p.proof_count,
+                "paper_word_count": p.paper_word_count,
+                "proof_word_count": p.proof_word_count,
+                "total_word_count": p.total_word_count,
+                "paper_character_count": p.paper_character_count,
+                "proof_character_count": p.proof_character_count,
+                "total_character_count": p.total_character_count,
                 "source_brainstorm_ids": p.source_brainstorm_ids,
                 "referenced_papers": p.referenced_papers,
                 "status": p.status,
@@ -1288,19 +1596,30 @@ async def get_paper(paper_id: str):
         
         content = await paper_library.get_paper_content(paper_id)
         outline = await paper_library.get_outline(paper_id)
+        from backend.shared.paper_proofs import analyze_paper_content
+        analysis = analyze_paper_content(content)
         
         return {
             "paper_id": metadata.paper_id,
             "title": metadata.title,
             "abstract": metadata.abstract,
             "word_count": metadata.word_count,
+            "proof_count": metadata.proof_count,
+            "paper_word_count": metadata.paper_word_count,
+            "proof_word_count": metadata.proof_word_count,
+            "total_word_count": metadata.total_word_count,
+            "paper_character_count": metadata.paper_character_count,
+            "proof_character_count": metadata.proof_character_count,
+            "total_character_count": metadata.total_character_count,
             "source_brainstorm_ids": metadata.source_brainstorm_ids,
             "referenced_papers": metadata.referenced_papers,
             "status": metadata.status,
             "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
             "model_usage": metadata.model_usage,
             "content": content,
-            "outline": outline
+            "outline": outline,
+            "paper_content": analysis["paper_content"],
+            "proofs": analysis["proofs"],
         }
         
     except HTTPException:
@@ -1455,6 +1774,13 @@ async def get_current_paper_progress():
                 "title": None,
                 "content": "",
                 "word_count": 0,
+                "proof_count": 0,
+                "paper_word_count": 0,
+                "proof_word_count": 0,
+                "total_word_count": 0,
+                "paper_character_count": 0,
+                "proof_character_count": 0,
+                "total_character_count": 0,
                 "tier": None
             }
         
@@ -1463,8 +1789,14 @@ async def get_current_paper_progress():
         from backend.compiler.memory.outline_memory import outline_memory
         
         content = await compiler_paper_memory.get_paper()
-        word_count = await compiler_paper_memory.get_word_count()
         outline = await outline_memory.get_outline()
+        from backend.shared.paper_proofs import analyze_paper_content
+        analysis = analyze_paper_content(content)
+        metrics = {
+            key: value
+            for key, value in analysis.items()
+            if key not in {"paper_content", "proofs"}
+        }
         
         # Build response based on tier
         if is_tier2:
@@ -1477,8 +1809,11 @@ async def get_current_paper_progress():
                 "paper_id": current_paper_id,
                 "title": title,
                 "content": content,
+                "paper_content": analysis["paper_content"],
+                "proofs": analysis["proofs"],
                 "outline": outline,
-                "word_count": word_count,
+                "word_count": metrics["total_word_count"],
+                **metrics,
                 "tier": "tier2"
             }
         else:
@@ -1512,8 +1847,11 @@ async def get_current_paper_progress():
                 "paper_id": f"tier3_chapter_{tier3_state.current_writing_chapter}" if tier3_state.current_writing_chapter else "tier3",
                 "title": title,
                 "content": content,
+                "paper_content": analysis["paper_content"],
+                "proofs": analysis["proofs"],
                 "outline": outline,
-                "word_count": word_count,
+                "word_count": metrics["total_word_count"],
+                **metrics,
                 "tier": "tier3",
                 "tier3_format": tier3_state.answer_format,
                 "tier3_status": tier3_state.status,
@@ -2143,6 +2481,7 @@ async def get_final_answer():
     Returns either the short form paper or the assembled volume.
     """
     try:
+        from backend.shared.paper_proofs import analyze_paper_content, paper_metric_fields
         # Ensure final answer memory is initialized (loads state from disk)
         await final_answer_memory.initialize()
         state = final_answer_memory.get_state()
@@ -2160,6 +2499,8 @@ async def get_final_answer():
             if state.short_form_paper_id:
                 content = await paper_library.get_paper_content(state.short_form_paper_id)
                 metadata = await paper_library.get_metadata(state.short_form_paper_id)
+                metrics = paper_metric_fields(content)
+                analysis = analyze_paper_content(content)
                 
                 return {
                     "has_final_answer": True,
@@ -2167,7 +2508,10 @@ async def get_final_answer():
                     "paper_id": state.short_form_paper_id,
                     "title": metadata.title if metadata else "Final Answer",
                     "content": content,
-                    "word_count": len(content.split()) if content else 0,
+                    "paper_content": analysis["paper_content"],
+                    "proofs": analysis["proofs"],
+                    "word_count": metrics["total_word_count"],
+                    **metrics,
                     "status": state.status
                 }
             else:
@@ -2184,12 +2528,17 @@ async def get_final_answer():
             volume_org = state.volume_organization
             
             if volume_content:
+                metrics = paper_metric_fields(volume_content)
+                analysis = analyze_paper_content(volume_content)
                 return {
                     "has_final_answer": True,
                     "format": "long_form",
                     "title": volume_org.volume_title if volume_org else "Research Volume",
                     "content": volume_content,
-                    "word_count": len(volume_content.split()),
+                    "paper_content": analysis["paper_content"],
+                    "proofs": analysis["proofs"],
+                    "word_count": metrics["total_word_count"],
+                    **metrics,
                     "chapters": [
                         {
                             "order": ch.order,
@@ -2228,6 +2577,7 @@ async def get_volume_progress():
     Returns detailed status of each chapter.
     """
     try:
+        from backend.shared.paper_proofs import analyze_paper_content
         state = final_answer_memory.get_state()
         
         if state.answer_format != "long_form" or not state.volume_organization:
@@ -2241,6 +2591,7 @@ async def get_volume_progress():
         # Get chapter contents
         chapters_data = []
         for ch in sorted(vol.chapters, key=lambda x: x.order):
+            content = ""
             chapter_data = {
                 "order": ch.order,
                 "title": ch.title,
@@ -2258,6 +2609,12 @@ async def get_volume_progress():
             elif ch.status == "complete":
                 content = await final_answer_memory.get_chapter_paper(ch.order)
                 chapter_data["content_preview"] = content[:500] + "..." if content and len(content) > 500 else content or ""
+            analysis = analyze_paper_content(content or "")
+            chapter_data.update({
+                key: value
+                for key, value in analysis.items()
+                if key != "paper_content"
+            })
             
             chapters_data.append(chapter_data)
         

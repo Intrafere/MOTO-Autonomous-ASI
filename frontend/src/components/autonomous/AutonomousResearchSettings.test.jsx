@@ -1,6 +1,7 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import AutonomousResearchSettings from './AutonomousResearchSettings';
+import { persistAutonomousSettings } from '../../utils/autonomousProfiles';
 import { api, autonomousAPI, cloudAccessAPI, openRouterAPI } from '../../services/api';
 
 vi.mock('../../services/api', () => ({
@@ -77,6 +78,17 @@ function renderSettings({
     />
   );
 }
+
+test.each([false, true])('Codex effort covers all Autonomous roles with running=%s', async isRunning => {
+  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: true } });
+  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [{ id: 'codex', supported_reasoning_levels: ['medium', 'max'] }] });
+  const config = { ...baseConfig, submitter_configs: [{ ...baseConfig.submitter_configs[0], provider: 'openai_codex_oauth', modelId: 'codex', openrouterReasoningEffort: 'max' }] };
+  for (const prefix of ['validator', 'assistant', 'writer', 'high_param']) Object.assign(config, { [`${prefix}_provider`]: 'openai_codex_oauth', [`${prefix}_model`]: 'codex', [`${prefix}_openrouter_reasoning_effort`]: 'max' });
+  renderSettings({ config, isRunning });
+  await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' })).toHaveLength(5));
+  expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.value === 'max')).toBe(true);
+  await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.disabled === isRunning)).toBe(true));
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -162,6 +174,61 @@ test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', asy
   expect(cloudAccessAPI.getXAIGrokStatus).not.toHaveBeenCalled();
   expect(cloudAccessAPI.getOpenAICodexModels).not.toHaveBeenCalled();
   expect(cloudAccessAPI.getXAIGrokModels).not.toHaveBeenCalled();
+});
+
+test('does not invent extra submitters or LM Studio providers for incomplete saved roles', async () => {
+  persistAutonomousSettings({
+    numSubmitters: 1,
+    selectedProfile: '',
+    submitterConfigs: [
+      {
+        submitterId: 1,
+        modelId: 'openrouter/submitter',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+      },
+    ],
+    localConfig: {
+      validator_provider: 'openrouter',
+      validator_model: 'openrouter/validator',
+      validator_context_window: 7777,
+      validator_max_tokens: 777,
+      assistant_provider: 'openrouter',
+      assistant_model: 'openrouter/assistant',
+      assistant_context_window: 9999,
+      assistant_max_tokens: 999,
+      writer_provider: 'openrouter',
+      writer_model: 'openrouter/writer',
+      writer_context_window: 8192,
+      writer_max_tokens: 1024,
+      high_param_provider: 'openrouter',
+      high_param_model: 'openrouter/rigor',
+      high_param_context_window: 8192,
+      high_param_max_tokens: 1024,
+    },
+  });
+  const incompleteConfig = {
+    ...baseConfig,
+    num_submitters: 1,
+    submitter_configs: [
+      {
+        submitterId: 1,
+        modelId: 'openrouter/submitter',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+      },
+    ],
+  };
+
+  renderSettings({ config: incompleteConfig });
+
+  await waitFor(() => {
+    const countLabel = screen.getByText('Number of Submitters');
+    expect(countLabel.parentElement.querySelector('input').value).toBe('1');
+  });
+  expect(screen.queryByText(/Submitter 2/i)).not.toBeInTheDocument();
+  const lmStudioButtons = screen.getAllByRole('button', { name: 'LM Studio' });
+  expect(lmStudioButtons[0].className).not.toContain('active-lm');
 });
 
 test('applies a recommended profile even when OpenRouter model list is empty', async () => {

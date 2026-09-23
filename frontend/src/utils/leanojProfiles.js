@@ -157,7 +157,7 @@ function normalizeRoleConfig(config = {}) {
     ...DEFAULT_ROLE_CONFIG,
     ...config,
     openrouterProvider: config.openrouterProvider || null,
-    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort),
+    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort, config.provider),
     lmStudioFallbackId: config.lmStudioFallbackId || null,
   };
 }
@@ -230,7 +230,7 @@ const roleToApi = (config = {}, label = 'Role') => ({
   provider: config.provider || 'lm_studio',
   model_id: config.modelId || '',
   openrouter_provider: config.openRouterProvider || config.openrouterProvider || null,
-  openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort),
+  openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort, config.provider),
   lm_studio_fallback_id: config.lmStudioFallbackId || null,
   context_window: positiveRoleSetting(config.contextWindow, `${label} context window`),
   max_output_tokens: positiveRoleSetting(config.maxOutputTokens, `${label} max output tokens`),

@@ -1,0 +1,51 @@
+.moto-version-button {
+  border: 1px solid rgba(158, 169, 255, 0.4);
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: rgba(25, 31, 56, 0.85);
+  color: #e3e8ff;
+  font: inherit;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.moto-version-button:hover { background: #303c68; }
+.moto-version-button:focus-visible,
+.whats-new-modal :is(button, a):focus-visible { outline: 3px solid #9bb5ff; outline-offset: 4px; }
+.whats-new-overlay { z-index: 1000000; padding: 20px; }
+.inline-modal-content.whats-new-modal {
+  width: min(1408px, 96vw, 100%);
+  min-width: 0;
+  max-height: 88vh;
+  overflow-y: auto;
+  color: rgba(244, 245, 255, 0.9);
+  background: radial-gradient(circle at top, rgba(30, 255, 28, 0.08), transparent 34%), #1a1a2e;
+  border: 1px solid rgba(30, 255, 28, 0.12);
+  border-radius: 16px;
+  padding: 2.35rem 2.6rem;
+}
+.whats-new-header {
+  position: relative;
+  text-align: center;
+  margin-bottom: 1.25rem;
+  padding: 0.65rem 2.5rem 1rem;
+  border-bottom: 1px solid rgba(30, 255, 28, 0.18);
+}
+.whats-new-eyebrow { color: #1eff1c; font-size: 0.78rem; letter-spacing: 0.12em; font-weight: 800; }
+.whats-new-header h2 { color: #fff; font-size: clamp(1.3rem, 4vw, 2.05rem); font-weight: 800; letter-spacing: 0.055em; text-shadow: 0 0 18px rgba(30, 255, 28, 0.22); margin: 12px 0; line-height: 1.3; }
+.whats-new-header p { color: #d8d8f4; margin: 0.25rem 0 0; line-height: 1.68; font-size: 1rem; }
+.whats-new-close { position: absolute; top: 0; right: 0; }
+.whats-new-section { margin-bottom: 1.15rem; padding: 1.25rem 1.35rem; border-radius: 14px; background: rgba(255, 255, 255, 0.045); border: 1px solid rgba(255, 255, 255, 0.085); }
+.whats-new-section h3 { color: #fff; font-size: 1.13rem; font-weight: 800; letter-spacing: 0.015em; text-align: center; margin: 0 0 0.75rem; }
+.whats-new-section ul { padding-left: 20px; margin: 0; }
+.whats-new-section li { padding-left: 4px; margin-top: 10px; line-height: 1.68; font-size: 1.02rem; }
+.whats-new-section li strong { color: #fff; font-weight: 800; }
+.whats-new-footer { padding-top: 0.5rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+.whats-new-footer a { color: #f4f5ff; background: rgba(255, 255, 255, 0.075); border: 1px solid rgba(255, 255, 255, 0.18); padding: 0.58rem 1.05rem; border-radius: 999px; font-weight: 800; text-decoration: none; box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22); }
+.whats-new-done { background: rgba(30, 255, 28, 0.08); color: #1eff1c; font: inherit; font-weight: 800; border: 1px solid rgba(30, 255, 28, 0.38); border-radius: 999px; padding: 0.58rem 1.5rem; cursor: pointer; }
+.whats-new-footer p { flex-basis: 100%; margin: 0; color: #d8d8f4; font-size: 0.8rem; line-height: 1.5; text-align: center; }
+@media (max-width: 520px) {
+  .whats-new-overlay { padding: 10px; }
+  .inline-modal-content.whats-new-modal { padding: 1.25rem; }
+  .whats-new-header { padding: 2.5rem 0 1rem; }
+}

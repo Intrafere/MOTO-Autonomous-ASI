@@ -5,6 +5,7 @@ Outline prompts for rigorous solution-document structure generation.
 from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 
 
+
 OUTLINE_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES FOR OUTLINES:
 - Match each claim to its appropriate verification standard. Mathematical claims require sound derivation, proof, or explicit assumptions; engineering/software proposals require mechanisms, constraints, failure modes, feasibility reasoning, and verification plans; strategic or causal claims require valid inference, explicit assumptions, and realistic limitations.
 - Do NOT turn unsupported benchmark-style claims into committed outline sections.
@@ -482,7 +483,9 @@ Example (Outline Update - Adding new section before Conclusion):
 
 async def build_outline_create_prompt(
     user_prompt: str,
-    rag_evidence: str
+    rag_evidence: str,
+    rejection_history: str = "",
+    creation_feedback: str = "",
 ) -> str:
     """
     Build complete prompt for outline creation.
@@ -501,8 +504,6 @@ async def build_outline_create_prompt(
         "\n---\n"
     ]
     
-    # Add rejection history (DIRECT INJECTION - almost always fits)
-    rejection_history = await compiler_rejection_log.get_rejections_text()
     if rejection_history:
         parts.append(f"""YOUR RECENT REJECTION HISTORY (Last 10 rejections):
 {rejection_history}
@@ -511,10 +512,6 @@ LEARN FROM THESE PAST MISTAKES.
 ---
 """)
     
-    # Add creation feedback (last 5 validator reviews)
-    # CRITICAL: This includes the last ACCEPTED outline so model can see its own work
-    from backend.compiler.memory.outline_memory import outline_memory
-    creation_feedback = await outline_memory.get_creation_feedback()
     if creation_feedback:
         parts.append(f"""YOUR OUTLINE CREATION FEEDBACK (Last 5 validator reviews):
 
@@ -541,7 +538,8 @@ async def build_outline_update_prompt(
     user_prompt: str,
     current_outline: str,
     current_paper: str,
-    rag_evidence: str = ""
+    rag_evidence: str = "",
+    rejection_history: str = "",
 ) -> str:
     """
     Build complete prompt for outline update.
@@ -562,8 +560,6 @@ async def build_outline_update_prompt(
         "\n---\n"
     ]
     
-    # Add rejection history (DIRECT INJECTION - almost always fits)
-    rejection_history = await compiler_rejection_log.get_rejections_text()
     if rejection_history:
         parts.append(f"""YOUR RECENT REJECTION HISTORY (Last 10 rejections):
 {rejection_history}

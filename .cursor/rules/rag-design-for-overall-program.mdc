@@ -14,6 +14,17 @@ Some inputs are **mandatory direct-inject** and must never be RAG'd, summarized,
 
 If an item is direct injected, its RAG counterpart must NOT also be included.
 
+Model-visible rolling rejection/execution feedback uses whole chronological entries:
+start with at most the newest five, remove the oldest one at a time while rebuilding
+and counting the complete prompt, and retain the newest entry as the minimum. Retained
+feedback stays direct and never enters RAG; if newest-only still overflows, use the
+mode's existing hard context-overflow path without mutating durable history.
+Provider-context retries preserve already-omitted optional context and re-count the
+complete rebuilt prompt; normal and compact full-script/tactic proof calls share this
+policy without consuming additional proof attempts. LeanOJ deduplicates overlapping
+attempt/event feedback only in prompt projections, preferring richer attempt records;
+durable packets, artifact history, and the full master proof remain unchanged.
+
 The active Progressive Solution Path is never RAG-indexed. Before five accepted brainstorm ideas it is absent; afterward, only the bounded Main Submitter 1-approved canonical revision is optional advisory direct context for relevant solving and semantic-validator calls. It may be shed before mandatory user/source/candidate/tool context when budget requires, and pending, rejected, stale, and historical revisions never enter model context. The path is not evidence and may always be ignored for a better route.
 
 ### Paper-Writing / Research Offload Order
@@ -22,12 +33,12 @@ These priorities apply to Aggregator, Compiler, and Autonomous paper-writing wor
 
 | Mode | Mandatory direct context | Optional direct-first blocks | RAG/offload order |
 |---|---|---|---|
-| Aggregator submitter | User prompt, role/schema instructions | Shared training DB, local submitter DB, rejection log, user uploads | Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files |
+| Aggregator submitter | User prompt, role/schema instructions, newest retained rejection-feedback suffix | Shared training DB, local submitter DB, user uploads | Shared Training DB → Local Submitter DB → User Upload Files |
 | Aggregator validator | User prompt, role/schema instructions, submission(s) under review | Shared training DB, user uploads | Shared Training DB → User Upload Files |
 | Aggregator cleanup review | User prompt, cleanup schema/instructions | Accepted-submissions DB if it fits with reserve | Accepted-submissions DB via normal RAG fallback; cleanup never skips solely because DB is large |
-| Compiler construction/review | User prompt, current outline | Current paper, autonomous brainstorm/source DB when injected by the caller, rejection/acceptance logs | Reference Papers → Brainstorm/Source DB → Current Paper → Rejection/Acceptance Logs |
-| Compiler outline update | User prompt, current outline | Current paper, rejection/acceptance logs | Current Paper → Rejection/Acceptance Logs |
-| Compiler rigor | User prompt, current outline, current paper, Lean candidate/attempt context | Existing verified-proof summaries and recent failed-proof hints | Shared Training DB / reference evidence → Rejection/Acceptance Logs → User Upload Files |
+| Compiler construction/review | User prompt, current outline, retained whole-entry rejection feedback | Current paper, autonomous brainstorm/source DB when injected by the caller, acceptance logs | Reference Papers → Brainstorm/Source DB → Current Paper → Acceptance Logs |
+| Compiler outline update | User prompt, current outline, retained whole-entry rejection feedback | Current paper, acceptance logs | Current Paper → Acceptance Logs |
+| Compiler rigor | User prompt, current outline, current paper, Lean candidate/attempt context, retained whole-entry rejection feedback | Existing verified-proof summaries and recent failed-proof hints | Shared Training DB / reference evidence → Acceptance Logs → User Upload Files |
 | Autonomous topic/title/metadata agents | User research prompt, compact metadata/candidate lists | Usually none; metadata is capped direct context | No RAG unless the specific browsing/expansion step calls for full-content fallback |
 | Autonomous brainstorm/paper context | User research prompt, topic/title/outline as applicable | Brainstorm DB when the compiler caller injects it, current paper | Reference and prior-brainstorm papers are indexed as high-priority RAG evidence; oversized direct source blocks fail or use the mode's explicit fallback |
 | Autonomous proof verification | User prompt, complete source content, proof candidate/formalization context | Verified proof summaries and failed-proof hints | Proof agents operate outside Chroma RAG; Lean source files are not indexed |

@@ -12,7 +12,7 @@ alwaysApply: false
 **Required implementation:**
 - `import DOMPurify from 'dompurify';` in LatexRenderer.jsx
 - `DOMPURIFY_CONFIG` constant defined (see below)
-- `renderedHtmlSmall` useMemo (single chunk) and per-chunk `renderedHtml` useMemo both call `DOMPurify.sanitize()` AFTER `renderLatexToHtml()`
+- All asynchronously converted chunks call `DOMPurify.sanitize()` on the main thread AFTER conversion, before screen insertion or PDF payload assembly
 - `dangerouslySetInnerHTML` receives ONLY sanitized HTML
 
 ### DOMPurify Configuration (REQUIRED)
@@ -47,11 +47,7 @@ const DOMPURIFY_CONFIG = {
 
 ### Sanitization Point (REQUIRED)
 
-DOMPurify sanitization occurs in two paths:
-- **Small documents** (single chunk): via `renderedHtmlSmall` useMemo in main component
-- **Chunked documents**: via per-chunk `renderedHtml` useMemo in each `RenderedChunk`
-
-Both paths call `DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG)` after `renderLatexToHtml()`.
+Both single- and multi-chunk screen rendering and PDF preparation sanitize converted HTML on the main thread before use. Worker output is untrusted; raw-source fallback is rendered as React text, never inserted as HTML.
 
 ---
 
@@ -59,13 +55,14 @@ Both paths call `DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG)` after `renderLat
 
 Dual rendering: **Rendered LaTeX View** (KaTeX math, dark theme on screen, white for PDFs) and **Raw Text View** (plain text, dark theme). All rendering flows through `LatexRenderer.jsx` (`frontend/src/components/LatexRenderer.jsx`). CSS in `LatexRenderer.css`. PDF generation via `downloadHelpers.js`.
 
-**Performance Architecture**: For large documents (>~10K words), content is split into chunks at section boundaries. Each chunk renders independently via `IntersectionObserver`-gated `RenderedChunk` components — only chunks visible in the viewport (plus 600px margin) are LaTeX-rendered. Paper views default to rendered mode, including documents >50K chars. Content updates in rendered mode are debounced (1.5s) to prevent rapid re-rendering.
+**Performance Architecture**: Paper views and the Autonomous brainstorm viewer default to rendered mode, including large documents; the brainstorm checkbox stays adjacent to its label. Math-aware chunks preserve complete source and protected constructs. A bounded cancellable dedicated worker handles conversion, with main-thread sanitization before publication. Viewport windowing and offscreen HTML eviction limit retained rendered content; live snapshots have bounded latency and document-identity fences. Oversized or failed atomic blocks expose complete raw source and explicit recovery rather than synchronous unbounded conversion. Responsiveness claims require measured browser tests, not character-count guarantees.
 
 ### Props API
 
 ```javascript
 <LatexRenderer
   content={string}       // Raw content to render
+  documentId={string}    // Stable document identity, separate from content revision
   className={string}     // Optional CSS class
   showToggle={boolean}   // Show Rendered/Raw toggle (default: true)
   defaultRaw={boolean}   // Start in raw mode (default: false)
@@ -85,17 +82,21 @@ The raw conversion inside `renderLatexToHtml()` may include targeted preprocessi
 4. **KaTeX rendering** via `renderKatexSafely()` — `maxExpand: 5000`, skips HTML placeholder content
 5. **Line breaks/horizontal rules** (`\\` → `<br/>`, `\hrule` → `<hr/>`) — AFTER KaTeX
 
-DOMPurify sanitization is intentionally outside `renderLatexToHtml()` and must run immediately after it at every HTML sink (`renderedHtmlSmall`, `RenderedChunk.renderedHtml`, and PDF helper rendering).
+DOMPurify sanitization remains outside the conversion function and mandatory before every screen HTML sink and PDF payload publication.
 
 **Critical:** `\\` line break conversion MUST be after KaTeX (valid syntax in `aligned`, `matrix`, etc.)
 
 ### Chunked Rendering Architecture
 
-**Chunking**: `splitIntoChunks()` splits content at section headers and double-newlines. Target chunk size ~3000 chars. Documents under target stay as single chunk (no overhead).
+**Chunking**: Split only outside protected math, environment, brace, and code boundaries; concatenated chunks must reproduce the original source. Macro-definition-bearing sources remain atomic to preserve ordered same-document definitions without cross-document worker leakage. Large atomic constructs require explicit safe handling, never blind character splitting.
 
-**Virtualization**: Each chunk is a memoized `RenderedChunk` component. An `IntersectionObserver` (600px root margin) triggers LaTeX rendering only when the chunk scrolls near the viewport. Off-screen chunks show a height-estimated placeholder div.
+**Virtualization**: Nearby chunks render on demand; measured-height placeholders preserve scroll geometry outside the viewport window. Live-paper toolbar checkboxes keep fixed unpadded native geometry across focus changes so mouse presses cannot move adjacent download targets. Focused/selected content is protected during interaction. Complete source remains available in raw view and exports; rendered browser search/selection and direct-print limitations must be visible.
 
-**Debouncing**: `useDebouncedValue` hook delays rendered-mode processing by 1.5s during rapid content updates (WebSocket + polling). Raw mode is unaffected (instant updates).
+**Live updates**: Bounded-latency snapshots avoid trailing-debounce starvation. Stable block identity is separate from content revision, and stale document/worker results cannot replace current content.
+
+**Viewer lifecycle requirements**: Background refreshes and unrelated parent renders must retain the mounted reader. Polling/live-event demand must not indefinitely invalidate successful in-flight reads. All content/outline publishers must be fenced to current document/session and clear/unmount ownership; exports must use matching content and identity. Enabled auto-follow must track asynchronous rendered layout changes; disabled auto-follow must preserve the reading position.
+
+**Audit status**: The brainstorm API-wrapper remount fix is implemented. Slow-request starvation in brainstorm/live Tier 2/Tier 3 readers, stale publication in PaperLibrary/manual LivePaper, and auto-follow timing remain identified implementation gaps—not completed guarantees. Verify fixes with delayed/out-of-order/clear regressions and real-browser scroll checks; mocked DOM retention alone does not establish scroll stability.
 
 **Large-document threshold**: Documents >50K chars (`LARGE_DOC_THRESHOLD`) use the same progressive chunk rendering while preserving the caller's selected/default view.
 
@@ -105,7 +106,7 @@ DOMPurify sanitization is intentionally outside `renderLatexToHtml()` and must r
 
 ## Download System (`frontend/src/utils/downloadHelpers.js`)
 
-**`downloadPDFViaBackend()`**: Frontend renders content to HTML using `renderLatexToHtml()` + `DOMPurify.sanitize()`, then POSTs the HTML body to `POST /api/download/pdf`. The backend (`backend/api/routes/download.py`) wraps it in a complete HTML document with KaTeX CSS (read from `frontend/node_modules/katex/dist/katex.min.css`) + LatexRenderer.css (both inlined — no CDN dependency), then uses **Playwright (headless Chromium)** to print to PDF via `asyncio.get_running_loop().run_in_executor` (non-blocking). Returns a `Response` with the PDF bytes. Frontend triggers browser download when response arrives. Button shows "Preparing PDF..." while request is in flight — UI stays fully interactive throughout.
+**`downloadPDFViaBackend()`**: Frontend asynchronously converts all source chunks through the shared worker and sanitizes each result with event-loop yields, then POSTs complete ordered HTML to `POST /api/download/pdf`. Limits or rendering failures produce explicit errors, never partial exports or synchronous whole-document fallbacks. Worker assets must resolve under the frontend base path and be permitted by CSP; hosted frontend policy and deployment verification belong to the Web Team. The backend (`backend/api/routes/download.py`) wraps it in a complete HTML document with KaTeX CSS (read from `frontend/node_modules/katex/dist/katex.min.css`) + LatexRenderer.css (both inlined — no CDN dependency), then uses **Playwright (headless Chromium)** to print to PDF via `asyncio.get_running_loop().run_in_executor` (non-blocking). Returns a `Response` with the PDF bytes. Frontend triggers browser download when response arrives. Button shows "Preparing PDF..." while work is in flight. Conversion is off-thread, but sanitization, DOM insertion, and request assembly still require measured responsiveness checks.
 
 **`downloadRawText()`**: Combine outline + content → Blob (UTF-8) → browser download.
 
@@ -135,7 +136,7 @@ DOMPurify sanitization is intentionally outside `renderLatexToHtml()` and must r
 ### PDF Download Usage
 
 ```javascript
-// Pass raw text content — backend handles rendering and PDF generation
+// Pass raw text — helper converts/sanitizes asynchronously; backend prints the HTML
 // disclaimerType ('paper'|'brainstorm'|null) auto-prepends disclaimer if content lacks one
 await downloadPDFViaBackend(rawContent, metadata, sanitizeFilename(title), outline, onStart, onComplete, onError, 'paper');
 ```
@@ -185,5 +186,5 @@ When a frontend storage prefix is active for multi-instance shared-origin use, t
 11. Chunks MUST split at safe boundaries (section headers, double-newlines) — never mid-math-environment
 12. IntersectionObserver root margin MUST be ≥600px — prevents visible pop-in
 13. Debounce delay applies ONLY to rendered mode — raw mode updates instantly
-14. Chunk `key` MUST include content hash (`simpleHash`) — prevents React reusing stale DOM on content change
+14. Chunk identity must remain separate from content revision; stable identities preserve measured heights, while cancellation/revision fences prevent stale HTML publication
 15. Disclaimer MUST appear on all brainstorm/paper display and download paths — injected at frontend layer only, never stored in backend files consumed by models

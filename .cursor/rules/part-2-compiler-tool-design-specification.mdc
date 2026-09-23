@@ -51,6 +51,11 @@ Before every `_pre_validate_exact_string_match()`, system calls `paper_memory.en
 
 **Export Behavior**: Raw text export available in both modes. PDF export (`POST /api/download/pdf`) is desktop-only — generic mode returns `501` before rendering because the hosted image does not install the Chromium browser runtime. Server-side PDF rendering must treat submitted HTML as untrusted: sanitize/allowlist content and block external network requests from Playwright.
 
+**Paper Display**: Paper viewers default to rendered content and present each embedded
+verified proof as an ordered, collapsed, accessible section titled from its theorem.
+Visible metrics show only paper-only, proof-only, and combined word counts (no character counts); raw and
+downloaded paper content remains complete.
+
 **Aggregator RAG refresh**: Manual Part 2 refreshes every 10 accepted aggregator submissions (not immediate like aggregator). Autonomous/Tier 3 compiler runs do not start the manual aggregator monitor because the parent autonomous tier owns the active brainstorm/reference context.
 
 **Enhanced Rejection Feedback Format** (`compiler_rejection_log.py`):
@@ -61,6 +66,13 @@ Before every `_pre_validate_exact_string_match()`, system calls `paper_memory.en
 - Diagnostics: needle/haystack previews (first/last 200 chars) when exact match fails
 
 Recent compiler rejections are direct-injected into submitter prompts when available. Acceptance history is persisted for diagnostics/model context surfaces but is not currently a guaranteed prompt-injection path.
+Model-facing rejection/retry feedback begins with at most the newest five whole
+entries and sheds only oldest entries after complete-prompt accounting. The last
+accepted outline remains mandatory outline state rather than disposable feedback;
+newest-only overflow follows the existing Compiler context-overflow lifecycle.
+Outline creation shares one at-most-five-projection recency window across creation
+comments and rejection history, preserving each stream's newest entry and the accepted
+outline rather than multiplying provider retries across independent streams.
 
 ---
 
@@ -116,6 +128,8 @@ Body content is ALWAYS inserted BEFORE CONCLUSION_PLACEHOLDER. `_apply_edit()` a
 - 1x Writing Submitter outline update → validator *(skipped if body complete)*
 - 2x Writing Submitter review → validator
 - Then, if body is still active, run the Rigor & Proofs Submitter Lean-4 theorem-search rigor loop until the first decline or 5 consecutive rigor cycles, whichever comes first. Each successful rigor cycle lands one verified theorem inline or in the Theorems Appendix; after the cap the compiler returns to construction/review before any later rigor loop.
+
+**Autonomous competition exception**: An explicitly enabled Autonomous-owned compiler may try ordered secondary formalization-only routes after the primary's five full-proof attempts exhaust. Each secondary owns an isolated five-attempt budget; first Lean success ends the chain. Discovery, novelty, serial placement, and primary failure policies remain unchanged. Secondary route interruptions are visible and nonfatal, not proof losses; Manual compiler and LeanOJ never inherit this scoped option.
 
 **Rigor Mode (Lean 4 verified theorems, 4-stage)**:
 The rigor loop no longer rewrites prose. Each rigor cycle:

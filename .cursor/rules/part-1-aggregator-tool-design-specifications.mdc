@@ -49,6 +49,12 @@ Validator processes 1, 2, or 3 submissions simultaneously using batch-specific p
 
 **Submission context injection**: Submitter context direct-injects first and offloads existing context to RAG when needed. Validator submissions under review are mandatory direct context; if a single or batch validation prompt is still too large after normal allocation, reject that validation batch with diagnostic feedback rather than indexing the pending submission as RAG.
 
+**Feedback context fitting**: Durable local rejection history remains intact. Each
+submitter prompt starts with at most the newest five whole rejection entries and
+removes the oldest one at a time only as needed after complete-prompt token counting.
+The newest entry remains mandatory direct feedback; if it still does not fit, the
+normal context-overflow lifecycle stops the affected workflow.
+
 **Upload/path enforcement**: Server-side validation allows `.txt` and `.lean` text uploads only, 5 MB max, UTF-8/non-empty content, filename sanitization, path traversal rejection, and delete-by-logical-filename cleanup. Upload responses return logical filenames, not absolute host paths. Public Aggregator starts resolve `uploaded_files` only under `user_uploads`; internal autonomous reference-paper context may opt into trusted data-root file references via an explicit coordinator flag.
 
 ## Context Allocation

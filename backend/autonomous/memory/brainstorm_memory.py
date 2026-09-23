@@ -16,6 +16,7 @@ from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import BrainstormMetadata
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.autonomous.memory.proof_database import is_duplicate_novel_tier
+from backend.autonomous.memory.session_write_authority import autonomous_session_write
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ class BrainstormMemory:
     
     async def create_brainstorm(self, topic_id: str, topic_prompt: str) -> BrainstormMetadata:
         """Create a new brainstorm topic."""
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             metadata = BrainstormMetadata(
                 topic_id=topic_id,
                 topic_prompt=topic_prompt,
@@ -180,7 +181,7 @@ class BrainstormMemory:
     
     async def update_metadata(self, topic_id: str, **kwargs) -> Optional[BrainstormMetadata]:
         """Update specific fields in brainstorm metadata."""
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             metadata = await self.get_metadata(topic_id)
             if metadata is None:
                 return None
@@ -204,31 +205,29 @@ class BrainstormMemory:
     
     async def add_paper_reference(self, topic_id: str, paper_id: str) -> Optional[BrainstormMetadata]:
         """Add a paper reference to the brainstorm metadata."""
-        metadata = await self.get_metadata(topic_id)
-        if metadata is None:
-            return None
-        
-        if paper_id not in metadata.papers_generated:
-            metadata.papers_generated.append(paper_id)
-            await self._save_metadata(metadata)
-        
-        return metadata
+        async with autonomous_session_write(self._base_dir), self._lock:
+            metadata = await self.get_metadata(topic_id)
+            if metadata is None:
+                return None
+            if paper_id not in metadata.papers_generated:
+                metadata.papers_generated.append(paper_id)
+                await self._save_metadata(metadata)
+            return metadata
 
     async def remove_paper_reference(self, topic_id: str, paper_id: str) -> Optional[BrainstormMetadata]:
         """Remove a paper reference from the brainstorm metadata if it exists."""
-        metadata = await self.get_metadata(topic_id)
-        if metadata is None:
-            return None
-
-        if paper_id in metadata.papers_generated:
-            metadata.papers_generated = [
-                existing_paper_id
-                for existing_paper_id in metadata.papers_generated
-                if existing_paper_id != paper_id
-            ]
-            await self._save_metadata(metadata)
-
-        return metadata
+        async with autonomous_session_write(self._base_dir), self._lock:
+            metadata = await self.get_metadata(topic_id)
+            if metadata is None:
+                return None
+            if paper_id in metadata.papers_generated:
+                metadata.papers_generated = [
+                    existing_paper_id
+                    for existing_paper_id in metadata.papers_generated
+                    if existing_paper_id != paper_id
+                ]
+                await self._save_metadata(metadata)
+            return metadata
     
     async def get_all_brainstorms(self) -> List[BrainstormMetadata]:
         """Get metadata for all brainstorm topics."""
@@ -256,7 +255,7 @@ class BrainstormMemory:
     
     async def add_submission(self, topic_id: str, content: str, submission_number: int) -> bool:
         """Add an accepted submission to the brainstorm database."""
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             db_path = self._get_database_path(topic_id)
             
             if not db_path.exists():
@@ -325,7 +324,7 @@ class BrainstormMemory:
 
     async def append_proofs_section(self, topic_id: str, proofs_data: Any) -> bool:
         """Append verified proofs to the bottom of a brainstorm database."""
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             db_path = self._get_database_path(topic_id)
             if not db_path.exists():
                 logger.error(f"Brainstorm database not found for proof append: {topic_id}")
@@ -435,7 +434,7 @@ class BrainstormMemory:
         Edit an existing submission's content in the brainstorm database.
         Preserves submission number and updates timestamp.
         """
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             db_path = self._get_database_path(topic_id)
             if not db_path.exists():
                 logger.error(f"Brainstorm database not found for edit: {topic_id}")
@@ -467,7 +466,7 @@ class BrainstormMemory:
         Remove a submission from the brainstorm database.
         Does not renumber remaining submissions.
         """
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             db_path = self._get_database_path(topic_id)
             if not db_path.exists():
                 logger.error(f"Brainstorm database not found for removal: {topic_id}")
@@ -501,7 +500,7 @@ class BrainstormMemory:
         Add a new submission discovered during paper compilation.
         Returns the new submission number, or None on failure.
         """
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             db_path = self._get_database_path(topic_id)
             if not db_path.exists():
                 logger.error(f"Brainstorm database not found for retroactive add: {topic_id}")
@@ -587,7 +586,7 @@ class BrainstormMemory:
         submission_preview: str
     ) -> None:
         """Add a rejection to submitter's local rejection log (max 5)."""
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             rejections_path = self._get_submitter_rejections_path(topic_id, submitter_id)
             
             # Load existing rejections
@@ -661,7 +660,7 @@ class BrainstormMemory:
         Returns:
             True if deletion successful, False otherwise
         """
-        async with self._lock:
+        async with autonomous_session_write(self._base_dir), self._lock:
             try:
                 # Delete database file
                 db_path = self._get_database_path(topic_id)

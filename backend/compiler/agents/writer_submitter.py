@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import uuid
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Awaitable, Mapping, Sequence, Tuple
 
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
@@ -15,6 +15,8 @@ from backend.shared.config import system_config, rag_config
 from backend.shared.utils import count_tokens
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
+from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback_async
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.compiler.prompts.outline_prompts import (
     build_outline_create_prompt,
     build_outline_update_prompt
@@ -28,6 +30,7 @@ from backend.compiler.prompts.construction_prompts import (
 )
 from backend.compiler.prompts.review_prompts import build_review_prompt
 from backend.compiler.memory.outline_memory import outline_memory
+from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 from backend.compiler.memory.paper_memory import (
     paper_memory,
 )
@@ -231,6 +234,46 @@ class WritingSubmitter:
     def get_current_task_id(self) -> str:
         """Get the task ID for the current/next API call."""
         return f"comp_writer_{self.task_sequence:03d}"
+
+    async def _fit_rejection_feedback(
+        self,
+        build_prompt: Callable[[str], Awaitable[str]],
+    ) -> Tuple[str, Tuple[Mapping[str, str], ...]]:
+        entries = await compiler_rejection_log.get_rejection_entries(limit=5)
+        result = await fit_prompt_with_feedback_async(
+            entries,
+            build_prompt=lambda selected: build_prompt(
+                compiler_rejection_log.render_rejections(selected)
+            ),
+            available_tokens=self.available_input_tokens,
+        )
+        return result.prompt, result.retained_entries
+
+    async def _generate_with_feedback_retry(
+        self,
+        *,
+        task_id: str,
+        prompt: str,
+        retained_entries: Sequence[Mapping[str, str]],
+        rebuild_prompt: Callable[[Sequence[Mapping[str, str]]], Awaitable[str]],
+    ) -> Tuple[dict, str]:
+        visible_entries = tuple(retained_entries)
+        while True:
+            try:
+                response = await api_client_manager.generate_completion(
+                    task_id=task_id,
+                    role_id=self.role_id,
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=self.max_output_tokens,
+                )
+                return response, prompt
+            except ProviderContextLengthError:
+                if len(visible_entries) <= 1:
+                    raise
+                visible_entries = visible_entries[1:]
+                prompt = await rebuild_prompt(visible_entries)
     
     async def initialize(self) -> None:
         """Initialize submitter."""
@@ -266,21 +309,48 @@ class WritingSubmitter:
             )
             logger.info(f"RAG retrieval complete: {len(context_pack.text)} chars retrieved")
             
-            # Build prompt
-            logger.info("Building outline creation prompt...")
-            prompt = await build_outline_create_prompt(
-                user_prompt=self.user_prompt,
-                rag_evidence=context_pack.text
-            )
-            logger.info(f"Prompt built: {len(prompt)} chars")
             from backend.shared.solution_path.integration import with_budgeted_solver_plan
-            prompt = with_budgeted_solver_plan(
-                prompt,
-                getattr(self, "solution_path_manager", None),
-                rag_config.get_available_input_tokens(
-                    self.context_window, self.max_output_tokens
-                ),
+            accepted_outline, creation_comments = await outline_memory.get_creation_feedback_entries()
+            rejection_entries = await compiler_rejection_log.get_rejection_entries(limit=5)
+
+            async def assemble(selected_rejections, selected_comments):
+                assembled = await build_outline_create_prompt(
+                    user_prompt=self.user_prompt,
+                    rag_evidence=context_pack.text,
+                    rejection_history=compiler_rejection_log.render_rejections(selected_rejections),
+                    creation_feedback=outline_memory.render_creation_feedback(
+                        accepted_outline, selected_comments
+                    ),
+                )
+                return with_budgeted_solver_plan(
+                    assembled,
+                    getattr(self, "solution_path_manager", None),
+                    self.available_input_tokens,
+                )
+
+            # Both histories describe outline correction context. Use one shared
+            # recency window so independent streams cannot multiply retries. Each
+            # slot retains whole entries and the newest slot preserves both tails.
+            creation_comments = tuple(creation_comments[-5:])
+            rejection_entries = tuple(rejection_entries[-5:])
+            window_size = max(len(creation_comments), len(rejection_entries))
+            feedback_slots = tuple(range(window_size, 0, -1))
+
+            async def assemble_window(slots):
+                retained = len(slots)
+                return await assemble(
+                    rejection_entries[-retained:] if retained else (),
+                    creation_comments[-retained:] if retained else (),
+                )
+
+            feedback_fit = await fit_prompt_with_feedback_async(
+                feedback_slots,
+                build_prompt=assemble_window,
+                available_tokens=self.available_input_tokens,
             )
+            prompt = feedback_fit.prompt
+            visible_slots = feedback_fit.retained_entries
+            logger.info(f"Prompt built: {len(prompt)} chars")
 
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -310,14 +380,22 @@ class WritingSubmitter:
             
             # Get completion via api_client_manager (handles boost and fallback)
             logger.info(f"Generating LLM completion via api_client_manager (task_id={task_id})...")
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,  # Deterministic generation - evolving context provides diversity
-                max_tokens=system_config.compiler_writer_max_output_tokens  # User-configurable (outline creation, update, construction, review)
-            )
+            while True:
+                try:
+                    response = await api_client_manager.generate_completion(
+                        task_id=task_id,
+                        role_id=self.role_id,
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        max_tokens=self.max_output_tokens,
+                    )
+                    break
+                except ProviderContextLengthError:
+                    if len(visible_slots) <= 1:
+                        raise
+                    visible_slots = visible_slots[1:]
+                    prompt = await assemble_window(visible_slots)
             
             # Check for empty response
             if not response.get("choices") or not response["choices"][0].get("message"):
@@ -427,23 +505,25 @@ class WritingSubmitter:
             )
             logger.info(f"RAG retrieval complete: {len(context_pack.text)} chars retrieved")
             
-            # Build prompt
-            logger.info("Building outline update prompt...")
-            prompt = await build_outline_update_prompt(
-                user_prompt=self.user_prompt,
-                current_outline=current_outline,
-                current_paper=paper_for_llm,
-                rag_evidence=context_pack.text
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            async def assemble_outline_update(rejection_history):
+                assembled = await build_outline_update_prompt(
+                    user_prompt=self.user_prompt,
+                    current_outline=current_outline,
+                    current_paper=paper_for_llm,
+                    rag_evidence=context_pack.text,
+                    rejection_history=rejection_history,
+                )
+                return with_budgeted_solver_plan(
+                    assembled,
+                    getattr(self, "solution_path_manager", None),
+                    self.available_input_tokens,
+                )
+
+            prompt, visible_rejections = await self._fit_rejection_feedback(
+                assemble_outline_update
             )
             logger.info(f"Prompt built: {len(prompt)} chars")
-            from backend.shared.solution_path.integration import with_budgeted_solver_plan
-            prompt = with_budgeted_solver_plan(
-                prompt,
-                getattr(self, "solution_path_manager", None),
-                rag_config.get_available_input_tokens(
-                    self.context_window, self.max_output_tokens
-                ),
-            )
 
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -473,13 +553,13 @@ class WritingSubmitter:
             
             # Get completion via api_client_manager (handles boost and fallback)
             logger.info(f"Generating LLM completion via api_client_manager (task_id={task_id})...")
-            response = await api_client_manager.generate_completion(
+            response, prompt = await self._generate_with_feedback_retry(
                 task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,  # Deterministic generation - evolving context provides diversity
-                max_tokens=system_config.compiler_writer_max_output_tokens  # User-configurable (outline creation, update, construction, review)
+                prompt=prompt,
+                retained_entries=visible_rejections,
+                rebuild_prompt=lambda selected: assemble_outline_update(
+                    compiler_rejection_log.render_rejections(selected)
+                ),
             )
             
             # Check for empty response
@@ -665,61 +745,30 @@ class WritingSubmitter:
             # Build prompt based on section phase (uses phase-specific prompts for explicit completion tracking)
             logger.info(f"Building construction prompt for phase: {section_phase or 'generic'}...")
             
-            if section_phase == "body":
-                prompt = await build_body_construction_prompt(
-                    user_prompt=self.user_prompt,
-                    current_outline=current_outline,
-                    current_paper=paper_for_llm,
-                    rag_evidence=context_pack.text,
-                    is_first_portion=is_first_portion,
-                    rejection_feedback=rejection_feedback,
-                    brainstorm_content=brainstorm_content
-                )
-            elif section_phase == "conclusion":
-                prompt = await build_conclusion_construction_prompt(
-                    user_prompt=self.user_prompt,
-                    current_outline=current_outline,
-                    current_paper=paper_for_llm,
-                    rag_evidence=context_pack.text,
-                    rejection_feedback=rejection_feedback,
-                    brainstorm_content=brainstorm_content
-                )
-            elif section_phase == "introduction":
-                prompt = await build_introduction_construction_prompt(
-                    user_prompt=self.user_prompt,
-                    current_outline=current_outline,
-                    current_paper=paper_for_llm,
-                    rag_evidence=context_pack.text,
-                    rejection_feedback=rejection_feedback,
-                    brainstorm_content=brainstorm_content
-                )
-            elif section_phase == "abstract":
-                prompt = await build_abstract_construction_prompt(
-                    user_prompt=self.user_prompt,
-                    current_outline=current_outline,
-                    current_paper=paper_for_llm,
-                    rag_evidence=context_pack.text,
-                    rejection_feedback=rejection_feedback,
-                    brainstorm_content=brainstorm_content
-                )
-            else:
-                # Fallback to generic prompt for backward compatibility
-                prompt = await build_construction_prompt(
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+
+            async def assemble_construction(rejection_history):
+                assembled = await build_construction_prompt(
                     user_prompt=self.user_prompt,
                     current_outline=current_outline,
                     current_paper=paper_for_llm,
                     rag_evidence=context_pack.text,
                     is_first_portion=is_first_portion,
                     section_phase=section_phase,
-                    rejection_feedback=rejection_feedback
+                    rejection_feedback=rejection_feedback,
+                    brainstorm_content=brainstorm_content,
+                    rejection_history=rejection_history,
                 )
-            logger.info(f"Prompt built: {len(prompt)} chars")
-            from backend.shared.solution_path.integration import with_budgeted_solver_plan
-            prompt = with_budgeted_solver_plan(
-                prompt,
-                getattr(self, "solution_path_manager", None),
-                max_allowed_tokens,
+                return with_budgeted_solver_plan(
+                    assembled,
+                    getattr(self, "solution_path_manager", None),
+                    max_allowed_tokens,
+                )
+
+            prompt, visible_rejections = await self._fit_rejection_feedback(
+                assemble_construction
             )
+            logger.info(f"Prompt built: {len(prompt)} chars")
 
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -755,10 +804,20 @@ class WritingSubmitter:
             # Wolfram is disabled this helper degrades to a single-shot call.
             logger.info(f"Generating LLM completion via api_client_manager (task_id={task_id})...")
             try:
-                llm_output, wolfram_calls, _message = await self._generate_completion_with_wolfram_tool(
-                    task_id=task_id,
-                    initial_prompt=prompt,
-                )
+                while True:
+                    try:
+                        llm_output, wolfram_calls, _message = await self._generate_completion_with_wolfram_tool(
+                            task_id=task_id,
+                            initial_prompt=prompt,
+                        )
+                        break
+                    except ProviderContextLengthError:
+                        if len(visible_rejections) <= 1:
+                            raise
+                        visible_rejections = visible_rejections[1:]
+                        prompt = await assemble_construction(
+                            compiler_rejection_log.render_rejections(visible_rejections)
+                        )
             except RetryableProviderError:
                 raise
             except WolframFinalizationError:
@@ -967,21 +1026,25 @@ class WritingSubmitter:
             # Build prompt (no RAG, just direct outline + paper content)
             # CRITICAL: Outline is ALWAYS fully injected per architectural rules
             logger.info("Building review prompt (full outline + paper, no aggregator DB)...")
-            prompt = await build_review_prompt(
-                user_prompt=self.user_prompt,
-                current_outline=current_outline,  # ALWAYS fully injected
-                current_paper=paper_for_llm,
-                review_focus=review_focus
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            async def assemble_review(rejection_history):
+                assembled = await build_review_prompt(
+                    user_prompt=self.user_prompt,
+                    current_outline=current_outline,
+                    current_paper=paper_for_llm,
+                    review_focus=review_focus,
+                    rejection_history=rejection_history,
+                )
+                return with_budgeted_solver_plan(
+                    assembled,
+                    getattr(self, "solution_path_manager", None),
+                    self.available_input_tokens,
+                )
+
+            prompt, visible_rejections = await self._fit_rejection_feedback(
+                assemble_review
             )
             logger.info(f"Prompt built: {len(prompt)} chars")
-            from backend.shared.solution_path.integration import with_budgeted_solver_plan
-            prompt = with_budgeted_solver_plan(
-                prompt,
-                getattr(self, "solution_path_manager", None),
-                rag_config.get_available_input_tokens(
-                    self.context_window, self.max_output_tokens
-                ),
-            )
 
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -1011,13 +1074,13 @@ class WritingSubmitter:
             
             # Get completion via api_client_manager (handles boost and fallback)
             logger.info(f"Generating LLM completion via api_client_manager (task_id={task_id})...")
-            response = await api_client_manager.generate_completion(
+            response, prompt = await self._generate_with_feedback_retry(
                 task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,  # Deterministic generation - evolving context provides diversity
-                max_tokens=system_config.compiler_writer_max_output_tokens  # User-configurable (outline creation, update, construction, review)
+                prompt=prompt,
+                retained_entries=visible_rejections,
+                rebuild_prompt=lambda selected: assemble_review(
+                    compiler_rejection_log.render_rejections(selected)
+                ),
             )
             
             # Check for empty response

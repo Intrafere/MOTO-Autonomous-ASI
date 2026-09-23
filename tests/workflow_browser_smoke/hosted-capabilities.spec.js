@@ -8,6 +8,7 @@ test('hosted capabilities drive startup copy and hide desktop-only paths', async
   await expect(page.getByText('LM Studio is intentionally disabled in this environment.')).toBeVisible();
 
   await page.getByRole('button', { name: 'I Have Read and Acknowledge This Disclaimer' }).click();
+  await page.getByRole('button', { name: "Close What's New", exact: true }).click();
 
   await expect(page.getByRole('heading', { name: 'Choose Your Startup Setup' })).toBeVisible();
   await expect(page.getByText('This hosted deployment needs an OpenRouter API key before you start.')).toBeVisible();

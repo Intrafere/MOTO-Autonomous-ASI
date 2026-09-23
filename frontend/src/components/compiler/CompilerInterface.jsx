@@ -3,6 +3,7 @@ import { autonomousAPI, compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import {
   DEFAULT_CONTEXT_WINDOW,
+  normalizeOpenRouterReasoningEffort,
 } from '../../utils/openRouterSelection';
 import TextFileUploader from '../TextFileUploader';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
@@ -275,7 +276,16 @@ function CompilerInterface({
       }
     }
 
-    const settings = window.compilerSettings || {};
+    const settings = { ...(window.compilerSettings || {}) };
+    for (const prefix of ['validator', 'writer', 'highParam', 'assistant']) {
+      const provider = lmStudioEnabled
+        ? (settings[`${prefix}Provider`] || (prefix === 'assistant' ? settings.validatorProvider : 'lm_studio'))
+        : 'openrouter';
+      settings[`${prefix}OpenrouterReasoningEffort`] = normalizeOpenRouterReasoningEffort(
+        settings[`${prefix}OpenrouterReasoningEffort`] || (prefix === 'assistant' ? settings.validatorOpenrouterReasoningEffort : undefined),
+        provider,
+      );
+    }
     
     // Check if models are configured in settings
     if (!settings.validatorModel || !settings.writerModel || !settings.highParamModel) {
