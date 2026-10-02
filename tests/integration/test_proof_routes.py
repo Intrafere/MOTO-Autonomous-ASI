@@ -8,7 +8,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.api.routes import proofs as proofs_route
-from backend.autonomous.memory.proof_database import ProofDatabase
+from backend.autonomous.memory.proof_database import (
+    ProofDatabase,
+    is_live_context_active,
+)
 from backend.shared.models import (
     ProofCandidate,
     ProofCheckRequest,
@@ -219,6 +222,85 @@ class ProofBuild01PersistenceTests(IsolatedAsyncioTestCase):
             self.assertTrue(all(record.live_context_status == "pruned" for record in updated))
             self.assertEqual(updated[0].live_context_prune_reason, "")
 
+    async def test_bulk_user_prune_targets_active_store_run_not_proof_creation_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = ProofDatabase()
+            database.set_base_dir(Path(tmpdir))
+            await database.initialize()
+            stored = await self._add_live_context_proof(
+                database,
+                "proof_current_run",
+                "current_run",
+            )
+            active_run_id = await database.get_or_create_active_run_id()
+            self.assertNotEqual(active_run_id, stored.run_id)
+            revision = await database.get_proof_set_revision()
+
+            updated, _, _ = await database.set_live_context_status_bulk(
+                expected_proof_set_revision=revision,
+                owning_run_id=active_run_id,
+                items=[
+                    {
+                        "proof_id": stored.proof_id,
+                        "status": "pruned",
+                        "actor": "user",
+                        "expected_run_id": stored.run_id,
+                        "reason": "Remove from the active proof run context.",
+                    }
+                ],
+            )
+
+            self.assertEqual(updated[0].live_context_owner_run_id, active_run_id)
+            self.assertFalse(
+                is_live_context_active(updated[0], requesting_run_id=active_run_id)
+            )
+            self.assertTrue(
+                is_live_context_active(updated[0], requesting_run_id=stored.run_id)
+            )
+
+    async def test_live_context_run_id_uses_active_autonomous_session(self) -> None:
+        database = ProofDatabase()
+        database._session_manager = mock.Mock(
+            is_session_active=True,
+            session_id="autonomous-session",
+        )
+        self.assertEqual(
+            await database.get_live_context_run_id(),
+            "autonomous-session",
+        )
+
+    async def test_autonomous_prompt_injection_honors_user_prune_for_session_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = ProofDatabase()
+            database.set_base_dir(Path(tmpdir))
+            await database.initialize()
+            stored = await self._add_live_context_proof(
+                database,
+                "proof_session_pruned",
+                "session_pruned",
+            )
+            database._session_manager = mock.Mock(
+                is_session_active=True,
+                session_id="autonomous-session",
+            )
+            revision = await database.get_proof_set_revision()
+            await database.set_live_context_status(
+                proof_id=stored.proof_id,
+                status="pruned",
+                expected_run_id=stored.run_id,
+                expected_proof_set_revision=revision,
+                actor="user",
+                reason="Exclude from this Autonomous session.",
+                owning_run_id=await database.get_live_context_run_id(),
+            )
+
+            prompt = await proofs_route._prompt_with_verified_proof_context(
+                "Original research prompt.",
+                database,
+            )
+
+            self.assertEqual(prompt, "Original research prompt.")
+
     async def test_automatic_pruning_still_requires_nonempty_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             database = ProofDatabase()
@@ -404,6 +486,9 @@ class ProofBuild01PersistenceTests(IsolatedAsyncioTestCase):
         database = mock.Mock()
         database.set_live_context_status_bulk = mock.AsyncMock(
             return_value=(records, [record.proof_id for record in records], 9)
+        )
+        database.get_live_context_run_id = mock.AsyncMock(
+            return_value="active-proof-run"
         )
         database.get_proofs_depending_on = mock.AsyncMock(return_value=[])
         request = ProofLiveContextBulkMutationRequest(

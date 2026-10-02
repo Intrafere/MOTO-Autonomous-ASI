@@ -162,6 +162,26 @@ def _active_notification_workflow_mode() -> str:
     }.get(str(workflow_start_guard.active_owner or ""), "")
 
 
+def _retry_workflow_mode(role_id: str) -> str:
+    active_mode = _active_notification_workflow_mode()
+    if active_mode:
+        return active_mode
+    role = str(role_id or "").lower()
+    if "leanoj" in role:
+        return "leanoj"
+    if "manual_proof" in role or (
+        "autonomous_proof_" in role and "_manual_" in role
+    ):
+        return "manual_proof_check"
+    if role.startswith(("comp_", "compiler_")) or "manual_compiler" in role:
+        return "compiler"
+    if role.startswith(("agg_", "aggregator_")) or "manual_aggregator" in role:
+        return "aggregator"
+    if "autonomous" in role:
+        return "autonomous"
+    return ""
+
+
 def _cap_oauth_live_error_text(value: Any, max_chars: int = OAUTH_LIVE_ERROR_MAX_CHARS) -> str:
     """Return a redacted one-line provider error that is at most max_chars long."""
     text = redact_log_text(value).strip()
@@ -459,6 +479,65 @@ class APIClientManager:
         if self._broadcast_callback:
             await self._broadcast_callback(event, data or {})
 
+    async def _broadcast_provider_retry_cooldown(
+        self,
+        payload: Dict[str, Any],
+        *,
+        role_id: str = "",
+    ) -> None:
+        """Publish one additive, secret-safe activity item before a provider retry wait."""
+        wait_seconds = max(0.0, float(payload.get("retry_after_seconds") or 0))
+        provider_label = str(payload.get("provider_label") or payload.get("provider") or "Provider")
+        retry_attempt = max(1, int(payload.get("retry_attempt") or 1))
+        event_payload = {
+            "event_type": "provider_retry_cooldown",
+            "workflow_mode": _retry_workflow_mode(str(payload.get("role_id") or role_id or "")),
+            "provider": str(payload.get("provider") or "unknown"),
+            "provider_label": provider_label,
+            "role_id": str(payload.get("role_id") or role_id or ""),
+            "model": str(payload.get("model") or ""),
+            "retry_attempt": retry_attempt,
+            "max_attempts": payload.get("max_attempts"),
+            "retry_after_seconds": wait_seconds,
+            "reason": str(payload.get("reason") or "transient_provider_error"),
+            "message": (
+                f"{provider_label} API call will retry after a {wait_seconds:g}-second cooldown "
+                f"(retry {retry_attempt})."
+            ),
+        }
+        await self._broadcast("provider_retry_cooldown", event_payload)
+
+    def _provider_retry_callback(
+        self,
+        role_id: str,
+    ) -> Callable[[Dict[str, Any]], Awaitable[None]]:
+        async def callback(payload: Dict[str, Any]) -> None:
+            await self._broadcast_provider_retry_cooldown(payload, role_id=role_id)
+
+        return callback
+
+    async def broadcast_retry_cooldown(
+        self,
+        *,
+        provider: str,
+        provider_label: str,
+        role_id: str,
+        model: str = "",
+        retry_attempt: int = 1,
+        retry_after_seconds: float,
+        reason: str,
+    ) -> None:
+        """Expose the shared retry activity event to coordinator-owned cooldowns."""
+        await self._broadcast_provider_retry_cooldown({
+            "provider": provider,
+            "provider_label": provider_label,
+            "role_id": role_id,
+            "model": model,
+            "retry_attempt": retry_attempt,
+            "retry_after_seconds": retry_after_seconds,
+            "reason": reason,
+        })
+
     async def _broadcast_unrecoverable_codex_error(
         self,
         *,
@@ -685,6 +764,7 @@ class APIClientManager:
         if isinstance(error, ProviderRepairRequiredError):
             return error
         route = getattr(error, "route", None)
+        error_detail = getattr(error, "safe_message", "") or str(error)
         return ProviderRepairRequiredError(
             provider=provider,
             provider_label=provider_label,
@@ -703,6 +783,7 @@ class APIClientManager:
             configured_model=getattr(route, "configured_model", "") or model,
             effective_host_provider=getattr(route, "host_provider", ""),
             route_kind=getattr(route, "route_kind", ""),
+            error_detail=error_detail,
         )
 
     @staticmethod
@@ -768,6 +849,7 @@ class APIClientManager:
         }
         if activity_callback is not None:
             await activity_callback("waiting", activity_payload)
+        await self._broadcast_provider_retry_cooldown(activity_payload, role_id=display_role)
         await self._sleep_with_optional_stop(wait_seconds, should_stop)
         if (
             activity_callback is not None
@@ -801,6 +883,15 @@ class APIClientManager:
                 active_role,
                 wait_seconds,
             )
+            await self._broadcast_provider_retry_cooldown({
+                "provider": provider,
+                "provider_label": error.provider_label or provider,
+                "role_id": active_role,
+                "model": error.model,
+                "retry_attempt": 1,
+                "retry_after_seconds": wait_seconds,
+                "reason": "usage_limit_cooldown",
+            })
             await self._sleep_with_optional_stop(wait_seconds, should_stop)
         if waited_for_cooldown and not (should_stop is not None and should_stop()):
             expired = self._provider_recent_expired_cooldowns.get(provider, {})
@@ -2205,6 +2296,7 @@ class APIClientManager:
                             ),
                             tools=tools,
                             tool_choice=tool_choice,
+                            retry_callback=self._provider_retry_callback(role_id),
                         ),
                         role_id=role_id,
                         model=boost_model,
@@ -2645,6 +2737,7 @@ class APIClientManager:
                             tools=tools,
                             tool_choice=tool_choice,
                             allow_provider_auto_fallback=role_id.endswith("_assistant"),
+                            retry_callback=self._provider_retry_callback(role_id),
                         ),
                         role_id=role_id,
                         model=openrouter_model,
@@ -2768,6 +2861,7 @@ class APIClientManager:
                         reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
+                        retry_callback=self._provider_retry_callback(role_id),
                     )
                     if rotated_result is not None:
                         free_model_manager.clear_failed_models()  # Success - clear failures
@@ -3041,6 +3135,7 @@ class APIClientManager:
                         reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
+                        retry_callback=self._provider_retry_callback(role_id),
                     ),
                     role_id=role_id,
                     model=sakana_model,
@@ -3343,6 +3438,7 @@ class APIClientManager:
                             reasoning_effort=role_reasoning_effort,
                             tools=tools,
                             tool_choice=tool_choice,
+                            retry_callback=self._provider_retry_callback(role_id),
                         ),
                         role_id=role_id,
                         model=codex_model,
@@ -3581,6 +3677,7 @@ class APIClientManager:
                         reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
+                        retry_callback=self._provider_retry_callback(role_id),
                     ),
                     role_id=role_id,
                     model=xai_model,
@@ -3817,6 +3914,7 @@ class APIClientManager:
                     response_format=response_format,
                     tools=tools,
                     tool_choice=tool_choice,
+                    retry_callback=self._provider_retry_callback(role_id),
                     **kwargs
                 ),
                 role_id=role_id,
@@ -3975,6 +4073,7 @@ class APIClientManager:
                             reasoning_effort=reasoning_effort,
                             tools=tools,
                             tool_choice=tool_choice,
+                            retry_callback=self._provider_retry_callback(role_id),
                         ),
                         role_id=role_id,
                         model=alt_model,
@@ -4052,6 +4151,7 @@ class APIClientManager:
                         reasoning_effort=reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
+                        retry_callback=self._provider_retry_callback(role_id),
                     ),
                     role_id=role_id,
                     model=auto_model,

@@ -32,7 +32,7 @@ _DEFAULT_MANIFEST = {
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build6-v95",
+    "api_contract_version": "build6-v97",
 }
 
 _DEFAULT_PRESERVED_ROOTS = {
@@ -472,6 +472,26 @@ def consume_internal_launcher_args(argv: list[str]) -> tuple[list[str], list[Pat
 def _is_pid_running(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not process:
+                return ctypes.windll.kernel32.GetLastError() == 5
+            try:
+                exit_code = wintypes.DWORD()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(
+                    process,
+                    ctypes.byref(exit_code),
+                ):
+                    return False
+                return exit_code.value == 259
+            finally:
+                ctypes.windll.kernel32.CloseHandle(process)
+        except (AttributeError, OSError, ValueError):
+            return False
     try:
         os.kill(pid, 0)
     except (OSError, SystemError):

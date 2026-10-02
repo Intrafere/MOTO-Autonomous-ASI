@@ -218,6 +218,13 @@ class SubmitterAgent:
             except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
                 logger.warning(f"Submitter {self.submitter_id}: all free models exhausted: {e}")
+                await api_client_manager.broadcast_retry_cooldown(
+                    provider="openrouter",
+                    provider_label="OpenRouter free models",
+                    role_id=self.role_id,
+                    retry_after_seconds=120,
+                    reason="free_models_exhausted",
+                )
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             except RetryableProviderError as e:
                 logger.warning(

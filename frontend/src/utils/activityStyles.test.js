@@ -9,6 +9,7 @@ import {
   formatContextOverflowActivityMessage,
   formatEmptyProofDiscoveryMessage,
   formatProofRunEventMessage,
+  formatProviderRetryCooldownMessage,
   formatProviderUsageLimitActivityMessage,
   formatProviderUsageLimitResumedMessage,
   formatSolutionPathEventMessage,
@@ -130,6 +131,16 @@ test('formats durable provider cooldown and confirmed resume activity', () => {
   expect(getActivityClass('provider_usage_limit_resumed')).toBe('activity-success');
 });
 
+test('formats additive provider retry cooldown activity', () => {
+  expect(formatProviderRetryCooldownMessage({
+    provider_label: 'OpenRouter',
+    retry_after_seconds: 60,
+    retry_attempt: 2,
+  })).toBe('OpenRouter API call will retry after a 60-second cooldown (retry 2).');
+  expect(getActivityIcon('provider_retry_cooldown')).toBe('↺');
+  expect(getActivityClass('provider_retry_cooldown')).toBe('activity-warning');
+});
+
 test('shows usage-limit popup only for an active waiting cooldown', () => {
   const now = 1_700_000_000_000;
   const active = {
@@ -155,6 +166,13 @@ test('shows usage-limit popup only for an active waiting cooldown', () => {
 test('formats proof-run lifecycle activity and source-specific state', () => {
   expect(formatProofRunEventMessage('proof_run_repair_required', {}))
     .toContain('start a new proof loop');
+  expect(formatProofRunEventMessage('proof_run_terminal', {
+    terminal_reason: 'repair_required',
+    last_error_summary: 'Prompt exceeds the loaded LM Studio context window.',
+  })).toBe('Proof run ended: Prompt exceeds the loaded LM Studio context window.');
+  expect(formatProofRunEventMessage('proof_run_terminal', {
+    terminal_reason: 'repair_required',
+  })).toBe('Proof run ended: repair_required');
   expect(formatProofRunEventMessage('proof_run_provider_paused', {}))
     .toBe('Proof run paused for provider credits.');
   expect(getActivityClass('proof_run_repair_required')).toBe('activity-warning');

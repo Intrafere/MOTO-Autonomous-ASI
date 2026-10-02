@@ -35,14 +35,23 @@ class BackendReadinessTests(TestCase):
         self.assertEqual(payload["status"], "healthy")
 
     def test_early_exit_reports_backend_log(self) -> None:
-        with mock.patch.object(moto_launcher, "is_pid_running", return_value=False):
-            with self.assertRaisesRegex(RuntimeError, "launcher_backend.log"):
-                moto_launcher.wait_for_backend_health(
-                    "http://localhost:8000",
-                    self.service,
-                    timeout_seconds=1,
-                    poll_interval_seconds=0,
-                )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "launcher_backend.log"
+            log_path.write_text("startup header\nspecific backend traceback\n", encoding="utf-8")
+            service = moto_launcher.LaunchedService(
+                title=self.service.title,
+                pid=self.service.pid,
+                mode=self.service.mode,
+                log_path=str(log_path),
+            )
+            with mock.patch.object(moto_launcher, "is_pid_running", return_value=False):
+                with self.assertRaisesRegex(RuntimeError, "specific backend traceback"):
+                    moto_launcher.wait_for_backend_health(
+                        "http://localhost:8000",
+                        service,
+                        timeout_seconds=1,
+                        poll_interval_seconds=0,
+                    )
 
     def test_frontend_early_exit_reports_frontend_log(self) -> None:
         frontend = moto_launcher.LaunchedService(
@@ -62,6 +71,13 @@ class BackendReadinessTests(TestCase):
 
 
 class ResolveInstanceRuntimeTests(TestCase):
+    def setUp(self) -> None:
+        # Runtime-selection unit tests must never inspect or terminate a real
+        # user's backend. Lock ownership is covered in isolated OS tests.
+        patcher = mock.patch.object(moto_launcher, "backend_lease_is_held", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_defaults_free_uses_default_instance(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None):
@@ -280,15 +296,16 @@ class ResolveInstanceRuntimeTests(TestCase):
             "secret_namespace": None,
             "storage_prefix": None,
         }
-        live_record = [{"instance_id": "default"}]
-
         with mock.patch.dict(os.environ, {}, clear=True):
             with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=saved_record):
-                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=live_record):
+                with mock.patch.object(
+                    moto_launcher,
+                    "assert_runtime_lock_available",
+                    side_effect=RuntimeError("default MOTO instance is already running"),
+                ):
                     with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
-                        with mock.patch.object(moto_launcher, "new_instance_id", return_value="instance_safe_parallel"):
-                            with self.assertRaisesRegex(RuntimeError, "default MOTO instance already appears to be running"):
-                                moto_launcher.resolve_instance_runtime()
+                        with self.assertRaisesRegex(RuntimeError, "default MOTO instance is already running"):
+                            moto_launcher.resolve_instance_runtime()
 
     def test_explicit_override_does_not_read_last_record(self) -> None:
         """Explicit env overrides must never be replaced by a stored record."""
@@ -326,22 +343,190 @@ class ResolveInstanceRuntimeTests(TestCase):
         self.assertTrue(runtime.explicit_override)
         loader.assert_not_called()
 
-    def test_runtime_lock_blocks_live_default_backend(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            moto_launcher.write_runtime_lock(temp_dir, 4242, "default")
-            with mock.patch.object(moto_launcher, "is_pid_running", return_value=True):
-                with self.assertRaisesRegex(RuntimeError, "data root is already in use"):
-                    moto_launcher.assert_runtime_lock_available(temp_dir)
+    def test_orphan_recovery_happens_before_backend_port_selection(self) -> None:
+        observed_ports: list[int] = []
+
+        def fake_port_in_use(port: int) -> bool:
+            observed_ports.append(port)
+            return False
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None):
+                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                    with mock.patch.object(moto_launcher, "assert_runtime_lock_available") as reconcile:
+                        with mock.patch.object(moto_launcher, "port_in_use", side_effect=fake_port_in_use):
+                            runtime = moto_launcher.resolve_instance_runtime()
+
+        reconcile.assert_called_once_with(runtime.data_root)
+        self.assertEqual(runtime.backend_port, 8000)
+        self.assertEqual(observed_ports[0], 8000)
+
+    def test_tracked_backend_orphan_reaches_reconciliation(self) -> None:
+        record = {
+            "instance_id": "default",
+            "backend_window_pid": 15216,
+            "frontend_window_pid": 40124,
+        }
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None), \
+             mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[record]), \
+             mock.patch.object(moto_launcher, "assert_runtime_lock_available") as reconcile, \
+             mock.patch.object(moto_launcher, "port_in_use", return_value=False):
+            runtime = moto_launcher.resolve_instance_runtime()
+        reconcile.assert_called_once_with(runtime.data_root)
 
     def test_runtime_lock_ignores_stale_default_backend_pid(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             moto_launcher.write_runtime_lock(temp_dir, 4242, "default")
-            with mock.patch.object(moto_launcher, "is_pid_running", return_value=False):
+            with mock.patch.object(moto_launcher, "backend_lease_is_held", return_value=False):
                 moto_launcher.assert_runtime_lock_available(temp_dir)
 
+    def test_runtime_lock_rejects_unverified_windows_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            moto_launcher.write_runtime_lock(temp_dir, 37088, "default", 8000)
+            with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+                with mock.patch.object(moto_launcher, "backend_lease_is_held", return_value=True):
+                    with mock.patch.object(moto_launcher, "read_backend_lease_owner", return_value=15216):
+                        with mock.patch.object(moto_launcher, "windows_listening_ports_for_pid", return_value=[8000]):
+                            with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                                with mock.patch.object(moto_launcher, "windows_parent_pid", return_value=999):
+                                    with mock.patch.object(moto_launcher, "is_pid_running", return_value=True):
+                                        with mock.patch.object(moto_launcher, "is_moto_backend_process", return_value=True):
+                                            with mock.patch.object(moto_launcher, "backend_health_identity", return_value="other"):
+                                                with mock.patch.object(moto_launcher, "terminate_process_tree") as terminate:
+                                                    with self.assertRaisesRegex(RuntimeError, "could not safely identify"):
+                                                        moto_launcher.assert_runtime_lock_available(temp_dir)
+            terminate.assert_not_called()
+
+    def test_runtime_lock_recovers_healthy_backend_from_recorded_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            moto_launcher.write_runtime_lock(temp_dir, 37088, "default", 8000)
+            with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+                with mock.patch.object(
+                    moto_launcher,
+                    "backend_lease_is_held",
+                    side_effect=[True, False, False],
+                ):
+                    with mock.patch.object(
+                        moto_launcher,
+                        "port_in_use",
+                        return_value=False,
+                    ):
+                        with mock.patch.object(moto_launcher, "read_backend_lease_owner", return_value=15216):
+                            with mock.patch.object(moto_launcher, "windows_listening_ports_for_pid", return_value=[8000]):
+                                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                                    with mock.patch.object(moto_launcher, "windows_parent_pid", return_value=37088):
+                                        with mock.patch.object(moto_launcher, "backend_byte_zero_is_held", return_value=False):
+                                            with mock.patch.object(
+                                                moto_launcher,
+                                                "backend_health_identity",
+                                                return_value="default",
+                                            ):
+                                                with mock.patch.object(
+                                                    moto_launcher,
+                                                    "is_pid_running",
+                                                    side_effect=lambda pid: pid == 15216,
+                                                ):
+                                                    with mock.patch.object(moto_launcher, "is_moto_backend_process", return_value=True):
+                                                        with mock.patch.object(moto_launcher, "terminate_process_tree") as terminate:
+                                                            moto_launcher.assert_runtime_lock_available(temp_dir)
+
+            terminate.assert_called_once_with(15216)
+
+    def test_runtime_lock_preserves_untracked_healthy_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            moto_launcher.write_runtime_lock(temp_dir, 15216, "default", 8123)
+            with mock.patch.object(moto_launcher.sys, "platform", "win32"), \
+                 mock.patch.object(moto_launcher, "backend_lease_is_held", return_value=True), \
+                 mock.patch.object(moto_launcher, "read_backend_lease_owner", return_value=15216), \
+                 mock.patch.object(moto_launcher, "windows_listening_ports_for_pid", return_value=[8123]), \
+                 mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]), \
+                 mock.patch.object(moto_launcher, "windows_parent_pid", return_value=400), \
+                 mock.patch.object(moto_launcher, "is_pid_running", return_value=True), \
+                 mock.patch.object(moto_launcher, "backend_health_identity", return_value="default"), \
+                 mock.patch.object(moto_launcher, "is_moto_backend_process", return_value=True), \
+                 mock.patch.object(moto_launcher, "terminate_process_tree") as terminate:
+                with self.assertRaisesRegex(RuntimeError, "could not safely identify"):
+                    moto_launcher.assert_runtime_lock_available(temp_dir)
+            terminate.assert_not_called()
+
+    def test_runtime_lock_preserves_modern_untracked_backend_with_dead_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            moto_launcher.write_runtime_lock(temp_dir, 15216, "default", 8123)
+            running = lambda pid: pid == 15216
+            with mock.patch.object(moto_launcher.sys, "platform", "win32"), \
+                 mock.patch.object(moto_launcher, "backend_lease_is_held", return_value=True), \
+                 mock.patch.object(moto_launcher, "read_backend_lease_owner", return_value=15216), \
+                 mock.patch.object(moto_launcher, "backend_byte_zero_is_held", return_value=True), \
+                 mock.patch.object(moto_launcher, "windows_listening_ports_for_pid", return_value=[8123]), \
+                 mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]), \
+                 mock.patch.object(moto_launcher, "windows_parent_pid", return_value=400), \
+                 mock.patch.object(moto_launcher, "is_pid_running", side_effect=running), \
+                 mock.patch.object(moto_launcher, "backend_health_identity", return_value="default"), \
+                 mock.patch.object(moto_launcher, "is_moto_backend_process", return_value=True), \
+                 mock.patch.object(moto_launcher, "terminate_process_tree") as terminate:
+                with self.assertRaisesRegex(RuntimeError, "could not safely identify"):
+                    moto_launcher.assert_runtime_lock_available(temp_dir)
+            terminate.assert_not_called()
+
+    def test_runtime_lock_preserves_tracked_backend_when_frontend_is_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            moto_launcher.write_runtime_lock(temp_dir, 15216, "default", 8123)
+            record = {
+                "instance_id": "default",
+                "backend_window_pid": 15216,
+                "frontend_window_pid": 40124,
+                "data_root": temp_dir,
+            }
+            running = lambda pid: pid == 15216
+            with mock.patch.object(moto_launcher.sys, "platform", "win32"), \
+                 mock.patch.object(moto_launcher, "backend_lease_is_held", side_effect=[True, False, False]), \
+                 mock.patch.object(moto_launcher, "read_backend_lease_owner", return_value=None), \
+                 mock.patch.object(moto_launcher, "windows_listening_ports_for_pid", return_value=[8123]), \
+                 mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[record]), \
+                 mock.patch.object(moto_launcher, "windows_parent_pid", return_value=1), \
+                 mock.patch.object(moto_launcher, "is_pid_running", side_effect=running), \
+                 mock.patch.object(moto_launcher, "backend_health_identity", return_value="default"), \
+                 mock.patch.object(moto_launcher, "is_moto_backend_process", return_value=True), \
+                 mock.patch.object(moto_launcher, "port_in_use", return_value=False), \
+                 mock.patch.object(moto_launcher, "terminate_process_tree") as terminate:
+                with self.assertRaisesRegex(RuntimeError, "already running"):
+                    moto_launcher.assert_runtime_lock_available(temp_dir)
+            terminate.assert_not_called()
+
     def test_pid_running_treats_windows_invalid_parameter_as_not_running(self) -> None:
-        with mock.patch.object(moto_launcher.os, "kill", side_effect=SystemError("[WinError 87] The parameter is incorrect")):
-            self.assertFalse(moto_launcher.is_pid_running(4242))
+        kernel32 = mock.MagicMock()
+        kernel32.OpenProcess.return_value = 0
+        kernel32.GetLastError.return_value = 87
+        ctypes_module = mock.MagicMock()
+        ctypes_module.windll.kernel32 = kernel32
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.dict("sys.modules", {"ctypes": ctypes_module}):
+                self.assertFalse(moto_launcher.is_pid_running(4242))
+
+    def test_pid_running_uses_windows_process_handle_for_live_process(self) -> None:
+        kernel32 = mock.MagicMock()
+        kernel32.OpenProcess.return_value = 99
+        kernel32.GetExitCodeProcess.side_effect = lambda _handle, pointer: (
+            setattr(pointer._obj, "value", 259) or 1
+        )
+        ctypes_module = mock.MagicMock()
+        ctypes_module.windll.kernel32 = kernel32
+        ctypes_module.byref.side_effect = lambda value: mock.Mock(_obj=value)
+        wintypes_module = mock.MagicMock()
+
+        class FakeDword:
+            value = 0
+
+        wintypes_module.DWORD = FakeDword
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.dict(
+                "sys.modules",
+                {"ctypes": ctypes_module, "ctypes.wintypes": wintypes_module},
+            ):
+                self.assertTrue(moto_launcher.is_pid_running(4242))
+
+        kernel32.CloseHandle.assert_called_once_with(99)
 
 
 class WindowsLauncherStrategyTests(TestCase):
@@ -376,6 +561,116 @@ class WindowsLauncherStrategyTests(TestCase):
         self.assertEqual(service.pid, 5150)
         popen.assert_called_once()
         self.assertEqual(popen.call_args.args[0], [tool_path, "run", "dev"])
+
+    def test_launch_service_starts_windows_backend_directly(self) -> None:
+        process = mock.Mock(pid=6160)
+        args = [r"C:\Python\python.exe", "-m", "uvicorn", "backend.api.main:app"]
+
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher.subprocess, "Popen", return_value=process) as popen:
+                service = moto_launcher.launch_service(
+                    "MOTO Backend [default]",
+                    "backend",
+                    args,
+                    cwd=r"C:\repo",
+                    env={},
+                    log_root=r"C:\repo\backend\logs",
+                )
+
+        self.assertEqual(service.pid, 6160)
+        launched_args = popen.call_args.args[0]
+        self.assertEqual(launched_args[: len(args)], args)
+        self.assertEqual(launched_args[-2], "--log-config")
+        self.assertNotIn("stdout", popen.call_args.kwargs)
+        self.assertNotIn("stderr", popen.call_args.kwargs)
+        self.assertTrue(service.log_path.endswith("launcher_backend.log"))
+        self.assertEqual(
+            popen.call_args.kwargs["env"]["MOTO_BACKEND_CONSOLE_TITLE"],
+            "MOTO Backend [default]",
+        )
+
+
+class ServiceStartupRollbackTests(TestCase):
+    def _default_runtime(self) -> moto_launcher.InstanceRuntime:
+        return moto_launcher.InstanceRuntime(
+            instance_id="default",
+            backend_host="127.0.0.1",
+            backend_port=8000,
+            frontend_port=5173,
+            data_root=r"C:\data",
+            log_root=r"C:\logs",
+            secret_namespace=None,
+            storage_prefix=None,
+            is_default=True,
+            explicit_override=False,
+        )
+
+    def test_failed_termination_preserves_runtime_owner_metadata(self) -> None:
+        backend = moto_launcher.LaunchedService("backend", 101, "window")
+        with mock.patch.object(moto_launcher, "launch_service", return_value=backend), \
+             mock.patch.object(
+                 moto_launcher,
+                 "wait_for_backend_health",
+                 side_effect=RuntimeError("startup failed"),
+             ), \
+             mock.patch.object(moto_launcher, "terminate_launched_service"), \
+             mock.patch.object(moto_launcher, "is_pid_running", return_value=True), \
+             mock.patch.object(moto_launcher, "backend_lease_is_held", return_value=True), \
+             mock.patch.object(moto_launcher.time, "sleep"), \
+             mock.patch.object(
+                 moto_launcher.time,
+                 "monotonic",
+                 side_effect=[0.0, 0.0, 11.0],
+             ), \
+             mock.patch.object(moto_launcher, "remove_owned_runtime_lock") as remove:
+            with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                moto_launcher.start_services(
+                    self._default_runtime(),
+                    {},
+                    "http://127.0.0.1:5173",
+                    "http://127.0.0.1:8000",
+                    "npm",
+                )
+        remove.assert_not_called()
+
+    def test_registration_failure_terminates_both_started_services(self) -> None:
+        runtime = moto_launcher.InstanceRuntime(
+            instance_id="test",
+            backend_host="127.0.0.1",
+            backend_port=8100,
+            frontend_port=5174,
+            data_root=r"C:\data",
+            log_root=r"C:\logs",
+            secret_namespace="test",
+            storage_prefix="test",
+            is_default=False,
+            explicit_override=True,
+        )
+        backend = moto_launcher.LaunchedService("backend", 101, "window")
+        frontend = moto_launcher.LaunchedService("frontend", 202, "window")
+
+        with mock.patch.object(moto_launcher, "launch_service", side_effect=[backend, frontend]):
+            with mock.patch.object(moto_launcher, "wait_for_backend_health"):
+                with mock.patch.object(moto_launcher, "wait_for_frontend_ready"):
+                    with mock.patch.object(
+                        moto_launcher,
+                        "register_active_instance",
+                        side_effect=RuntimeError("registration failed"),
+                    ):
+                        with mock.patch.object(moto_launcher, "terminate_launched_service") as terminate:
+                            with self.assertRaisesRegex(RuntimeError, "registration failed"):
+                                moto_launcher.start_services(
+                                    runtime,
+                                    {},
+                                    "http://127.0.0.1:5174",
+                                    "http://127.0.0.1:8100",
+                                    "npm",
+                                )
+
+        self.assertEqual(
+            terminate.call_args_list,
+            [mock.call(frontend), mock.call(backend)],
+        )
 
 
 class LauncherDependencyVersionTests(TestCase):

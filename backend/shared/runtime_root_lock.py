@@ -15,6 +15,7 @@ class RuntimeRootInUseError(RuntimeError):
 
 _PROCESS_GUARD = threading.Lock()
 _PROCESS_OWNED: set[str] = set()
+_WINDOWS_LEASE_SPAN = 1024 * 1024 + 1
 
 
 class RuntimeRootLease:
@@ -35,7 +36,10 @@ class RuntimeRootLease:
 
         file_obj = None
         try:
-            file_obj = self.lock_path.open("a+b")
+            # Native byte-range locking must never use a buffered descriptor:
+            # read-ahead can leave its OS offset different from tell()/seek().
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            file_obj = os.fdopen(fd, "r+b", buffering=0)
             file_obj.seek(0)
             if file_obj.read(1) == b"":
                 file_obj.seek(0)
@@ -70,7 +74,15 @@ class RuntimeRootLease:
             import msvcrt
 
             try:
-                msvcrt.locking(file_obj.fileno(), msvcrt.LK_NBLCK, 1)
+                # Hold the complete bounded migration range for the lifetime of
+                # the lease. Legacy buffered/append-mode backends locked their
+                # read-ahead/EOF offset rather than byte zero; retaining this
+                # range makes legacy detection and modern ownership atomic.
+                msvcrt.locking(
+                    file_obj.fileno(),
+                    msvcrt.LK_NBLCK,
+                    _WINDOWS_LEASE_SPAN,
+                )
             except OSError as exc:
                 raise RuntimeRootInUseError("Windows runtime-root lock is held") from exc
         else:
@@ -87,20 +99,12 @@ class RuntimeRootLease:
         try:
             if file_obj is not None:
                 file_obj.seek(0)
-                if os.name == "nt":
-                    import msvcrt
-
-                    try:
-                        msvcrt.locking(file_obj.fileno(), msvcrt.LK_UNLCK, 1)
-                    except OSError:
-                        # Closing the descriptor also releases all Windows byte
-                        # locks. This covers runtimes that reject explicit
-                        # unlock after writes changed the current file pointer.
-                        pass
-                else:
+                if os.name != "nt":
                     import fcntl
 
                     fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
+                # Windows close releases the entire acquired range, including
+                # the legacy-offset migration span regardless of later writes.
                 file_obj.close()
         finally:
             with _PROCESS_GUARD:

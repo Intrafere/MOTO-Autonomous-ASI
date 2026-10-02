@@ -105,4 +105,14 @@ describe('proof presentation', () => {
       { status: 'pruned', reason: 'No longer useful' }
     )).toThrow(/proof-set revision is unavailable/i);
   });
+
+  test('uses occurrence identity when restoring a prune owned by the active run', () => {
+    expect(buildProofLiveContextMutation({
+      run_id: 'proof-creation-run',
+      live_context_owner_run_id: 'active-context-run',
+      proof_set_revision: 4,
+    }, {
+      status: 'active',
+    }).expected_run_id).toBe('proof-creation-run');
+  });
 });

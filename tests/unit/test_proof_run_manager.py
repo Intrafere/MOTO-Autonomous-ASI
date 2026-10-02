@@ -274,6 +274,32 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.last_error_summary, "stage checkpoint preserved")
         self.assertEqual(events, [("error", "proof_stage_error")])
 
+    async def test_repair_terminal_event_and_reconnect_item_include_error_detail(self):
+        events = []
+
+        async def event_callback(event_type, payload):
+            events.append((event_type, payload))
+
+        self.control.event_callback = event_callback
+        self.manager._runs["proof-run-1"] = self.control
+        snapshot = await self.manager.repair_required(
+            self.control,
+            reason=(
+                "Prompt (51489 tokens) exceeds model's context window (5632 tokens). "
+                "Increase LM Studio Context Length (n_ctx)."
+            ),
+        )
+
+        self.assertEqual(snapshot.terminal_reason, "repair_required")
+        self.assertEqual(events[-1][0], "proof_run_terminal")
+        self.assertIn("5632", events[-1][1]["last_error_summary"])
+        collection = await self.manager.find_by_source(
+            scope="manual",
+            source_type="paper",
+            source_id="paper-1",
+        )
+        self.assertIn("n_ctx", collection.runs[0].last_error_summary)
+
     async def test_continuous_lifecycle_events_are_typed_and_generation_scoped(self):
         events = []
 

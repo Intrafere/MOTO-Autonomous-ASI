@@ -17,7 +17,7 @@ import time
 import re
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Awaitable, Callable, List, Dict, Any, Optional, Tuple
 from backend.shared.config import rag_config, system_config
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.provider_errors import (
@@ -387,6 +387,7 @@ class LMStudioClient:
         skip_semaphore: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         Generate a completion using LM Studio API with validation and retry.
@@ -402,7 +403,7 @@ class LMStudioClient:
             # Direct execution without semaphore
             response = await self._execute_completion_request(
                 model, messages, temperature, max_tokens, response_format,
-                tools=tools, tool_choice=tool_choice,
+                tools=tools, tool_choice=tool_choice, retry_callback=retry_callback,
             )
             return self._attach_routing_metadata(
                 response,
@@ -419,7 +420,7 @@ class LMStudioClient:
             async with model_semaphore:
                 response = await self._execute_completion_request(
                     actual_model, messages, temperature, max_tokens, response_format,
-                    tools=tools, tool_choice=tool_choice,
+                    tools=tools, tool_choice=tool_choice, retry_callback=retry_callback,
                 )
                 return self._attach_routing_metadata(
                     response,
@@ -439,6 +440,7 @@ class LMStudioClient:
         response_format: Optional[Dict[str, str]],
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Execute the actual completion request (extracted for semaphore bypass)."""
         # Calculate approximate token count for logging
@@ -502,9 +504,20 @@ class LMStudioClient:
                     # Check error type
                     is_model_crash = "has crashed" in error_detail.lower() or "exit code:" in error_detail.lower()
                     is_regex_error = "failed to process regex" in error_detail.lower()
-                    is_input_overflow = ("prompt" in error_detail.lower() and "too" in error_detail.lower()) or \
-                                        ("input" in error_detail.lower() and "exceeds" in error_detail.lower()) or \
-                                        ("prompt exceeds" in error_detail.lower())
+                    error_detail_lower = error_detail.lower()
+                    is_input_overflow = (
+                        ("prompt" in error_detail_lower and "too" in error_detail_lower)
+                        or ("input" in error_detail_lower and "exceeds" in error_detail_lower)
+                        or ("prompt exceeds" in error_detail_lower)
+                        or (
+                            "n_keep" in error_detail_lower
+                            and "n_ctx" in error_detail_lower
+                            and (
+                                ">=" in error_detail_lower
+                                or "greater than the context length" in error_detail_lower
+                            )
+                        )
+                    )
                     is_mid_generation_overflow = "mid-generation" in error_detail.lower() or \
                                                  ("context length" in error_detail.lower() and "does not support" in error_detail.lower())
                     
@@ -539,8 +552,17 @@ class LMStudioClient:
                         )
                     
                     elif is_input_overflow:
-                        limit_match = re.search(r'context.*?(\d+)', error_detail.lower())
-                        context_limit = int(limit_match.group(1)) if limit_match else "unknown"
+                        n_ctx_match = re.search(r"\bn_ctx\s*[:=]\s*(\d+)", error_detail_lower)
+                        generic_limit_match = re.search(
+                            r"context(?:\s+window|\s+length)?\D{0,40}(\d+)",
+                            error_detail_lower,
+                        )
+                        context_limit_match = n_ctx_match or generic_limit_match
+                        context_limit = (
+                            int(context_limit_match.group(1))
+                            if context_limit_match
+                            else "unknown"
+                        )
                         
                         logger.error(
                             f"Input prompt too large! Prompt: ~{approx_tokens} tokens, "
@@ -555,11 +577,26 @@ class LMStudioClient:
                     
                     # Retry on transient 400 errors
                     if attempt < max_retries:
-                        await asyncio.sleep(1.0 * (attempt + 1))
+                        delay = 1.0 * (attempt + 1)
+                        if retry_callback is not None:
+                            await retry_callback({
+                                "provider": "lm_studio",
+                                "provider_label": "LM Studio",
+                                "model": model,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": max_retries + 1,
+                                "retry_after_seconds": delay,
+                                "reason": "transient_http_error",
+                            })
+                        await asyncio.sleep(delay)
                         logger.info(f"Retrying after 400 error...")
                         continue
                     
-                    raise
+                    raise ProviderRouteError(
+                        f"LM Studio rejected the completion request: {error_detail}",
+                        route=ProviderRouteIdentity(provider="lm_studio", model=model),
+                        cause=e,
+                    ) from e
                     
                 elif e.response.status_code == 404:
                     logger.error(
@@ -587,7 +624,18 @@ class LMStudioClient:
                     redact_log_text(e, 240),
                 )
                 if attempt < max_retries:
-                    await asyncio.sleep(1.0 * (attempt + 1))
+                    delay = 1.0 * (attempt + 1)
+                    if retry_callback is not None:
+                        await retry_callback({
+                            "provider": "lm_studio",
+                            "provider_label": "LM Studio",
+                            "model": model,
+                            "retry_attempt": attempt + 1,
+                            "max_attempts": max_retries + 1,
+                            "retry_after_seconds": delay,
+                            "reason": "connection_error",
+                        })
+                    await asyncio.sleep(delay)
                     continue
                 raise ProviderRouteError(
                     "LM Studio connection failed after internal retries.",

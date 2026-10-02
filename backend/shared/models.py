@@ -1523,6 +1523,7 @@ class ProofRunCollectionItem(BaseModel):
     proof_set_revision: int = Field(default=0, ge=0)
     updated_at: datetime
     terminal_reason: str = ""
+    last_error_summary: str = Field(default="", max_length=1800)
     pruning_status: ProofPruningStatus = "disabled"
 
 

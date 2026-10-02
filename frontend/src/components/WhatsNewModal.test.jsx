@@ -12,39 +12,28 @@ afterEach(() => {
 
 describe('release highlights', () => {
   it('remembers acknowledgement independently for each version', () => {
-    expect(hasSeenRelease('1.1.06')).toBe(false);
-    markReleaseSeen('1.1.06');
-    expect(hasSeenRelease('1.1.06')).toBe(true);
     expect(hasSeenRelease('1.1.07')).toBe(false);
+    markReleaseSeen('1.1.07');
+    expect(hasSeenRelease('1.1.07')).toBe(true);
+    expect(hasSeenRelease('1.1.08')).toBe(false);
   });
 
   it('shows readable highlights, a safe GitHub link, and dismiss controls', () => {
     const onClose = vi.fn();
-    render(<WhatsNewModal version="1.1.06" onClose={onClose} />);
+    render(<WhatsNewModal version="1.1.07" onClose={onClose} />);
     expect(screen.getByRole('dialog').getAttribute('aria-modal')).toBe('true');
-    expect(screen.getByRole('heading', { name: 'What’s New with MOTO v1.1.06?' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'What’s New with MOTO v1.1.07?' })).toBeTruthy();
     expect(screen.getByRole('link').getAttribute('href')).toBe(MOTO_GITHUB_URL);
     fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
     expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('covers user-facing pending changes and ends with the SyntheticLib announcement', () => {
-    render(<WhatsNewModal version="1.1.06" onClose={() => {}} />);
-    for (const title of [
-      'Let proof-solving models compete',
-      'More control over your models',
-      'Manage more with fewer clicks',
-      'Research that’s easier to read',
-      'Smoother, more reliable runs',
-    ]) {
-      expect(screen.getByRole('heading', { name: title })).toBeTruthy();
-    }
-    expect(screen.getByText(/Benchmarks survive API-log clearing/)).toBeTruthy();
-    expect(screen.getByText(/Auto selects the highest advertised effort/)).toBeTruthy();
-    expect(screen.getByText(/GPT 6 Astra first/)).toBeTruthy();
-    expect(screen.getByText('proof-strength (PS) badge to GPT OSS 120B').tagName).toBe('STRONG');
-    expect(screen.getByText(/two moderate security audit findings/)).toBeTruthy();
-    expect(screen.getByText('Force Paper Writing').tagName).toBe('STRONG');
+    render(<WhatsNewModal version="1.1.07" onClose={() => {}} />);
+    expect(screen.getByRole('heading', { name: 'Reliability improvements' })).toBeTruthy();
+    expect(screen.getByText(/Provider retry cooldowns now appear/)).toBeTruthy();
+    expect(screen.getByText(/safely recover verified orphaned backends/)).toBeTruthy();
+    expect(screen.getByText(/stronger data-root locking/)).toBeTruthy();
     expect(screen.queryByText(/\*\*/)).toBeNull();
     expect(screen.queryByText(/deterministic workflow-test scenarios/)).toBeNull();
     expect(screen.getByRole('dialog').lastElementChild.lastElementChild.textContent)
@@ -56,7 +45,7 @@ describe('release highlights', () => {
     document.body.appendChild(trigger);
     trigger.focus();
     const onClose = vi.fn();
-    const { unmount } = render(<WhatsNewModal version="1.1.06" onClose={onClose} />);
+    const { unmount } = render(<WhatsNewModal version="1.1.07" onClose={onClose} />);
     const close = screen.getByRole('button', { name: "Close What's New" });
     expect(document.activeElement).toBe(close);
     fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
@@ -73,7 +62,7 @@ describe('release highlights', () => {
     const alreadyInert = document.createElement('div');
     alreadyInert.inert = true;
     document.body.append(background, alreadyInert);
-    const { unmount } = render(<WhatsNewModal version="1.1.06" onClose={() => {}} />);
+    const { unmount } = render(<WhatsNewModal version="1.1.07" onClose={() => {}} />);
     expect(background.inert).toBe(true);
     background.focus();
     expect(document.activeElement).toBe(screen.getByRole('button', { name: "Close What's New" }));
@@ -99,6 +88,6 @@ describe('release highlights', () => {
 
   it('keeps storage failures nonfatal', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
-    expect(() => markReleaseSeen('1.1.06')).not.toThrow();
+    expect(() => markReleaseSeen('1.1.07')).not.toThrow();
   });
 });

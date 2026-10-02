@@ -141,4 +141,4 @@ def test_competitor_nested_snapshot_and_start():
 def test_contract_version_matches_manifest():
     from backend.shared.build_info import _DEFAULT_BUILD_INFO
     manifest = json.loads((Path(__file__).resolve().parents[1] / "moto-update-manifest.json").read_text())
-    assert manifest["api_contract_version"] == _DEFAULT_BUILD_INFO["api_contract_version"] == "build6-v95"
+    assert manifest["api_contract_version"] == _DEFAULT_BUILD_INFO["api_contract_version"] == "build6-v97"

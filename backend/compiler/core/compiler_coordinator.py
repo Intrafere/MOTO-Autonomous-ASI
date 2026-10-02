@@ -946,6 +946,13 @@ class CompilerCoordinator:
                 "role_id": "compiler",
                 "message": "All free models exhausted, waiting to retry",
             })
+            await api_client_manager.broadcast_retry_cooldown(
+                provider="openrouter",
+                provider_label="OpenRouter free models",
+                role_id="compiler",
+                retry_after_seconds=120,
+                reason="free_models_exhausted",
+            )
             await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             if self.is_running:
                 self._main_task = asyncio.create_task(self._main_workflow())

@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 from pathlib import Path
 import tempfile
 import urllib.error
@@ -7,6 +8,32 @@ from unittest import TestCase, main, mock
 import zipfile
 
 import moto_updater
+
+
+class WindowsProcessStatusTests(TestCase):
+    def test_windows_live_pid_uses_process_handle(self) -> None:
+        kernel32 = mock.MagicMock()
+        kernel32.OpenProcess.return_value = 99
+        kernel32.GetExitCodeProcess.side_effect = lambda _handle, pointer: (
+            setattr(pointer._obj, "value", 259) or 1
+        )
+        ctypes_module = mock.MagicMock()
+        ctypes_module.windll.kernel32 = kernel32
+        ctypes_module.byref.side_effect = lambda value: mock.Mock(_obj=value)
+        wintypes_module = mock.MagicMock()
+
+        class FakeDword:
+            value = 0
+
+        wintypes_module.DWORD = FakeDword
+        with mock.patch.object(moto_updater.sys, "platform", "win32"), \
+             mock.patch.dict(
+                 "sys.modules",
+                 {"ctypes": ctypes_module, "ctypes.wintypes": wintypes_module},
+             ), \
+             mock.patch.object(os, "kill", side_effect=AssertionError("must not use os.kill")):
+            self.assertTrue(moto_updater._is_pid_running(4242))
+        kernel32.CloseHandle.assert_called_once_with(99)
 
 
 class RepoSlugTests(TestCase):

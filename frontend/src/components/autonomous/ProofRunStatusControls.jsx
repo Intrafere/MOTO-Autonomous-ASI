@@ -67,6 +67,11 @@ export default function ProofRunStatusControls({
           <strong>Ended because</strong> {readable(run.terminal_reason, 'Unknown reason')}
         </div>
       )}
+      {isTerminal && run.last_error_summary && (
+        <div className="proof-run-status-controls__error" role="alert">
+          <strong>Error details:</strong> {run.last_error_summary}
+        </div>
+      )}
       <div className="proof-run-status-controls__actions">
         {canStop && (
           <button

@@ -13,7 +13,7 @@ import json
 import logging
 import secrets
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import httpx
@@ -914,7 +914,14 @@ class OpenAICodexClient:
                         output_text += content.get("text") or ""
         return aggregate_text or output_text, tool_calls
 
-    async def _post_with_retry(self, url: str, **kwargs) -> httpx.Response:
+    async def _post_with_retry(
+        self,
+        url: str,
+        *,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        retry_model: str = "",
+        **kwargs,
+    ) -> httpx.Response:
         """POST with retry on transport errors (peer close, read error, connect error)."""
         max_attempts = self._max_attempts()
         for attempt in range(max_attempts):
@@ -933,6 +940,16 @@ class OpenAICodexClient:
                         f"; retrying in {delay:.1f}s" if attempt < max_attempts - 1 else "",
                     )
                     if attempt < max_attempts - 1:
+                        if retry_callback is not None:
+                            await retry_callback({
+                                "provider": "openai_codex_oauth",
+                                "provider_label": "OpenAI Codex",
+                                "model": retry_model,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": max_attempts,
+                                "retry_after_seconds": delay,
+                                "reason": "transient_http_error",
+                            })
                         await asyncio.sleep(delay)
                         continue
                     raise OpenAICodexRequestError(
@@ -956,6 +973,16 @@ class OpenAICodexClient:
                     f"; retrying in {delay:.1f}s" if attempt < max_attempts - 1 else "",
                 )
                 if attempt < max_attempts - 1:
+                    if retry_callback is not None:
+                        await retry_callback({
+                            "provider": "openai_codex_oauth",
+                            "provider_label": "OpenAI Codex",
+                            "model": retry_model,
+                            "retry_attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "retry_after_seconds": delay,
+                            "reason": "connection_error",
+                        })
                     await asyncio.sleep(delay)
                     continue
                 raise OpenAICodexRequestError(
@@ -975,6 +1002,7 @@ class OpenAICodexClient:
         reasoning_effort: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Generate a completion and return a Chat Completions-compatible shape."""
         requested_model = model
@@ -1010,6 +1038,8 @@ class OpenAICodexClient:
         while True:
             response = await self._post_with_retry(
                 f"{self.CODEX_BASE_URL}/responses",
+                retry_callback=retry_callback,
+                retry_model=requested_model,
                 json=payload,
                 headers=self._headers(tokens, accept_stream=True),
             )
@@ -1052,6 +1082,16 @@ class OpenAICodexClient:
                             sanitize_provider_error_text(str(exc)),
                             delay,
                         )
+                        if retry_callback is not None:
+                            await retry_callback({
+                                "provider": "openai_codex_oauth",
+                                "provider_label": "OpenAI Codex",
+                                "model": requested_model,
+                                "retry_attempt": stream_retries_used,
+                                "max_attempts": self.MAX_RETRIES,
+                                "retry_after_seconds": delay,
+                                "reason": "stream_error",
+                            })
                         await asyncio.sleep(delay)
                         continue
                     raise OpenAICodexRequestError(
