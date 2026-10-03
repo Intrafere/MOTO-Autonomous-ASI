@@ -80,14 +80,14 @@ export default function HighlightedModelsSidebar() {
               <div className="model-item-badge">Powerful and affordable OAuth</div>
             </div>
 
-            <div className="model-item model-item--ranked model-item--silver model-item--oa">
-              <OauthTag stacked />
+            <div className="model-item model-item--ranked model-item--silver model-item--os">
+              <OsTag />
               <div className="flex-row-center">
                 <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
                 <div className="model-item-name">Grok 4.7</div>
                 <div className="ranking-badge ranking-badge--silver">🥈 SILVER</div>
               </div>
-              <div className="model-item-badge">Powerful and affordable OAuth</div>
+              <div className="model-item-badge">Highly knowledgeable, affordable API cost</div>
             </div>
 
             <div className="model-item model-item--ranked model-item--bronze model-item--os">
