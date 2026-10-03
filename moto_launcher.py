@@ -20,8 +20,10 @@ import secrets
 import socket
 import shlex
 from shutil import copyfileobj, rmtree, which
+import struct
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import time
 from typing import Sequence
@@ -30,6 +32,7 @@ from urllib.request import Request, urlopen
 import webbrowser
 import zipfile
 
+from launcher_https import verified_urlopen
 from moto_updater import (
     apply_update,
     build_update_prompt,
@@ -57,6 +60,16 @@ RESET = "\033[0m"
 MIN_PYTHON_VERSION = (3, 10)
 MIN_NODE_VERSION = (20, 19, 0)
 MIN_NODE_ALT_VERSION = (22, 12, 0)
+WINDOWS_VC_REDIST_PACKAGE_IDS = {
+    "x64": "Microsoft.VCRedist.2015+.x64",
+    "x86": "Microsoft.VCRedist.2015+.x86",
+    "arm64": "Microsoft.VCRedist.2015+.arm64",
+}
+WINDOWS_VC_REDIST_URLS = {
+    architecture: f"https://aka.ms/vs/17/release/vc_redist.{architecture}.exe"
+    for architecture in WINDOWS_VC_REDIST_PACKAGE_IDS
+}
+TRUSTSTORE_REQUIREMENT = "truststore>=0.10.0,<1.0"
 
 
 @dataclass(frozen=True)
@@ -850,6 +863,43 @@ def run_silent(args: list[str], cwd: str | None = None) -> int:
     ).returncode
 
 
+def ensure_windows_launcher_truststore() -> bool:
+    """Bootstrap native Windows HTTPS trust before the first update request."""
+    if sys.platform != "win32":
+        return True
+
+    python_cmd = get_python_command()
+    import_command = [python_cmd, "-c", "import truststore"]
+    if run_silent(import_command, cwd=str(SCRIPT_DIR)) == 0:
+        return True
+
+    cprint("Preparing native Windows certificate verification...", YELLOW)
+    install_result = run_visible(
+        [
+            python_cmd,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            TRUSTSTORE_REQUIREMENT,
+        ],
+        cwd=str(SCRIPT_DIR),
+        check=False,
+    )
+    importlib.invalidate_caches()
+    if install_result == 0 and run_silent(import_command, cwd=str(SCRIPT_DIR)) == 0:
+        cprint("Native Windows certificate verification ready.", GREEN)
+        return True
+
+    cprint(
+        "WARNING: Native Windows certificate verification could not be prepared. "
+        "The launcher will keep standard certificate verification enabled; update "
+        "checking may be unavailable until Python dependencies are installed.",
+        YELLOW,
+    )
+    return False
+
+
 def has_desktop_session() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
@@ -1448,6 +1498,116 @@ def install_python_dependencies() -> None:
     print()
 
 
+def _probe_chromadb_native_bindings() -> tuple[bool, str]:
+    """Probe ChromaDB's native extension in a clean child interpreter."""
+    python_cmd = get_python_command()
+    if not python_cmd:
+        return False, "Python interpreter could not be resolved."
+    result = subprocess.run(
+        [python_cmd, "-c", "import chromadb_rust_bindings"],
+        cwd=str(SCRIPT_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    diagnostic = (result.stderr or result.stdout or "").strip()
+    return result.returncode == 0, diagnostic
+
+
+def _windows_python_architecture() -> str | None:
+    """Return the VC runtime architecture required by this Python process."""
+    python_platform = sysconfig.get_platform().lower()
+    if python_platform in {"win-arm64", "win-aarch64"}:
+        return "arm64"
+    if python_platform in {"win-amd64", "win-x86_64"}:
+        return "x64"
+    if python_platform in {"win32", "win-x86"}:
+        return "x86"
+    # Some embeddable/custom Windows distributions do not expose a standard
+    # sysconfig platform. Use the process bitness only for conventional x86 hosts.
+    machine = platform.machine().lower()
+    if struct.calcsize("P") == 8 and machine in {"amd64", "x86_64"}:
+        return "x64"
+    if struct.calcsize("P") == 4 and machine in {"x86", "i386", "i686", "amd64", "x86_64"}:
+        return "x86"
+    return None
+
+
+def install_windows_vc_runtime() -> bool:
+    """Install the native runtime required by ChromaDB's Windows wheel."""
+    if sys.platform != "win32":
+        return False
+
+    winget_cmd = resolve_command("winget.exe", "winget")
+    if not winget_cmd:
+        return False
+
+    architecture = _windows_python_architecture()
+    package_id = WINDOWS_VC_REDIST_PACKAGE_IDS.get(architecture or "")
+    if not package_id:
+        return False
+
+    cprint("Installing the Microsoft Visual C++ runtime required by ChromaDB...", YELLOW)
+    run_visible(
+        [winget_cmd, "source", "update", "--name", "winget"],
+        cwd=str(SCRIPT_DIR),
+        check=False,
+    )
+    command = [
+        winget_cmd,
+        "install",
+        "--id",
+        package_id,
+        "-e",
+        "--source",
+        "winget",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--silent",
+    ]
+    return run_visible(command, cwd=str(SCRIPT_DIR), check=False) == 0
+
+
+def ensure_python_native_dependencies() -> None:
+    """Fail before service startup if required Windows native modules cannot load."""
+    if sys.platform != "win32":
+        return
+
+    available, initial_diagnostic = _probe_chromadb_native_bindings()
+    if available:
+        return
+
+    print()
+    cprint("ChromaDB's Windows native module could not load.", YELLOW)
+    cprint("Attempting a one-time Microsoft Visual C++ runtime installation...", YELLOW)
+    install_windows_vc_runtime()
+    repaired, repair_diagnostic = _probe_chromadb_native_bindings()
+    if repaired:
+        cprint("Microsoft Visual C++ runtime ready; ChromaDB native module verified.", GREEN)
+        print()
+        return
+
+    diagnostic = repair_diagnostic or initial_diagnostic
+    diagnostic_suffix = f" Native loader diagnostic: {diagnostic[:500]}" if diagnostic else ""
+    architecture = _windows_python_architecture()
+    architecture_label = architecture or "unknown architecture"
+    runtime_url = WINDOWS_VC_REDIST_URLS.get(
+        architecture or "",
+        "https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist",
+    )
+    print()
+    raise RuntimeError(
+        "ChromaDB's native Windows module could not load. "
+        "The launcher could not install or verify the Microsoft Visual C++ "
+        f"2015-2022 Redistributable ({architecture_label}). Install or repair it from "
+        f"{runtime_url} and launch MOTO again."
+        f"{diagnostic_suffix}"
+    )
+
+
 def install_playwright_browser() -> None:
     cprint("[4b/8] Installing Playwright Chromium browser for PDF generation...", YELLOW)
     cprint("This is a one-time download (~150MB) and may take a few minutes...", YELLOW)
@@ -1517,7 +1677,7 @@ def _download_file(url: str, destination: Path) -> None:
     tmp = destination.with_suffix(destination.suffix + ".tmp")
     try:
         request = Request(url, headers={"User-Agent": "MOTO Launcher"})
-        with urlopen(request) as response, tmp.open("wb") as handle:
+        with verified_urlopen(request) as response, tmp.open("wb") as handle:
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -1745,7 +1905,7 @@ def install_lean4(
                         "Accept": "application/vnd.github+json",
                     },
                 )
-                with urlopen(release_request, timeout=60) as response:
+                with verified_urlopen(release_request, timeout=60) as response:
                     release_payload = json.loads(response.read().decode("utf-8"))
 
                 asset = _select_elan_windows_asset(list(release_payload.get("assets") or []))
@@ -1927,7 +2087,7 @@ def install_z3(runtime: InstanceRuntime, env: dict[str, str]) -> None:
                     "Accept": "application/vnd.github+json",
                 },
             )
-            with urlopen(release_request, timeout=60) as response:
+            with verified_urlopen(release_request, timeout=60) as response:
                 release_payload = json.loads(response.read().decode("utf-8"))
 
             asset = _select_z3_asset(list(release_payload.get("assets") or []))
@@ -2507,6 +2667,7 @@ def main() -> int:
         clear_console()
         print_banner()
 
+        ensure_windows_launcher_truststore()
         if not handle_available_updates(launcher_args):
             return 0
 
@@ -2514,6 +2675,7 @@ def main() -> int:
         check_node_installation()
         runtime, frontend_url, backend_url, env = prepare_runtime_and_environment()
         install_python_dependencies()
+        ensure_python_native_dependencies()
         install_playwright_browser()
         install_lean4(runtime, env)
         install_z3(runtime, env)

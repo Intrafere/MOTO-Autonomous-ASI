@@ -14,6 +14,7 @@ export const releaseNotes = {
           'Provider retry cooldowns now appear in **Live Activity**.',
           'Windows relaunches now safely recover verified orphaned backends while preserving active instances.',
           'Windows startup now has stronger data-root locking, process tracking, cleanup, and diagnostics.',
+          'Fresh Windows installs now automatically repair the Microsoft runtime required by ChromaDB.',
         ],
       },
     ],

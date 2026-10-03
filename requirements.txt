@@ -19,6 +19,7 @@ python-dotenv>=1.0.0
 aiofiles>=23.2.1,<25.0
 tiktoken>=0.5.2
 keyring>=25.6.0
+truststore>=0.10.0,<1.0
 
 # PDF generation (headless Chromium via Playwright - full rendering fidelity)
 playwright>=1.40.0

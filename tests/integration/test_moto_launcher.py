@@ -1,4 +1,5 @@
 import io
+import inspect
 import os
 from pathlib import Path
 import tarfile
@@ -390,12 +391,13 @@ class ResolveInstanceRuntimeTests(TestCase):
                         with mock.patch.object(moto_launcher, "windows_listening_ports_for_pid", return_value=[8000]):
                             with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
                                 with mock.patch.object(moto_launcher, "windows_parent_pid", return_value=999):
-                                    with mock.patch.object(moto_launcher, "is_pid_running", return_value=True):
-                                        with mock.patch.object(moto_launcher, "is_moto_backend_process", return_value=True):
-                                            with mock.patch.object(moto_launcher, "backend_health_identity", return_value="other"):
-                                                with mock.patch.object(moto_launcher, "terminate_process_tree") as terminate:
-                                                    with self.assertRaisesRegex(RuntimeError, "could not safely identify"):
-                                                        moto_launcher.assert_runtime_lock_available(temp_dir)
+                                    with mock.patch.object(moto_launcher, "backend_byte_zero_is_held", return_value=False):
+                                        with mock.patch.object(moto_launcher, "is_pid_running", return_value=True):
+                                            with mock.patch.object(moto_launcher, "is_moto_backend_process", return_value=True):
+                                                with mock.patch.object(moto_launcher, "backend_health_identity", return_value="other"):
+                                                    with mock.patch.object(moto_launcher, "terminate_process_tree") as terminate:
+                                                        with self.assertRaisesRegex(RuntimeError, "could not safely identify"):
+                                                            moto_launcher.assert_runtime_lock_available(temp_dir)
             terminate.assert_not_called()
 
     def test_runtime_lock_recovers_healthy_backend_from_recorded_port(self) -> None:
@@ -442,6 +444,7 @@ class ResolveInstanceRuntimeTests(TestCase):
                  mock.patch.object(moto_launcher, "windows_listening_ports_for_pid", return_value=[8123]), \
                  mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]), \
                  mock.patch.object(moto_launcher, "windows_parent_pid", return_value=400), \
+                 mock.patch.object(moto_launcher, "backend_byte_zero_is_held", return_value=False), \
                  mock.patch.object(moto_launcher, "is_pid_running", return_value=True), \
                  mock.patch.object(moto_launcher, "backend_health_identity", return_value="default"), \
                  mock.patch.object(moto_launcher, "is_moto_backend_process", return_value=True), \
@@ -692,6 +695,74 @@ class LauncherDependencyVersionTests(TestCase):
 
         installer.assert_called_once()
 
+    def test_windows_truststore_bootstrap_skips_install_when_available(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "get_python_command", return_value="python"):
+                with mock.patch.object(moto_launcher, "run_silent", return_value=0) as probe:
+                    with mock.patch.object(moto_launcher, "run_visible") as install:
+                        self.assertTrue(moto_launcher.ensure_windows_launcher_truststore())
+
+        probe.assert_called_once_with(
+            ["python", "-c", "import truststore"],
+            cwd=str(moto_launcher.SCRIPT_DIR),
+        )
+        install.assert_not_called()
+
+    def test_windows_truststore_bootstrap_installs_and_reprobes(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "get_python_command", return_value="python"):
+                with mock.patch.object(
+                    moto_launcher,
+                    "run_silent",
+                    side_effect=[1, 0],
+                ) as probe:
+                    with mock.patch.object(
+                        moto_launcher,
+                        "run_visible",
+                        return_value=0,
+                    ) as install:
+                        with mock.patch.object(
+                            moto_launcher.importlib,
+                            "invalidate_caches",
+                        ) as invalidate:
+                            self.assertTrue(moto_launcher.ensure_windows_launcher_truststore())
+
+        self.assertEqual(probe.call_count, 2)
+        install.assert_called_once_with(
+            [
+                "python",
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                moto_launcher.TRUSTSTORE_REQUIREMENT,
+            ],
+            cwd=str(moto_launcher.SCRIPT_DIR),
+            check=False,
+        )
+        invalidate.assert_called_once_with()
+
+    def test_windows_truststore_bootstrap_failure_keeps_startup_available(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "get_python_command", return_value="python"):
+                with mock.patch.object(moto_launcher, "run_silent", return_value=1):
+                    with mock.patch.object(moto_launcher, "run_visible", return_value=1):
+                        self.assertFalse(moto_launcher.ensure_windows_launcher_truststore())
+
+    def test_truststore_bootstrap_is_noop_outside_windows(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "linux"):
+            with mock.patch.object(moto_launcher, "run_silent") as probe:
+                self.assertTrue(moto_launcher.ensure_windows_launcher_truststore())
+
+        probe.assert_not_called()
+
+    def test_main_bootstraps_native_trust_before_update_check(self) -> None:
+        source = inspect.getsource(moto_launcher.main)
+        self.assertLess(
+            source.index("ensure_windows_launcher_truststore()"),
+            source.index("handle_available_updates(launcher_args)"),
+        )
+
     def test_install_windows_nodejs_tries_user_scope_lts_after_source_refresh(self) -> None:
         with mock.patch.object(moto_launcher.sys, "platform", "win32"):
             with mock.patch.object(moto_launcher, "resolve_command", return_value="winget"):
@@ -783,6 +854,125 @@ class LauncherDependencyVersionTests(TestCase):
                                 moto_launcher.check_node_installation()
 
                 self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], str(node_dir.resolve()))
+
+    def test_chromadb_native_probe_uses_clean_child_interpreter(self) -> None:
+        result = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(moto_launcher, "get_python_command", return_value="python"):
+            with mock.patch.object(moto_launcher.subprocess, "run", return_value=result) as run:
+                self.assertEqual(moto_launcher._probe_chromadb_native_bindings(), (True, ""))
+
+        run.assert_called_once_with(
+            ["python", "-c", "import chromadb_rust_bindings"],
+            cwd=str(moto_launcher.SCRIPT_DIR),
+            stdout=moto_launcher.subprocess.PIPE,
+            stderr=moto_launcher.subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    def test_ensure_native_dependencies_installs_vc_runtime_and_reprobes(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(
+                moto_launcher,
+                "_probe_chromadb_native_bindings",
+                side_effect=[(False, "missing DLL"), (True, "")],
+            ) as probe:
+                with mock.patch.object(
+                    moto_launcher,
+                    "install_windows_vc_runtime",
+                    return_value=True,
+                ) as installer:
+                    moto_launcher.ensure_python_native_dependencies()
+
+        installer.assert_called_once_with()
+        self.assertEqual(probe.call_count, 2)
+
+    def test_install_windows_vc_runtime_uses_winget_machine_package(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "resolve_command", return_value="winget"):
+                with mock.patch.object(moto_launcher, "_windows_python_architecture", return_value="x64"):
+                    with mock.patch.object(moto_launcher, "run_visible", return_value=0) as run_visible:
+                        self.assertTrue(moto_launcher.install_windows_vc_runtime())
+
+        self.assertEqual(
+            run_visible.call_args_list[1].args[0],
+            [
+                "winget",
+                "install",
+                "--id",
+                "Microsoft.VCRedist.2015+.x64",
+                "-e",
+                "--source",
+                "winget",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--silent",
+            ],
+        )
+
+    def test_ensure_native_dependencies_fails_before_backend_when_repair_fails(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(
+                moto_launcher,
+                "_probe_chromadb_native_bindings",
+                side_effect=[
+                    (False, "DLL load failed: initial dependency"),
+                    (False, "DLL load failed: missing dependency"),
+                ],
+            ):
+                with mock.patch.object(
+                    moto_launcher,
+                    "install_windows_vc_runtime",
+                    return_value=False,
+                ):
+                    with mock.patch.object(moto_launcher, "_windows_python_architecture", return_value="x64"):
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "vc_redist.x64.exe.*missing dependency",
+                        ):
+                            moto_launcher.ensure_python_native_dependencies()
+
+    def test_ensure_native_dependencies_reprobes_when_winget_reports_failure(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(
+                moto_launcher,
+                "_probe_chromadb_native_bindings",
+                side_effect=[(False, "initial failure"), (True, "")],
+            ) as probe:
+                with mock.patch.object(
+                    moto_launcher,
+                    "install_windows_vc_runtime",
+                    return_value=False,
+                ):
+                    moto_launcher.ensure_python_native_dependencies()
+
+        self.assertEqual(probe.call_count, 2)
+
+    def test_windows_python_architecture_prefers_interpreter_platform(self) -> None:
+        with mock.patch.object(moto_launcher.sysconfig, "get_platform", return_value="win-arm64"):
+            with mock.patch.object(moto_launcher.platform, "machine", return_value="AMD64"):
+                self.assertEqual(moto_launcher._windows_python_architecture(), "arm64")
+
+    def test_ensure_native_dependencies_skips_installer_when_probe_succeeds(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(
+                moto_launcher,
+                "_probe_chromadb_native_bindings",
+                return_value=(True, ""),
+            ):
+                with mock.patch.object(moto_launcher, "install_windows_vc_runtime") as installer:
+                    moto_launcher.ensure_python_native_dependencies()
+
+        installer.assert_not_called()
+
+    def test_ensure_native_dependencies_is_noop_outside_windows(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "linux"):
+            with mock.patch.object(moto_launcher, "_probe_chromadb_native_bindings") as probe:
+                moto_launcher.ensure_python_native_dependencies()
+
+        probe.assert_not_called()
 
     def test_frontend_dependency_install_uses_lockfile_and_read_only_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

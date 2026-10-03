@@ -18,6 +18,8 @@ from urllib.parse import quote, urlparse
 import urllib.request
 import zipfile
 
+from launcher_https import verified_urlopen
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 PACKAGE_JSON_PATH = REPO_ROOT / "package.json"
@@ -370,7 +372,7 @@ def _fetch_json_url(url: str, timeout_seconds: int) -> dict:
             "User-Agent": "MOTO-Build1-Updater",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+    with verified_urlopen(request, timeout=timeout_seconds) as response:
         payload = json.loads(response.read().decode("utf-8"))
 
     if not isinstance(payload, dict):
@@ -999,7 +1001,7 @@ def _download_archive(manifest: BuildManifest, destination: Path) -> None:
         archive_url_for_manifest(manifest),
         headers={"User-Agent": "MOTO-Build1-Updater"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response, destination.open("wb") as output:
+    with verified_urlopen(request, timeout=30) as response, destination.open("wb") as output:
         shutil.copyfileobj(response, output)
 
 
