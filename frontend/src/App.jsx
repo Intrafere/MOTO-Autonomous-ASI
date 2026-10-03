@@ -90,6 +90,7 @@ import {
   formatProofRunEventMessage,
   formatProviderUsageLimitActivityMessage,
   formatProviderUsageLimitResumedMessage,
+  formatProviderRetryCooldownMessage,
   formatSolutionPathEventMessage,
   buildAutonomousProofProviderPauseActivity,
   buildRejectionFeedbackNoticeActivity,
@@ -864,13 +865,15 @@ function App() {
   const addScopedProviderActivity = useCallback((notification = {}) => {
     const notificationKey = notification.notification_key;
     const workflowMode = String(notification.workflow_mode || '').toLowerCase();
-    if (!notificationKey || !workflowMode) return;
+    if (!workflowMode || (!notificationKey && notification.event_type !== 'provider_retry_cooldown')) return;
     const event = {
       event: notification.event_type || 'oauth_provider_error',
       type: notification.event_type || 'oauth_provider_error',
       timestamp: notification.created_at || notification._serverTimestamp || new Date().toISOString(),
       message: notification.event_type === 'provider_usage_limit_resumed'
         ? formatProviderUsageLimitResumedMessage(notification, notification.provider_label)
+        : notification.event_type === 'provider_retry_cooldown'
+          ? formatProviderRetryCooldownMessage(notification)
         : (
           notification.reason === 'usage_limit_reached'
             ? buildOAuthUsageLimitActivityMessage(notification, notification.provider_label)
@@ -879,7 +882,7 @@ function App() {
       data: notification,
     };
     const appendOnce = setter => setter(previous => (
-      previous.some(item => item?.data?.notification_key === notificationKey)
+      notificationKey && previous.some(item => item?.data?.notification_key === notificationKey)
         ? previous
         : [...previous, event].slice(-MAX_LIVE_ACTIVITY_EVENTS)
     ));
@@ -2801,6 +2804,14 @@ function App() {
       setCodexOAuthNotifications(previous => previous.filter(notification => (
         notification.provider !== provider || notification.reason !== 'usage_limit_reached'
       )));
+    }));
+
+    unsubscribers.push(websocket.on('provider_retry_cooldown', (data) => {
+      console.info('Provider API retry cooldown:', data);
+      addScopedProviderActivity({
+        ...data,
+        event_type: 'provider_retry_cooldown',
+      });
     }));
 
     unsubscribers.push(websocket.on('leanoj_provider_paused', (data) => {

@@ -50,6 +50,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _set_windows_console_title() -> None:
+    title = os.environ.get("MOTO_BACKEND_CONSOLE_TITLE", "").strip()
+    if os.name != "nt" or not title:
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.SetConsoleTitleW(title)
+    except (AttributeError, OSError):
+        logger.debug("Could not set the Windows backend console title", exc_info=True)
+
+
+_set_windows_console_title()
+
 # Suppress noisy HTTP client logs (keep only WARNING/ERROR level)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)

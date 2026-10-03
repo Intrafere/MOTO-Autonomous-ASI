@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import time
-from typing import List, Dict, Any, Optional
+from typing import Awaitable, Callable, List, Dict, Any, Optional
 
 from backend.shared.config import system_config
 from backend.shared.free_model_manager import supports_text_chat_model
@@ -400,6 +400,7 @@ class OpenRouterClient:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         allow_provider_auto_fallback: bool = False,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         Generate a completion using OpenRouter API with validation and retry.
@@ -438,6 +439,7 @@ class OpenRouterClient:
                 tools=tools,
                 tool_choice=tool_choice,
             allow_provider_auto_fallback=allow_provider_auto_fallback,
+            retry_callback=retry_callback,
             )
     
     def _is_reasoning_model_without_temperature(self, model: str) -> bool:
@@ -502,6 +504,7 @@ class OpenRouterClient:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         allow_provider_auto_fallback: bool = False,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Execute the actual completion request."""
         # Check if this model is currently rate-limited (for free models)
@@ -572,6 +575,20 @@ class OpenRouterClient:
         # or natural completion. The json_parser handles any trailing garbage/padding.
         
         # Retry logic for transient errors (but NOT credit exhaustion)
+        async def wait_before_retry(attempt: int, reason: str) -> None:
+            delay = self.RETRY_DELAY * (attempt + 1)
+            if retry_callback is not None:
+                await retry_callback({
+                    "provider": "openrouter",
+                    "provider_label": "OpenRouter",
+                    "model": model,
+                    "retry_attempt": attempt + 1,
+                    "max_attempts": self.MAX_RETRIES,
+                    "retry_after_seconds": delay,
+                    "reason": reason,
+                })
+            await asyncio.sleep(delay)
+
         for attempt in range(self.MAX_RETRIES):
             try:
                 response = await self.client.post(
@@ -620,7 +637,7 @@ class OpenRouterClient:
                     )
                     # Retry on transient malformed responses
                     if attempt < self.MAX_RETRIES - 1:
-                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                        await wait_before_retry(attempt, "invalid_response")
                         continue
                     raise OpenRouterInvalidResponseError(
                         f"OpenRouter returned non-JSON body after {self.MAX_RETRIES} attempts "
@@ -665,7 +682,7 @@ class OpenRouterClient:
                         # Paid model hit rate limit - treat as transient error
                         logger.warning(f"OpenRouter rate limit (429) for paid model '{model}': {error_detail}")
                         if attempt < self.MAX_RETRIES - 1:
-                            await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                            await wait_before_retry(attempt, "rate_limited")
                             continue
                         raise ValueError(f"OpenRouter rate limit: {error_detail}")
                 
@@ -751,7 +768,7 @@ class OpenRouterClient:
                         self.MAX_RETRIES,
                     )
                     if attempt < self.MAX_RETRIES - 1:
-                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                        await wait_before_retry(attempt, "upstream_provider_error")
                         continue
                     route = ProviderRouteIdentity(
                         provider="openrouter",
@@ -805,7 +822,7 @@ class OpenRouterClient:
                 
                 # Retry on transient errors
                 if attempt < self.MAX_RETRIES - 1:
-                    await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                    await wait_before_retry(attempt, "http_error")
                     continue
                 
                 raise ProviderRouteError(
@@ -828,7 +845,7 @@ class OpenRouterClient:
                     f"[{error_type}] {error_detail}"
                 )
                 if attempt < self.MAX_RETRIES - 1:
-                    await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                    await wait_before_retry(attempt, "connection_error")
                     continue
                 raise ProviderRouteError(
                     f"OpenRouter connection failed after {self.MAX_RETRIES} attempts: [{error_type}] {error_detail}",

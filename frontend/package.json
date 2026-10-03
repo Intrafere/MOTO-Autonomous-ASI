@@ -1,6 +1,6 @@
 {
   "name": "asi-aggregator-frontend",
-  "version": "1.1.06",
+  "version": "1.1.07",
   "description": "Frontend UI for MOTO Autonomous ASI multi-agent research and rigorous solution generation with optional Lean 4 proof verification",
   "author": "Intrafere LLC",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "test:browser": "playwright test"
   },
   "dependencies": {
-    "dompurify": "^3.4.12",
+    "dompurify": "^3.4.16",
     "entities": "6.0.1",
     "katex": "^0.16.27",
     "react": "^18.2.0",

@@ -49,7 +49,7 @@ export default function HighlightedModelsSidebar() {
               <OauthTag stacked />
               <div className="flex-row-center">
                 <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-                <div className="model-item-name">GPT 6 Astra</div>
+                <div className="model-item-name">GPT 6 Sol Maximum Thinking</div>
                 <div
                   className="help-tooltip-anchor"
                   style={{ zIndex: 100 }}
@@ -83,20 +83,20 @@ export default function HighlightedModelsSidebar() {
             <div className="model-item model-item--ranked model-item--silver model-item--os">
               <OsTag />
               <div className="flex-row-center">
-                <div className="model-item-name">MiniMax M3</div>
+                <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+                <div className="model-item-name">Grok 4.7</div>
                 <div className="ranking-badge ranking-badge--silver">🥈 SILVER</div>
               </div>
               <div className="model-item-badge">Highly knowledgeable, affordable API cost</div>
             </div>
 
-            <div className="model-item model-item--ranked model-item--bronze model-item--oa">
-              <OauthTag stacked />
+            <div className="model-item model-item--ranked model-item--bronze model-item--os">
+              <OsTag />
               <div className="flex-row-center">
-                <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-                <div className="model-item-name">Grok 4.6</div>
+                <div className="model-item-name">MiniMax M3</div>
                 <div className="ranking-badge ranking-badge--bronze">🥉 BRONZE</div>
               </div>
-              <div className="model-item-badge">Powerful and affordable OAuth</div>
+              <div className="model-item-badge">Highly knowledgeable, affordable API cost</div>
             </div>
           </div>
 

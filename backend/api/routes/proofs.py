@@ -333,6 +333,12 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
     if event_type == "proof_run_provider_resumed":
         return f"{round_label} resumed after the provider pause"
     if event_type == "proof_run_terminal":
+        error_detail = _compact(
+            data.get("last_error_summary") or data.get("error_detail"),
+            limit=1800,
+        )
+        if error_detail:
+            return f"Proof run ended: {error_detail}"
         reason = data.get("terminal_reason") or "completed"
         return f"Proof run ended: {reason}"
     return f"Proof event: {event_type}"
@@ -760,7 +766,7 @@ async def _refresh_manual_assistant_memory(
         )
         return
 
-    run_id = await scoped_proof_database.get_or_create_active_run_id()
+    run_id = await scoped_proof_database.get_live_context_run_id()
     snapshot = AssistantTargetSnapshot(
         workflow_mode="manual_proof_check",
         target_kind="proof_candidate",
@@ -809,7 +815,7 @@ async def _prompt_with_verified_proof_context(
     if not requesting_run_id:
         run_id_getter = getattr(
             scoped_proof_database,
-            "get_or_create_active_run_id",
+            "get_live_context_run_id",
             None,
         )
         if run_id_getter is not None:
@@ -1157,7 +1163,7 @@ async def _resolve_proof_source_adapter(request: ProofCheckRequest) -> ProofSour
             or history_paper.get("title", "")
             or paper_id
         )
-        run_id = await scoped_database.get_or_create_active_run_id()
+        run_id = await scoped_database.get_live_context_run_id()
         user_prompt = await _prompt_with_history_proof_context(
             canonical_prompt,
             session_id,
@@ -1279,7 +1285,7 @@ async def _run_manual_proof_check(
             else websocket.broadcast_event
         )
         scoped_proof_database = source.proof_database
-        active_run_id = await scoped_proof_database.get_or_create_active_run_id()
+        active_run_id = await scoped_proof_database.get_live_context_run_id()
         pruning_coordinator = ProofPruningCoordinator(
             proof_database=scoped_proof_database,
             runtime_snapshot=snapshot,
@@ -1574,9 +1580,17 @@ async def _run_manual_proof_check(
                         return "stopped", None
                     return "retry_same_round", None
                 if isinstance(exc, ProviderRepairRequiredError) or is_non_retryable_model_error(exc):
+                    repair_detail = (
+                        getattr(exc, "error_detail", "")
+                        or getattr(exc, "safe_message", "")
+                        or str(exc)
+                    )
                     await proof_run_manager.repair_required(
                         run_control,
-                        reason=ProofVerificationStage._summarize_error(str(exc), limit=1000),
+                        reason=ProofVerificationStage._summarize_error(
+                            repair_detail,
+                            limit=1800,
+                        ),
                     )
                     return "stopped", None
                 raise
@@ -1585,6 +1599,20 @@ async def _run_manual_proof_check(
                 run_control.snapshot.run_mode == "loop_with_pruning"
                 and bool(result.context_overflow_payload)
             )
+            if result.context_overflow_payload:
+                overflow_detail = (
+                    result.context_overflow_payload.get("error_detail")
+                    or result.context_overflow_payload.get("message")
+                    or result.error_message
+                )
+                if overflow_detail:
+                    await proof_run_manager.update(
+                        run_control,
+                        last_error_summary=ProofVerificationStage._summarize_error(
+                            str(overflow_detail),
+                            limit=1800,
+                        ),
+                    )
             if continuous_context_overflow:
                 overflow_payload = dict(result.context_overflow_payload or {})
                 overflow_payload.update(
@@ -1700,7 +1728,13 @@ async def _run_manual_proof_check(
             await proof_run_manager.error(
                 run_control,
                 terminal_reason="proof_stage_error",
-                reason="Proof verification preserved an error checkpoint. Review proof activity for details, then repair settings or retry.",
+                reason=(
+                    run_control.snapshot.last_error_summary
+                    or (
+                        "Proof verification preserved an error checkpoint. Review proof "
+                        "activity for details, then repair settings or retry."
+                    )
+                ),
             )
             return
         if driver_status == "fatal_stop":
@@ -2133,7 +2167,7 @@ async def run_manual_proof_check(request: ProofCheckRequest):
 
     async with get_manual_proof_context_lock():
         source = await _resolve_proof_source_adapter(request)
-        run_id = await source.proof_database.get_or_create_active_run_id()
+        run_id = await source.proof_database.get_live_context_run_id()
         try:
             source_fingerprint = await source.fingerprint()
             response = await proof_run_manager.queue(
@@ -2256,6 +2290,7 @@ async def update_proof_live_context(
     if proof.source_type in {"leanoj_final"}:
         warnings.append("This occurrence is a verified final-solution proof.")
     try:
+        owning_run_id = await scoped_database.get_live_context_run_id()
         updated, revision = await scoped_database.set_live_context_status(
             proof_id=proof_id,
             status=request.status,
@@ -2263,6 +2298,7 @@ async def update_proof_live_context(
             expected_proof_set_revision=request.expected_proof_set_revision,
             actor=request.actor,
             reason=request.reason,
+            owning_run_id=owning_run_id,
             expected_theorem_hash=request.expected_theorem_hash,
             expected_lean_hash=request.expected_lean_hash,
         )
@@ -2317,10 +2353,12 @@ async def update_proof_live_context_bulk(
 ):
     scoped_database = _get_scoped_proof_database(scope)
     try:
+        owning_run_id = await scoped_database.get_live_context_run_id()
         updated_records, changed_proof_ids, revision = (
             await scoped_database.set_live_context_status_bulk(
                 items=[item.model_dump() for item in request.items],
                 expected_proof_set_revision=request.expected_proof_set_revision,
+                owning_run_id=owning_run_id,
             )
         )
     except KeyError:

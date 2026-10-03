@@ -219,6 +219,16 @@ export const formatProviderUsageLimitResumedMessage = (
   return `${providerLabel} usage limit ended for ${roleId}; provider work resumed.`;
 };
 
+export const formatProviderRetryCooldownMessage = (data = {}) => {
+  if (data.message) return data.message;
+  const providerLabel = data.provider_label || data.provider || 'Provider';
+  const waitSeconds = Number(data.retry_after_seconds || 0);
+  const formattedWait = Number.isInteger(waitSeconds) ? String(waitSeconds) : waitSeconds.toFixed(1);
+  const waitText = waitSeconds > 0 ? ` after a ${formattedWait}-second cooldown` : '';
+  const retryAttempt = Number(data.retry_attempt || 1);
+  return `${providerLabel} API call will retry${waitText} (retry ${retryAttempt}).`;
+};
+
 export const formatProofRunEventMessage = (event = '', data = {}) => {
   if (data.message) return data.message;
   const round = Number(data.proof_round_index || data.round_index || data.current_round || 0);
@@ -251,9 +261,13 @@ export const formatProofRunEventMessage = (event = '', data = {}) => {
     case 'proof_run_provider_paused':
       return 'Proof run paused for provider credits.';
     case 'proof_run_repair_required':
-      return 'Proof run needs provider, model, source, or runtime repair. Repair settings, then start a new proof loop.';
+      return data.last_error_summary || data.error_detail
+        || 'Proof run needs provider, model, source, or runtime repair. Repair settings, then start a new proof loop.';
     case 'proof_run_terminal':
     case 'proof_run_failed':
+      if (data.last_error_summary || data.error_detail) {
+        return `Proof run ended: ${data.last_error_summary || data.error_detail}`;
+      }
       return `Proof run ended${(data.terminal_reason || data.reason) ? `: ${data.terminal_reason || data.reason}` : '.'}`;
     case 'proof_prune_review_queued':
       return 'Proof solving continues while a non-destructive pruning review waits to start.';
@@ -349,6 +363,8 @@ export const getActivityIcon = (event = '') => {
       return '⧗';
     case 'oauth_provider_usage_limited':
       return '⏳';
+    case 'provider_retry_cooldown':
+      return '↺';
     case 'provider_usage_limit_resumed':
       return '▶';
     case 'openai_codex_oauth_error':
@@ -579,6 +595,10 @@ export const getActivityClass = (event = '', item = {}) => {
   }
 
   if (event === 'oauth_provider_usage_limited') {
+    return 'activity-warning';
+  }
+
+  if (event === 'provider_retry_cooldown') {
     return 'activity-warning';
   }
 

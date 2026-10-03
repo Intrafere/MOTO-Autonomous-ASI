@@ -102,6 +102,7 @@ class ProofRunManager:
                     "proof_set_revision",
                     "updated_at",
                     "terminal_reason",
+                    "last_error_summary",
                     "pruning_status",
                 }
             )
@@ -325,6 +326,7 @@ class ProofRunManager:
             "status": snapshot.status,
             "idle_reason": snapshot.idle_reason,
             "terminal_reason": snapshot.terminal_reason,
+            "last_error_summary": snapshot.last_error_summary,
         }
 
     async def _emit(

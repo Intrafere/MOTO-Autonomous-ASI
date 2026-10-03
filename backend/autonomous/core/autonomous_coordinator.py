@@ -3927,6 +3927,13 @@ class AutonomousCoordinator:
                     "role_id": "autonomous",
                     "message": "All free models exhausted, waiting to retry",
                 })
+                await api_client_manager.broadcast_retry_cooldown(
+                    provider="openrouter",
+                    provider_label="OpenRouter free models",
+                    role_id="autonomous",
+                    retry_after_seconds=120,
+                    reason="free_models_exhausted",
+                )
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
               except RetryableProviderError as e:
                 logger.warning("AutonomousCoordinator paused for retryable provider failure: %s", e)
@@ -4494,6 +4501,13 @@ class AutonomousCoordinator:
                     "role_id": "autonomous_resumed",
                     "message": "All free models exhausted, waiting to retry",
                 })
+                await api_client_manager.broadcast_retry_cooldown(
+                    provider="openrouter",
+                    provider_label="OpenRouter free models",
+                    role_id="autonomous_resumed",
+                    retry_after_seconds=120,
+                    reason="free_models_exhausted",
+                )
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
 
         except ProviderRepairRequiredError as e:

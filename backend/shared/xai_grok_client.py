@@ -15,7 +15,7 @@ import logging
 import os
 import secrets
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -540,7 +540,14 @@ class XAIGrokClient:
                 logger.debug("xAI Grok token revoke failed; clearing local credential anyway.")
         clear_xai_grok_oauth_tokens()
 
-    async def _post_with_retry(self, url: str, **kwargs) -> httpx.Response:
+    async def _post_with_retry(
+        self,
+        url: str,
+        *,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        retry_model: str = "",
+        **kwargs,
+    ) -> httpx.Response:
         """POST with retry on transient transport/provider errors."""
         max_attempts = self._max_attempts()
         for attempt in range(max_attempts):
@@ -567,6 +574,16 @@ class XAIGrokClient:
                         f"; retrying in {delay:.1f}s" if attempt < max_attempts - 1 else "",
                     )
                     if attempt < max_attempts - 1:
+                        if retry_callback is not None:
+                            await retry_callback({
+                                "provider": "xai_grok_oauth",
+                                "provider_label": "xAI Grok",
+                                "model": retry_model,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": max_attempts,
+                                "retry_after_seconds": delay,
+                                "reason": "transient_http_error",
+                            })
                         await asyncio.sleep(delay)
                         continue
                     raise XAIGrokRequestError(
@@ -587,6 +604,16 @@ class XAIGrokClient:
                     f"; retrying in {delay:.1f}s" if attempt < max_attempts - 1 else "",
                 )
                 if attempt < max_attempts - 1:
+                    if retry_callback is not None:
+                        await retry_callback({
+                            "provider": "xai_grok_oauth",
+                            "provider_label": "xAI Grok",
+                            "model": retry_model,
+                            "retry_attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "retry_after_seconds": delay,
+                            "reason": "connection_error",
+                        })
                     await asyncio.sleep(delay)
                     continue
                 raise XAIGrokRequestError(
@@ -624,6 +651,7 @@ class XAIGrokClient:
         reasoning_effort: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Generate a completion and return a Chat Completions-compatible shape."""
         selected_model = model or self.DEFAULT_MODEL
@@ -655,6 +683,8 @@ class XAIGrokClient:
         while True:
             response = await self._post_with_retry(
                 f"{self.API_BASE_URL}/chat/completions",
+                retry_callback=retry_callback,
+                retry_model=selected_model,
                 json=payload,
                 headers=self._headers(tokens),
             )

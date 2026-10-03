@@ -13,7 +13,7 @@ import json
 import os
 import random
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
@@ -317,7 +317,15 @@ class SakanaFuguClient:
             return min(base + jitter, cls.RETRY_MAX_DELAY)
         return cls._retry_delay(attempt)
 
-    async def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        retry_model: str = "",
+        **kwargs,
+    ) -> httpx.Response:
         for attempt in range(self.MAX_RETRIES):
             try:
                 response = await self.client.request(method, url, **kwargs)
@@ -327,7 +335,18 @@ class SakanaFuguClient:
                 if response.status_code >= 400 and response.status_code in self.TRANSIENT_STATUS_CODES:
                     detail = sanitize_provider_error_text(response.text)
                     if attempt < self.MAX_RETRIES - 1:
-                        await asyncio.sleep(self._retry_after_delay(response, attempt))
+                        delay = self._retry_after_delay(response, attempt)
+                        if retry_callback is not None:
+                            await retry_callback({
+                                "provider": "sakana_fugu",
+                                "provider_label": "Sakana Fugu",
+                                "model": retry_model,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": self.MAX_RETRIES,
+                                "retry_after_seconds": delay,
+                                "reason": "transient_http_error",
+                            })
+                        await asyncio.sleep(delay)
                         continue
                     raise SakanaFuguRequestError(
                         f"Sakana Fugu connection failed after retries: HTTP {response.status_code}: {detail}"
@@ -336,7 +355,18 @@ class SakanaFuguClient:
             except httpx.TransportError as exc:
                 detail = sanitize_provider_error_text(str(exc) or repr(exc))
                 if attempt < self.MAX_RETRIES - 1:
-                    await asyncio.sleep(self._retry_delay(attempt))
+                    delay = self._retry_delay(attempt)
+                    if retry_callback is not None:
+                        await retry_callback({
+                            "provider": "sakana_fugu",
+                            "provider_label": "Sakana Fugu",
+                            "model": retry_model,
+                            "retry_attempt": attempt + 1,
+                            "max_attempts": self.MAX_RETRIES,
+                            "retry_after_seconds": delay,
+                            "reason": "connection_error",
+                        })
+                    await asyncio.sleep(delay)
                     continue
                 raise SakanaFuguRequestError(f"Sakana Fugu connection failed after retries: {detail}") from exc
         raise SakanaFuguRequestError("Sakana Fugu request failed after retries.")
@@ -468,6 +498,7 @@ class SakanaFuguClient:
         reasoning_effort: Optional[str],
         tools: Optional[List[Dict[str, Any]]],
         tool_choice: Optional[Any],
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": model,
@@ -488,6 +519,8 @@ class SakanaFuguClient:
 
         response = await self._post_with_retry(
             f"{self.API_BASE_URL}/chat/completions",
+            retry_callback=retry_callback,
+            retry_model=model,
             json=payload,
             headers=self._headers(),
         )
@@ -543,6 +576,7 @@ class SakanaFuguClient:
         reasoning_effort: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         selected_model = model or self.DEFAULT_MODEL
         if self._messages_need_chat_completions(messages, tools):
@@ -555,6 +589,7 @@ class SakanaFuguClient:
                 reasoning_effort=reasoning_effort,
                 tools=tools,
                 tool_choice=tool_choice,
+                retry_callback=retry_callback,
             )
 
         instructions, input_items = self._messages_to_responses_payload(messages)
@@ -577,7 +612,13 @@ class SakanaFuguClient:
         if response_format and response_format.get("type") == "json_object":
             payload["text"] = {"format": {"type": "json_object"}}
 
-        response = await self._post_with_retry(f"{self.API_BASE_URL}/responses", json=payload, headers=self._headers())
+        response = await self._post_with_retry(
+            f"{self.API_BASE_URL}/responses",
+            retry_callback=retry_callback,
+            retry_model=selected_model,
+            json=payload,
+            headers=self._headers(),
+        )
         if response.status_code >= 400:
             message = sanitize_provider_error_text(response.text)
             if response.status_code in {401, 403}:
@@ -592,6 +633,7 @@ class SakanaFuguClient:
                     reasoning_effort=reasoning_effort,
                     tools=tools,
                     tool_choice=tool_choice,
+                    retry_callback=retry_callback,
                 )
             raise SakanaFuguRequestError(f"Sakana Fugu completion failed: {message}")
         data = response.json()

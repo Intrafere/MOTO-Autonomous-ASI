@@ -70,3 +70,22 @@ test('guides repair state to a new loop and disables stop while stopping', () =>
   );
   expect(screen.getByRole('button', { name: 'Stopping…' })).toBeDisabled();
 });
+
+test('shows the full safe terminal error detail when the backend provides it', () => {
+  render(
+    <ProofRunStatusControls
+      run={{
+        ...baseRun,
+        status: 'error',
+        terminal_reason: 'repair_required',
+        last_error_summary: (
+          'Prompt (51489 tokens) exceeds model context window (5632 tokens). '
+          + 'Increase LM Studio Context Length (n_ctx).'
+        ),
+      }}
+    />
+  );
+
+  expect(screen.getByRole('alert')).toHaveTextContent('51489 tokens');
+  expect(screen.getByRole('alert')).toHaveTextContent('n_ctx');
+});

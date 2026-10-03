@@ -20,8 +20,10 @@ import secrets
 import socket
 import shlex
 from shutil import copyfileobj, rmtree, which
+import struct
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import time
 from typing import Sequence
@@ -30,6 +32,7 @@ from urllib.request import Request, urlopen
 import webbrowser
 import zipfile
 
+from launcher_https import verified_urlopen
 from moto_updater import (
     apply_update,
     build_update_prompt,
@@ -57,6 +60,16 @@ RESET = "\033[0m"
 MIN_PYTHON_VERSION = (3, 10)
 MIN_NODE_VERSION = (20, 19, 0)
 MIN_NODE_ALT_VERSION = (22, 12, 0)
+WINDOWS_VC_REDIST_PACKAGE_IDS = {
+    "x64": "Microsoft.VCRedist.2015+.x64",
+    "x86": "Microsoft.VCRedist.2015+.x86",
+    "arm64": "Microsoft.VCRedist.2015+.arm64",
+}
+WINDOWS_VC_REDIST_URLS = {
+    architecture: f"https://aka.ms/vs/17/release/vc_redist.{architecture}.exe"
+    for architecture in WINDOWS_VC_REDIST_PACKAGE_IDS
+}
+TRUSTSTORE_REQUIREMENT = "truststore>=0.10.0,<1.0"
 
 
 @dataclass(frozen=True)
@@ -351,21 +364,274 @@ def read_runtime_lock_pid(data_root: str) -> int | None:
     return pid if pid > 0 else None
 
 
+def windows_listening_ports_for_pid(pid: int) -> list[int]:
+    """Return loopback TCP listener ports owned by one Windows process."""
+    if sys.platform != "win32" or pid <= 0:
+        return []
+    try:
+        output = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    f"Get-NetTCPConnection -State Listen -OwningProcess {pid} "
+                    "-ErrorAction SilentlyContinue | "
+                    "Where-Object {$_.LocalAddress -in @('127.0.0.1','0.0.0.0','::1','::')} | "
+                    "Select-Object -ExpandProperty LocalPort -Unique"
+                ),
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    ports = []
+    for line in output.splitlines():
+        try:
+            port = int(line.strip())
+        except ValueError:
+            continue
+        if 0 < port <= 65535:
+            ports.append(port)
+    return sorted(set(ports))
+
+
+def windows_parent_pid(pid: int) -> int | None:
+    if sys.platform != "win32" or pid <= 0:
+        return None
+    try:
+        output = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId",
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        ).strip()
+        parent_pid = int(output)
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return None
+    return parent_pid if parent_pid > 0 else None
+
+
+def backend_health_identity(port: int) -> str | None:
+    """Return the instance ID exposed by a responsive local MOTO backend."""
+    try:
+        request = Request(
+            f"http://127.0.0.1:{port}/api/health",
+            headers={"Accept": "application/json"},
+        )
+        with urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
+        return None
+    if response.status != 200 or payload.get("status") != "healthy":
+        return None
+    instance_id = payload.get("instance_id")
+    return instance_id if isinstance(instance_id, str) else None
+
+
+def backend_lease_is_held(data_root: str) -> bool:
+    """Return whether the authoritative backend byte-range lease is active."""
+    lock_path = Path(data_root) / ".moto_backend.lock"
+    if not lock_path.is_file():
+        return False
+    try:
+        with lock_path.open("r+b", buffering=0) as stream:
+            stream.seek(0)
+            if sys.platform == "win32":
+                import msvcrt
+
+                # Legacy buffered backends locked a read-ahead offset, not byte
+                # zero. Include EOF, where an old reader may have locked.
+                lock_length = os.fstat(stream.fileno()).st_size + 1
+                try:
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, lock_length)
+                except OSError:
+                    return True
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, lock_length)
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return True
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        return True
+    return False
+
+
+def backend_byte_zero_is_held(data_root: str) -> bool:
+    """Distinguish modern byte-zero leases from legacy misplaced locks."""
+    if sys.platform != "win32":
+        return backend_lease_is_held(data_root)
+    try:
+        import msvcrt
+
+        with (Path(data_root) / ".moto_backend.lock").open("r+b", buffering=0) as stream:
+            stream.seek(0)
+            try:
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        return True
+    return False
+
+
+def read_backend_lease_owner(data_root: str) -> int | None:
+    """Read bounded legacy append records without crossing a locked byte."""
+    try:
+        with (Path(data_root) / ".moto_backend.lock").open("rb", buffering=0) as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if size > 1024 * 1024:
+                return None
+            content = bytearray(size)
+            offset = 0
+            while offset < size:
+                stream.seek(offset)
+                try:
+                    chunk = stream.read(min(64 * 1024, size - offset))
+                except OSError:
+                    # Find the single inaccessible legacy lock byte, then
+                    # continue with bounded chunk reads on either side.
+                    chunk = b""
+                    while offset < size:
+                        stream.seek(offset)
+                        try:
+                            byte = stream.read(1)
+                        except OSError:
+                            content[offset] = ord("{")
+                            offset += 1
+                            break
+                        content[offset:offset + len(byte)] = byte
+                        offset += len(byte)
+                    continue
+                content[offset:offset + len(chunk)] = chunk
+                offset += len(chunk)
+        expected = os.path.normcase(os.path.realpath(data_root))
+        decoder = json.JSONDecoder()
+        text = content.decode("utf-8", errors="replace")
+        owner = None
+        for match in re.finditer(r"\{", text):
+            try:
+                record, _ = decoder.raw_decode(text, match.start())
+                root = os.path.normcase(os.path.realpath(record["data_root"]))
+                pid = int(record["pid"])
+                if root == expected and pid > 0:
+                    owner = pid
+            except (ValueError, TypeError, KeyError):
+                continue
+        return owner
+    except OSError:
+        return None
+
+
 def assert_runtime_lock_available(data_root: str) -> None:
     payload = read_runtime_lock(data_root)
-    pid = read_runtime_lock_pid(data_root)
-    if pid is not None and is_pid_running(pid):
-        backend_port = int(payload.get("backend_port") or 0)
-        if backend_port > 0 and not port_in_use(backend_port):
-            try:
-                _runtime_lock_path(data_root).unlink(missing_ok=True)
-            except OSError:
-                pass
-            return
+    if not backend_lease_is_held(data_root):
+        with contextlib.suppress(OSError):
+            _runtime_lock_path(data_root).unlink(missing_ok=True)
+        return
+    if sys.platform != "win32":
         raise RuntimeError(
             "The default MOTO data root is already in use by another backend process. "
-            "Close the existing MOTO backend/frontend windows, then launch again."
+            "Close the existing MOTO backend/frontend terminals, then launch again."
         )
+
+    try:
+        recorded_port = int(payload.get("backend_port") or 0)
+        recorded_backend_pid = int(payload.get("backend_pid") or 0)
+    except (AttributeError, TypeError, ValueError):
+        recorded_port = 0
+        recorded_backend_pid = 0
+    recorded_instance = str(payload.get("instance_id") or "")
+    lease_owner = read_backend_lease_owner(data_root)
+    owner_pid = lease_owner or recorded_backend_pid
+    if owner_pid <= 0:
+        owner_pid = 0
+
+    active_record = next(
+        (
+            item
+            for item in cleanup_launcher_state()
+            if isinstance(item, dict)
+            and str(item.get("instance_id") or "") == (recorded_instance or "default")
+            and int(item.get("backend_window_pid") or 0) == owner_pid
+            and os.path.normcase(os.path.realpath(str(item.get("data_root") or "")))
+            == os.path.normcase(os.path.realpath(data_root))
+        ),
+        None,
+    )
+    if active_record is not None:
+        raise RuntimeError(
+            "The default MOTO instance is already running. Close its backend/frontend "
+            "windows before launching again."
+        )
+
+    ports = windows_listening_ports_for_pid(owner_pid)
+    if recorded_port and recorded_port not in ports:
+        ports = []
+    if not recorded_port and len(ports) == 1:
+        recorded_port = ports[0]
+    if not recorded_instance and lease_owner is not None:
+        recorded_instance = "default"
+    parent_pid = windows_parent_pid(owner_pid)
+    legacy_orphan = (
+        lease_owner == owner_pid
+        and not backend_byte_zero_is_held(data_root)
+        and parent_pid is not None
+        and not is_pid_running(parent_pid)
+        and recorded_backend_pid in (0, owner_pid, parent_pid)
+    )
+    verified_owner = (
+        owner_pid
+        if owner_pid > 0
+        and recorded_port > 0
+        and recorded_instance
+        and backend_health_identity(recorded_port) == recorded_instance
+        and is_pid_running(owner_pid)
+        and is_moto_backend_process(owner_pid)
+        and legacy_orphan
+        else None
+    )
+    if verified_owner is None:
+        raise RuntimeError(
+            "The default MOTO data root is locked, but the launcher could not safely "
+            "identify its owner as the recorded MOTO backend. Close any remaining MOTO "
+            "backend window or process, then launch again; no data files should be deleted."
+        )
+
+    cprint(
+        f"Recovering an orphaned MOTO backend process (PID {verified_owner}) from a previous launch...",
+        YELLOW,
+    )
+    terminate_process_tree(verified_owner)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if not backend_lease_is_held(data_root) and not port_in_use(recorded_port):
+            break
+        time.sleep(0.1)
+    if backend_lease_is_held(data_root) or port_in_use(recorded_port):
+        raise RuntimeError(
+            f"MOTO stopped the orphaned backend PID {verified_owner}, but its data-root "
+            "lease or listening port did not release within 10 seconds. Close any remaining "
+            "MOTO backend process and launch again; no reboot or lock-file deletion is required."
+        )
+    with contextlib.suppress(OSError):
+        _runtime_lock_path(data_root).unlink(missing_ok=True)
 
 
 def write_runtime_lock(data_root: str, backend_pid: int, instance_id: str, backend_port: int | None = None) -> None:
@@ -462,20 +728,7 @@ def resolve_instance_runtime() -> InstanceRuntime:
     # storage overrides. Port-only overrides are not identity overrides.
     # ------------------------------------------------------------------
     reused_record: dict | None = None
-    active_plain_instance_ids: set[str] = set()
     if not has_explicit_identity:
-        active_plain_instance_ids = {
-            str(active.get("instance_id") or "").strip()
-            for active in cleanup_launcher_state()
-            if isinstance(active, dict)
-        }
-        if "default" in active_plain_instance_ids:
-            raise RuntimeError(
-                "The default MOTO instance already appears to be running. Close the existing "
-                "MOTO backend/frontend windows, then launch again. A plain launch will not "
-                "create a separate empty data/keyring namespace."
-            )
-
         last_record = load_last_instance_record()
         if last_record is not None:
             candidate_id = sanitize_instance_id(last_record.get("instance_id")) or "default"
@@ -517,6 +770,12 @@ def resolve_instance_runtime() -> InstanceRuntime:
             or (reused_record or {}).get("log_root")
             or str(instance_root / "logs")
         )
+
+    # Reconcile the authoritative data-root lease before selecting ports.
+    # Otherwise a detached backend on 8000 makes the launcher choose 8001,
+    # only for that replacement to fail against the same locked data root.
+    if is_default_instance and not has_explicit_identity:
+        assert_runtime_lock_available(data_root)
 
     # Resolve ports. We always pick a free port; ports are not part of the
     # keyring namespace, so changing them between launches is safe.
@@ -604,6 +863,43 @@ def run_silent(args: list[str], cwd: str | None = None) -> int:
     ).returncode
 
 
+def ensure_windows_launcher_truststore() -> bool:
+    """Bootstrap native Windows HTTPS trust before the first update request."""
+    if sys.platform != "win32":
+        return True
+
+    python_cmd = get_python_command()
+    import_command = [python_cmd, "-c", "import truststore"]
+    if run_silent(import_command, cwd=str(SCRIPT_DIR)) == 0:
+        return True
+
+    cprint("Preparing native Windows certificate verification...", YELLOW)
+    install_result = run_visible(
+        [
+            python_cmd,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            TRUSTSTORE_REQUIREMENT,
+        ],
+        cwd=str(SCRIPT_DIR),
+        check=False,
+    )
+    importlib.invalidate_caches()
+    if install_result == 0 and run_silent(import_command, cwd=str(SCRIPT_DIR)) == 0:
+        cprint("Native Windows certificate verification ready.", GREEN)
+        return True
+
+    cprint(
+        "WARNING: Native Windows certificate verification could not be prepared. "
+        "The launcher will keep standard certificate verification enabled; update "
+        "checking may be unavailable until Python dependencies are installed.",
+        YELLOW,
+    )
+    return False
+
+
 def has_desktop_session() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
@@ -671,8 +967,34 @@ def build_windows_service_command(title: str, args: Sequence[str]) -> str:
     return f"title {title} && {subprocess.list2cmdline(shell_args)}"
 
 
-def launch_windows_service(title: str, args: Sequence[str], cwd: str, env: dict[str, str]) -> LaunchedService:
+def launch_windows_service(
+    title: str,
+    args: Sequence[str],
+    cwd: str,
+    env: dict[str, str],
+    *,
+    direct: bool = False,
+) -> LaunchedService:
     creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+
+    # The launcher must retain the PID of the actual backend process. A
+    # `cmd /k` wrapper can be closed independently and leave uvicorn running
+    # invisibly, causing the authoritative data-root lease to remain held
+    # after launcher state has forgotten the backend. Direct launch also lets
+    # the backend inherit its new console's standard streams, preserving the
+    # visible live backend log for desktop users.
+    if direct:
+        process = subprocess.Popen(
+            list(args),
+            cwd=cwd,
+            env=env,
+            creationflags=creationflags,
+        )
+        return LaunchedService(
+            title=title,
+            pid=process.pid,
+            mode="window",
+        )
 
     # Some Windows tools (notably npm.cmd under "Program Files") break when a
     # quoted absolute path is embedded inside a `cmd /k` string. Prefer the
@@ -743,6 +1065,42 @@ def launch_background_service(
     return LaunchedService(title=title, pid=process.pid, mode="background", log_path=str(log_path))
 
 
+def write_backend_log_config(log_root: str) -> tuple[str, str]:
+    log_path = Path(log_root) / "launcher_backend.log"
+    config_path = Path(log_root) / ".launcher_backend_logging.json"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    formatter = {
+        "format": "%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s",
+        "datefmt": "%Y-%m-%d %H:%M:%S",
+    }
+    config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {"default": formatter},
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "default",
+                "stream": "ext://sys.stderr",
+            },
+            "file": {
+                "class": "logging.FileHandler",
+                "formatter": "default",
+                "filename": str(log_path),
+                "encoding": "utf-8",
+            },
+        },
+        "root": {"handlers": ["console", "file"], "level": "INFO"},
+        "loggers": {
+            "uvicorn": {"handlers": ["console", "file"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"level": "INFO"},
+            "uvicorn.access": {"handlers": ["console", "file"], "level": "INFO", "propagate": False},
+        },
+    }
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    return str(config_path), str(log_path)
+
+
 def launch_service(
     title: str,
     service_slug: str,
@@ -752,12 +1110,64 @@ def launch_service(
     log_root: str,
 ) -> LaunchedService:
     if sys.platform == "win32":
-        return launch_windows_service(title, args, cwd, env)
+        launch_args = list(args)
+        log_path = None
+        launch_env = env
+        if service_slug == "backend":
+            log_config_path, log_path = write_backend_log_config(log_root)
+            launch_args.extend(["--log-config", log_config_path])
+            launch_env = dict(env)
+            launch_env["MOTO_BACKEND_CONSOLE_TITLE"] = title
+        service = launch_windows_service(
+            title,
+            launch_args,
+            cwd,
+            launch_env,
+            direct=service_slug == "backend",
+        )
+        return LaunchedService(
+            title=service.title,
+            pid=service.pid,
+            mode=service.mode,
+            log_path=log_path,
+        )
     if is_linux():
         terminal_service = launch_linux_terminal_service(title, args, cwd, env)
         if terminal_service is not None:
             return terminal_service
     return launch_background_service(title, service_slug, args, cwd, env, log_root)
+
+
+def terminate_process_tree(pid: int) -> None:
+    """Best-effort termination of one launcher-owned process tree."""
+    if pid <= 0 or not is_pid_running(pid):
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            os.kill(pid, 15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def terminate_launched_service(service: LaunchedService | None) -> None:
+    """Best-effort rollback for a service started by this launcher attempt."""
+    if service is not None:
+        terminate_process_tree(service.pid)
+
+
+def remove_owned_runtime_lock(data_root: str, backend_pid: int) -> None:
+    """Remove advisory metadata only when it belongs to this launch attempt."""
+    if read_runtime_lock_pid(data_root) != backend_pid:
+        return
+    with contextlib.suppress(OSError):
+        _runtime_lock_path(data_root).unlink(missing_ok=True)
 
 
 def cleanup_relaunch_artifacts(cleanup_paths: list[Path]) -> None:
@@ -1088,6 +1498,116 @@ def install_python_dependencies() -> None:
     print()
 
 
+def _probe_chromadb_native_bindings() -> tuple[bool, str]:
+    """Probe ChromaDB's native extension in a clean child interpreter."""
+    python_cmd = get_python_command()
+    if not python_cmd:
+        return False, "Python interpreter could not be resolved."
+    result = subprocess.run(
+        [python_cmd, "-c", "import chromadb_rust_bindings"],
+        cwd=str(SCRIPT_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    diagnostic = (result.stderr or result.stdout or "").strip()
+    return result.returncode == 0, diagnostic
+
+
+def _windows_python_architecture() -> str | None:
+    """Return the VC runtime architecture required by this Python process."""
+    python_platform = sysconfig.get_platform().lower()
+    if python_platform in {"win-arm64", "win-aarch64"}:
+        return "arm64"
+    if python_platform in {"win-amd64", "win-x86_64"}:
+        return "x64"
+    if python_platform in {"win32", "win-x86"}:
+        return "x86"
+    # Some embeddable/custom Windows distributions do not expose a standard
+    # sysconfig platform. Use the process bitness only for conventional x86 hosts.
+    machine = platform.machine().lower()
+    if struct.calcsize("P") == 8 and machine in {"amd64", "x86_64"}:
+        return "x64"
+    if struct.calcsize("P") == 4 and machine in {"x86", "i386", "i686", "amd64", "x86_64"}:
+        return "x86"
+    return None
+
+
+def install_windows_vc_runtime() -> bool:
+    """Install the native runtime required by ChromaDB's Windows wheel."""
+    if sys.platform != "win32":
+        return False
+
+    winget_cmd = resolve_command("winget.exe", "winget")
+    if not winget_cmd:
+        return False
+
+    architecture = _windows_python_architecture()
+    package_id = WINDOWS_VC_REDIST_PACKAGE_IDS.get(architecture or "")
+    if not package_id:
+        return False
+
+    cprint("Installing the Microsoft Visual C++ runtime required by ChromaDB...", YELLOW)
+    run_visible(
+        [winget_cmd, "source", "update", "--name", "winget"],
+        cwd=str(SCRIPT_DIR),
+        check=False,
+    )
+    command = [
+        winget_cmd,
+        "install",
+        "--id",
+        package_id,
+        "-e",
+        "--source",
+        "winget",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--silent",
+    ]
+    return run_visible(command, cwd=str(SCRIPT_DIR), check=False) == 0
+
+
+def ensure_python_native_dependencies() -> None:
+    """Fail before service startup if required Windows native modules cannot load."""
+    if sys.platform != "win32":
+        return
+
+    available, initial_diagnostic = _probe_chromadb_native_bindings()
+    if available:
+        return
+
+    print()
+    cprint("ChromaDB's Windows native module could not load.", YELLOW)
+    cprint("Attempting a one-time Microsoft Visual C++ runtime installation...", YELLOW)
+    install_windows_vc_runtime()
+    repaired, repair_diagnostic = _probe_chromadb_native_bindings()
+    if repaired:
+        cprint("Microsoft Visual C++ runtime ready; ChromaDB native module verified.", GREEN)
+        print()
+        return
+
+    diagnostic = repair_diagnostic or initial_diagnostic
+    diagnostic_suffix = f" Native loader diagnostic: {diagnostic[:500]}" if diagnostic else ""
+    architecture = _windows_python_architecture()
+    architecture_label = architecture or "unknown architecture"
+    runtime_url = WINDOWS_VC_REDIST_URLS.get(
+        architecture or "",
+        "https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist",
+    )
+    print()
+    raise RuntimeError(
+        "ChromaDB's native Windows module could not load. "
+        "The launcher could not install or verify the Microsoft Visual C++ "
+        f"2015-2022 Redistributable ({architecture_label}). Install or repair it from "
+        f"{runtime_url} and launch MOTO again."
+        f"{diagnostic_suffix}"
+    )
+
+
 def install_playwright_browser() -> None:
     cprint("[4b/8] Installing Playwright Chromium browser for PDF generation...", YELLOW)
     cprint("This is a one-time download (~150MB) and may take a few minutes...", YELLOW)
@@ -1157,7 +1677,7 @@ def _download_file(url: str, destination: Path) -> None:
     tmp = destination.with_suffix(destination.suffix + ".tmp")
     try:
         request = Request(url, headers={"User-Agent": "MOTO Launcher"})
-        with urlopen(request) as response, tmp.open("wb") as handle:
+        with verified_urlopen(request) as response, tmp.open("wb") as handle:
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -1385,7 +1905,7 @@ def install_lean4(
                         "Accept": "application/vnd.github+json",
                     },
                 )
-                with urlopen(release_request, timeout=60) as response:
+                with verified_urlopen(release_request, timeout=60) as response:
                     release_payload = json.loads(response.read().decode("utf-8"))
 
                 asset = _select_elan_windows_asset(list(release_payload.get("assets") or []))
@@ -1567,7 +2087,7 @@ def install_z3(runtime: InstanceRuntime, env: dict[str, str]) -> None:
                     "Accept": "application/vnd.github+json",
                 },
             )
-            with urlopen(release_request, timeout=60) as response:
+            with verified_urlopen(release_request, timeout=60) as response:
                 release_payload = json.loads(response.read().decode("utf-8"))
 
             asset = _select_z3_asset(list(release_payload.get("assets") or []))
@@ -1825,8 +2345,6 @@ def check_secure_keyring() -> None:
 
 def verify_instance_ports(runtime: InstanceRuntime) -> None:
     cprint("[7/8] Final launch checks...", YELLOW)
-    if runtime.is_default and not runtime.explicit_override:
-        assert_runtime_lock_available(runtime.data_root)
     if port_in_use(runtime.backend_port):
         raise RuntimeError(f"Backend port {runtime.backend_port} became occupied before launch.")
     if port_in_use(runtime.frontend_port):
@@ -1836,11 +2354,72 @@ def verify_instance_ports(runtime: InstanceRuntime) -> None:
 
 
 def is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not process:
+                # Access denied means the PID exists but cannot be queried;
+                # invalid-parameter means there is no such process.
+                return ctypes.windll.kernel32.GetLastError() == 5
+            try:
+                exit_code = wintypes.DWORD()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(
+                    process,
+                    ctypes.byref(exit_code),
+                ):
+                    return False
+                return exit_code.value == 259  # STILL_ACTIVE
+            finally:
+                ctypes.windll.kernel32.CloseHandle(process)
+        except (AttributeError, OSError, ValueError):
+            return False
     try:
         os.kill(pid, 0)
     except (OSError, SystemError):
         return False
     return True
+
+
+def is_moto_backend_process(pid: int) -> bool:
+    """Verify a Windows PID is the MOTO uvicorn backend before terminating it."""
+    if sys.platform != "win32" or pid <= 0:
+        return False
+    try:
+        command = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine",
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    normalized = " ".join(command.lower().split())
+    return (
+        "uvicorn" in normalized
+        and "backend.api.main:app" in normalized
+    )
+
+
+def read_log_tail(log_path: str | None, *, max_lines: int = 30) -> str:
+    if not log_path:
+        return ""
+    try:
+        lines = Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    tail = "\n".join(lines[-max_lines:]).strip()
+    return f"\n\nRecent backend log:\n{tail}" if tail else ""
 
 
 def wait_for_backend_health(
@@ -1857,7 +2436,10 @@ def wait_for_backend_health(
     while time.monotonic() < deadline:
         if not is_pid_running(backend_service.pid):
             log_hint = f" Check backend log: {backend_service.log_path}" if backend_service.log_path else ""
-            raise RuntimeError(f"{backend_service.title} exited before becoming healthy.{log_hint}")
+            raise RuntimeError(
+                f"{backend_service.title} exited before becoming healthy.{log_hint}"
+                f"{read_log_tail(backend_service.log_path)}"
+            )
         try:
             request = Request(health_url, headers={"Accept": "application/json"})
             with urlopen(request, timeout=min(2.0, max(0.1, deadline - time.monotonic()))) as response:
@@ -1871,7 +2453,7 @@ def wait_for_backend_health(
     log_hint = f" Backend log: {backend_service.log_path}" if backend_service.log_path else ""
     raise RuntimeError(
         f"{backend_service.title} did not become healthy within {timeout_seconds:g} seconds "
-        f"({last_error}).{log_hint}"
+        f"({last_error}).{log_hint}{read_log_tail(backend_service.log_path)}"
     )
 
 
@@ -1941,45 +2523,65 @@ def start_services(
         str(runtime.backend_port),
         "--no-access-log",
     ]
-    backend_service = launch_service(
-        title=f"MOTO Backend [{runtime.instance_id}]",
-        service_slug="backend",
-        args=backend_args,
-        cwd=str(SCRIPT_DIR),
-        env=env,
-        log_root=runtime.log_root,
-    )
+    backend_service: LaunchedService | None = None
+    frontend_service: LaunchedService | None = None
+    try:
+        backend_service = launch_service(
+            title=f"MOTO Backend [{runtime.instance_id}]",
+            service_slug="backend",
+            args=backend_args,
+            cwd=str(SCRIPT_DIR),
+            env=env,
+            log_root=runtime.log_root,
+        )
 
-    cprint("Waiting for backend health check...", YELLOW)
-    wait_for_backend_health(backend_url, backend_service)
-    cprint("Backend is healthy.", GREEN)
+        cprint("Waiting for backend health check...", YELLOW)
+        wait_for_backend_health(backend_url, backend_service)
+        cprint("Backend is healthy.", GREEN)
 
-    if runtime.is_default and not runtime.explicit_override:
-        write_runtime_lock(runtime.data_root, backend_service.pid, runtime.instance_id, runtime.backend_port)
+        if runtime.is_default and not runtime.explicit_override:
+            write_runtime_lock(runtime.data_root, backend_service.pid, runtime.instance_id, runtime.backend_port)
 
-    frontend_service = launch_service(
-        title=f"MOTO Frontend [{runtime.instance_id}]",
-        service_slug="frontend",
-        args=[npm_cmd, "run", "dev"],
-        cwd=str(SCRIPT_DIR / "frontend"),
-        env=env,
-        log_root=runtime.log_root,
-    )
+        frontend_service = launch_service(
+            title=f"MOTO Frontend [{runtime.instance_id}]",
+            service_slug="frontend",
+            args=[npm_cmd, "run", "dev"],
+            cwd=str(SCRIPT_DIR / "frontend"),
+            env=env,
+            log_root=runtime.log_root,
+        )
 
-    cprint("Waiting for frontend readiness...", YELLOW)
-    wait_for_frontend_ready(frontend_url, frontend_service)
-    cprint("Frontend is ready.", GREEN)
+        cprint("Waiting for frontend readiness...", YELLOW)
+        wait_for_frontend_ready(frontend_url, frontend_service)
+        cprint("Frontend is ready.", GREEN)
 
-    register_active_instance(
-        instance_id=runtime.instance_id,
-        backend_window_pid=backend_service.pid,
-        frontend_window_pid=frontend_service.pid,
-        backend_port=runtime.backend_port,
-        frontend_port=runtime.frontend_port,
-        data_root=runtime.data_root,
-        log_root=runtime.log_root,
-        storage_prefix=runtime.storage_prefix,
-    )
+        register_active_instance(
+            instance_id=runtime.instance_id,
+            backend_window_pid=backend_service.pid,
+            frontend_window_pid=frontend_service.pid,
+            backend_port=runtime.backend_port,
+            frontend_port=runtime.frontend_port,
+            data_root=runtime.data_root,
+            log_root=runtime.log_root,
+            storage_prefix=runtime.storage_prefix,
+        )
+    except BaseException:
+        terminate_launched_service(frontend_service)
+        terminate_launched_service(backend_service)
+        if backend_service is not None and runtime.is_default and not runtime.explicit_override:
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                if (
+                    not is_pid_running(backend_service.pid)
+                    and not backend_lease_is_held(runtime.data_root)
+                ):
+                    remove_owned_runtime_lock(runtime.data_root, backend_service.pid)
+                    break
+                time.sleep(0.1)
+        raise
+
+    assert backend_service is not None
+    assert frontend_service is not None
 
     # Persist the active instance runtime so subsequent relaunches can reuse
     # the same keyring namespace / data root / storage prefix. This includes
@@ -2065,6 +2667,7 @@ def main() -> int:
         clear_console()
         print_banner()
 
+        ensure_windows_launcher_truststore()
         if not handle_available_updates(launcher_args):
             return 0
 
@@ -2072,6 +2675,7 @@ def main() -> int:
         check_node_installation()
         runtime, frontend_url, backend_url, env = prepare_runtime_and_environment()
         install_python_dependencies()
+        ensure_python_native_dependencies()
         install_playwright_browser()
         install_lean4(runtime, env)
         install_z3(runtime, env)

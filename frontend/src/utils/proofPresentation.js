@@ -165,7 +165,7 @@ export function buildProofLiveContextMutation(proof = {}, {
   proofSetRevision,
 } = {}) {
   const runId = String(
-    proof.live_context_owner_run_id || proof.run_id || proof.session_id || ''
+    proof.run_id || proof.session_id || ''
   ).trim();
   const revisionValue = proofSetRevision
     ?? proof.proof_set_revision

@@ -669,7 +669,16 @@ class ProofPruningCoordinator:
                         should_stop=lambda: not self._owns_lifecycle(),
                     )
                 else:
-                    await asyncio.sleep(min(30, 2 ** min(self.state.retry_count, 4)))
+                    wait_seconds = min(30, 2 ** min(self.state.retry_count, 4))
+                    await api_client_manager.broadcast_retry_cooldown(
+                        provider="unknown",
+                        provider_label="Proof pruning provider",
+                        role_id="proof_prune",
+                        retry_attempt=max(1, self.state.retry_count),
+                        retry_after_seconds=wait_seconds,
+                        reason="transient_provider_error",
+                    )
+                    await asyncio.sleep(wait_seconds)
             except asyncio.CancelledError:
                 return True
             return not self._owns_lifecycle()

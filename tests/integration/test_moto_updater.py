@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 from pathlib import Path
 import tempfile
 import urllib.error
@@ -7,6 +8,83 @@ from unittest import TestCase, main, mock
 import zipfile
 
 import moto_updater
+
+
+class UpdaterHttpsTests(TestCase):
+    def test_fetch_json_uses_shared_verified_https(self) -> None:
+        response = mock.MagicMock()
+        response.read.return_value = b'{"ok": true}'
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        with mock.patch.object(
+            moto_updater,
+            "verified_urlopen",
+            return_value=response,
+        ) as open_url:
+            payload = moto_updater._fetch_json_url(
+                "https://api.github.com/repos/example/project",
+                17,
+            )
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(open_url.call_args.kwargs["timeout"], 17)
+        self.assertEqual(
+            open_url.call_args.args[0].full_url,
+            "https://api.github.com/repos/example/project",
+        )
+
+    def test_archive_download_uses_shared_verified_https(self) -> None:
+        manifest = moto_updater.BuildManifest(
+            manifest_version=1,
+            version="1.0.0",
+            build_commit="a" * 40,
+            update_channel="main",
+            api_contract_version="test",
+        )
+        response = mock.MagicMock()
+        response.read.side_effect = [b"archive", b""]
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "update.zip"
+            with mock.patch.object(
+                moto_updater,
+                "verified_urlopen",
+                return_value=response,
+            ) as open_url:
+                moto_updater._download_archive(manifest, destination)
+
+            self.assertEqual(destination.read_bytes(), b"archive")
+            self.assertEqual(open_url.call_args.kwargs["timeout"], 30)
+            self.assertTrue(
+                open_url.call_args.args[0].full_url.startswith("https://github.com/")
+            )
+
+
+class WindowsProcessStatusTests(TestCase):
+    def test_windows_live_pid_uses_process_handle(self) -> None:
+        kernel32 = mock.MagicMock()
+        kernel32.OpenProcess.return_value = 99
+        kernel32.GetExitCodeProcess.side_effect = lambda _handle, pointer: (
+            setattr(pointer._obj, "value", 259) or 1
+        )
+        ctypes_module = mock.MagicMock()
+        ctypes_module.windll.kernel32 = kernel32
+        ctypes_module.byref.side_effect = lambda value: mock.Mock(_obj=value)
+        wintypes_module = mock.MagicMock()
+
+        class FakeDword:
+            value = 0
+
+        wintypes_module.DWORD = FakeDword
+        with mock.patch.object(moto_updater.sys, "platform", "win32"), \
+             mock.patch.dict(
+                 "sys.modules",
+                 {"ctypes": ctypes_module, "ctypes.wintypes": wintypes_module},
+             ), \
+             mock.patch.object(os, "kill", side_effect=AssertionError("must not use os.kill")):
+            self.assertTrue(moto_updater._is_pid_running(4242))
+        kernel32.CloseHandle.assert_called_once_with(99)
 
 
 class RepoSlugTests(TestCase):

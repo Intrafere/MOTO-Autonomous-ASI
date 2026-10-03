@@ -118,6 +118,21 @@ class ProviderErrorUtilityTests(unittest.TestCase):
         self.assertTrue(is_transient_model_call_error(error))
         self.assertFalse(is_non_retryable_model_error(error))
 
+    def test_provider_repair_error_preserves_only_redacted_safe_detail(self):
+        normalized = APIClientManager._as_provider_repair_error(
+            provider="lm_studio",
+            provider_label="LM Studio",
+            role_id="proof_identifier",
+            model="local-model",
+            error=ProviderRouteError(
+                "LM Studio rejected the request: Bearer secret-value",
+                route=ProviderRouteIdentity(provider="lm_studio", model="local-model"),
+            ),
+        )
+
+        self.assertIn("LM Studio rejected the request", normalized.error_detail)
+        self.assertNotIn("secret-value", normalized.error_detail)
+
     def test_timeout_subclass_is_transient(self):
         request = httpx.Request("POST", "https://provider.invalid")
         cause = httpx.ReadTimeout("slow", request=request)
@@ -202,6 +217,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
         )
         client.client.post = AsyncMock(return_value=response)
         client.MAX_RETRIES = 3
+        retry_callback = AsyncMock()
         try:
             with patch(
                 "backend.shared.openrouter_client.asyncio.sleep",
@@ -212,8 +228,14 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                         model="nvidia/model:free",
                         messages=[{"role": "user", "content": "hello"}],
                         max_tokens=10,
+                        retry_callback=retry_callback,
                     )
             self.assertEqual(client.client.post.await_count, 3)
+            self.assertEqual(retry_callback.await_count, 2)
+            self.assertEqual(
+                retry_callback.await_args_list[0].args[0]["reason"],
+                "upstream_provider_error",
+            )
             self.assertTrue(is_transient_model_call_error(raised.exception))
             self.assertFalse(is_non_retryable_model_error(raised.exception))
         finally:
@@ -280,6 +302,39 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                         skip_semaphore=True,
                     )
             self.assertIsInstance(raised.exception.cause, httpx.TimeoutException)
+        finally:
+            await client.client.aclose()
+
+    async def test_lm_studio_n_keep_context_rejection_is_typed_without_retry(self):
+        client = LMStudioClient(base_url="http://127.0.0.1:1")
+        request = httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions")
+        response = httpx.Response(
+            400,
+            request=request,
+            json={
+                "error": (
+                    "The number of tokens to keep from the initial prompt is greater "
+                    "than the context length (n_keep: 57936>= n_ctx: 5632). "
+                    "Bearer secret-value"
+                )
+            },
+        )
+        client.client.post = AsyncMock(return_value=response)
+        retry_callback = AsyncMock()
+        try:
+            with self.assertRaises(ProviderContextLengthError) as raised:
+                await client.generate_completion(
+                    model="local-model",
+                    messages=[{"role": "user", "content": "hello"}],
+                    max_tokens=10,
+                    skip_semaphore=True,
+                    retry_callback=retry_callback,
+                )
+            self.assertEqual(client.client.post.await_count, 1)
+            retry_callback.assert_not_awaited()
+            self.assertEqual(raised.exception.route.provider, "lm_studio")
+            self.assertIn("5632", str(raised.exception))
+            self.assertNotIn("secret-value", str(raised.exception))
         finally:
             await client.client.aclose()
 

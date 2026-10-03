@@ -325,6 +325,15 @@ class ProofDatabase:
                 await self._save_index()
             return run_id
 
+    async def get_live_context_run_id(self) -> str:
+        """Return the run identity used to filter this store's model context."""
+        session_manager = self._session_manager
+        if session_manager is not None and session_manager.is_session_active:
+            session_id = str(getattr(session_manager, "session_id", "") or "").strip()
+            if session_id:
+                return session_id
+        return await self.get_or_create_active_run_id()
+
     def _rebuild_reverse_indexes(self) -> None:
         self._mathlib_reverse_index = {}
         self._mathlib_reverse_short_index = {}
@@ -1092,6 +1101,7 @@ class ProofDatabase:
         expected_run_id: str,
         actor: str,
         reason: str,
+        owning_run_id: str = "",
         validator_reasoning: str = "",
         snapshot_revision: Optional[int] = None,
         trigger_reasons: Optional[List[str]] = None,
@@ -1102,6 +1112,9 @@ class ProofDatabase:
         normalized_run_id = str(record.run_id or f"legacy:{record.source_type}:{record.source_id}")
         if normalized_run_id != str(expected_run_id or "").strip():
             raise RuntimeError("Proof run changed; refresh and retry.")
+        normalized_owning_run_id = str(owning_run_id or normalized_run_id).strip()
+        if not normalized_owning_run_id:
+            raise RuntimeError("Active proof run identity is unavailable; refresh and retry.")
         if expected_theorem_hash and expected_theorem_hash != record.canonical_theorem_statement_hash:
             raise RuntimeError("Proof theorem identity changed; refresh and retry.")
         if expected_lean_hash and expected_lean_hash != record.canonical_lean_code_hash:
@@ -1113,14 +1126,14 @@ class ProofDatabase:
 
         if status == record.live_context_status:
             if status == "active" or (
-                record.live_context_owner_run_id == normalized_run_id
+                record.live_context_owner_run_id == normalized_owning_run_id
                 and record.live_context_pruned_by == actor
             ):
                 return record
         if (
             status == "active"
             and record.live_context_status == "pruned"
-            and record.live_context_owner_run_id == normalized_run_id
+            and record.live_context_owner_run_id == normalized_owning_run_id
             and record.live_context_pruned_by == "automatic_proof_pruning"
         ):
             raise RuntimeError("Validator-approved automatic pruning is immutable in its owning run.")
@@ -1146,7 +1159,7 @@ class ProofDatabase:
         return record.model_copy(
             update={
                 "live_context_status": "pruned",
-                "live_context_owner_run_id": normalized_run_id,
+                "live_context_owner_run_id": normalized_owning_run_id,
                 "live_context_pruned_at": datetime.now(),
                 "live_context_pruned_by": actor,
                 "live_context_prune_reason": bounded_reason,
@@ -1168,6 +1181,7 @@ class ProofDatabase:
         expected_proof_set_revision: int,
         actor: str,
         reason: str,
+        owning_run_id: str = "",
         validator_reasoning: str = "",
         snapshot_revision: Optional[int] = None,
         trigger_reasons: Optional[List[str]] = None,
@@ -1197,6 +1211,7 @@ class ProofDatabase:
                 record=record,
                 status=status,
                 expected_run_id=expected_run_id,
+                owning_run_id=owning_run_id,
                 actor=actor,
                 reason=reason,
                 validator_reasoning=validator_reasoning,
@@ -1235,6 +1250,7 @@ class ProofDatabase:
         *,
         items: List[Mapping[str, Any]],
         expected_proof_set_revision: int,
+        owning_run_id: str = "",
     ) -> tuple[List[ProofRecord], List[str], int]:
         """Atomically apply multiple live-context updates with one revision."""
         async with self._lock:
@@ -1263,6 +1279,7 @@ class ProofDatabase:
                     record=record,
                     status=str(item.get("status") or ""),
                     expected_run_id=str(item.get("expected_run_id") or ""),
+                    owning_run_id=owning_run_id,
                     actor=str(item.get("actor") or ""),
                     reason=str(item.get("reason") or ""),
                     expected_theorem_hash=str(item.get("expected_theorem_hash") or ""),

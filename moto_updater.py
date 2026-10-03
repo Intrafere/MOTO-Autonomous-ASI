@@ -18,6 +18,8 @@ from urllib.parse import quote, urlparse
 import urllib.request
 import zipfile
 
+from launcher_https import verified_urlopen
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 PACKAGE_JSON_PATH = REPO_ROOT / "package.json"
@@ -32,7 +34,7 @@ _DEFAULT_MANIFEST = {
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build6-v95",
+    "api_contract_version": "build6-v97",
 }
 
 _DEFAULT_PRESERVED_ROOTS = {
@@ -370,7 +372,7 @@ def _fetch_json_url(url: str, timeout_seconds: int) -> dict:
             "User-Agent": "MOTO-Build1-Updater",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+    with verified_urlopen(request, timeout=timeout_seconds) as response:
         payload = json.loads(response.read().decode("utf-8"))
 
     if not isinstance(payload, dict):
@@ -472,6 +474,26 @@ def consume_internal_launcher_args(argv: list[str]) -> tuple[list[str], list[Pat
 def _is_pid_running(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not process:
+                return ctypes.windll.kernel32.GetLastError() == 5
+            try:
+                exit_code = wintypes.DWORD()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(
+                    process,
+                    ctypes.byref(exit_code),
+                ):
+                    return False
+                return exit_code.value == 259
+            finally:
+                ctypes.windll.kernel32.CloseHandle(process)
+        except (AttributeError, OSError, ValueError):
+            return False
     try:
         os.kill(pid, 0)
     except (OSError, SystemError):
@@ -979,7 +1001,7 @@ def _download_archive(manifest: BuildManifest, destination: Path) -> None:
         archive_url_for_manifest(manifest),
         headers={"User-Agent": "MOTO-Build1-Updater"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response, destination.open("wb") as output:
+    with verified_urlopen(request, timeout=30) as response, destination.open("wb") as output:
         shutil.copyfileobj(response, output)
 
 

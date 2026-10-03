@@ -7,6 +7,7 @@ from backend.shared.api_client_manager import (
     OAuthProviderCooldownError,
     ProviderCooldownError,
     RetryableProviderError,
+    _retry_workflow_mode,
 )
 from backend.shared.config import system_config
 from backend.shared.model_error_utils import is_retryable_model_output_error, is_transient_model_call_error
@@ -57,6 +58,23 @@ class OAuthUsageLimitParsingTests(IsolatedAsyncioTestCase):
 class APIClientManagerOAuthCooldownTests(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.manager = APIClientManager()
+
+    def test_manual_proof_retry_roles_use_manual_proof_activity_scope(self) -> None:
+        role_ids = (
+            "autonomous_proof_identification_manual_aggregator_run_123",
+            "autonomous_proof_formalization_manual_compiler_run_123",
+            "autonomous_proof_prune_proposer_manual_brainstorm_run_123",
+            "manual_proof_assistant",
+        )
+
+        with mock.patch(
+            "backend.shared.api_client_manager._active_notification_workflow_mode",
+            return_value="",
+        ):
+            self.assertEqual(
+                [_retry_workflow_mode(role_id) for role_id in role_ids],
+                ["manual_proof_check"] * len(role_ids),
+            )
 
     def test_mark_and_read_provider_cooldown(self) -> None:
         error = OAuthUsageLimitError(
@@ -366,6 +384,8 @@ class APIClientManagerOAuthCooldownTests(IsolatedAsyncioTestCase):
             message="OpenAI Codex transient transport failure",
         )
         activity_callback = mock.AsyncMock()
+        broadcast = mock.AsyncMock()
+        self.manager.set_broadcast_callback(broadcast)
 
         with mock.patch.object(
             self.manager,
@@ -385,6 +405,16 @@ class APIClientManagerOAuthCooldownTests(IsolatedAsyncioTestCase):
         self.assertEqual(waiting_payload["retry_attempt"], 1)
         self.assertEqual(waiting_payload["retry_after_seconds"], 60)
         self.assertEqual(waiting_payload["provider_label"], "OpenAI Codex")
+        retry_events = [
+            call for call in broadcast.await_args_list
+            if call.args and call.args[0] == "provider_retry_cooldown"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        retry_payload = retry_events[0].args[1]
+        self.assertEqual(retry_payload["retry_after_seconds"], 60.0)
+        self.assertEqual(retry_payload["retry_attempt"], 1)
+        self.assertEqual(retry_payload["reason"], "transient_provider_error")
+        self.assertNotIn("OpenAI Codex transient transport failure", str(retry_payload))
 
     async def test_retryable_provider_backoff_clears_after_success_with_display_role_override(self) -> None:
         error = RetryableProviderError(
