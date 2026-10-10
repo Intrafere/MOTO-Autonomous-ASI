@@ -321,6 +321,38 @@ class SharedTrainingMemory:
             if strip_proofs or not self.proof_appendix:
                 return content
             return f"{content.rstrip()}\n\n{self.proof_appendix}\n" if content.strip() else self.proof_appendix
+
+    async def get_model_context_content(
+        self,
+        *,
+        proof_database,
+        requesting_run_id: str,
+        source_id: str,
+        formatted: bool = False,
+    ) -> str:
+        """Render accepted memory after applying owning-run proof pruning."""
+        if proof_database is None or not source_id:
+            return (
+                await self.get_all_content_formatted(strip_proofs=True)
+                if formatted
+                else await self.get_all_content(strip_proofs=True)
+            )
+        from backend.autonomous.memory.brainstorm_memory import (
+            project_brainstorm_content_for_model,
+        )
+
+        canonical = await self.get_all_content_formatted(strip_proofs=True)
+        proofs = await proof_database.get_all_proofs()
+        projected = project_brainstorm_content_for_model(
+            canonical,
+            proofs=proofs,
+            requesting_run_id=requesting_run_id,
+            source_id=source_id,
+        )
+        if formatted:
+            return projected
+        parsed = self._parse_formatted_file(projected)
+        return "\n\n".join(item["content"] for item in parsed)
     
     async def get_all_content_formatted(self, *, strip_proofs: bool = False) -> str:
         """Get all shared training content with full formatting and metadata for export."""

@@ -1,10 +1,17 @@
 {
   "adapter": "real_route",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "outputs.at_least_one_output_enabled"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "http_400",
     "coordinator_not_started"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "allowed_outputs",
@@ -13,11 +20,22 @@
   "invariants": [
     "outputs.at_least_one_output_enabled"
   ],
+  "observed_transition": "http_400; coordinator_not_started",
+  "real_components": [
+    "backend/api/routes/aggregator.py",
+    "backend/api/routes/compiler.py",
+    "backend/api/routes/leanoj.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_manual_compiler_rejects_no_allowed_outputs",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+  "source_identity": "workflow-source-v1:6a402f03168555f5880c706467b6749b48c74469533b7741ad440e2d94569152",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_manual_compiler_rejects_invalid_output_selection_before_start"
+  ]
 }

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { getSyntheticLibPresentation } from '../utils/syntheticLibPresentation';
 
 function statusClass(status) {
   const normalized = String(status || '').toLowerCase();
@@ -14,6 +15,10 @@ function StatusPill({ status }) {
   return <span className={`connectivity-status ${statusClass(label)}`}>{label}</span>;
 }
 
+// Each row is a plain container: the label + status is one real button that
+// opens the row's dialog, and any enable checkbox is a sibling control rather
+// than a nested one. The Coming soon X is decorative and hidden from assistive
+// technology; its meaning is in the button's name.
 function ConnectivityRow({
   label,
   status,
@@ -25,61 +30,36 @@ function ConnectivityRow({
   disabled = false,
   title = '',
 }) {
-  const handleToggleClick = (event) => {
-    event.stopPropagation();
-    if (onToggle) {
-      onToggle(!checked);
-    }
-  };
-
-  const handleIndicatorClick = (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    onOpen?.();
-  };
-
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      className="connectivity-row"
-      onClick={onOpen}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          onOpen?.();
-        }
-      }}
-      title={title || label}
-    >
-      <span className="connectivity-row__left">
-        {checkbox && checkboxVariant === 'x' && (
-          <input
-            type="checkbox"
-            checked={false}
-            readOnly
-            tabIndex={-1}
-            onClick={handleIndicatorClick}
-            onKeyDown={(event) => event.stopPropagation()}
-            className="connectivity-checkbox connectivity-checkbox--x"
-            aria-label={`${label} coming soon`}
-          />
-        )}
-        {checkbox && checkboxVariant !== 'x' && (
-          <input
-            type="checkbox"
-            checked={Boolean(checked)}
-            disabled={disabled}
-            onClick={(event) => event.stopPropagation()}
-            onKeyDown={(event) => event.stopPropagation()}
-            onChange={handleToggleClick}
-            className="connectivity-checkbox"
-            aria-label={`Enable ${label}`}
-          />
-        )}
+    <div className="connectivity-row">
+      {checkbox && checkboxVariant === 'x' && (
+        <span
+          aria-hidden="true"
+          className="connectivity-checkbox connectivity-checkbox--x"
+          data-testid="connectivity-coming-soon-indicator"
+          onClick={onOpen}
+        />
+      )}
+      {checkbox && checkboxVariant !== 'x' && (
+        <input
+          type="checkbox"
+          checked={Boolean(checked)}
+          disabled={disabled}
+          onChange={() => onToggle?.(!checked)}
+          className="connectivity-checkbox"
+          aria-label={`Enable ${label}`}
+        />
+      )}
+      <button
+        type="button"
+        className="connectivity-row__button"
+        onClick={onOpen}
+        aria-haspopup="dialog"
+        title={title || label}
+      >
         <span className="connectivity-label">{label}</span>
-      </span>
-      <StatusPill status={status} />
+        <StatusPill status={status} />
+      </button>
     </div>
   );
 }
@@ -110,6 +90,11 @@ export default function ConnectivityPanel({
   const memoryStatus = skills.agent_conversation_memory || {};
   const wolframStatus = skills.wolfram_alpha || {};
   const skillFallbackStatus = isStarting ? 'starting' : 'inactive';
+  const syntheticLibPresentation = getSyntheticLibPresentation(
+    capabilities?.syntheticLibProductState,
+    developerModeEnabled,
+    capabilities?.genericMode,
+  );
 
   return (
     <div className={`connectivity-panel ${isCollapsed ? 'connectivity-panel--collapsed' : ''}`}>
@@ -162,14 +147,27 @@ export default function ConnectivityPanel({
 
           <section className="connectivity-section">
             <div className="connectivity-section__title">Skills And Enhancements Connectivity</div>
-            <ConnectivityRow
-              checkbox
-              checkboxVariant="x"
-              label="SyntheticLib4"
-              status="Coming soon"
-              onOpen={onOpenSyntheticLib4}
-              title="SyntheticLib4 is coming soon"
-            />
+            {syntheticLibPresentation.showComingSoon ? (
+              <ConnectivityRow
+                checkbox
+                checkboxVariant="x"
+                label="SyntheticLib4"
+                status="Coming soon"
+                onOpen={onOpenSyntheticLib4}
+                title="SyntheticLib4 is coming soon"
+              />
+            ) : (
+              <ConnectivityRow
+                label={syntheticLibPresentation.isPrivatePreview
+                  ? 'SyntheticLib4 — Private development'
+                  : 'SyntheticLib4'}
+                status={syntheticLibPresentation.isPrivatePreview ? 'Developer preview' : 'Integration'}
+                onOpen={onOpenSyntheticLib4}
+                title={syntheticLibPresentation.isPrivatePreview
+                  ? 'Open the private SyntheticLib development workspace'
+                  : 'Open SyntheticLib integration'}
+              />
+            )}
             <ConnectivityRow
               checkbox
               label="Wolfram Alpha"

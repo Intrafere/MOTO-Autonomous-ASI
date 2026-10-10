@@ -216,3 +216,15 @@ def exercise_proof_pruning_and_continuous_contracts(model: WorkflowModel) -> Non
 def exercise_candidate_list_validator_contract(model: WorkflowModel) -> None:
     model.exercise_candidate_list_validator_contract()
 
+
+def exercise_overflow_lifecycle_contracts(model: WorkflowModel) -> None:
+    model.exercise_overflow_lifecycle_contracts()
+
+
+def exercise_live_activity_assurance(model: WorkflowModel) -> None:
+    model.exercise_live_activity_assurance()
+
+
+def exercise_current_product_laws(model: WorkflowModel) -> None:
+    model.exercise_current_product_laws()
+

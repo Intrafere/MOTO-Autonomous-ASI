@@ -6,6 +6,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from backend.shared.config import system_config
+from backend.shared.models import CanonicalProofLocator
+from backend.shared.syntheticlib_product import syntheticlib_corpus_access_allowed
 
 
 ProofSearchCorpus = Literal["moto", "manual", "leanoj", "syntheticlib4"]
@@ -13,12 +15,17 @@ ProofSearchSourceKind = Literal["verified_proof", "partial_proof", "failed_attem
 ProofSearchUseCase = Literal["human_browse", "model_context"]
 
 
+def syntheticlib4_corpus_enabled() -> bool:
+    """User toggle plus the backend-owned SyntheticLib lifecycle/preview gate."""
+    return bool(system_config.syntheticlib4_enabled) and syntheticlib_corpus_access_allowed()
+
+
 def default_proof_search_corpora() -> list[ProofSearchCorpus]:
     """Return the enabled default proof-search corpora for AI retrieval."""
     corpora: list[ProofSearchCorpus] = []
     if system_config.agent_conversation_memory_enabled:
         corpora.extend(["moto", "manual", "leanoj"])
-    if system_config.syntheticlib4_enabled:
+    if syntheticlib4_corpus_enabled():
         corpora.append("syntheticlib4")
     return corpora
 
@@ -50,6 +57,12 @@ class UnifiedProofSearchRecord(BaseModel):
     canonical_identity_version: str = ""
     canonical_lean_code_hash: str = ""
     canonical_theorem_statement_hash: str = ""
+    client_proof_id: str = ""
+    canonical_locator: CanonicalProofLocator | None = None
+    canonical_locator_digest: str = ""
+    verification_evidence_status: str = "legacy_unrecorded"
+    compile_receipt_digest: str = ""
+    checked_source_sha256: str = ""
     imports: list[str] = Field(default_factory=list)
     dependency_names: list[str] = Field(default_factory=list)
     topic_tags: list[str] = Field(default_factory=list)
@@ -58,6 +71,9 @@ class UnifiedProofSearchRecord(BaseModel):
     source_path: str = ""
     novelty_tier: str = ""
     novelty_reasoning: str = ""
+    novelty_scope: Literal["standalone", "group"] = "standalone"
+    novelty_group_claim: str = ""
+    novelty_group_proof_ids: list[str] = Field(default_factory=list)
     verified: bool = True
     created_at: str = ""
     live_context_status: str = "active"
@@ -70,9 +86,15 @@ class UnifiedProofSearchRecord(BaseModel):
     def dedupe_keys(self) -> list[str]:
         """Return strong identity keys for exact duplicate suppression."""
         keys: list[str] = []
+        if self.client_proof_id:
+            keys.append(f"occurrence:{self.client_proof_id}")
         if self.external_fingerprint:
             keys.append(f"fingerprint:{self.external_fingerprint}")
-        if self.corpus != "syntheticlib4" and self.proof_id:
+        if (
+            self.corpus != "syntheticlib4"
+            and self.proof_id
+            and not self.client_proof_id
+        ):
             keys.append(f"local:{self.corpus}:{self.proof_id}")
         statement_hash = self.canonical_theorem_statement_hash or self.theorem_statement_hash
         lean_hash = self.canonical_lean_code_hash or self.lean_code_hash

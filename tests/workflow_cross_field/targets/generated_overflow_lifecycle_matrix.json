@@ -1,0 +1,23 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "websocket_api_contracts",
+    "proof_runtime_gating",
+    "continuous_proof_loop"
+  ],
+  "invariants": [
+    "events.proof_context_overflow_nonfatal",
+    "events.autonomous_mandatory_overflow_checkpoint_preserved",
+    "events.continuous_manual_overflow_terminal_after_drain"
+  ],
+  "max_steps": 3,
+  "must_exercise": [
+    "overflow_lifecycle"
+  ],
+  "result_ids": [
+    "generated_overflow_lifecycle_matrix_seed_7",
+    "generated_overflow_lifecycle_matrix_seed_29"
+  ],
+  "schema_version": 2,
+  "target_id": "generated_overflow_lifecycle_matrix"
+}

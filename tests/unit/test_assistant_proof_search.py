@@ -28,6 +28,7 @@ from backend.shared.proof_search.models import ProofSearchRequest, ProofSearchRe
 from backend.shared.models import ModelConfig
 from backend.autonomous.memory.session_manager import session_manager
 from backend.shared.proof_search import moto_sources
+from tests.unit.syntheticlib_gate_cases import syntheticlib_lifecycle
 
 
 def _record(
@@ -806,6 +807,28 @@ class AssistantProofRankerTests(unittest.TestCase):
         self.assertTrue(all(support.source_kind == "verified_proof" for support in supports))
         self.assertTrue(all(support.theorem_statement for support in supports))
 
+    def test_ranker_filters_group_scope_before_filling_support_limit(self) -> None:
+        target = AssistantTargetSnapshot(
+            workflow_mode="autonomous",
+            target_kind="proof_candidate",
+            user_prompt="Prove a true helper theorem.",
+            target_statement="theorem target : True",
+        )
+        group_record = _record(0)
+        group_record.novelty_scope = "group"
+        group_record.novelty_group_claim = "Only the finite group has this rank."
+        group_record.novelty_group_proof_ids = ["proof_0", "proof_1"]
+        standalone_records = [_record(index) for index in range(1, 9)]
+
+        supports = rank_assistant_proof_candidates(
+            [group_record, *standalone_records],
+            target,
+            limit=7,
+        )
+
+        self.assertEqual(len(supports), 7)
+        self.assertTrue(all(support.novelty_scope == "standalone" for support in supports))
+
     def test_internal_candidate_pool_exceeds_public_search_cap(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             indexer = ProofSearchIndexer(Path(temp_dir) / "proof_search.sqlite")
@@ -891,6 +914,10 @@ class AssistantProofRankerTests(unittest.TestCase):
 
 
 class AssistantProofCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # SyntheticLib4 corpus cases need local developer-preview authority.
+        self.enterContext(syntheticlib_lifecycle())
+
     async def test_assistant_selector_makes_exactly_one_call_on_invalid_output(self) -> None:
         restore = _preserve_role_config("manual_proof_assistant")
         try:

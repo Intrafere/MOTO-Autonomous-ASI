@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from copy import deepcopy
 from collections import deque
 from collections.abc import Callable
@@ -57,6 +58,7 @@ class GeneratedRun:
     observed_evidence: frozenset[str]
     final_mode: WorkflowMode
     final_phase: WorkflowPhase
+    planning_diagnostics: tuple[str, ...] = ()
 
     @property
     def action_count(self) -> int:
@@ -130,11 +132,30 @@ INVARIANT_ACTIVATION_EVIDENCE: dict[str, frozenset[str]] = {
     "events.context_overflow_persists_across_reload": frozenset({"context_overflow"}),
     "events.context_overflow_terminal_stop_once": frozenset({"context_overflow"}),
     "events.proof_context_overflow_nonfatal": frozenset({"context_overflow"}),
+    "events.autonomous_mandatory_overflow_checkpoint_preserved": frozenset({"overflow_lifecycle"}),
+    "events.continuous_manual_overflow_terminal_after_drain": frozenset({"overflow_lifecycle"}),
     "prompt.user_prompt_direct_injected": frozenset({"prompt_context"}),
     "prompt.proof_source_context_required": frozenset({"prompt_context"}),
     "prompt.direct_sources_excluded_from_rag": frozenset({"rag_source_exclusion"}),
     "prompt.mandatory_source_overflow_fails_visible": frozenset({"mandatory_source_overflow"}),
     "prompt.generated_appendices_stripped": frozenset({"prompt_context"}),
+    **{
+        invariant_id: frozenset({"current_product_laws"})
+        for invariant_id in (
+            "solution_path.activation_review_fenced",
+            "proof_competition.secondary_after_primary_exhaustion",
+            "provider.exact_role_and_cooldown_scope",
+            "feedback_projection.newest_five_whole",
+            "bulk_mutation.atomic_revision_fenced",
+            "runtime_root.single_owner_bound_paths",
+            "proof_run.identity_generation_fenced",
+            "proof_framing.allowed_outputs_gate",
+            "sleep.unique_owner_released",
+            "supercharge_creativity.routing_separation",
+            "proof_novelty.group_atomic_same_run",
+            "leanoj.parent_control_generation_fences_children",
+        )
+    },
 }
 
 
@@ -437,6 +458,39 @@ ACTION_SPECS: tuple[ActionSpec, ...] = (
         produces=("context_overflow",),
     ),
     ActionSpec(
+        "exercise_overflow_lifecycle_contracts",
+        actions.exercise_overflow_lifecycle_contracts,
+        (
+            "websocket_api_contracts",
+            "proof_runtime_gating",
+            "workflow_filesystem_state",
+            "runtime_exclusivity",
+            "continuous_proof_loop",
+        ),
+        lambda model: "candidate_local_overflow" not in model.exercise_observations,
+        produces=("overflow_lifecycle",),
+    ),
+    ActionSpec(
+        "exercise_current_product_laws",
+        actions.exercise_current_product_laws,
+        (
+            "solution_path",
+            "proof_competition",
+            "provider_routing",
+            "feedback_projection",
+            "bulk_mutation",
+            "runtime_root_ownership",
+            "proof_run_identity",
+            "proof_framing",
+            "sleep_ownership",
+            "answer_wrappers",
+            "group_novelty",
+            "leanoj_parent_control",
+        ),
+        lambda model: not model.law_observations,
+        produces=("current_product_laws",),
+    ),
+    ActionSpec(
         "verify_rag_source_exclusion",
         actions.verify_rag_source_exclusion,
         ("prompt_context", "workflow_filesystem_state"),
@@ -583,6 +637,17 @@ DEFAULT_TARGETS: tuple[GenerationTarget, ...] = (
         ),
         must_exercise=("context_overflow",),
         max_steps=6,
+    ),
+    GenerationTarget(
+        target_id="generated_overflow_lifecycle_matrix",
+        fields=("websocket_api_contracts", "proof_runtime_gating", "continuous_proof_loop"),
+        invariants=(
+            "events.proof_context_overflow_nonfatal",
+            "events.autonomous_mandatory_overflow_checkpoint_preserved",
+            "events.continuous_manual_overflow_terminal_after_drain",
+        ),
+        must_exercise=("overflow_lifecycle",),
+        max_steps=3,
     ),
     GenerationTarget(
         target_id="generated_rag_prompt_boundaries",
@@ -940,7 +1005,33 @@ def _planning_signature(
     observed: frozenset[str],
     observed_fields: frozenset[str],
 ) -> tuple[object, frozenset[str], frozenset[str]]:
-    return (_signature_value(model), observed, observed_fields)
+    # Planner identity tracks state that can change action eligibility or future
+    # coverage. Audit/event counters and repeated payload lists do not affect
+    # reachability; including them made harmless repeat actions create an
+    # effectively unbounded state graph.
+    eligibility_state = (
+        model.mode,
+        model.phase,
+        model.previous_phase,
+        model.allow_mathematical_proofs,
+        model.allow_research_papers,
+        model.provider.credit_exhausted,
+        model.lean.enabled,
+        model.assistant.enabled,
+        bool(model.assistant.live_pack),
+        bool(model.manual_proofs_active),
+        bool(model.manual_aggregator_submissions),
+        model.leanoj_draft_written,
+        model.leanoj_skip_count > 0,
+        model.leanoj_force_count > 0,
+        bool(model.checkpoint),
+        _signature_value(model.checkpoint),
+        frozenset(event.event_type for event in model.events),
+        frozenset(event.event_type for event in model.persisted_events),
+        frozenset(model.exercise_observations),
+        frozenset(model.law_observations),
+    )
+    return (_signature_value(eligibility_state), observed, observed_fields)
 
 
 def _seeded_action_order(
@@ -989,61 +1080,104 @@ def _plan_reachable_path(
 ) -> tuple[ActionSpec, ...]:
     required_evidence = frozenset(target.must_exercise)
     required_fields = frozenset(target.fields)
-    frontier: deque[
+    started = time.monotonic()
+    timeout_seconds = 10.0
+    max_states = 10_000
+    frontier: list[
         tuple[WorkflowModel, frozenset[str], frozenset[str], tuple[ActionSpec, ...]]
-    ] = deque([(deepcopy(model), observed, observed_fields, ())])
-    visited = {_planning_signature(frontier[0][0], observed, observed_fields)}
+    ] = [(deepcopy(model), observed, observed_fields, ())]
+    visited: set[object] = {
+        _planning_signature(frontier[0][0], observed, observed_fields)
+    }
+    visited_count = 1
     reachable_evidence = set(observed)
     reachable_fields = set(observed_fields)
+    relevant_actions = _target_relevant_action_ids(target, action_specs)
 
-    while frontier:
-        state, state_observed, state_fields, path = frontier.popleft()
-        if (
-            required_evidence.issubset(state_observed)
-            and required_fields.issubset(state_fields)
-        ):
-            return path
-        if len(path) >= remaining_steps:
-            continue
-
-        missing = required_evidence - state_observed
-        eligible = eligible_action_specs(state, action_specs)
-        progress_actions = tuple(
-            spec
-            for spec in eligible
-            if set(spec.advances).union(spec.produces).intersection(missing)
-        )
-        if progress_actions:
-            eligible = progress_actions
-        ordered = _seeded_action_order(
-            eligible,
-            target=target,
-            seed=seed,
-            signature=_planning_signature(state, state_observed, state_fields),
-            missing_evidence=missing,
-        )
-        for spec in ordered:
-            candidate = deepcopy(state)
-            replay_before = len(candidate.replay)
-            spec.execute(candidate)
-            if len(candidate.replay) <= replay_before:
+    for depth in range(remaining_steps + 1):
+        if visited_count >= max_states or time.monotonic() - started >= timeout_seconds:
+            break
+        next_frontier: list[
+            tuple[WorkflowModel, frozenset[str], frozenset[str], tuple[ActionSpec, ...]]
+        ] = []
+        for state, state_observed, state_fields, path in frontier:
+            if required_evidence.issubset(state_observed) and required_fields.issubset(
+                state_fields
+            ):
+                return path
+            if depth >= remaining_steps:
                 continue
-            try:
-                _assert_all_invariants_with_id(candidate)
-            except InvariantFailure:
-                continue
-            next_observed = frozenset(
-                set(state_observed).union(observed_exercise_tokens(candidate))
+            used_action_ids = {spec.action_id for spec in path}
+            missing = required_evidence - state_observed
+            ordered = _seeded_action_order(
+                tuple(
+                    spec
+                    for spec in eligible_action_specs(state, action_specs)
+                    if spec.action_id not in used_action_ids
+                        and (
+                            len(action_specs) <= 12
+                            or spec.action_id in relevant_actions
+                        )
+                ),
+                target=target,
+                seed=seed,
+                signature=_planning_signature(state, state_observed, state_fields),
+                missing_evidence=missing,
             )
-            next_fields = frozenset(set(state_fields).union(spec.fields))
-            reachable_evidence.update(next_observed)
-            reachable_fields.update(next_fields)
-            signature = _planning_signature(candidate, next_observed, next_fields)
-            if signature in visited:
-                continue
-            visited.add(signature)
-            frontier.append((candidate, next_observed, next_fields, path + (spec,)))
+            for spec in ordered:
+                candidate = deepcopy(state)
+                replay_before = len(candidate.replay)
+                spec.execute(candidate)
+                if len(candidate.replay) <= replay_before:
+                    continue
+                try:
+                    _assert_all_invariants_with_id(candidate)
+                except InvariantFailure:
+                    continue
+                next_observed = frozenset(
+                    set(state_observed).union(observed_exercise_tokens(candidate))
+                )
+                next_fields = frozenset(set(state_fields).union(spec.fields))
+                reachable_evidence.update(next_observed)
+                reachable_fields.update(next_fields)
+                next_path = path + (spec,)
+                if required_evidence.issubset(
+                    next_observed
+                ) and required_fields.issubset(next_fields):
+                    return next_path
+                signature = _planning_signature(
+                    candidate, next_observed, next_fields
+                )
+                if signature in visited:
+                    continue
+                visited.add(signature)
+                visited_count += 1
+                next_frontier.append(
+                    (candidate, next_observed, next_fields, next_path)
+                )
+        if not next_frontier:
+            break
+        if len(action_specs) > 12:
+            next_frontier.sort(
+                key=lambda node: (
+                    len(required_evidence - node[1]),
+                    len(required_fields - node[2]),
+                    -sum(
+                        _weight_for(spec, target, required_evidence - node[1])
+                        for spec in node[3]
+                    ),
+                    hashlib.sha256(
+                        (
+                            f"{seed}\0{target.target_id}\0"
+                            + "\0".join(spec.action_id for spec in node[3])
+                        ).encode()
+                    ).hexdigest(),
+                )
+            )
+            next_frontier = next_frontier[:512]
+        frontier = next_frontier
 
+    elapsed = time.monotonic() - started
     missing_evidence = sorted(required_evidence - reachable_evidence)
     missing_fields = sorted(required_fields - reachable_fields)
     raise GeneratedRunFailure(
@@ -1057,10 +1191,43 @@ def _plan_reachable_path(
                 f"No path within {remaining_steps} steps; "
                 f"missing evidence {missing_evidence!r}; "
                 f"missing fields {missing_fields!r}; "
-                f"visited {len(visited)} state/evidence signatures."
+                f"visited {visited_count}/{max_states} state/evidence signatures in "
+                f"{elapsed:.3f}/{timeout_seconds:.1f}s."
             ),
         )
     )
+
+
+def _target_relevant_action_ids(
+    target: GenerationTarget,
+    action_specs: tuple[ActionSpec, ...],
+) -> frozenset[str]:
+    """Conservatively retain goal actions and their declared prerequisites."""
+    required = set(target.must_exercise)
+    selected: set[str] = set()
+    while True:
+        changed = False
+        for spec in action_specs:
+            signals = set(spec.advances).union(spec.produces)
+            if signals.intersection(required) or (
+                set(spec.fields).intersection(target.fields)
+                and signals.intersection(target.must_exercise)
+            ):
+                if spec.action_id not in selected:
+                    selected.add(spec.action_id)
+                    required.update(spec.advances)
+                    changed = True
+        if not changed:
+            break
+    # Starts/stops/resumes and target-field actions are state prerequisites whose
+    # predicates cannot be inferred from metadata alone.
+    selected.update(
+        spec.action_id
+        for spec in action_specs
+        if spec.action_id.startswith(("start_", "stop", "resume", "complete_", "force_"))
+        and set(spec.fields).intersection(target.fields)
+    )
+    return frozenset(selected)
 
 
 def _assert_all_invariants_with_id(model: WorkflowModel) -> None:

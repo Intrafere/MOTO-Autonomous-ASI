@@ -9,7 +9,7 @@ body:
       options:
         - label: I searched existing issues and did not find a duplicate.
           required: true
-        - label: I reviewed the relevant documentation in `README.md`, `CONTRIBUTING.md`, or `.cursor/rules/` when applicable.
+        - label: I reviewed the relevant documentation in `README.md`, `CONTRIBUTING.md`, or `.claude/rules/` when applicable.
           required: false
         - label: This is not a security vulnerability or secret exposure. I will use `security@intrafere.com` for security reports.
           required: true

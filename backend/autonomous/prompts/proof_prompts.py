@@ -474,7 +474,7 @@ def build_proof_candidate_list_validation_prompt(
 
 Review novelty without using private MOTO proof history or treating program-local firsts as novel. Assess every proposed theorem independently against public, standard, textbook, and Mathlib knowledge. A theorem is approvable only when its mathematical content is plausibly new or novel and it directly solves or substantially advances the user's objective. Reject standard results, routine helpers, minor reformulations, local formalizations, and proof-engineering glue.
 
-Return exactly one result for every theorem_id below, in the same order, with no duplicate, missing, or extra IDs. Use decision "approve_novel" or "reject_not_novel". Give a specific novelty reason for each result. The feedback must concisely explain what a regenerated complete list should fix; if all entries are approved, state why the list is suitable for proof attempts. Do not decide the aggregate 75% threshold in prose; deterministic code owns that decision.
+Return exactly one result for every theorem_id below, in the same order, with no duplicate, missing, or extra IDs. Use decision "approve_novel" or "reject_not_novel". Give a specific novelty reason for each result. The feedback must concisely explain what a regenerated complete list should fix; if all entries are approved, state why the list is suitable for proof attempts. Do not decide the aggregate list outcome in prose; deterministic code owns that decision.
 
 USER RESEARCH PROMPT:
 {user_prompt}
@@ -868,12 +868,13 @@ def build_proof_novelty_prompt(
     theorem_statement: str,
     lean_code: str,
     existing_novel_proofs: str,
+    verified_group_candidates: str = "",
 ) -> str:
     """Ask the validator to classify a Lean-verified theorem into one of five novelty tiers."""
     user_prompt, _verified_proof_context_block = _prepare_user_prompt_context(user_prompt)
-    return f"""This proof has been FORMALLY VERIFIED by Lean 4. It is mathematically valid.
+    return f"""The supplied LEAN 4 CODE has already been accepted by Lean 4 without errors. The declarations it contains are formally verified and mathematically valid.
 
-Your ONLY task: assign a novelty tier to the verified result based on the criteria below.
+Your ONLY task: inspect those verified Lean 4 declarations and assign a novelty tier to the mathematical result they actually establish, based on the criteria below.
 
 NOVELTY TIERS (choose exactly one):
 
@@ -909,12 +910,21 @@ NOVELTY TIERS (choose exactly one):
 - Assign this tier only when the proof's significance appears field-level or prize-level, above an ordinary mathematical discovery.
 
 Rules:
-- Do NOT re-check validity. Lean 4 already verified it.
+- Do NOT re-check validity. Lean 4 already accepted the supplied code without errors.
+- Treat the LEAN 4 CODE as authoritative for what was proved. Read its theorem declarations, hypotheses, and conclusions, and rank only the mathematical content those verified declarations actually establish.
+- VERIFIED THEOREM, the user research prompt, titles, intended targets, candidate metadata, and surrounding prose provide context but are not authority for what the Lean code proved. If any description overstates or differs from the code, follow the code.
+- Never transfer the ambition or importance of an unproved target to a narrower verified lemma. Rank that narrower lemma at the tier warranted by its own actual conclusion.
+- First decide the ranking scope. Use "standalone" when the novelty tier is justified by the current LEAN 4 CODE on its own. Use "group" only when the current verified Lean declarations together with a finite subset of the supplied VERIFIED GROUP CANDIDATES establish the stated combined significance.
+- The novelty tier always ranks the selected scope, never the ambition, importance, title, or unresolved target of the surrounding research campaign.
+- A theorem does not inherit the significance of an open problem merely because it is a useful lemma, branch, reduction, obstruction, formalization, or failed-route result within a project aimed at that problem.
+- For "group", derive the combined claim solely from the current verified Lean declarations and the specifically cited verified candidates. List every supporting proof ID needed for that claim in group_proof_ids and state the exact combined theorem-level contribution in group_claim. Every listed ID must come from VERIFIED GROUP CANDIDATES. Do not list loosely related proofs.
+- Use "standalone" with an empty group_proof_ids list and empty group_claim when the supplied candidates are insufficient to establish a stronger combined result.
 - Choose the single best-fitting tier. When a proof could fit multiple tiers, choose the highest applicable one.
 - Consider the research prompt context. A textbook-standard result does NOT qualify as "novel_formulation" merely because this program has not stored or mechanized it before; the exact formulation/formalization must be absent from standard references and Mathlib and be citable beyond this run.
 - Do not assign a high novelty tier to a theorem that is mathematically interesting but irrelevant to the USER RESEARCH PROMPT.
 - Do not reward building a general verified background library. Novelty must be prompt-directed, not merely formalized known knowledge.
 - Err toward recognizing higher tiers for results that required multi-step reasoning, non-trivial formalization work, or original proof strategy.
+- In reasoning, identify the concrete result established by the Lean code for standalone scope, or the exact verified combined contribution for group scope, and explain why that actual result warrants the selected tier.
 
 USER RESEARCH PROMPT:
 {user_prompt}
@@ -925,7 +935,10 @@ VERIFIED THEOREM:
 LEAN 4 CODE:
 {lean_code}
 
-{_json_only_footer('{"novelty_tier": "mathematical_discovery", "reasoning": "brief explanation"}')}
+VERIFIED GROUP CANDIDATES FROM THIS RUN:
+{verified_group_candidates or "[None. The result must be ranked standalone.]"}
+
+{_json_only_footer('{"novelty_tier": "mathematical_discovery", "reasoning": "brief explanation tied to the selected scope", "novelty_scope": "standalone", "group_claim": "", "group_proof_ids": []}')}
 """
 
 

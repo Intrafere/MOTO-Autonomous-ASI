@@ -1,11 +1,18 @@
 {
   "adapter": "real_route",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "route_start_stop",
     "saved_output",
     "temp_root_containment"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "workflow_filesystem_state",
@@ -15,11 +22,22 @@
   "invariants": [
     "runtime.single_active_workflow"
   ],
+  "observed_transition": "route_start_stop; saved_output; temp_root_containment",
+  "real_components": [
+    "backend/api/routes/aggregator.py",
+    "backend/api/routes/compiler.py",
+    "backend/api/routes/leanoj.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_manual_aggregator_route_lifecycle_output_and_temp_root",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+  "source_identity": "workflow-source-v1:22c7b0d22f2b3d4bfe35e8d86138c5bea121d084dedf20c85d86137c1740421e",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_manual_aggregator_real_route_start_stop_output_and_temp_root"
+  ]
 }

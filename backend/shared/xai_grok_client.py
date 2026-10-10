@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 import os
-import secrets
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -21,13 +19,16 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.oauth_pkce import generate_pkce_pair
 from backend.shared.openrouter_client import sanitize_provider_error_text
+from backend.shared.provider_recovery.runtime import assured_retry_wait
 from backend.shared.secret_store import (
     SecretStoreError,
     clear_xai_grok_oauth_tokens,
     load_xai_grok_oauth_tokens,
     store_xai_grok_oauth_tokens,
 )
+from backend.shared.credential_locks import xai_grok_credential_mutation
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,33 @@ class XAIGrokSpendingLimitError(XAIGrokError):
         self.code = str(code or "")
         self.status_code = int(status_code or 0)
         super().__init__(message)
+
+
+class XAIGrokUsageLimitError(XAIGrokError):
+    """Raised when xAI reports a usage limit with a credible reset time."""
+
+    provider = "xai_grok_oauth"
+    provider_label = "xAI Grok"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resets_at: Optional[int] = None,
+        resets_in_seconds: Optional[int] = None,
+        plan_type: str = "",
+        code: str = "",
+        status_code: int = 0,
+    ) -> None:
+        self.resets_at = resets_at
+        self.resets_in_seconds = resets_in_seconds
+        self.plan_type = plan_type
+        self.code = str(code or "")
+        self.status_code = int(status_code or 0)
+        detail = message or "The xAI Grok usage limit has been reached."
+        if resets_in_seconds is not None:
+            detail = f"{detail} Resets in {resets_in_seconds} seconds."
+        super().__init__(detail)
 
 
 class XAIGrokClient:
@@ -120,13 +148,7 @@ class XAIGrokClient:
             ),
         )
 
-    @staticmethod
-    def generate_pkce_pair() -> tuple[str, str]:
-        """Return a PKCE verifier and S256 challenge."""
-        verifier = secrets.token_urlsafe(64)
-        digest = hashlib.sha256(verifier.encode("ascii")).digest()
-        challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-        return verifier, challenge
+    generate_pkce_pair = staticmethod(generate_pkce_pair)
 
     @classmethod
     def build_authorization_url(
@@ -266,6 +288,106 @@ class XAIGrokClient:
             or "need a grok subscription" in lowered
         )
 
+    @staticmethod
+    def _positive_int(value: Any) -> Optional[int]:
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @classmethod
+    def _body_reset_metadata(
+        cls,
+        payload: Any,
+    ) -> tuple[Optional[int], Optional[int], str]:
+        """Parse JSON-body reset fields. HTTP Retry-After is not a spending reset."""
+        now = int(time.time())
+        resets_in_seconds: Optional[int] = None
+        resets_at: Optional[int] = None
+        plan_type = ""
+        candidates: list[Any] = []
+        if isinstance(payload, dict):
+            candidates.append(payload)
+            error = payload.get("error")
+            if isinstance(error, dict):
+                candidates.append(error)
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            resets_in_seconds = resets_in_seconds or cls._positive_int(
+                item.get("resets_in_seconds")
+                or item.get("reset_after_seconds")
+                or item.get("retry_after")
+            )
+            resets_at = resets_at or cls._positive_int(
+                item.get("resets_at")
+                or item.get("reset_at")
+                or item.get("reset_timestamp")
+            )
+            plan_type = str(item.get("plan_type") or item.get("plan") or plan_type)
+        if resets_at is not None and resets_at > now:
+            if resets_in_seconds is None:
+                resets_in_seconds = max(1, resets_at - now)
+            return resets_at, resets_in_seconds, plan_type
+        if resets_in_seconds is not None:
+            return now + resets_in_seconds, resets_in_seconds, plan_type
+        return None, None, plan_type
+
+    @classmethod
+    def _header_reset_metadata(
+        cls,
+        response: httpx.Response,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Parse Retry-After / rate-limit headers as a throttle window, not a spending reset."""
+        now = int(time.time())
+        retry_after = cls._positive_int(response.headers.get("retry-after"))
+        reset_header = cls._positive_int(
+            response.headers.get("x-ratelimit-reset")
+            or response.headers.get("x-rate-limit-reset")
+        )
+        if reset_header is not None and reset_header > now:
+            return reset_header, max(1, reset_header - now)
+        if retry_after is not None:
+            return now + retry_after, retry_after
+        # Small values are remaining seconds; large past unix timestamps are ignored.
+        if reset_header is not None and reset_header <= 7 * 24 * 3600:
+            return now + reset_header, reset_header
+        return None, None
+
+    @classmethod
+    def _timed_usage_limit(
+        cls,
+        response: httpx.Response,
+        code: str,
+        message: str,
+    ) -> Optional[XAIGrokUsageLimitError]:
+        """Return a timed limit from body reset fields, or from 429 throttle headers.
+
+        HTTP Retry-After is a throttle window for ordinary 429s, never a spending reset.
+        """
+        try:
+            payload = response.json()
+        except (AttributeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        resets_at, resets_in_seconds, plan_type = cls._body_reset_metadata(payload)
+        if (
+            resets_at is None
+            and not cls._is_hard_spending_limit(code, message)
+            and int(getattr(response, "status_code", 0) or 0) == 429
+        ):
+            resets_at, resets_in_seconds = cls._header_reset_metadata(response)
+        if resets_at is None:
+            return None
+        return XAIGrokUsageLimitError(
+            f"xAI Grok timed usage limit reached: {message}",
+            resets_at=resets_at,
+            resets_in_seconds=resets_in_seconds,
+            plan_type=plan_type,
+            code=code,
+            status_code=response.status_code,
+        )
+
     @classmethod
     def _is_transient_text(cls, text: str) -> bool:
         lowered = (text or "").lower()
@@ -279,6 +401,7 @@ class XAIGrokClient:
     def _retry_delay(cls, retry_index: int) -> float:
         return min(cls.RETRY_MAX_DELAY, cls.RETRY_DELAY * (2 ** max(0, retry_index)))
 
+    @xai_grok_credential_mutation
     async def exchange_code(
         self,
         *,
@@ -320,6 +443,7 @@ class XAIGrokClient:
         store_xai_grok_oauth_tokens(tokens)
         return self.safe_status(tokens)
 
+    @xai_grok_credential_mutation
     async def refresh_tokens(self, tokens: Dict[str, Any]) -> Dict[str, Any]:
         """Refresh stored xAI OAuth tokens and persist the replacement bundle."""
         refresh_token = str(tokens.get("refresh_token") or "")
@@ -525,6 +649,7 @@ class XAIGrokClient:
                 models.append(normalized)
         return models
 
+    @xai_grok_credential_mutation
     async def clear_tokens(self) -> None:
         """Revoke best-effort and clear persisted xAI Grok OAuth tokens."""
         tokens = self.load_tokens()
@@ -554,12 +679,16 @@ class XAIGrokClient:
             try:
                 response = await self.client.post(url, **kwargs)
                 code, error_detail = self._provider_error_fields(response)
-                if response.status_code >= 400 and self._is_hard_spending_limit(code, error_detail):
-                    raise XAIGrokSpendingLimitError(
-                        f"xAI Grok spending limit reached: {error_detail}",
-                        code=code,
-                        status_code=response.status_code,
-                    )
+                if response.status_code >= 400:
+                    timed_limit = self._timed_usage_limit(response, code, error_detail)
+                    if timed_limit is not None:
+                        raise timed_limit
+                    if self._is_hard_spending_limit(code, error_detail):
+                        raise XAIGrokSpendingLimitError(
+                            f"xAI Grok spending limit reached: {error_detail}",
+                            code=code,
+                            status_code=response.status_code,
+                        )
                 if response.status_code >= 400 and (
                     response.status_code in self.TRANSIENT_STATUS_CODES
                     or self._is_transient_text(response.text)
@@ -583,8 +712,22 @@ class XAIGrokClient:
                                 "max_attempts": max_attempts,
                                 "retry_after_seconds": delay,
                                 "reason": "transient_http_error",
+                                "error_summary": error_detail,
                             })
-                        await asyncio.sleep(delay)
+                        else:
+                            await assured_retry_wait(
+                                {
+                                    "provider": "xai_grok_oauth",
+                                    "provider_label": "xAI Grok",
+                                    "model": retry_model,
+                                    "retry_attempt": attempt + 1,
+                                    "max_attempts": max_attempts,
+                                    "retry_after_seconds": delay,
+                                    "reason": "transient_http_error",
+                                    "error_summary": error_detail,
+                                },
+                                role_id="xai_grok_direct",
+                            )
                         continue
                     raise XAIGrokRequestError(
                         f"xAI Grok connection failed after {self.MAX_RETRIES} retries: "
@@ -613,8 +756,22 @@ class XAIGrokClient:
                             "max_attempts": max_attempts,
                             "retry_after_seconds": delay,
                             "reason": "connection_error",
+                            "error_summary": f"[{error_type}] {error_detail}",
                         })
-                    await asyncio.sleep(delay)
+                    else:
+                        await assured_retry_wait(
+                            {
+                                "provider": "xai_grok_oauth",
+                                "provider_label": "xAI Grok",
+                                "model": retry_model,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": max_attempts,
+                                "retry_after_seconds": delay,
+                                "reason": "connection_error",
+                                "error_summary": f"[{error_type}] {error_detail}",
+                            },
+                            role_id="xai_grok_direct",
+                        )
                     continue
                 raise XAIGrokRequestError(
                     f"xAI Grok connection failed after {self.MAX_RETRIES} retries: "
@@ -636,6 +793,8 @@ class XAIGrokClient:
             return "high"
         if effort == "minimal":
             return "low"
+        if effort == "none":
+            return None
         if effort in {"high", "medium", "low"}:
             return effort
         return None
@@ -690,6 +849,9 @@ class XAIGrokClient:
             )
             if response.status_code >= 400:
                 code, message = self._provider_error_fields(response)
+                timed_limit = self._timed_usage_limit(response, code, message)
+                if timed_limit is not None:
+                    raise timed_limit
                 if self._is_hard_spending_limit(code, message):
                     raise XAIGrokSpendingLimitError(
                         f"xAI Grok spending limit reached: {message}",

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -69,7 +70,21 @@ def _write_network_blocker(fake_root: Path) -> None:
         "    if host not in {'127.0.0.1', '::1', 'localhost'}:\n"
         "        raise AssertionError('Build F deep tests forbid external network access')\n"
         "    return _original_connect(self, address)\n"
-        "socket.socket.connect = _guarded_connect\n",
+        "socket.socket.connect = _guarded_connect\n"
+        "import os\n"
+        "import subprocess\n"
+        "_original_popen = subprocess.Popen\n"
+        "_allowed = os.path.normcase(os.path.realpath(os.environ['MOTO_DEEP_ALLOWED_EXECUTABLE']))\n"
+        "_safe_system_queries = {'ver'}\n"
+        "class _GuardedPopen(_original_popen):\n"
+        "    def __init__(self, args, *pargs, **kwargs):\n"
+        "        command = args[0] if isinstance(args, (list, tuple)) else args\n"
+        "        executable = str(command).split()[0]\n"
+        "        resolved = os.path.normcase(os.path.realpath(executable))\n"
+        "        if resolved != _allowed and executable.lower() not in _safe_system_queries:\n"
+        "            raise AssertionError(f'Build F deep tests forbid subprocess escape: {executable}')\n"
+        "        super().__init__(args, *pargs, **kwargs)\n"
+        "subprocess.Popen = _GuardedPopen\n",
         encoding="utf-8",
     )
 
@@ -92,8 +107,13 @@ def test_build_f_deep_environment_is_minimal_and_clears_sensitive_routes(
 
     assert SENSITIVE_ENV_NAMES.isdisjoint(env)
     assert env["PYTHON_KEYRING_BACKEND"] == "keyring.backends.null.Keyring"
+    assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
     assert env["PYTHONHASHSEED"] == "101"
     assert env["NO_PROXY"] == "127.0.0.1,localhost,::1"
+    assert "provider endpoints" in env["MOTO_DEEP_FAKE_BOUNDARIES"]
+    assert Path(env["MOTO_DEEP_ALLOWED_EXECUTABLE"]).resolve() == Path(
+        sys.executable
+    ).resolve()
 
 
 @pytest.mark.parametrize(

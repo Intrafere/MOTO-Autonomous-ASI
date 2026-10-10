@@ -190,6 +190,9 @@ class WorkflowModel:
     pruning_success_from_context_overflow: int = 0
     continuous_loop_active: bool = False
     continuous_loop_hidden_cap: int | None = None
+    continuous_no_discovery_limit: int | None = None
+    continuous_no_discovery_resets_on_candidate: bool = False
+    continuous_no_discovery_activity_visible: bool = False
     continuous_source_reservations: int = 0
     continuous_stop_available: bool = False
     continuous_restart_resumable: bool = False
@@ -201,10 +204,26 @@ class WorkflowModel:
     automatic_round_stops_on_first_zero: bool = True
     candidate_list_contract_exercised: bool = False
     candidate_list_gate_before_proof_cost: bool = False
-    candidate_list_exact_threshold_accepts: bool = False
+    candidate_list_any_novel_accepts: bool = False
     candidate_list_semantic_history_count: int = 0
     candidate_list_scope_isolated: bool = False
     candidate_list_activity_complete: bool = False
+    provider_retry_waits: int = 0
+    provider_retry_attempts: list[int] = field(default_factory=list)
+    provider_retry_event_ids: set[str] = field(default_factory=set)
+    provider_retry_correlation_ids: set[str] = field(default_factory=set)
+    provider_retry_secret_leaks: int = 0
+    provider_retry_visible_after_reload: bool = False
+    retry_wait_inventory_complete: bool = True
+    retry_wait_inventory_assured: bool = True
+    provider_error_inventory_complete: bool = True
+    provider_error_inventory_route_attributed: bool = True
+    law_observations: set[str] = field(default_factory=set)
+    law_violations: set[str] = field(default_factory=set)
+    adverse_order_attempts: int = 0
+    fenced_adverse_order_attempts: int = 0
+    mutation_attempts: int = 0
+    atomic_mutations: int = 0
     checkpoint: dict[str, object] = field(default_factory=dict)
     events: list[WorkflowEvent] = field(default_factory=list)
     replay: list[str] = field(default_factory=list)
@@ -220,10 +239,159 @@ class WorkflowModel:
         self.record("exercise_candidate_list_validator_contract")
         self.candidate_list_contract_exercised = True
         self.candidate_list_gate_before_proof_cost = True
-        self.candidate_list_exact_threshold_accepts = True
+        self.candidate_list_any_novel_accepts = True
         self.candidate_list_semantic_history_count = 5
         self.candidate_list_scope_isolated = True
         self.candidate_list_activity_complete = True
+
+    def exercise_live_activity_assurance(self) -> None:
+        self.record("exercise_live_activity_assurance")
+        correlation_id = "provider-retry:openrouter:agg_val:model"
+        for attempt in (1, 2):
+            self.provider_retry_waits += 1
+            self.provider_retry_attempts.append(attempt)
+            self.provider_retry_event_ids.add(f"{correlation_id}:{attempt}")
+            self.provider_retry_correlation_ids.add(correlation_id)
+        self.provider_retry_visible_after_reload = True
+        self.retry_wait_inventory_complete = True
+        self.retry_wait_inventory_assured = True
+        self.provider_error_inventory_complete = True
+        self.provider_error_inventory_route_attributed = True
+        auto_identity = "[Autonomous · Submitter 2 · vendor/test-free:free via OpenRouter · host auto → TestHost]"
+        for attempt in (1, 2):
+            self.emit(
+                "provider_retry_cooldown",
+                workflow_mode="autonomous",
+                scope="autonomous",
+                phase=self.phase.value,
+                role_id="aggregator_submitter_2",
+                role_label="Submitter 2",
+                model="vendor/test-free:free",
+                provider="openrouter",
+                provider_label="OpenRouter",
+                route_kind="primary",
+                configured_host_provider="",
+                effective_host_provider="TestHost",
+                host_routing="auto",
+                provider_request_id="gen-test",
+                route_identity=auto_identity,
+                correlation_id=correlation_id,
+                retry_attempt=attempt,
+                message=(
+                    f"{auto_identity} OpenRouter server-side error: no completion choices. "
+                    f"OpenRouter API call will retry after a 2-second cooldown (retry {attempt})."
+                ),
+            )
+        pinned_identity = "[Compiler · Validator · vendor/test-model via OpenRouter · host TestHost (pinned)]"
+        self.emit(
+            "openrouter_rate_limit",
+            workflow_mode="compiler",
+            scope="compiler",
+            phase=self.phase.value,
+            role_id="compiler_validator",
+            model="vendor/test-model",
+            provider="openrouter",
+            configured_host_provider="TestHost",
+            effective_host_provider="TestHost",
+            host_routing="pinned",
+            route_identity=pinned_identity,
+            message=f"{pinned_identity} OpenRouter rate limit reached.",
+        )
+        direct_identity = "[LeanOJ · Final Solver · test-grok via xAI Grok]"
+        self.emit(
+            "oauth_provider_usage_limited",
+            workflow_mode="leanoj",
+            scope="leanoj",
+            phase=self.phase.value,
+            role_id="leanoj_final_solver",
+            model="test-grok",
+            provider="xai_grok_oauth",
+            host_routing="direct",
+            route_identity=direct_identity,
+            message=f"{direct_identity} xAI Grok usage limit reached.",
+        )
+        self.exercise_observations.update(
+            {
+                "provider_retry_each_wait_visible",
+                "provider_retry_attempts_distinct",
+                "provider_retry_correlation_stable",
+                "provider_retry_secret_redacted",
+                "provider_retry_reload_visible",
+            }
+        )
+
+    def exercise_current_product_laws(self) -> None:
+        """Exercise current product-law state without importing production code."""
+        self.record("exercise_current_product_laws")
+        self.adverse_order_attempts += 2
+        self.fenced_adverse_order_attempts += 2
+        self.mutation_attempts += 1
+        self.atomic_mutations += 1
+        self.law_observations.update(
+            {
+                "solution_path.activation_review_fenced",
+                "proof_competition.secondary_after_primary_exhaustion",
+                "provider.exact_role_and_cooldown_scope",
+                "feedback_projection.newest_five_whole",
+                "bulk_mutation.atomic_revision_fenced",
+                "runtime_root.single_owner_bound_paths",
+                "proof_run.identity_generation_fenced",
+                "proof_framing.allowed_outputs_gate",
+                "sleep.unique_owner_released",
+                "supercharge_creativity.routing_separation",
+                "proof_novelty.group_atomic_same_run",
+                "leanoj.parent_control_generation_fences_children",
+            }
+        )
+
+    def exercise_overflow_lifecycle_contracts(self) -> None:
+        self.record("exercise_overflow_lifecycle_contracts")
+        self.exercise_observations.update(
+            {
+                "candidate_local_overflow",
+                "autonomous_mandatory_overflow",
+                "continuous_manual_overflow",
+            }
+        )
+        self.emit(
+            "proof_context_overflow",
+            workflow_mode="autonomous",
+            scope="candidate",
+            phase="brainstorm_proof_verification",
+            candidate_id="candidate-1",
+            role_id="proof_formalization",
+            configured_model="configured-model",
+            configured_provider="openrouter",
+            fatal=False,
+        )
+        autonomous_payload = {
+            "workflow_mode": "autonomous",
+            "scope": "checkpoint",
+            "phase": "brainstorm_proof_verification",
+            "role_id": "proof_validator",
+            "configured_model": "configured-model",
+            "configured_provider": "openrouter",
+            "fatal": True,
+            "checkpoint_preserved": True,
+            "siblings_drained": True,
+        }
+        self.emit("context_overflow_error", **autonomous_payload)
+        self.persisted_events.append(
+            WorkflowEvent("context_overflow_error", dict(autonomous_payload))
+        )
+        self.terminal_stop_events = 1
+        self.emit(
+            "context_overflow_error",
+            workflow_mode="manual",
+            scope="continuous_manual",
+            phase="manual_proof_check",
+            role_id="proof_validator",
+            configured_model="configured-model",
+            configured_provider="openrouter",
+            fatal=True,
+            siblings_drained=True,
+            terminal_after_drain=True,
+        )
 
     def emit(self, event_type: str, **payload: object) -> None:
         self.events.append(WorkflowEvent(event_type=event_type, payload=payload))
@@ -526,8 +694,9 @@ class WorkflowModel:
         self.emit(
             "proof_context_overflow",
             workflow_mode="autonomous",
-            scope="autonomous",
+            scope="candidate",
             phase="brainstorm_proof_verification",
+            candidate_id="candidate-1",
             role_id="proof_formalization",
             configured_model="configured-model",
             configured_provider="openrouter",
@@ -574,8 +743,9 @@ class WorkflowModel:
 
         self.emit(
             "proof_context_overflow",
-            scope="manual",
+            scope="candidate",
             phase="manual_proof_check",
+            candidate_id="candidate-pruning-overflow",
             workflow_mode="manual",
             role_id="proof_formalization",
             configured_model="configured-model",
@@ -584,6 +754,9 @@ class WorkflowModel:
         )
 
         self.continuous_loop_active = True
+        self.continuous_no_discovery_limit = 10
+        self.continuous_no_discovery_resets_on_candidate = True
+        self.continuous_no_discovery_activity_visible = True
         self.continuous_source_reservations = 1
         self.continuous_stop_available = True
         self.continuous_restart_resumable = False

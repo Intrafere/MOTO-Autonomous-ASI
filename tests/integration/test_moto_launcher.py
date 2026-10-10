@@ -78,6 +78,14 @@ class ResolveInstanceRuntimeTests(TestCase):
         patcher = mock.patch.object(moto_launcher, "backend_lease_is_held", return_value=False)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Resolve against a temporary install root: with the lease reported free,
+        # runtime selection clears the default root's advisory lock, which must
+        # never be the running backend's real backend/data/.moto_runtime.lock.
+        install_root = tempfile.TemporaryDirectory()
+        self.addCleanup(install_root.cleanup)
+        root_patcher = mock.patch.object(moto_launcher, "SCRIPT_DIR", Path(install_root.name))
+        root_patcher.start()
+        self.addCleanup(root_patcher.stop)
 
     def test_defaults_free_uses_default_instance(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -835,6 +843,169 @@ class LauncherDependencyVersionTests(TestCase):
                     "user",
                 ],
             ],
+        )
+
+    def test_install_windows_git_tries_user_scope_then_default_scope(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "resolve_command", return_value="winget"):
+                with mock.patch.object(moto_launcher, "run_visible", return_value=0) as run_visible:
+                    with mock.patch.object(moto_launcher, "refresh_windows_path_from_registry"):
+                        with mock.patch.object(
+                            moto_launcher,
+                            "_verified_git_candidate",
+                            side_effect=[
+                                (None, "not found after user install"),
+                                (r"C:\Program Files\Git\cmd\git.exe", "git version 2.51.0"),
+                            ],
+                        ):
+                            git_cmd, detail = moto_launcher.install_windows_git()
+
+        self.assertEqual(git_cmd, r"C:\Program Files\Git\cmd\git.exe")
+        self.assertEqual(detail, "git version 2.51.0")
+        self.assertEqual(
+            [call.args[0] for call in run_visible.call_args_list],
+            [
+                ["winget", "source", "update", "--name", "winget"],
+                [
+                    "winget",
+                    "install",
+                    "--id",
+                    "Git.Git",
+                    "-e",
+                    "--source",
+                    "winget",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--scope",
+                    "user",
+                ],
+                [
+                    "winget",
+                    "install",
+                    "--id",
+                    "Git.Git",
+                    "-e",
+                    "--source",
+                    "winget",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ],
+            ],
+        )
+
+    def test_ensure_git_for_lean_uses_existing_verified_git_without_install(self) -> None:
+        env = {"PATH": os.environ.get("PATH", "")}
+        probe = mock.Mock(returncode=0, stdout="git version 2.51.0\n", stderr="")
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "get_git_command", return_value=r"C:\Git\cmd\git.exe"):
+                with mock.patch.object(moto_launcher.subprocess, "run", return_value=probe):
+                    with mock.patch.object(moto_launcher, "install_windows_git") as installer:
+                        with mock.patch.object(moto_launcher, "_prepend_path_entry") as prepend:
+                            git_cmd = moto_launcher.ensure_git_for_lean(env)
+
+        self.assertEqual(git_cmd, str(Path(r"C:\Git\cmd\git.exe").resolve()))
+        installer.assert_not_called()
+        prepend.assert_called_once_with(str(Path(git_cmd).parent), env)
+
+    def test_ensure_git_for_lean_propagates_verified_git_directory_to_child_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            git_path = Path(temp_dir) / "git.exe"
+            git_path.write_text("", encoding="utf-8")
+            env = {"PATH": r"C:\Windows\System32"}
+            probe = mock.Mock(returncode=0, stdout="git version 2.51.0\n", stderr="")
+
+            with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+                with mock.patch.object(moto_launcher, "get_git_command", return_value=str(git_path)):
+                    with mock.patch.object(moto_launcher.subprocess, "run", return_value=probe):
+                        with mock.patch.dict(os.environ, {"PATH": env["PATH"]}, clear=False):
+                            resolved_git = moto_launcher.ensure_git_for_lean(env)
+
+            self.assertEqual(resolved_git, str(git_path.resolve()))
+            self.assertEqual(env["PATH"].split(os.pathsep)[0], str(git_path.parent.resolve()))
+
+    def test_ensure_git_for_lean_reprobes_after_windows_install_and_path_refresh(self) -> None:
+        env = {"PATH": ""}
+        installed_git = r"C:\Program Files\Git\cmd\git.exe"
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(
+                moto_launcher,
+                "_verified_git_candidate",
+                return_value=(None, "broken"),
+            ):
+                with mock.patch.object(
+                    moto_launcher,
+                    "install_windows_git",
+                    return_value=(installed_git, "git version 2.51.0"),
+                ) as installer:
+                    with mock.patch.object(moto_launcher, "_prepend_path_entry") as prepend:
+                        git_cmd = moto_launcher.ensure_git_for_lean(env)
+
+        self.assertEqual(git_cmd, str(Path(installed_git).resolve()))
+        installer.assert_called_once_with()
+        prepend.assert_called_once_with(str(Path(git_cmd).parent), env)
+
+    def test_ensure_git_for_lean_does_not_trust_successful_winget_without_probe(self) -> None:
+        env = {"PATH": ""}
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(
+                moto_launcher,
+                "_verified_git_candidate",
+                return_value=(None, "not found"),
+            ):
+                with mock.patch.object(
+                    moto_launcher,
+                    "install_windows_git",
+                    return_value=(None, "not found after installation"),
+                ):
+                    self.assertIsNone(moto_launcher.ensure_git_for_lean(env))
+
+    def test_install_lean4_disables_proofs_when_git_is_unavailable(self) -> None:
+        runtime = mock.Mock(data_root=r"C:\MOTO\data")
+        env: dict[str, str] = {}
+        with mock.patch.object(moto_launcher, "ensure_git_for_lean", return_value=None):
+            with mock.patch.object(moto_launcher, "_set_lean_env_flags") as set_flags:
+                with mock.patch.object(moto_launcher, "get_lean_command") as get_lean:
+                    moto_launcher.install_lean4(runtime, env)
+
+        set_flags.assert_called_once_with(
+            env,
+            enabled=False,
+            unavailable_reason="git_unavailable",
+        )
+        get_lean.assert_not_called()
+
+    def test_ensure_git_for_lean_linux_missing_git_skips_windows_installer(self) -> None:
+        env = {"PATH": ""}
+        with mock.patch.object(moto_launcher.sys, "platform", "linux"):
+            with mock.patch.object(moto_launcher, "get_git_command", return_value=None):
+                with mock.patch.object(moto_launcher, "install_windows_git") as installer:
+                    self.assertIsNone(moto_launcher.ensure_git_for_lean(env))
+
+        installer.assert_not_called()
+
+    def test_install_lean4_longpaths_uses_resolved_git(self) -> None:
+        runtime = mock.Mock(data_root=r"C:\MOTO\data")
+        env: dict[str, str] = {}
+        git_cmd = r"C:\Program Files\Git\cmd\git.exe"
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "ensure_git_for_lean", return_value=git_cmd):
+                with mock.patch.object(moto_launcher, "get_lean_command", return_value=r"C:\elan\lean.exe"):
+                    with mock.patch.object(moto_launcher, "get_lake_command", return_value=r"C:\elan\lake.exe"):
+                        with mock.patch.object(
+                            moto_launcher.subprocess,
+                            "check_output",
+                            return_value="Lean (version 4.24.0)",
+                        ):
+                            with mock.patch.object(moto_launcher.subprocess, "run") as run:
+                                with mock.patch.object(moto_launcher, "_write_lean_workspace_files"):
+                                    with mock.patch.object(moto_launcher, "_set_lean_env_flags"):
+                                        moto_launcher.install_lean4(runtime, env)
+
+        run.assert_called_once_with(
+            [git_cmd, "config", "--global", "core.longpaths", "true"],
+            check=False,
+            stdout=moto_launcher.subprocess.DEVNULL,
+            stderr=moto_launcher.subprocess.DEVNULL,
         )
 
     def test_check_node_installation_prepends_detected_node_dir_for_npm_scripts(self) -> None:

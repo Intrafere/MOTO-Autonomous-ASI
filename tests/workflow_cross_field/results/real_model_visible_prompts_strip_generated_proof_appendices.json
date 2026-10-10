@@ -1,12 +1,20 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "prompt.generated_appendices_stripped",
+    "proof_scope.generated_appendices_stripped_from_prompts"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "paper_head_and_tail_preserved",
     "generated_appendix_absent",
     "verified_library_context_present",
     "rigor_message_captured"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "prompt_context",
@@ -17,11 +25,22 @@
     "prompt.generated_appendices_stripped",
     "proof_scope.generated_appendices_stripped_from_prompts"
   ],
+  "observed_transition": "paper_head_and_tail_preserved; generated_appendix_absent; verified_library_context_present; rigor_message_captured",
+  "real_components": [
+    "backend/autonomous/agents/proof_formalization_agent.py",
+    "backend/compiler/agents/high_param_submitter.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_model_visible_prompts_strip_generated_proof_appendices",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py"
+  "source_identity": "workflow-source-v1:aed4e3331cb0e7ef05047c8b3ba768bd1277cc74386b04cfa2f367a1a1bb8528",
+  "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py::test_real_proof_formalization_message_keeps_source_boundaries_and_verified_library",
+    "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py::test_real_compiler_rigor_message_strips_theorem_appendix_and_keeps_proof_summary"
+  ]
 }

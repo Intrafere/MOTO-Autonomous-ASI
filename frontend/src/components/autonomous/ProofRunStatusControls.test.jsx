@@ -21,19 +21,42 @@ test('shows source, round, status, and independent pruning state', () => {
   expect(screen.getByRole('button', { name: 'Stop Loop' })).toBeEnabled();
 });
 
-test('shows that a continuous run advances automatically until Stop', () => {
+test('shows automatic continuation and reconnect-safe no-discovery progress', () => {
   render(
     <ProofRunStatusControls
       run={{
         ...baseRun,
         status: 'running',
         pruning_status: 'idle',
+        consecutive_no_discovery_rounds: 4,
+        no_discovery_round_limit: 10,
       }}
       onStop={vi.fn()}
     />
   );
-  expect(screen.getByText(/Every completed round starts the next round automatically/i))
+  expect(screen.getByText(/Rounds continue automatically until you press Stop/i))
     .toBeInTheDocument();
+  expect(screen.getByText(/Current no-discovery streak: 4\/10/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Stop Loop' })).toBeEnabled();
+});
+
+test('preserves reconnect-safe no-discovery progress while provider-paused', () => {
+  render(
+    <ProofRunStatusControls
+      run={{
+        ...baseRun,
+        status: 'provider_paused',
+        pruning_status: 'idle',
+        consecutive_no_discovery_rounds: 4,
+        no_discovery_round_limit: 10,
+      }}
+      onStop={vi.fn()}
+    />
+  );
+
+  expect(screen.getByText(/Continuous search is paused for provider credits/i))
+    .toBeInTheDocument();
+  expect(screen.getByText(/Current no-discovery streak: 4\/10/i)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Stop Loop' })).toBeEnabled();
 });
 

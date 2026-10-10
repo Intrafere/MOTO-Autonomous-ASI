@@ -1,10 +1,15 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [],
+  "blocked_dependencies": [
+    "unavailable bounded production transition seam"
+  ],
   "diagnostics": {
     "reason": "The production final loop combines unbounded model iteration, Lean execution, semantic review, persistence, and registration without a bounded route-level seam. Direct registration ordering is covered elsewhere; publishing a full lifecycle pass would require faking the transition owner rather than observing it."
   },
   "evidence": [],
+  "faked_dependencies": [],
   "fields": [
     "proof_runtime_gating",
     "workflow_filesystem_state",
@@ -13,11 +18,16 @@
   "invariants": [
     "events.proof_verified_after_registration"
   ],
+  "observed_transition": null,
+  "real_components": [],
   "replay": [],
   "result": "blocked",
+  "runner": null,
   "scenario_id": "real_leanoj_full_final_loop_not_safely_bounded",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+  "source_identity": "workflow-source-v1:92ba30bc402e24de5eebb0199cd253fe9b0c06a844d49411794705e7b99ddc4c",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py",
+  "test_selectors": []
 }

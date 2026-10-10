@@ -60,6 +60,7 @@ from backend.shared.prompt_feedback_budget import (
     fit_prompt_with_feedback_async,
 )
 from backend.shared.provider_errors import ProviderContextLengthError
+from backend.shared.provider_route_identity import merge_route_identity
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
@@ -1263,14 +1264,19 @@ class HighParamSubmitter:
                             raise
                         self._unavailable_proof_competitors.add(index)
                         await report_competitor("unavailable", type(exc).__name__)
-                        await self._broadcast("proof_competition_unavailable", {
+                        await self._broadcast("proof_competition_unavailable", merge_route_identity({
                             "source_type": "compiler_rigor",
                             "source_id": self._compiler_source_id(),
                             "competitor_index": index,
                             "configured_model": route.model_id,
                             "configured_provider": route.provider,
                             "message": "Secondary proof model unavailable; research continues.",
-                        })
+                        }, api_client_manager.route_identity_for_role(
+                            role_id,
+                            # Proof competition is only enabled for Autonomous-owned compilers.
+                            workflow_mode="autonomous",
+                            error=exc,
+                        )))
                         continue
                     await report_competitor("success" if success else ("exhausted" if len(attempts) >= 5 else "blocked"))
                     if success:
@@ -1281,12 +1287,17 @@ class HighParamSubmitter:
                         feedback.failure_kind == "context_overflow" for feedback in attempts
                     ):
                         self._unavailable_proof_competitors.add(index)
-                        await self._broadcast("proof_competition_unavailable", {
+                        await self._broadcast("proof_competition_unavailable", merge_route_identity({
                             "source_type": "compiler_rigor",
                             "source_id": self._compiler_source_id(),
                             "competitor_index": index,
+                            "configured_model": route.model_id,
+                            "configured_provider": route.provider,
                             "message": "Secondary proof model interrupted; research continues.",
-                        })
+                        }, api_client_manager.route_identity_for_role(
+                            role_id,
+                            workflow_mode="autonomous",
+                        )))
                         attempts = []
 
         if not success:
@@ -1425,6 +1436,7 @@ class HighParamSubmitter:
                 verification_notes=verification_notes,
                 attempt_count=len(attempts),
                 attempts=list(attempts),
+                compile_receipt=attempts[-1].compile_receipt if attempts else None,
                 broadcast_fn=self.websocket_broadcaster,
                 base_event={
                     "source_type": "compiler_rigor",

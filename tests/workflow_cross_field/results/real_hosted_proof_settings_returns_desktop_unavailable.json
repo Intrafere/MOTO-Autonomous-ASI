@@ -1,10 +1,17 @@
 {
   "adapter": "real_route",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_runtime.hosted_proof_settings_unavailable"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "hosted_mode",
     "http_501"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "proof_runtime_gating",
@@ -14,11 +21,21 @@
   "invariants": [
     "proof_runtime.hosted_proof_settings_unavailable"
   ],
+  "observed_transition": "hosted_mode; http_501",
+  "real_components": [
+    "backend/autonomous/core/autonomous_coordinator.py",
+    "backend/api/routes/proofs.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_hosted_proof_settings_returns_desktop_unavailable",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+  "source_identity": "workflow-source-v1:e9e3103a18afaa784a23022a682c4ed4493c5ea3eee92fe29be5aa7dd81e735f",
+  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_high_value_scenarios.py::test_hosted_proof_settings_returns_desktop_unavailable"
+  ]
 }

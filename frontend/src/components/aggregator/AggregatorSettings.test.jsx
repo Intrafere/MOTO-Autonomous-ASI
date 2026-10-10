@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import AggregatorSettings from './AggregatorSettings';
+import { buildAggregatorConfigFromStorage } from '../../App';
 import { api, cloudAccessAPI, openRouterAPI } from '../../services/api';
 
 vi.mock('../../services/api', () => ({
@@ -50,6 +51,7 @@ function renderSettings({
   memoryEnabled = true,
   isRunning = false,
   capabilities: capabilityOverrides = {},
+  developerModeEnabled = false,
 } = {}) {
   let observedConfig = initialConfig;
 
@@ -81,6 +83,7 @@ function renderSettings({
             },
           },
         }}
+        developerModeEnabled={developerModeEnabled}
       />
     );
   }
@@ -124,6 +127,19 @@ test.each([false, true])('Codex effort covers all Aggregator roles with running=
   await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.value === 'max')).toBe(true));
   expect(result.getObservedConfig().assistantOpenrouterReasoningEffort).toBe('max');
   await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.disabled === isRunning)).toBe(true));
+});
+
+test.each([false, true])('xAI effort covers all Aggregator roles with running=%s', async isRunning => {
+  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: true } });
+  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [{ id: 'grok-4.3' }] });
+  const result = renderSettings({ isRunning, initialConfig: { ...baseConfig, validatorProvider: 'xai_grok_oauth', validatorModel: 'grok-4.3', validatorOpenrouterReasoningEffort: 'medium', assistantProvider: 'xai_grok_oauth', assistantModel: 'grok-4.3', assistantOpenrouterReasoningEffort: 'medium', submitterConfigs: [{ ...baseConfig.submitterConfigs[0], provider: 'xai_grok_oauth', modelId: 'grok-4.3', openrouterReasoningEffort: 'medium' }] } });
+  const controls = await screen.findAllByRole('combobox', { name: 'xAI Reasoning Effort' });
+  expect(controls).toHaveLength(3);
+  expect(controls.every(node => node.value === 'medium' && node.disabled === isRunning)).toBe(true);
+  if (!isRunning) {
+    fireEvent.change(controls[0], { target: { value: 'low' } });
+    await waitFor(() => expect(result.getObservedConfig().submitterConfigs[0].openrouterReasoningEffort).toBe('low'));
+  }
 });
 
 test('renders Assistant role and greys it out when Session History Memory is disabled', async () => {
@@ -221,6 +237,41 @@ test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', asy
   expect(cloudAccessAPI.getXAIGrokModels).not.toHaveBeenCalled();
   expect(cloudAccessAPI.getSakanaFuguModels).not.toHaveBeenCalled();
 });
+
+test('rejects raw settings when submitter count does not match configured roles', async () => {
+  renderSettings({
+    developerModeEnabled: true,
+  });
+
+  const rawToggle = await screen.findByRole('checkbox', { name: 'Edit Raw' });
+  fireEvent.click(rawToggle);
+  const editor = screen.getByRole('textbox');
+  const raw = JSON.parse(editor.value);
+  raw.numSubmitters = 1;
+  raw.submitterConfigs = [
+    raw.submitterConfigs[0],
+    { ...raw.submitterConfigs[0], submitterId: 2 },
+  ];
+  fireEvent.change(editor, { target: { value: JSON.stringify(raw) } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save Raw Settings' }));
+
+  expect(await screen.findByText(/numSubmitters must match the number of submitterConfigs/i))
+    .toBeInTheDocument();
+});
+
+test('canonicalizes legacy persisted submitter IDs from array order', () => {
+  localStorage.setItem('aggregator_settings', JSON.stringify({
+    ...baseConfig,
+    submitterConfigs: [
+      { ...baseConfig.submitterConfigs[0], submitterId: 7 },
+      { ...baseConfig.submitterConfigs[0], submitterId: 7 },
+    ],
+  }));
+
+  expect(buildAggregatorConfigFromStorage().submitterConfigs.map(role => role.submitterId))
+    .toEqual([1, 2]);
+});
+
 
 test('loads Sakana Fugu models when desktop capability is enabled and key is configured', async () => {
   cloudAccessAPI.getSakanaFuguStatus.mockResolvedValue({ status: { configured: true } });

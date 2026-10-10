@@ -1,4 +1,5 @@
 import React from 'react';
+import { getNoveltyGroupSize } from '../../utils/proofPresentation';
 
 const ALERT_SCALE = 1.4;
 
@@ -73,13 +74,21 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
         flexDirection: 'column',
         alignItems: 'flex-end',
         gap: scalePx(8),
-        overflow: 'visible',
-        pointerEvents: 'none',
+        maxHeight: `calc(100vh - ${scalePx(132)})`,
+        overflowY: 'auto',
+        overflowX: 'visible',
+        padding: scalePx(4),
+        overscrollBehavior: 'contain',
+        pointerEvents: 'auto',
         transition: 'right 0.15s ease',
       }}
+      aria-label="Proof discovery notifications"
+      tabIndex={0}
     >
       {notifications.map((notification) => {
         const tier = getTierStyle(notification.novelty_tier);
+        const isGroup = notification.novelty_scope === 'group';
+        const groupSize = getNoveltyGroupSize(notification);
         return (
           <div
             key={notification.id}
@@ -136,13 +145,41 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
                   style={{
                     fontSize: scalePx(10),
                     lineHeight: 1.4,
+                    color: isGroup ? '#c4b5fd' : '#bfdbfe',
+                    marginBottom: scalePx(5),
+                    fontWeight: 700,
+                  }}
+                >
+                  {isGroup
+                    ? `Ranking applies to a finite verified group${groupSize ? ` of ${groupSize} proofs` : ''}.`
+                    : 'Ranking applies to this accepted Lean statement alone.'}
+                </div>
+                <div
+                  style={{
+                    fontSize: scalePx(10),
+                    lineHeight: 1.4,
                     color: '#94a3b8',
                     marginBottom: scalePx(6),
                     fontStyle: 'italic',
                   }}
                 >
-                  {tier.subLabel}
+                  {isGroup
+                    ? 'The validator assigned this tier to the listed proofs and their exact combined claim, not to this proof by itself.'
+                    : tier.subLabel}
                 </div>
+                {isGroup && notification.novelty_group_claim && (
+                  <div
+                    style={{
+                      fontSize: scalePx(10),
+                      lineHeight: 1.4,
+                      color: '#cbd5e1',
+                      marginBottom: scalePx(6),
+                    }}
+                    title={notification.novelty_group_claim}
+                  >
+                    Combined claim: {truncate(notification.novelty_group_claim, 180)}
+                  </div>
+                )}
                 <div
                   style={{
                     fontSize: scalePx(13),

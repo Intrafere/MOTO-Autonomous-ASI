@@ -12,6 +12,7 @@ import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
   formatEmptyProofDiscoveryMessage,
+  formatHungConnectionMessage,
   formatProofRunEventMessage,
   formatSolutionPathEventMessage,
   buildRejectionFeedbackNoticeActivity,
@@ -21,6 +22,11 @@ import {
   hasRecentProofActivityDuplicate,
   shouldAddRejectionFeedbackNotice,
 } from '../../utils/activityStyles';
+import {
+  formatValidatorDecisionActivity,
+  getActivityIdentity,
+  normalizeActivityEvent,
+} from '../../utils/activityNormalization';
 import '../settings-common.css';
 
 const MAX_EVENT_LOG_ENTRIES = 5000;
@@ -39,6 +45,7 @@ const MANUAL_PROOF_EVENTS = [
   'proof_attempt_failed',
   'proof_attempts_exhausted',
   'proof_integrity_rejected',
+  'proof_novelty_assessment_started',
   'proof_verified',
   'known_proof_verified',
   'proof_registration_duplicate',
@@ -105,6 +112,10 @@ const normalizeAggregatorEventName = (eventName = '') => {
 };
 
 const getEventStorageKey = (event = {}) => {
+  const normalizedIdentity = getActivityIdentity(event);
+  if (normalizedIdentity) {
+    return normalizedIdentity;
+  }
   const data = event.data || {};
   if (data.notification_key) {
     return `provider:${data.notification_key}`;
@@ -315,8 +326,7 @@ export default function AggregatorLogs({ providerActivity = [] }) {
           event?.type !== 'proof_run_idle'
           && event?.type !== 'proof_run_next_round_required'
           && event?.data?.status !== 'idle_between_rounds'
-          && event?.data?.terminal_reason !== 'three_consecutive_zero_candidate_rounds'
-          && !/waiting for Run Next Round|three consecutive valid.*no candidates/i.test(message)
+          && !/waiting for Run Next Round/i.test(message)
         );
       }).map((event) => {
         if (!event) {
@@ -349,11 +359,24 @@ export default function AggregatorLogs({ providerActivity = [] }) {
   };
 
   const formatPersistedEventMessage = (event = {}) => {
+    const metadata = event.metadata || {};
+    const submitterSubject = metadata.submitter_id
+      ? `Submission from Submitter ${metadata.submitter_id}`
+      : 'Submission';
     switch (event.type) {
       case 'submission_accepted':
-        return `✓ ${event.message}`;
+        return formatValidatorDecisionActivity({
+          ...event,
+          data: metadata,
+        }, { subject: submitterSubject, includeMode: false });
       case 'submission_rejected':
-        return `✗ ${event.message}`;
+        return formatValidatorDecisionActivity({
+          ...event,
+          data: {
+            ...metadata,
+            reasoning: metadata.reasoning || metadata.validator_feedback || event.message,
+          },
+        }, { subject: submitterSubject, includeMode: false });
       case 'proof_attempt_failed':
       case 'proof_attempts_exhausted':
         return formatProofEvent(event.type, event.metadata || {});
@@ -425,12 +448,18 @@ export default function AggregatorLogs({ providerActivity = [] }) {
 
   const handleAcceptance = (data) => {
     const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-    addEvent('submission_accepted', `✓ ${prefix}Submission from Submitter ${data.submitter_id} ACCEPTED`, data);
+    addEvent('submission_accepted', `${prefix}${formatValidatorDecisionActivity({
+      type: 'submission_accepted',
+      data,
+    }, { subject: `Submission from Submitter ${data.submitter_id || '?'}`, includeMode: false })}`, data);
   };
 
   const handleRejection = (data) => {
     const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-    addEvent('submission_rejected', `✗ ${prefix}Submission from Submitter ${data.submitter_id} REJECTED WITH FEEDBACK: ${data.reasoning.substring(0, 100)}...`, data);
+    addEvent('submission_rejected', `${prefix}${formatValidatorDecisionActivity({
+      type: 'submission_rejected',
+      data,
+    }, { subject: `Submission from Submitter ${data.submitter_id || '?'}`, includeMode: false })}`, data);
   };
 
   const handleCorruptionDetected = (data) => {
@@ -546,7 +575,7 @@ export default function AggregatorLogs({ providerActivity = [] }) {
       case 'proof_candidate_list_review_accepted':
         return `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`;
       case 'proof_candidate_list_review_rejected':
-        return `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (75% required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`;
+        return `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (at least one novel candidate required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`;
       case 'proof_candidate_list_review_interrupted':
         return data.message || `Validator proof-list review attempt ${data.list_attempt || 1} was interrupted without a semantic decision.`;
       case 'proof_candidate_list_regeneration_started':
@@ -566,6 +595,8 @@ export default function AggregatorLogs({ providerActivity = [] }) {
         return formatLeanProofAttempt('Proof attempts exhausted', data);
       case 'proof_integrity_rejected':
         return `Proof integrity rejected: ${data.reason || data.message || proofTargetLabel(data)}`;
+      case 'proof_novelty_assessment_started':
+        return `Proof novelty assessment started: ranking the result actually established by Lean-verified code${data.verified_group_candidates_available ? ' with verified same-run group evidence available' : ''}: ${proofTargetLabel(data)}`;
       case 'proof_verified':
         return `Proof verified: ${proofTargetLabel(data)}`;
       case 'known_proof_verified':
@@ -606,22 +637,15 @@ export default function AggregatorLogs({ providerActivity = [] }) {
     }
   };
 
-  const formatHungConnectionMessage = (data = {}) => {
-    const model = data.model || 'model';
-    const provider = data.provider || 'provider';
-    const elapsed = data.elapsed_minutes || 15;
-    return `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`;
-  };
-
   const addEvent = (type, message, data = {}) => {
     const timestamp = new Date().toISOString();
-    const event = {
+    const event = normalizeActivityEvent({
       id: Date.now(),
       type,
       message,
       data,
       timestamp,
-    };
+    });
     setEvents(prev => {
       if (hasRecentProofActivityDuplicate(prev, type, data)) {
         return prev;

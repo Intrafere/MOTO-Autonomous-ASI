@@ -2,6 +2,103 @@
   "artifact_type": "target_risk_analysis",
   "risks": [
     {
+      "description": "A real provider wait is invisible, repeated attempts collapse together, error detail leaks credentials, reload loses the retry history, or the line omits the workflow mode, role, model, provider, or host that failed.",
+      "existing_scenarios": [
+        "browser_provider_error_route_identity_persists_and_hydrates_once",
+        "browser_provider_retry_activity_persists_distinct_attempts",
+        "model_live_activity_provider_retry_assurance",
+        "real_live_openrouter_upstream_host_reported",
+        "real_openrouter_no_choices_retry_names_full_route",
+        "real_provider_error_line_renders_route_identity_once",
+        "real_provider_retry_activity_persists_reload",
+        "real_provider_retry_activity_redacts_error_detail",
+        "real_provider_retry_attempt_identity_and_correlation",
+        "real_provider_retry_wait_broadcasts_additive_activity"
+      ],
+      "gap_score": 24,
+      "missing_isolated_artifacts": [
+        "model:live_activity.all_retry_wait_sources_accounted",
+        "focused_production:live_activity.all_retry_wait_sources_accounted",
+        "browser_smoke:live_activity.all_retry_wait_sources_accounted",
+        "browser_smoke:live_activity.provider_retry_identity_stable",
+        "browser_smoke:live_activity.provider_retry_secret_safe"
+      ],
+      "priority": "critical",
+      "rank": 1,
+      "required_adapters": [
+        "model",
+        "focused_production",
+        "browser_smoke"
+      ],
+      "required_fields": [
+        "websocket_api_contracts",
+        "provider_pause_resume",
+        "provider_routing",
+        "workflow_filesystem_state"
+      ],
+      "risk_id": "risk.provider_retry_activity_incomplete",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "live_activity.all_retry_wait_sources_accounted"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_live_activity_provider_retry_assurance"
+          ],
+          "status": "uncovered"
+        },
+        {
+          "adapter": "focused_production",
+          "missing_invariants": [
+            "live_activity.all_retry_wait_sources_accounted"
+          ],
+          "result_statuses": [
+            "blocked",
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_live_openrouter_upstream_host_reported",
+            "real_openrouter_no_choices_retry_names_full_route",
+            "real_provider_error_line_renders_route_identity_once",
+            "real_provider_retry_activity_persists_reload",
+            "real_provider_retry_activity_redacts_error_detail",
+            "real_provider_retry_attempt_identity_and_correlation",
+            "real_provider_retry_wait_broadcasts_additive_activity"
+          ],
+          "status": "blocked"
+        },
+        {
+          "adapter": "browser_smoke",
+          "missing_invariants": [
+            "live_activity.all_retry_wait_sources_accounted",
+            "live_activity.provider_retry_identity_stable",
+            "live_activity.provider_retry_secret_safe"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "browser_provider_error_route_identity_persists_and_hydrates_once",
+            "browser_provider_retry_activity_persists_distinct_attempts"
+          ],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "live_activity.provider_retry_each_wait_visible",
+        "live_activity.provider_retry_identity_stable",
+        "live_activity.provider_retry_secret_safe",
+        "live_activity.provider_retry_persists_reload",
+        "live_activity.all_retry_wait_sources_accounted",
+        "live_activity.provider_error_route_identity"
+      ],
+      "title": "Provider retry activity is missing, ambiguous, unsafe, or ephemeral"
+    },
+    {
       "description": "Hosted mode reaches proof settings or another desktop-only route or behavior.",
       "existing_scenarios": [
         "real_hosted_proof_settings_returns_desktop_unavailable"
@@ -13,7 +110,7 @@
         "real_route:api.hosted_desktop_only_routes_unavailable"
       ],
       "priority": "critical",
-      "rank": 1,
+      "rank": 2,
       "required_adapters": [
         "model",
         "real_route"
@@ -67,7 +164,7 @@
         "real_coordinator:runtime.parent_action_fences_child_outputs"
       ],
       "priority": "critical",
-      "rank": 2,
+      "rank": 3,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -108,6 +205,79 @@
       "title": "Stale child output overrides parent phase"
     },
     {
+      "description": "Overflow activity loses configured/effective route attribution, disappears on reload, duplicates terminal stop activity, or turns a scoped proof overflow into a workflow stop.",
+      "existing_scenarios": [
+        "generated_context_overflow_contract_seed_29",
+        "generated_context_overflow_contract_seed_7",
+        "generated_overflow_lifecycle_matrix_seed_29",
+        "generated_overflow_lifecycle_matrix_seed_7",
+        "model_overflow_scope_terminal_matrix",
+        "real_autonomous_overflow_terminal_stop_once",
+        "real_manual_aggregator_overflow_identity_persists_across_reload",
+        "real_proof_context_overflow_is_scoped_nonfatal"
+      ],
+      "gap_score": 9,
+      "missing_isolated_artifacts": [
+        "real_coordinator:events.autonomous_mandatory_overflow_checkpoint_preserved",
+        "real_coordinator:events.continuous_manual_overflow_terminal_after_drain"
+      ],
+      "priority": "critical",
+      "rank": 4,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "websocket_api_contracts",
+        "workflow_filesystem_state",
+        "provider_pause_resume",
+        "proof_runtime_gating"
+      ],
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_context_overflow_contract_seed_29",
+            "generated_context_overflow_contract_seed_7",
+            "generated_overflow_lifecycle_matrix_seed_29",
+            "generated_overflow_lifecycle_matrix_seed_7",
+            "model_overflow_scope_terminal_matrix"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "events.autonomous_mandatory_overflow_checkpoint_preserved",
+            "events.continuous_manual_overflow_terminal_after_drain"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_autonomous_overflow_terminal_stop_once",
+            "real_manual_aggregator_overflow_identity_persists_across_reload",
+            "real_proof_context_overflow_is_scoped_nonfatal"
+          ],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "events.context_overflow_route_identity",
+        "events.context_overflow_persists_across_reload",
+        "events.context_overflow_terminal_stop_once",
+        "events.proof_context_overflow_nonfatal",
+        "events.autonomous_mandatory_overflow_checkpoint_preserved",
+        "events.continuous_manual_overflow_terminal_after_drain"
+      ],
+      "title": "Context overflow loses route identity or lifecycle semantics"
+    },
+    {
       "description": "Credit pause, stop, or reset loses or corrupts the durable proof cursor.",
       "existing_scenarios": [
         "generated_allowed_outputs_provider_pause_resume_seed_29",
@@ -124,7 +294,7 @@
         "real_coordinator:provider.stop_resume_preserves_pause"
       ],
       "priority": "critical",
-      "rank": 3,
+      "rank": 5,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -190,7 +360,7 @@
         "real_coordinator:prompt.validator_excludes_assistant_memory"
       ],
       "priority": "high",
-      "rank": 4,
+      "rank": 6,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -248,7 +418,7 @@
         "real_coordinator:prompt.proof_source_context_required"
       ],
       "priority": "high",
-      "rank": 5,
+      "rank": 7,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -305,7 +475,7 @@
         "real_coordinator:state.pruned_papers_excluded_from_context"
       ],
       "priority": "high",
-      "rank": 6,
+      "rank": 8,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -353,7 +523,7 @@
         "real_coordinator:proof_runtime.no_smt_when_disabled"
       ],
       "priority": "critical",
-      "rank": 7,
+      "rank": 9,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -413,7 +583,7 @@
         "real_coordinator:outputs.at_least_one_output_enabled"
       ],
       "priority": "critical",
-      "rank": 8,
+      "rank": 10,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -462,6 +632,918 @@
       "title": "Proofs-only run enters paper phases"
     },
     {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "model:assistant.non_blocking_retrieval"
+      ],
+      "priority": "medium",
+      "rank": 11,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "assistant_memory",
+        "prompt_context",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.invariant.assistant.non_blocking_retrieval",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "assistant.non_blocking_retrieval"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "assistant.non_blocking_retrieval"
+      ],
+      "title": "Product law is violated: assistant.non_blocking_retrieval"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "model:assistant.stagnant_pack_backoff_not_shutdown"
+      ],
+      "priority": "medium",
+      "rank": 12,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "assistant_memory",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.invariant.assistant.stagnant_pack_backoff_not_shutdown",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "assistant.stagnant_pack_backoff_not_shutdown"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "assistant.stagnant_pack_backoff_not_shutdown"
+      ],
+      "title": "Product law is violated: assistant.stagnant_pack_backoff_not_shutdown"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_continuous_loop_stop_terminal_zero_policy"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_loop.continuous_explicit_ownership"
+      ],
+      "priority": "medium",
+      "rank": 13,
+      "required_adapters": [
+        "model",
+        "real_route",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "continuous_proof_loop",
+        "runtime_exclusivity",
+        "workflow_filesystem_state",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.invariant.proof_loop.continuous_explicit_ownership",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_route",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_continuous_loop_stop_terminal_zero_policy"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_loop.continuous_explicit_ownership"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_loop.continuous_explicit_ownership"
+      ],
+      "title": "Product law is violated: proof_loop.continuous_explicit_ownership"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_pruned_proof_artifacts_and_future_memory_preserved"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_pruning.artifacts_and_future_memory_preserved"
+      ],
+      "priority": "medium",
+      "rank": 14,
+      "required_adapters": [
+        "model",
+        "focused_production",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_pruning",
+        "proof_scope_isolation",
+        "workflow_filesystem_state",
+        "assistant_memory"
+      ],
+      "risk_id": "risk.invariant.proof_pruning.artifacts_and_future_memory_preserved",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "focused_production",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_pruned_proof_artifacts_and_future_memory_preserved"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_pruning.artifacts_and_future_memory_preserved"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_pruning.artifacts_and_future_memory_preserved"
+      ],
+      "title": "Product law is violated: proof_pruning.artifacts_and_future_memory_preserved"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_prune_commit_rechecks_lifecycle_and_revision"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_pruning.commit_lifecycle_fenced"
+      ],
+      "priority": "medium",
+      "rank": 15,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_pruning",
+        "runtime_exclusivity",
+        "workflow_filesystem_state"
+      ],
+      "risk_id": "risk.invariant.proof_pruning.commit_lifecycle_fenced",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_pruning.commit_lifecycle_fenced"
+          ],
+          "result_statuses": [
+            "blocked"
+          ],
+          "scenario_ids": [
+            "real_prune_commit_rechecks_lifecycle_and_revision"
+          ],
+          "status": "blocked"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_pruning.commit_lifecycle_fenced"
+      ],
+      "title": "Product law is violated: proof_pruning.commit_lifecycle_fenced"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_pruning_overflow_commit_interleaving_unobservable"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_pruning.context_overflow_truthful"
+      ],
+      "priority": "medium",
+      "rank": 16,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_pruning",
+        "websocket_api_contracts",
+        "proof_runtime_gating"
+      ],
+      "risk_id": "risk.invariant.proof_pruning.context_overflow_truthful",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_pruning.context_overflow_truthful"
+          ],
+          "result_statuses": [
+            "blocked"
+          ],
+          "scenario_ids": [
+            "real_pruning_overflow_commit_interleaving_unobservable"
+          ],
+          "status": "blocked"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_pruning.context_overflow_truthful"
+      ],
+      "title": "Product law is violated: proof_pruning.context_overflow_truthful"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_no_prune_is_valid_non_mutating_result"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_pruning.no_prune_is_valid"
+      ],
+      "priority": "medium",
+      "rank": 17,
+      "required_adapters": [
+        "model",
+        "focused_production",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_pruning",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.invariant.proof_pruning.no_prune_is_valid",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "focused_production",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_no_prune_is_valid_non_mutating_result"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_pruning.no_prune_is_valid"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_pruning.no_prune_is_valid"
+      ],
+      "title": "Product law is violated: proof_pruning.no_prune_is_valid"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_pruning_is_occurrence_and_owning_run_scoped"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_pruning.occurrence_scope_isolated"
+      ],
+      "priority": "medium",
+      "rank": 18,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_pruning",
+        "proof_scope_isolation",
+        "assistant_memory"
+      ],
+      "risk_id": "risk.invariant.proof_pruning.occurrence_scope_isolated",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_pruning.occurrence_scope_isolated"
+          ],
+          "result_statuses": [
+            "blocked"
+          ],
+          "scenario_ids": [
+            "real_pruning_is_occurrence_and_owning_run_scoped"
+          ],
+          "status": "blocked"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_pruning.occurrence_scope_isolated"
+      ],
+      "title": "Product law is violated: proof_pruning.occurrence_scope_isolated"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_owning_run_context_and_cached_assistant_exclude_pruned"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_pruning.owning_run_context_excludes_pruned"
+      ],
+      "priority": "medium",
+      "rank": 19,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_pruning",
+        "prompt_context",
+        "assistant_memory",
+        "proof_scope_isolation"
+      ],
+      "risk_id": "risk.invariant.proof_pruning.owning_run_context_excludes_pruned",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_pruning.owning_run_context_excludes_pruned"
+          ],
+          "result_statuses": [
+            "blocked"
+          ],
+          "scenario_ids": [
+            "real_owning_run_context_and_cached_assistant_exclude_pruned"
+          ],
+          "status": "blocked"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_pruning.owning_run_context_excludes_pruned"
+      ],
+      "title": "Product law is violated: proof_pruning.owning_run_context_excludes_pruned"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_pruning_review_pending_does_not_block_registration"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_pruning.review_non_blocking"
+      ],
+      "priority": "medium",
+      "rank": 20,
+      "required_adapters": [
+        "model",
+        "focused_production",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_pruning",
+        "proof_runtime_gating",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.invariant.proof_pruning.review_non_blocking",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "focused_production",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_pruning_review_pending_does_not_block_registration"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_pruning.review_non_blocking"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_pruning.review_non_blocking"
+      ],
+      "title": "Product law is violated: proof_pruning.review_non_blocking"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_semantic_prune_persists_and_protects_retained_support"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_pruning.semantic_distinct_review_preserves_unique_routes"
+      ],
+      "priority": "medium",
+      "rank": 21,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_pruning",
+        "prompt_context",
+        "proof_scope_isolation",
+        "workflow_filesystem_state"
+      ],
+      "risk_id": "risk.invariant.proof_pruning.semantic_distinct_review_preserves_unique_routes",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_pruning.semantic_distinct_review_preserves_unique_routes"
+          ],
+          "result_statuses": [
+            "blocked"
+          ],
+          "scenario_ids": [
+            "real_semantic_prune_persists_and_protects_retained_support"
+          ],
+          "status": "blocked"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_pruning.semantic_distinct_review_preserves_unique_routes"
+      ],
+      "title": "Product law is violated: proof_pruning.semantic_distinct_review_preserves_unique_routes"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_automatic_prune_requires_validator_acceptance"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_pruning.validator_gates_automatic_mutation"
+      ],
+      "priority": "medium",
+      "rank": 22,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_pruning",
+        "provider_pause_resume",
+        "workflow_filesystem_state"
+      ],
+      "risk_id": "risk.invariant.proof_pruning.validator_gates_automatic_mutation",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_pruning.validator_gates_automatic_mutation"
+          ],
+          "result_statuses": [
+            "blocked"
+          ],
+          "scenario_ids": [
+            "real_automatic_prune_requires_validator_acceptance"
+          ],
+          "status": "blocked"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_pruning.validator_gates_automatic_mutation"
+      ],
+      "title": "Product law is violated: proof_pruning.validator_gates_automatic_mutation"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "model:proof_runtime.truncation_is_attempt_failure"
+      ],
+      "priority": "medium",
+      "rank": 23,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "proof_runtime_gating",
+        "provider_pause_resume",
+        "prompt_context"
+      ],
+      "risk_id": "risk.invariant.proof_runtime.truncation_is_attempt_failure",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "proof_runtime.truncation_is_attempt_failure"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_runtime.truncation_is_attempt_failure"
+      ],
+      "title": "Product law is violated: proof_runtime.truncation_is_attempt_failure"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "real_actual_route_start_conflict_matrix_no_side_effects",
+        "real_manual_compiler_proof_only_background_ownership"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "model:runtime.child_tasks_count_as_active"
+      ],
+      "priority": "medium",
+      "rank": 24,
+      "required_adapters": [
+        "model",
+        "real_route"
+      ],
+      "required_fields": [
+        "runtime_exclusivity",
+        "provider_pause_resume",
+        "workflow_filesystem_state",
+        "websocket_api_contracts"
+      ],
+      "risk_id": "risk.invariant.runtime.child_tasks_count_as_active",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "runtime.child_tasks_count_as_active"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        },
+        {
+          "adapter": "real_route",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_actual_route_start_conflict_matrix_no_side_effects",
+            "real_manual_compiler_proof_only_background_ownership"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "runtime.child_tasks_count_as_active"
+      ],
+      "title": "Product law is violated: runtime.child_tasks_count_as_active"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "model:state.completed_brainstorm_no_replay_handoff"
+      ],
+      "priority": "medium",
+      "rank": 25,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "workflow_filesystem_state",
+        "allowed_outputs",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.invariant.state.completed_brainstorm_no_replay_handoff",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "state.completed_brainstorm_no_replay_handoff"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "state.completed_brainstorm_no_replay_handoff"
+      ],
+      "title": "Product law is violated: state.completed_brainstorm_no_replay_handoff"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "real_leanoj_coordinator_skip_force_clear_and_intermediate_edit",
+        "real_manual_aggregator_durable_hydration_and_clear_blocker"
+      ],
+      "gap_score": 2,
+      "missing_isolated_artifacts": [
+        "model:state.runtime_roots_are_active_roots"
+      ],
+      "priority": "medium",
+      "rank": 26,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "workflow_filesystem_state",
+        "runtime_exclusivity"
+      ],
+      "risk_id": "risk.invariant.state.runtime_roots_are_active_roots",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "state.runtime_roots_are_active_roots"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_leanoj_coordinator_skip_force_clear_and_intermediate_edit",
+            "real_manual_aggregator_durable_hydration_and_clear_blocker"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "state.runtime_roots_are_active_roots"
+      ],
+      "title": "Product law is violated: state.runtime_roots_are_active_roots"
+    },
+    {
+      "description": "Supercharge or creativity steering changes concurrency, routing, or validator behavior.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "high",
+      "rank": 27,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "answer_wrappers",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.answer_wrapper_semantic_mix",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "supercharge_creativity.routing_separation"
+      ],
+      "title": "Answer wrappers alter routing semantics"
+    },
+    {
+      "description": "A stale or canceled bulk proof/paper mutation publishes a partial result.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 28,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "bulk_mutation",
+        "workflow_filesystem_state"
+      ],
+      "risk_id": "risk.bulk_mutation_partial_publish",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "bulk_mutation.atomic_revision_fenced"
+      ],
+      "title": "Bulk mutation partially publishes"
+    },
+    {
+      "description": "Proof cost starts before list approval, or durable Autonomous and process-local manual review state are confused.",
+      "existing_scenarios": [
+        "real_candidate_list_autonomous_checkpoint_restarts_durably",
+        "real_candidate_list_manual_checkpoint_is_process_local",
+        "real_candidate_list_validator_gate_and_scope"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 29,
+      "required_adapters": [
+        "focused_production"
+      ],
+      "required_fields": [
+        "proof_runtime_gating",
+        "workflow_filesystem_state",
+        "runtime_exclusivity"
+      ],
+      "risk_id": "risk.candidate_list_ownership_mismatch",
+      "support": [
+        {
+          "adapter": "focused_production",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_candidate_list_autonomous_checkpoint_restarts_durably",
+            "real_candidate_list_manual_checkpoint_is_process_local",
+            "real_candidate_list_validator_gate_and_scope"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_runtime.candidate_list_validator_gate",
+        "proof_runtime.candidate_list_autonomous_restart_owned",
+        "proof_runtime.candidate_list_manual_process_local"
+      ],
+      "title": "Candidate-list review crosses its ownership boundary"
+    },
+    {
       "description": "Clear/reset fails to remove active state or removes preserved run history.",
       "existing_scenarios": [
         "generated_manual_scope_clear_archive_seed_29",
@@ -472,7 +1554,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "high",
-      "rank": 9,
+      "rank": 30,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -516,65 +1598,6 @@
       "title": "Clear destroys history or leaves active state"
     },
     {
-      "description": "Overflow activity loses configured/effective route attribution, disappears on reload, duplicates terminal stop activity, or turns a scoped proof overflow into a workflow stop.",
-      "existing_scenarios": [
-        "generated_context_overflow_contract_seed_29",
-        "generated_context_overflow_contract_seed_7",
-        "real_autonomous_overflow_terminal_stop_once",
-        "real_manual_aggregator_overflow_identity_persists_across_reload",
-        "real_proof_context_overflow_is_scoped_nonfatal"
-      ],
-      "gap_score": 0,
-      "missing_isolated_artifacts": [],
-      "priority": "critical",
-      "rank": 10,
-      "required_adapters": [
-        "model",
-        "real_coordinator"
-      ],
-      "required_fields": [
-        "websocket_api_contracts",
-        "workflow_filesystem_state",
-        "provider_pause_resume",
-        "proof_runtime_gating"
-      ],
-      "risk_id": "risk.context_overflow_activity_loses_identity",
-      "support": [
-        {
-          "adapter": "model",
-          "missing_invariants": [],
-          "result_statuses": [
-            "passed"
-          ],
-          "scenario_ids": [
-            "generated_context_overflow_contract_seed_29",
-            "generated_context_overflow_contract_seed_7"
-          ],
-          "status": "passed"
-        },
-        {
-          "adapter": "real_coordinator",
-          "missing_invariants": [],
-          "result_statuses": [
-            "passed"
-          ],
-          "scenario_ids": [
-            "real_autonomous_overflow_terminal_stop_once",
-            "real_manual_aggregator_overflow_identity_persists_across_reload",
-            "real_proof_context_overflow_is_scoped_nonfatal"
-          ],
-          "status": "passed"
-        }
-      ],
-      "supporting_invariants": [
-        "events.context_overflow_route_identity",
-        "events.context_overflow_persists_across_reload",
-        "events.context_overflow_terminal_stop_once",
-        "events.proof_context_overflow_nonfatal"
-      ],
-      "title": "Context overflow loses route identity or lifecycle semantics"
-    },
-    {
       "description": "A directly injected source reappears as supplemental evidence, or optional retrieval silently replaces mandatory source text when the configured context is too small.",
       "existing_scenarios": [
         "generated_rag_prompt_boundaries_seed_29",
@@ -585,7 +1608,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "high",
-      "rank": 11,
+      "rank": 31,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -629,6 +1652,509 @@
       "title": "Direct source is duplicated or displaced by RAG"
     },
     {
+      "description": "Prompt feedback exceeds five whole entries, truncates an entry, or drops newest feedback.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "high",
+      "rank": 32,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "feedback_projection",
+        "prompt_context"
+      ],
+      "risk_id": "risk.feedback_projection_corruption",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "feedback_projection.newest_five_whole"
+      ],
+      "title": "Feedback projection truncates or drops newest"
+    },
+    {
+      "description": "A group rank is applied to an incomplete or cross-run member set.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 33,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "group_novelty",
+        "proof_scope_isolation"
+      ],
+      "risk_id": "risk.group_novelty_partial_context",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_novelty.group_atomic_same_run"
+      ],
+      "title": "Group novelty becomes partial or cross-run"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "generated_scoped_registered_proof_events_seed_29",
+        "generated_scoped_registered_proof_events_seed_7",
+        "model_websocket_proof_scope_events"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "medium",
+      "rank": 34,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "websocket_api_contracts",
+        "proof_scope_isolation",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.invariant.events.frontend_events_include_scope_phase",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_scoped_registered_proof_events_seed_29",
+            "generated_scoped_registered_proof_events_seed_7",
+            "model_websocket_proof_scope_events"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "events.frontend_events_include_scope_phase"
+      ],
+      "title": "Product law is violated: events.frontend_events_include_scope_phase"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "generated_scoped_registered_proof_events_seed_29",
+        "generated_scoped_registered_proof_events_seed_7",
+        "model_websocket_proof_scope_events"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "medium",
+      "rank": 35,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "websocket_api_contracts",
+        "proof_scope_isolation"
+      ],
+      "risk_id": "risk.invariant.events.proof_verified_after_registration",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_scoped_registered_proof_events_seed_29",
+            "generated_scoped_registered_proof_events_seed_7",
+            "model_websocket_proof_scope_events"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "events.proof_verified_after_registration"
+      ],
+      "title": "Product law is violated: events.proof_verified_after_registration"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "generated_output_and_proof_runtime_gating_seed_29",
+        "generated_output_and_proof_runtime_gating_seed_7",
+        "model_proof_runtime_gating_allowed_outputs"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "medium",
+      "rank": 36,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "allowed_outputs",
+        "proof_runtime_gating",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.invariant.outputs.papers_only_skips_proof_work",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_output_and_proof_runtime_gating_seed_29",
+            "generated_output_and_proof_runtime_gating_seed_7",
+            "model_proof_runtime_gating_allowed_outputs"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "outputs.papers_only_skips_proof_work"
+      ],
+      "title": "Product law is violated: outputs.papers_only_skips_proof_work"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "generated_rag_prompt_boundaries_seed_29",
+        "generated_rag_prompt_boundaries_seed_7"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "medium",
+      "rank": 37,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "prompt_context",
+        "assistant_memory",
+        "proof_runtime_gating"
+      ],
+      "risk_id": "risk.invariant.prompt.user_prompt_direct_injected",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_rag_prompt_boundaries_seed_29",
+            "generated_rag_prompt_boundaries_seed_7"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "prompt.user_prompt_direct_injected"
+      ],
+      "title": "Product law is violated: prompt.user_prompt_direct_injected"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "model_proof_pruning_continuous_contracts",
+        "real_automatic_round_caller_count_policy_preserved"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "medium",
+      "rank": 38,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "continuous_proof_loop",
+        "proof_runtime_gating",
+        "workflow_filesystem_state"
+      ],
+      "risk_id": "risk.invariant.proof_loop.automatic_round_policy_preserved",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_proof_pruning_continuous_contracts"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_automatic_round_caller_count_policy_preserved"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_loop.automatic_round_policy_preserved"
+      ],
+      "title": "Product law is violated: proof_loop.automatic_round_policy_preserved"
+    },
+    {
+      "description": "The stable invariant is violated on one of its declared observation adapters.",
+      "existing_scenarios": [
+        "browser_autonomous_start_stop_preserves_single_ui_owner",
+        "browser_mode_switching_preserves_in_memory_default_and_developer_gate",
+        "generated_autonomous_paper_checkpoint_seed_29",
+        "generated_autonomous_paper_checkpoint_seed_7",
+        "generated_leanoj_durable_lifecycle_seed_29",
+        "generated_leanoj_durable_lifecycle_seed_7",
+        "generated_manual_aggregator_lifecycle_seed_29",
+        "generated_manual_aggregator_lifecycle_seed_7",
+        "generated_runtime_start_exclusivity_seed_29",
+        "generated_runtime_start_exclusivity_seed_7",
+        "real_actual_route_start_conflict_matrix_no_side_effects",
+        "real_manual_aggregator_route_lifecycle_output_and_temp_root",
+        "real_route_pending_child_activity_counts_as_active",
+        "real_route_start_conflicts_preserve_single_workflow",
+        "real_shared_start_guard_representative_race"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "medium",
+      "rank": 39,
+      "required_adapters": [
+        "model",
+        "real_route",
+        "browser_smoke"
+      ],
+      "required_fields": [
+        "runtime_exclusivity",
+        "provider_pause_resume",
+        "workflow_filesystem_state",
+        "websocket_api_contracts"
+      ],
+      "risk_id": "risk.invariant.runtime.single_active_workflow",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_autonomous_paper_checkpoint_seed_29",
+            "generated_autonomous_paper_checkpoint_seed_7",
+            "generated_leanoj_durable_lifecycle_seed_29",
+            "generated_leanoj_durable_lifecycle_seed_7",
+            "generated_manual_aggregator_lifecycle_seed_29",
+            "generated_manual_aggregator_lifecycle_seed_7",
+            "generated_runtime_start_exclusivity_seed_29",
+            "generated_runtime_start_exclusivity_seed_7"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_route",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_actual_route_start_conflict_matrix_no_side_effects",
+            "real_manual_aggregator_route_lifecycle_output_and_temp_root",
+            "real_route_pending_child_activity_counts_as_active",
+            "real_route_start_conflicts_preserve_single_workflow",
+            "real_shared_start_guard_representative_race"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "browser_smoke",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "browser_autonomous_start_stop_preserves_single_ui_owner",
+            "browser_mode_switching_preserves_in_memory_default_and_developer_gate"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "runtime.single_active_workflow"
+      ],
+      "title": "Product law is violated: runtime.single_active_workflow"
+    },
+    {
+      "description": "Stale child work commits after Skip or Force advances parent control generation.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 40,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "leanoj_parent_control",
+        "runtime_exclusivity"
+      ],
+      "risk_id": "risk.leanoj_parent_control_stale_commit",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "leanoj.parent_control_generation_fences_children"
+      ],
+      "title": "LeanOJ child overrides parent control"
+    },
+    {
+      "description": "A secondary formalizer starts early, after success, or shares attempt authority.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "high",
+      "rank": 41,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "proof_competition",
+        "proof_runtime_gating"
+      ],
+      "risk_id": "risk.proof_competition_wrong_order",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_competition.secondary_after_primary_exhaustion"
+      ],
+      "title": "Proof competition violates ordered fallback"
+    },
+    {
+      "description": "Proof framing is skipped when enabled or injected into papers-only work.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "high",
+      "rank": 42,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "proof_framing",
+        "allowed_outputs"
+      ],
+      "risk_id": "risk.proof_framing_output_mismatch",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_framing.allowed_outputs_gate"
+      ],
+      "title": "Proof framing ignores output gate"
+    },
+    {
+      "description": "Reload/control activity attaches to the wrong proof run or lifecycle generation.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 43,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "proof_run_identity",
+        "websocket_api_contracts"
+      ],
+      "risk_id": "risk.proof_run_identity_drift",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_run.identity_generation_fenced"
+      ],
+      "title": "Proof run identity drifts across lifecycle"
+    },
+    {
       "description": "Manual, autonomous, archived, or event proof state is exposed in the wrong scope.",
       "existing_scenarios": [
         "generated_manual_scope_clear_archive_seed_29",
@@ -644,7 +2170,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 12,
+      "rank": 44,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -692,7 +2218,196 @@
         "proof_scope.manual_clear_archives_active"
       ],
       "title": "Proof records leak across scopes"
+    },
+    {
+      "description": "A new or changed production provider/API-error activity source publishes a line that cannot name its mode, role, model, provider, or host, or escapes the attributed/exempt inventory.",
+      "existing_scenarios": [
+        "model_live_activity_provider_retry_assurance",
+        "real_provider_error_activity_sources_route_attributed"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 45,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "websocket_api_contracts",
+        "provider_routing",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.provider_error_activity_source_unattributed",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_live_activity_provider_retry_assurance"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_provider_error_activity_sources_route_attributed"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "live_activity.provider_error_sources_route_attributed"
+      ],
+      "title": "Provider-error activity source publishes without route identity"
+    },
+    {
+      "description": "An unconfigured role reaches a provider or provider-wide cooldown is scoped incorrectly.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 46,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "provider_routing",
+        "provider_pause_resume"
+      ],
+      "risk_id": "risk.provider_role_or_cooldown_alias",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "provider.exact_role_and_cooldown_scope"
+      ],
+      "title": "Provider role or cooldown scope aliases"
+    },
+    {
+      "description": "Two processes own one mutable root or path rebinding leaves split stores.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 47,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "runtime_root_ownership",
+        "runtime_exclusivity"
+      ],
+      "risk_id": "risk.runtime_root_double_owner",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "runtime_root.single_owner_bound_paths"
+      ],
+      "title": "Runtime root gains competing owner"
+    },
+    {
+      "description": "A workflow or manual proof sleep owner collides or survives terminal cleanup.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "medium",
+      "rank": 48,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "sleep_ownership",
+        "runtime_exclusivity"
+      ],
+      "risk_id": "risk.sleep_owner_leak",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "sleep.unique_owner_released"
+      ],
+      "title": "Sleep inhibition owner leaks"
+    },
+    {
+      "description": "Activation or proposal review bypasses parent count, exact role, or generation fences.",
+      "existing_scenarios": [
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 49,
+      "required_adapters": [
+        "model"
+      ],
+      "required_fields": [
+        "solution_path",
+        "workflow_filesystem_state"
+      ],
+      "risk_id": "risk.solution_path_stale_commit",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "solution_path.activation_review_fenced"
+      ],
+      "title": "Solution path accepts stale or unreviewed revision"
     }
   ],
-  "schema_version": 1
+  "schema_version": 2
 }

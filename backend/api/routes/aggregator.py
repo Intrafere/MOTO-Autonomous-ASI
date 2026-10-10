@@ -281,6 +281,8 @@ async def start_aggregator(request: AggregatorStartRequest):
                     status_code=400,
                     detail=f"Number of submitters must be {system_config.min_submitters}-{system_config.max_submitters}, got {num_submitters}"
                 )
+            for index, config in enumerate(request.submitter_configs, start=1):
+                config.submitter_id = index
             _require_valid_role_limits(
                 request.validator_context_size,
                 request.validator_max_output_tokens,
@@ -521,6 +523,10 @@ async def start_aggregator(request: AggregatorStartRequest):
                 validator_lm_studio_fallback=request.validator_lm_studio_fallback,
                 validator_supercharge_enabled=request.validator_supercharge_enabled,
                 creativity_emphasis_boost_enabled=request.creativity_emphasis_boost_enabled,
+                proof_database_store=manual_proof_database,
+                proof_context_requesting_run_id=(
+                    await manual_proof_database.get_live_context_run_id()
+                ),
                 solution_path_manager=manual_solution_path,
             )
             # Start coordinator

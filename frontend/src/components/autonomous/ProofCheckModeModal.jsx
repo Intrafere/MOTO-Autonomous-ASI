@@ -13,8 +13,8 @@ const MODE_OPTIONS = [
   {
     value: 'loop_with_pruning',
     title: 'Run Rounds on Loop With Pruning',
-    description: 'Run proof-search rounds continuously until you press Stop, the backend restarts, or a hard repair condition ends the run. A round with no candidates immediately proceeds to the next round.',
-    help: 'Runs proof rounds continuously in the current backend process with no automatic no-candidate limit. Press Stop when you want the loop to end; a backend restart or hard provider, model, source, or runtime repair condition also ends it. After every three accepted novel proofs, or material proof-memory context pressure, Rigor & Proofs may propose at most one redundant occurrence and Validator must approve. Nothing is deleted; no-prune is normal.',
+    description: 'Run proof-search rounds continuously until you press Stop, a hard repair condition ends the run, or 10 consecutive rounds find no candidates. Each empty round is reported in Live Activity.',
+    help: 'Runs proof rounds continuously in the current backend process. The no-discovery streak resets whenever a round finds at least one candidate, so the total number of rounds remains unlimited while discovery makes progress. The run completes normally after 10 consecutive empty rounds. A backend restart or hard provider, model, source, or runtime repair condition also ends it. After every three accepted novel proofs, or material proof-memory context pressure, Rigor & Proofs may propose at most one redundant occurrence and Validator must approve. Nothing is deleted; no-prune is normal.',
   },
 ];
 

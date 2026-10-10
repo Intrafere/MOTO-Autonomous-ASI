@@ -9,7 +9,7 @@ body:
       options:
         - label: I searched existing issues and did not find a duplicate request.
           required: true
-        - label: I reviewed the relevant architecture notes in `.cursor/rules/` for the areas this may affect.
+        - label: I reviewed the relevant architecture notes in `.claude/rules/` for the areas this may affect.
           required: false
   - type: textarea
     id: problem

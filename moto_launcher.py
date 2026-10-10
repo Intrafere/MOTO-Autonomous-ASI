@@ -211,6 +211,23 @@ def get_standard_windows_node_file(filename: str) -> str | None:
     )
 
 
+def get_standard_windows_git_file() -> str | None:
+    local_app_data = os.environ.get("LocalAppData")
+    local_git_path = (
+        Path(local_app_data) / "Programs" / "Git" / "cmd" / "git.exe"
+        if local_app_data
+        else Path.home() / "AppData" / "Local" / "Programs" / "Git" / "cmd" / "git.exe"
+    )
+    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+    return resolve_existing_file(
+        local_git_path,
+        program_files / "Git" / "cmd" / "git.exe",
+        program_files / "Git" / "bin" / "git.exe",
+        program_files_x86 / "Git" / "cmd" / "git.exe",
+    )
+
+
 def refresh_windows_path_from_registry() -> None:
     """Refresh PATH after installers update Windows environment variables."""
     if sys.platform != "win32":
@@ -293,6 +310,12 @@ def get_npm_command() -> str | None:
     if sys.platform == "win32":
         return resolve_command("npm.cmd", "npm.exe", "npm") or get_standard_windows_node_file("npm.cmd")
     return resolve_command("npm")
+
+
+def get_git_command() -> str | None:
+    if sys.platform == "win32":
+        return resolve_command("git.exe", "git") or get_standard_windows_git_file()
+    return resolve_command("git")
 
 
 def get_lean_command() -> str | None:
@@ -1316,6 +1339,45 @@ def install_windows_nodejs() -> bool:
     return False
 
 
+def install_windows_git() -> tuple[str | None, str]:
+    """Install Git with bounded winget fallbacks and return only a verified executable."""
+    if sys.platform != "win32":
+        return None, "Automatic Git installation is available only on Windows."
+
+    winget_cmd = resolve_command("winget.exe", "winget")
+    if not winget_cmd:
+        return None, "Windows Package Manager (winget) was not found."
+
+    cprint("Attempting to install Git for Lean 4 / Mathlib with winget...", YELLOW)
+    run_visible(
+        [winget_cmd, "source", "update", "--name", "winget"],
+        cwd=str(SCRIPT_DIR),
+        check=False,
+    )
+
+    base_command = [
+        winget_cmd,
+        "install",
+        "--id",
+        "Git.Git",
+        "-e",
+        "--source",
+        "winget",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+    ]
+    last_detail = "Git installation did not provide a usable executable."
+    for command in (base_command + ["--scope", "user"], base_command):
+        scope_label = "user scope" if "--scope" in command else "default scope"
+        cprint(f"Trying winget package Git.Git ({scope_label})...", YELLOW)
+        run_visible(command, cwd=str(SCRIPT_DIR), check=False)
+        refresh_windows_path_from_registry()
+        git_cmd, last_detail = _verified_git_candidate()
+        if git_cmd:
+            return git_cmd, last_detail
+    return None, last_detail
+
+
 def check_node_installation() -> None:
     cprint("[2/8] Checking Node.js installation...", YELLOW)
     node_cmd = get_node_command()
@@ -1666,6 +1728,69 @@ def _write_lean_workspace_files(workspace_dir: Path) -> None:
         root_file_path.write_text("import Mathlib\n", encoding="utf-8")
 
 
+def _probe_git_command(git_cmd: str | None) -> tuple[bool, str]:
+    if not git_cmd:
+        return False, "Git executable was not found."
+    try:
+        result = subprocess.run(
+            [git_cmd, "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as exc:
+        return False, str(exc)
+    output = (result.stdout or result.stderr or "").strip()
+    return result.returncode == 0, output or f"Git exited with status {result.returncode}."
+
+
+def _verified_git_candidate() -> tuple[str | None, str]:
+    candidates = [get_git_command()]
+    if sys.platform == "win32":
+        candidates.append(get_standard_windows_git_file())
+    seen: set[str] = set()
+    last_detail = "Git executable was not found."
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = str(Path(candidate).resolve())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        ready, detail = _probe_git_command(normalized)
+        last_detail = detail
+        if ready:
+            return normalized, detail
+    return None, last_detail
+
+
+def ensure_git_for_lean(env: dict[str, str]) -> str | None:
+    """Return a verified Git executable and expose it to Lake child processes."""
+    git_cmd, git_detail = _verified_git_candidate()
+
+    if not git_cmd and sys.platform == "win32":
+        cprint("Git is required for the Lean 4 Mathlib workspace but was not detected.", YELLOW)
+        git_cmd, git_detail = install_windows_git()
+
+    if not git_cmd:
+        cprint("WARNING: Git is unavailable -- Lean 4 proof verification will be skipped.", YELLOW)
+        cprint(f"Git check: {git_detail}", YELLOW)
+        if sys.platform == "win32":
+            cprint("Install Git for Windows from https://git-scm.com/download/win and relaunch MOTO.", YELLOW)
+        elif is_linux():
+            cprint("Install Git with `sudo apt install git` and relaunch MOTO.", YELLOW)
+        else:
+            cprint("Install Git and ensure `git` is available in PATH, then relaunch MOTO.", YELLOW)
+        return None
+
+    _prepend_path_entry(str(Path(git_cmd).parent), env)
+    cprint(f"Git ready: {git_detail}", GREEN)
+    return git_cmd
+
+
 def _download_file(url: str, destination: Path) -> None:
     """Download a remote file to disk using the standard library.
 
@@ -1847,7 +1972,10 @@ def _set_lean_env_flags(
     enabled: bool,
     lean_path: str = "",
     workspace_dir: str = "",
+    unavailable_reason: str = "",
 ) -> None:
+    env["MOTO_LEAN4_RUNTIME_AVAILABLE"] = "1" if enabled else "0"
+    env["MOTO_LEAN4_UNAVAILABLE_REASON"] = "" if enabled else unavailable_reason
     env["MOTO_LEAN4_ENABLED"] = "1" if enabled else "0"
     env["MOTO_LEAN4_PATH"] = lean_path
     env["MOTO_LEAN4_WORKSPACE_DIR"] = workspace_dir
@@ -1886,6 +2014,12 @@ def install_lean4(
     if not _is_repair:
         cprint("[4c/8] Checking Lean 4 / elan for proof verification...", YELLOW)
         print()
+
+    git_cmd = ensure_git_for_lean(env)
+    if not git_cmd:
+        _set_lean_env_flags(env, enabled=False, unavailable_reason="git_unavailable")
+        print()
+        return
 
     elan_bin_dir = Path.home() / ".elan" / "bin"
     lean_cmd = get_lean_command()
@@ -1957,7 +2091,7 @@ def install_lean4(
             print()
             cprint("WARNING: Lean 4 not available -- proof verification will be skipped.", YELLOW)
             cprint(str(exc), YELLOW)
-            _set_lean_env_flags(env, enabled=False)
+            _set_lean_env_flags(env, enabled=False, unavailable_reason="lean_install_failed")
             print()
             return
 
@@ -1987,7 +2121,7 @@ def install_lean4(
                 cprint(str(repair_exc), YELLOW)
         else:
             cprint("WARNING: Lean 4 tooling still incomplete after repair -- proof verification will be skipped.", YELLOW)
-        _set_lean_env_flags(env, enabled=False)
+        _set_lean_env_flags(env, enabled=False, unavailable_reason="lean_or_lake_unavailable")
         print()
         return
 
@@ -2026,14 +2160,14 @@ def install_lean4(
                 cprint(str(repair_exc), YELLOW)
         else:
             cprint("WARNING: Lean 4 still broken after repair -- proof verification will be skipped.", YELLOW)
-        _set_lean_env_flags(env, enabled=False)
+        _set_lean_env_flags(env, enabled=False, unavailable_reason="lean_version_check_failed")
         print()
         return
 
     if sys.platform == "win32":
         try:
             subprocess.run(
-                ["git", "config", "--global", "core.longpaths", "true"],
+                [git_cmd, "config", "--global", "core.longpaths", "true"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -2045,8 +2179,11 @@ def install_lean4(
     try:
         _write_lean_workspace_files(workspace_dir)
     except Exception as exc:
-        cprint("WARNING: Lean 4 workspace files could not be prepared; proof verification may fail later.", YELLOW)
+        cprint("WARNING: Lean 4 workspace files could not be prepared; proof verification will be skipped.", YELLOW)
         cprint(str(exc), YELLOW)
+        _set_lean_env_flags(env, enabled=False, unavailable_reason="lean_workspace_unavailable")
+        print()
+        return
 
     _set_lean_env_flags(
         env,

@@ -8,7 +8,18 @@
   ],
   "adapter": "model",
   "artifact_type": "scenario",
+  "asserted_invariants": [
+    "proof_scope.manual_not_in_autonomous_current",
+    "proof_scope.manual_clear_archives_active",
+    "state.clear_removes_active_preserves_history",
+    "assistant.disable_clears_live_pack"
+  ],
+  "blocked_dependencies": [],
+  "coverage_classification": "deterministic_model_evidence",
   "expected_result": "passed",
+  "faked_dependencies": [
+    "workflow executable state model"
+  ],
   "fields": [
     "proof_scope_isolation",
     "workflow_filesystem_state",
@@ -25,6 +36,13 @@
     "manual_archive",
     "assistant_pack"
   ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
+  "runner": "pytest",
   "scenario_id": "model_manual_proof_clear_scope_assistant",
-  "schema_version": 1
+  "schema_version": 2,
+  "source_identity": "workflow-source-v1:799f31efc9bd1ee9c9568f49b18c3822895a6a5a74663e81992bc727b3e3e4b9",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
 }

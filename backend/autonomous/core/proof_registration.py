@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from backend.autonomous.core.proof_novelty import assess_proof_novelty
@@ -17,6 +18,9 @@ from backend.shared.models import (
     ProofArtifactPurpose,
     ProofAttemptFeedback,
     ProofDependency,
+    LeanCompileReceipt,
+    LocalNoveltyAssessmentProvenance,
+    PortableProofDependency,
     ProofRecord,
 )
 from backend.shared.proof_identity import (
@@ -35,6 +39,41 @@ class RegisteredProof:
 
     record: ProofRecord
     duplicate: bool = False
+
+
+async def _verified_group_candidates_for_run(
+    proof_database,
+    *,
+    run_id: str,
+) -> tuple[str, frozenset[str]]:
+    """Return compact, current-run verified proof choices for group-scoped ranking."""
+    if not run_id:
+        return "", frozenset()
+    try:
+        if hasattr(proof_database, "get_all_proofs_for_live_context"):
+            proofs = await proof_database.get_all_proofs_for_live_context(run_id)
+        else:
+            proofs = await proof_database.get_all_proofs()
+    except Exception as exc:
+        logger.debug("Unable to load novelty group candidates for %s: %s", run_id, exc)
+        return "", frozenset()
+    candidates = [
+        proof
+        for proof in proofs
+        if str(getattr(proof, "run_id", "") or "") == run_id
+        and str(getattr(proof, "proof_id", "") or "").strip()
+    ]
+    candidates.sort(key=lambda proof: (str(proof.created_at), proof.proof_id))
+    ids = frozenset(proof.proof_id for proof in candidates)
+    text = "\n".join(
+        (
+            f"- proof_id: {proof.proof_id}\n"
+            f"  theorem_name: {proof.theorem_name or '[unnamed]'}\n"
+            f"  theorem_statement: {proof.theorem_statement}"
+        )
+        for proof in candidates
+    )
+    return text, ids
 
 
 async def _find_existing_proof(
@@ -149,6 +188,9 @@ async def _broadcast_registered_proof(
         "is_novel": record.novel,
         "novelty_tier": record.novelty_tier,
         "novelty_reasoning": record.novelty_reasoning,
+        "novelty_scope": record.novelty_scope,
+        "novelty_group_claim": record.novelty_group_claim,
+        "novelty_group_proof_ids": list(record.novelty_group_proof_ids),
         "retry_origin_source_id": retry_origin_source_id,
     }
     if proof_label:
@@ -177,6 +219,9 @@ async def _broadcast_duplicate_proof(
         "is_novel": record.novel,
         "novelty_tier": record.novelty_tier,
         "novelty_reasoning": record.novelty_reasoning,
+        "novelty_scope": record.novelty_scope,
+        "novelty_group_claim": record.novelty_group_claim,
+        "novelty_group_proof_ids": list(record.novelty_group_proof_ids),
         "duplicate": True,
     }
     if proof_label:
@@ -206,6 +251,8 @@ async def register_verified_lean_proof(
     attempt_count: int = 0,
     attempts: Optional[list[ProofAttemptFeedback]] = None,
     dependencies: Optional[list[ProofDependency]] = None,
+    compile_receipt: Optional[LeanCompileReceipt] = None,
+    portable_dependencies: Optional[list[PortableProofDependency]] = None,
     solver_hints: Optional[list[str]] = None,
     broadcast_fn: BroadcastFn = None,
     base_event: Optional[dict[str, Any]] = None,
@@ -223,8 +270,43 @@ async def register_verified_lean_proof(
     Historical theorem/code matches are evidence for the validator, not a
     shortcut that can suppress or pre-classify the current-run occurrence.
     """
+    if compile_receipt is not None:
+        checked_hash = compile_receipt.checked_source_sha256
+        from backend.shared.lean_source_evidence import source_sha256
+        if checked_hash != source_sha256(lean_code):
+            raise ValueError("Compile receipt does not bind the Lean source being registered")
+
     if novelty_classification is None:
-        novelty_tier, novelty_reasoning = await assess_proof_novelty(
+        active_session_id = getattr(
+            getattr(proof_database, "_session_manager", None),
+            "session_id",
+            None,
+        )
+        provisional_run_id = run_id or active_session_id
+        if not provisional_run_id and hasattr(proof_database, "get_or_create_active_run_id"):
+            provisional_run_id = await proof_database.get_or_create_active_run_id()
+        resolved_run_id = provisional_run_id or f"{source_type}:{source_id}"
+        group_candidates, allowed_group_ids = await _verified_group_candidates_for_run(
+            proof_database,
+            run_id=resolved_run_id,
+        )
+        if broadcast_fn:
+            await broadcast_fn(
+                "proof_novelty_assessment_started",
+                {
+                    **(base_event or {}),
+                    "source_type": source_type,
+                    "source_id": source_id,
+                    "run_id": resolved_run_id,
+                    "theorem_id": theorem_id,
+                    "theorem_name": theorem_name,
+                    "theorem_statement": theorem_statement,
+                    "proof_label": proof_label,
+                    "lean_verified": True,
+                    "verified_group_candidates_available": bool(allowed_group_ids),
+                },
+            )
+        novelty_assessment = await assess_proof_novelty(
             user_prompt=user_prompt,
             theorem_statement=theorem_statement,
             lean_code=lean_code,
@@ -232,19 +314,38 @@ async def register_verified_lean_proof(
             validator_context=validator_context,
             validator_max_tokens=validator_max_tokens,
             existing_novel_proofs="",
+            verified_group_candidates=group_candidates,
+            allowed_group_proof_ids=allowed_group_ids,
             task_id=task_id,
             role_id=role_id,
         )
+        if hasattr(novelty_assessment, "novelty_tier"):
+            novelty_tier = novelty_assessment.novelty_tier
+            novelty_reasoning = novelty_assessment.reasoning
+            novelty_scope = novelty_assessment.novelty_scope
+            novelty_group_claim = novelty_assessment.group_claim
+            novelty_group_proof_ids = list(novelty_assessment.group_proof_ids)
+            assessment_origin = getattr(
+                novelty_assessment,
+                "assessment_origin",
+                "validator_assessed",
+            )
+        else:
+            novelty_tier, novelty_reasoning = novelty_assessment
+            novelty_scope = "standalone"
+            novelty_group_claim = ""
+            novelty_group_proof_ids = []
+            assessment_origin = "validator_assessed"
     else:
         novelty_tier, novelty_reasoning = novelty_classification
+        novelty_scope = "standalone"
+        novelty_group_claim = ""
+        novelty_group_proof_ids = []
+        assessment_origin = "caller_supplied"
     independent_novelty_tier = novelty_tier
     independent_novelty_reasoning = novelty_reasoning
 
-    active_session_id = getattr(
-        getattr(proof_database, "_session_manager", None),
-        "session_id",
-        None,
-    )
+    active_session_id = getattr(getattr(proof_database, "_session_manager", None), "session_id", None)
     prompt_run_id = run_id or active_session_id
     if not prompt_run_id and hasattr(proof_database, "get_or_create_active_run_id"):
         prompt_run_id = await proof_database.get_or_create_active_run_id()
@@ -265,7 +366,11 @@ async def register_verified_lean_proof(
         )
     )
     is_cross_run_duplicate = bool(existing and existing_run_id != resolved_run_id)
-    if is_cross_run_duplicate and novelty_tier != "not_novel":
+    if (
+        is_cross_run_duplicate
+        and novelty_tier != "not_novel"
+        and novelty_scope == "standalone"
+    ):
         novelty_tier = "duplicate_novel"
         novelty_reasoning = independent_novelty_reasoning
     is_novel = novelty_tier != "not_novel"
@@ -289,6 +394,9 @@ async def register_verified_lean_proof(
         novel=is_novel,
         novelty_tier=novelty_tier,
         novelty_reasoning=novelty_reasoning,
+        novelty_scope=novelty_scope,
+        novelty_group_claim=novelty_group_claim,
+        novelty_group_proof_ids=novelty_group_proof_ids,
         independent_novelty_tier=independent_novelty_tier,
         independent_novelty_reasoning=independent_novelty_reasoning,
         exact_duplicate_proof_id=existing.proof_id if is_cross_run_duplicate else "",
@@ -297,6 +405,17 @@ async def register_verified_lean_proof(
         canonical_identity_version=identity.version,
         canonical_theorem_statement_hash=identity.theorem_statement_hash,
         canonical_lean_code_hash=identity.lean_code_hash,
+        local_novelty_assessment_provenance=LocalNoveltyAssessmentProvenance(
+            assessment_origin=assessment_origin,
+            source_local_rank=independent_novelty_tier,
+            assessment_scope=novelty_scope,
+            group_claim=novelty_group_claim,
+            group_proof_ids=novelty_group_proof_ids,
+            assessed_at=datetime.now(timezone.utc),
+        ),
+        compile_receipt=compile_receipt,
+        verification_evidence_status=("complete" if compile_receipt else "incomplete"),
+        portable_dependencies=list(portable_dependencies or []),
         verification_notes=verification_notes,
         attempt_count=attempt_count,
         attempts=list(attempts or []),
@@ -314,6 +433,11 @@ async def register_verified_lean_proof(
     else:
         stored = await proof_database.add_proof(record)
         duplicate = stored.proof_id != record.proof_id and record.proof_id != ""
+
+    if stored.novelty_scope == "group" and hasattr(
+        proof_database, "ensure_complete_novelty_group"
+    ):
+        stored = await proof_database.ensure_complete_novelty_group(stored.proof_id)
 
     if duplicate:
         await _broadcast_duplicate_proof(

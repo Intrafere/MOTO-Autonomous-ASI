@@ -2,7 +2,7 @@ import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ProofLibrary from './ProofLibrary';
-import { autonomousAPI, proofSearchAPI } from '../../services/api';
+import { autonomousAPI, proofSearchAPI, syntheticLib4API } from '../../services/api';
 import { buildResearchRunGroups } from '../../utils/researchRunHistory';
 
 vi.mock('../../services/api', () => ({
@@ -10,6 +10,10 @@ vi.mock('../../services/api', () => ({
     getProofLibrary: vi.fn(),
     getSessions: vi.fn(),
     getLibraryProof: vi.fn(),
+    getLibraryProofNoveltyGroup: vi.fn(),
+  },
+  syntheticLib4API: {
+    getTradeEvidenceDiagnostics: vi.fn(),
   },
   proofSearchAPI: {
     getOverview: vi.fn(),
@@ -75,9 +79,31 @@ beforeEach(() => {
   });
 });
 
+test('hides the SyntheticLib4 corpus from standard users and never requests it', async () => {
+  const user = userEvent.setup();
+  localStorage.setItem(
+    'proof_library_federated_corpora',
+    JSON.stringify(['moto', 'manual', 'leanoj', 'syntheticlib4']),
+  );
+  render(<ProofLibrary />);
+
+  expect(await screen.findByText('Unified Proof Search')).toBeInTheDocument();
+  expect(screen.queryByRole('checkbox', { name: 'SyntheticLib4' })).not.toBeInTheDocument();
+  expect(screen.queryByText(/SyntheticLib4 snapshot records/i)).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: /Search Proofs/i }));
+
+  await waitFor(() => {
+    expect(proofSearchAPI.search).toHaveBeenCalledWith(
+      expect.objectContaining({ corpora: ['moto', 'manual', 'leanoj'] }),
+    );
+  });
+  localStorage.removeItem('proof_library_federated_corpora');
+});
+
 test('submits unified proof-search checklist and hydrates SyntheticLib4 results', async () => {
   const user = userEvent.setup();
-  render(<ProofLibrary />);
+  render(<ProofLibrary syntheticLibIntegrationVisible />);
 
   expect(await screen.findByText('Unified Proof Search')).toBeInTheDocument();
   expect(screen.getByText('99 indexed')).toBeInTheDocument();
@@ -194,6 +220,40 @@ test('renders duplicate novel proof badge', async () => {
   expect(screen.getByText('Duplicate Novel')).toBeInTheDocument();
 });
 
+test('surfaces archived novelty-group download failures', async () => {
+  const user = userEvent.setup();
+  autonomousAPI.getProofLibrary.mockResolvedValue({
+    counts: { novel: 1 },
+    proofs: [{
+      proof_id: 'group-proof-2',
+      session_id: 'session-group',
+      run_id: 'run-group',
+      theorem_name: 'Group.Member',
+      theorem_statement: 'theorem group_member : True',
+      novelty_tier: 'mathematical_discovery',
+      novelty_scope: 'group',
+      novelty_group_claim: 'The pair establishes the combined claim.',
+      novelty_group_proof_ids: ['group-proof-1', 'group-proof-2'],
+      novel: true,
+    }],
+  });
+  buildResearchRunGroups.mockReturnValue([{
+    sessionId: 'run-group',
+    userPrompt: 'Grouped proof run',
+  }]);
+  autonomousAPI.getLibraryProofNoveltyGroup.mockRejectedValue(
+    new Error('Stored novelty group references an unavailable proof occurrence')
+  );
+
+  render(<ProofLibrary />);
+  await user.click(await screen.findByRole('button', { name: /Grouped proof run/i }));
+  await user.click(screen.getByRole('button', { name: /Download Ranked Group/i }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    /unavailable proof occurrence/i
+  );
+});
+
 test('presents historical prune state as read-only originating-run metadata', async () => {
   const user = userEvent.setup();
   autonomousAPI.getProofLibrary.mockResolvedValue({
@@ -280,4 +340,22 @@ test('selected proof id switches filters, expands, and hydrates matching proof h
   });
   expect(await screen.findByText('Known but useful.')).toBeInTheDocument();
   expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+});
+
+test('offer panel renders only for the visible SyntheticLib trade surface and never auto-requests', async () => {
+  const { unmount } = render(<ProofLibrary />);
+  expect(await screen.findByText('Unified Proof Search')).toBeInTheDocument();
+  expect(screen.queryByText(/Offer proofs for SyntheticLib access/i)).not.toBeInTheDocument();
+  unmount();
+
+  // Generic/hosted launch: corpus search may be visible, but proof trade is desktop-only.
+  const hosted = render(<ProofLibrary syntheticLibIntegrationVisible />);
+  expect(await screen.findByText('Unified Proof Search')).toBeInTheDocument();
+  expect(screen.queryByText(/Offer proofs for SyntheticLib access/i)).not.toBeInTheDocument();
+  hosted.unmount();
+
+  render(<ProofLibrary syntheticLibIntegrationVisible syntheticLibTradeVisible />);
+  expect(await screen.findByText(/Offer proofs for SyntheticLib access/i)).toBeInTheDocument();
+  expect(screen.getByText('Private development')).toBeInTheDocument();
+  expect(syntheticLib4API.getTradeEvidenceDiagnostics).not.toHaveBeenCalled();
 });

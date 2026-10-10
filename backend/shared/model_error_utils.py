@@ -43,6 +43,8 @@ _NON_RETRYABLE_MODEL_ERROR_MARKERS = (
 _RETRYABLE_OUTPUT_FAILURE_MARKERS = (
     ("response.incomplete", "max_output_tokens"),
     ("response.incomplete", "max output tokens"),
+    ("status=incomplete", "max_output_tokens"),
+    ("output_truncated", "max_output_tokens"),
 )
 
 _TRANSIENT_MODEL_CALL_MARKERS = (

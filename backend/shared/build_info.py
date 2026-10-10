@@ -19,13 +19,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_MANIFEST_PATH = REPO_ROOT / "moto-update-manifest.json"
 PACKAGE_JSON_PATH = REPO_ROOT / "package.json"
 ARCHIVAL_METADATA_PATH = REPO_ROOT / ".git_archival.txt"
+API_CONTRACT_VERSION = "build6-v119"
 
 _DEFAULT_BUILD_INFO = {
     "manifest_version": 1,
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build6-v97",
+    "api_contract_version": API_CONTRACT_VERSION,
 }
 
 _ENV_OVERRIDES = {

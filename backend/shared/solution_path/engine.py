@@ -10,13 +10,15 @@ import random
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
-from backend.shared.api_client_manager import RetryableProviderError
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
+from backend.shared.activity import fill_missing_activity_metadata
 from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.provider_pause import (
     is_provider_credit_pause_error,
     mark_provider_paused,
     wait_for_provider_resume,
 )
+from backend.shared.provider_route_identity import route_identity_from_error
 
 from .models import (
     AuditRecord,
@@ -393,6 +395,7 @@ class SolutionPathEngine:
                                 "a shorter user prompt before it can continue."
                             ),
                             detail=proposal.feedback,
+                            route_fields=self._reviewer_route_identity(error=exc),
                         )
                     await self._broadcast(
                         "solution_path_proposal_user_repair_required", repair_payload
@@ -414,6 +417,7 @@ class SolutionPathEngine:
                             proposal=proposal,
                             message="Solution-path review needs user configuration repair before it can continue.",
                             detail=proposal.repair_detail,
+                            route_fields=self._reviewer_route_identity(error=exc),
                         )
                     await self._broadcast(
                         "solution_path_proposal_user_repair_required",
@@ -444,6 +448,7 @@ class SolutionPathEngine:
                             proposal=proposal,
                             message="Solution-path review repeatedly failed and now requires explicit user repair.",
                             detail=proposal.repair_detail,
+                            route_fields=self._reviewer_route_identity(error=exc),
                         )
                         retry_payload = None
                     else:
@@ -649,10 +654,13 @@ class SolutionPathEngine:
         proposal: PlanProposal | None = None,
         decision: str = "",
         detail: str = "",
+        route_fields: dict | None = None,
     ) -> dict:
         revision = self._state.plan.revision if self._state.plan else 0
         queued_statuses = {ProposalStatus.QUEUED, ProposalStatus.FOLLOWUP}
+        # Route identity fills only keys the engine payload does not own.
         return {
+            **(route_fields or {}),
             "workflow_mode": self._state.workflow_mode or "unknown",
             "run_id": self.run_id,
             "acceptance_count": self._state.acceptance_count,
@@ -685,6 +693,29 @@ class SolutionPathEngine:
             "message": message,
             "detail": detail,
         }
+
+    def _reviewer_route_identity(self, *, error: Exception) -> dict:
+        """Return provider route identity for a reviewer failure needing repair.
+
+        The reviewer role comes from the typed error when it names one;
+        otherwise it is the dedicated Main Submitter 1 reviewer role that each
+        workflow configures as ``{workflow_mode}_solution_path_reviewer``.
+        """
+        error_role = str(route_identity_from_error(error).get("role_id") or "")
+        workflow_mode = self._state.workflow_mode
+        if error_role and error_role != "unknown":
+            role_id = error_role
+        elif workflow_mode:
+            role_id = f"{workflow_mode}_solution_path_reviewer"
+        else:
+            role_id = "solution_path_reviewer"
+        # Pinning the model role keeps a placeholder error role from relabelling it.
+        return api_client_manager.route_identity_for_role(
+            role_id,
+            workflow_mode=workflow_mode,
+            error=error,
+            model_role_id=role_id,
+        )
 
     def _audit(
         self,
@@ -866,7 +897,38 @@ class SolutionPathEngine:
     async def _broadcast(self, event: str, payload: dict) -> None:
         try:
             from backend.api.routes.websocket import broadcast_event
-            await broadcast_event(event, payload)
+            operational = any(
+                marker in event
+                for marker in ("failed", "error", "repair", "paused", "stopped")
+            )
+            semantic = event in {"solution_path_updated", "solution_path_proposal_rejected"}
+            await broadcast_event(
+                event,
+                fill_missing_activity_metadata(
+                    payload,
+                    workflow=self._state.workflow_mode or "solution_path",
+                    run_id=self.run_id,
+                    generation=self._state.lifecycle_generation,
+                    source_type="solution_path",
+                    source_id=str(payload.get("proposal_id") or self.run_id),
+                    phase=str(payload.get("status") or ""),
+                    classification=(
+                        "semantic" if semantic else "operational" if operational else "informational"
+                    ),
+                    category="validator" if semantic else "workflow",
+                    outcome=(
+                        "rejected"
+                        if event == "solution_path_proposal_rejected"
+                        else "error"
+                        if operational
+                        else "success"
+                        if event == "solution_path_updated"
+                        else "info"
+                    ),
+                    feedback=payload.get("feedback") or payload.get("reasoning"),
+                    detail=payload.get("repair_detail") or payload.get("error"),
+                ),
+            )
         except Exception:
             # Plan review remains secondary and must never block the parent workflow.
             pass

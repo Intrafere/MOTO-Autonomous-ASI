@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import base64
 import asyncio
-import hashlib
 import json
 import logging
-import secrets
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import httpx
+from websockets.asyncio.client import connect as websocket_connect
+from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.oauth_pkce import generate_pkce_pair
 from backend.shared.openrouter_client import sanitize_provider_error_text
 from backend.shared.secret_store import (
     SecretStoreError,
@@ -26,6 +27,8 @@ from backend.shared.secret_store import (
     load_openai_codex_oauth_tokens,
     store_openai_codex_oauth_tokens,
 )
+from backend.shared.credential_locks import codex_credential_mutation
+from backend.shared.provider_recovery.runtime import assured_retry_wait
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,39 @@ class OAuthUsageLimitError(OpenAICodexError):
         super().__init__(detail)
 
 
+class OpenAICodexUntimedUsageLimitError(OpenAICodexRequestError):
+    """Raised when Codex reports usage exhaustion without a credible reset."""
+
+    def __init__(self, message: str = "The usage limit has been reached.") -> None:
+        super().__init__(
+            message,
+            error_code="usage_limit_reached",
+            failure_kind="untimed_usage_limit",
+        )
+
+
+class OpenAICodexWebsocketTransportError(OpenAICodexError):
+    """Raised when the Codex websocket stream ends before a terminal completion.
+
+    Retried exactly like an SSE transport failure: the remote outcome is unknown.
+    """
+
+
+class OpenAICodexWebsocketUnavailableError(OpenAICodexError):
+    """Raised when the websocket handshake fails and the request must use SSE instead."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        permanent: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.permanent = permanent
+
+
 class OpenAICodexClient:
     """Client for OpenAI Codex OAuth and the ChatGPT Codex Responses backend."""
 
@@ -91,6 +127,19 @@ class OpenAICodexClient:
     DEFAULT_ORIGINATOR = "moto-autonomous-asi"
     DEFAULT_INSTRUCTIONS = "Follow the user's instructions and produce the requested response."
     REFRESH_SKEW_SECONDS = 60
+    # The Codex CLI streams turns over the Responses websocket; the HTTP/SSE path
+    # is closed by the provider at roughly 15 minutes, so long turns need this.
+    CODEX_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
+    WEBSOCKET_OPEN_TIMEOUT_SECONDS = 30.0
+    WEBSOCKET_PING_INTERVAL_SECONDS = 20.0
+    WEBSOCKET_PING_TIMEOUT_SECONDS = 60.0
+    # Handshake statuses that mean the backend does not serve this transport.
+    WEBSOCKET_UNSUPPORTED_STATUS_CODES = frozenset({404, 405, 426, 501})
+    # Error events that require a fresh connection rather than a provider repair.
+    WEBSOCKET_RECONNECT_ERROR_CODES = frozenset({"websocket_connection_limit_reached"})
+    # Production default. The test overlay turns this off for the session and
+    # websocket tests opt back in on their own instance with a fake connector.
+    websocket_transport_enabled = True
     REASONING_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
     REASONING_EFFORT_LEVELS = set(REASONING_EFFORT_ORDER)
     # Exact documented IDs only; provider variants must use their own catalog row.
@@ -103,6 +152,7 @@ class OpenAICodexClient:
     MAX_RETRIES = 4
     RETRY_DELAY = 2.0
     RETRY_MAX_DELAY = 30.0
+    LIVE_ERROR_DETAIL_LIMIT = 1800
     TRANSIENT_COMPLETION_STATUS_CODES = {408, 409, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524}
     TRANSIENT_COMPLETION_MARKERS = (
         "bad gateway",
@@ -155,6 +205,7 @@ class OpenAICodexClient:
         self._refresh_lock = asyncio.Lock()
         self._model_reasoning_cache: Dict[str, Dict[str, Any]] = {}
         self._model_catalog_lock = asyncio.Lock()
+        self._websocket_disabled_reason: Optional[str] = None
         self.client = httpx.AsyncClient(
             timeout=None,
             limits=httpx.Limits(
@@ -164,13 +215,7 @@ class OpenAICodexClient:
             ),
         )
 
-    @staticmethod
-    def generate_pkce_pair() -> tuple[str, str]:
-        """Return a PKCE verifier and S256 challenge."""
-        verifier = secrets.token_urlsafe(64)
-        digest = hashlib.sha256(verifier.encode("ascii")).digest()
-        challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-        return verifier, challenge
+    generate_pkce_pair = staticmethod(generate_pkce_pair)
 
     @classmethod
     def build_authorization_url(
@@ -244,6 +289,7 @@ class OpenAICodexClient:
         }
         return {key: value for key, value in normalized.items() if value not in ("", None)}
 
+    @codex_credential_mutation
     async def exchange_code(
         self,
         *,
@@ -276,6 +322,7 @@ class OpenAICodexClient:
         store_openai_codex_oauth_tokens(tokens)
         return self.safe_status(tokens)
 
+    @codex_credential_mutation
     async def refresh_tokens(self, tokens: Dict[str, Any]) -> Dict[str, Any]:
         """Refresh stored Codex OAuth tokens and persist the replacement bundle."""
         refresh_token = str(tokens.get("refresh_token") or "")
@@ -508,6 +555,7 @@ class OpenAICodexClient:
             normalized["effective_input_context_window"] = effective_input_context_window
         return normalized
 
+    @codex_credential_mutation
     async def clear_tokens(self) -> None:
         """Revoke best-effort and clear persisted Codex OAuth tokens."""
         tokens = self.load_tokens()
@@ -700,12 +748,19 @@ class OpenAICodexClient:
         return None
 
     @classmethod
-    def _usage_limit_error_from_payload(cls, value: Any) -> Optional[OAuthUsageLimitError]:
+    def _usage_limit_error_from_payload(
+        cls,
+        value: Any,
+    ) -> Optional[OpenAICodexError]:
         payload = cls._extract_usage_limit_payload(value)
         if payload is None:
             return None
         resets_at = cls._coerce_positive_int(payload.get("resets_at"))
         resets_in_seconds = cls._coerce_positive_int(payload.get("resets_in_seconds"))
+        if resets_at is None and resets_in_seconds is None:
+            return OpenAICodexUntimedUsageLimitError(
+                str(payload.get("message") or "The usage limit has been reached.").strip()
+            )
         if resets_at is None and resets_in_seconds is not None:
             resets_at = int(time.time()) + resets_in_seconds
         elif resets_in_seconds is None and resets_at is not None:
@@ -721,7 +776,7 @@ class OpenAICodexClient:
         )
 
     @classmethod
-    def _usage_limit_error_from_text(cls, text: str) -> Optional[OAuthUsageLimitError]:
+    def _usage_limit_error_from_text(cls, text: str) -> Optional[OpenAICodexError]:
         raw = str(text or "")
         start = raw.find("{")
         end = raw.rfind("}")
@@ -735,11 +790,7 @@ class OpenAICodexClient:
                 return usage_error
         lowered = raw.lower()
         if "usage_limit_reached" in lowered or "usage limit has been reached" in lowered:
-            return OAuthUsageLimitError(
-                provider="openai_codex_oauth",
-                provider_label="OpenAI Codex",
-                message="The usage limit has been reached.",
-            )
+            return OpenAICodexUntimedUsageLimitError()
         return None
 
     @staticmethod
@@ -836,59 +887,215 @@ class OpenAICodexClient:
                 usage_error = cls._usage_limit_error_from_payload(data)
                 if usage_error is not None:
                     raise usage_error
+                cls._validate_plain_response_status(data)
                 return data
         except json.JSONDecodeError:
             logger.debug("OpenAI Codex response body is not plain JSON; parsing stream events")
 
-        response_data: Optional[Dict[str, Any]] = None
-        output_text_parts: List[str] = []
+        state = cls._new_stream_state()
         for event_data in cls._iter_sse_data(body):
-            if event_data == "[DONE]":
-                continue
-            try:
-                event = json.loads(event_data)
-            except json.JSONDecodeError:
-                logger.debug("Ignoring malformed OpenAI Codex stream event: %s", redact_log_text(event_data[:500]))
-                continue
-            if not isinstance(event, dict):
-                continue
+            cls._consume_stream_event_data(event_data, state)
+        return cls._finalize_stream_state(state)
 
-            event_type = str(event.get("type") or "")
-            if event_type in {"response.failed", "response.incomplete"}:
-                response = event.get("response")
-                response_error = response.get("error") if isinstance(response, dict) else None
-                error = event.get("error") or response_error
-                usage_error = cls._usage_limit_error_from_payload(error or event)
-                if usage_error is not None:
-                    raise usage_error
-                raise OpenAICodexRequestError(
-                    f"OpenAI Codex completion failed: {sanitize_provider_error_text(json.dumps(error or event))}",
-                    error_code=cls._error_code_from_value(error or event),
-                    failure_kind="stream_rejected",
-                )
-            if event_type == "response.output_text.delta":
-                output_text_parts.append(str(event.get("delta") or ""))
-            elif event_type == "response.output_text.done" and not output_text_parts:
-                text = event.get("text")
-                if text:
-                    output_text_parts.append(str(text))
+    @staticmethod
+    def _new_stream_state() -> Dict[str, Any]:
+        return {
+            "response_data": None,
+            "output_text_parts": [],
+            "valid_events": 0,
+            "malformed_events": 0,
+            "terminal_seen": False,
+            "done_seen": False,
+        }
 
-            response = event.get("response")
-            if isinstance(response, dict):
-                response_data = response
+    @classmethod
+    def _validate_plain_response_status(cls, data: Dict[str, Any]) -> None:
+        status = str(data.get("status") or "").strip().lower()
+        if status in {"failed", "incomplete", "cancelled", "canceled"}:
+            cls._raise_terminal_response_error(data, status=status, source="JSON response")
+        if status in {"queued", "in_progress"}:
+            raise OpenAICodexRequestError(
+                f"OpenAI Codex completion did not reach a terminal state (status={status}).",
+                failure_kind="terminal_missing",
+            )
 
-        if response_data is not None:
-            if output_text_parts and not response_data.get("output_text"):
-                response_data = {**response_data, "output_text": "".join(output_text_parts)}
-            return response_data
-
-        if output_text_parts:
-            return {"id": "", "output_text": "".join(output_text_parts)}
-
-        raise OpenAICodexRequestError(
-            "OpenAI Codex streamed response contained no completion output.",
-            failure_kind="empty_stream",
+    @classmethod
+    def _terminal_error_detail(cls, value: Dict[str, Any], *, status: str) -> tuple[str, str]:
+        error = value.get("error")
+        incomplete = value.get("incomplete_details")
+        detail_value: Any = error or incomplete or {"status": status}
+        error_code = cls._error_code_from_value(error or incomplete or value)
+        if isinstance(incomplete, dict):
+            reason = str(incomplete.get("reason") or "").strip()
+            if reason:
+                error_code = error_code or reason.lower()
+                detail_value = {"status": status, "reason": reason}
+        safe_detail = sanitize_provider_error_text(
+            json.dumps(detail_value, ensure_ascii=False),
+            max_chars=cls.LIVE_ERROR_DETAIL_LIMIT,
         )
+        return safe_detail, error_code
+
+    @classmethod
+    def _raise_terminal_response_error(
+        cls,
+        value: Dict[str, Any],
+        *,
+        status: str,
+        source: str,
+    ) -> None:
+        usage_error = cls._usage_limit_error_from_payload(value)
+        if usage_error is not None:
+            raise usage_error
+        detail, error_code = cls._terminal_error_detail(value, status=status)
+        failure_kind = (
+            "output_truncated"
+            if status == "incomplete" and error_code == "max_output_tokens"
+            else "response_incomplete"
+            if status == "incomplete"
+            else "stream_rejected"
+        )
+        raise OpenAICodexRequestError(
+            f"OpenAI Codex {source} ended with status={status}. Detail: {detail}",
+            error_code=error_code,
+            failure_kind=failure_kind,
+        )
+
+    @classmethod
+    def _consume_stream_event_data(cls, event_data: str, state: Dict[str, Any]) -> None:
+        if event_data == "[DONE]":
+            state["done_seen"] = True
+            return
+        event = cls._parse_stream_event(event_data, state, transport="SSE")
+        if event is not None:
+            cls._consume_stream_event(event, state)
+
+    @classmethod
+    def _consume_websocket_event_text(cls, text: str, state: Dict[str, Any]) -> None:
+        event = cls._parse_stream_event(text, state, transport="websocket")
+        if event is None:
+            return
+        if str(event.get("type") or "").strip() == "error":
+            error_value = event.get("error")
+            code = cls._error_code_from_value(error_value if isinstance(error_value, dict) else event)
+            if code in cls.WEBSOCKET_RECONNECT_ERROR_CODES:
+                raise OpenAICodexWebsocketTransportError(
+                    f"OpenAI Codex websocket reported {code}; the turn must be retried on a new connection."
+                )
+        cls._consume_stream_event(event, state)
+
+    @classmethod
+    def _parse_stream_event(
+        cls,
+        event_data: str,
+        state: Dict[str, Any],
+        *,
+        transport: str,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            event = json.loads(event_data)
+        except json.JSONDecodeError as exc:
+            state["malformed_events"] += 1
+            logger.warning(
+                "Ignoring malformed OpenAI Codex %s event (length=%s, json_error=%s at %s); raw event omitted",
+                transport,
+                len(event_data),
+                type(exc).__name__,
+                exc.pos,
+            )
+            return None
+        if not isinstance(event, dict):
+            return None
+        return event
+
+    @classmethod
+    def _consume_stream_event(cls, event: Dict[str, Any], state: Dict[str, Any]) -> None:
+        state["valid_events"] += 1
+        event_type = str(event.get("type") or "").strip()
+        response = event.get("response")
+        response_dict = response if isinstance(response, dict) else {}
+
+        if event_type == "error":
+            usage_error = cls._usage_limit_error_from_payload(event)
+            if usage_error is not None:
+                raise usage_error
+            error_value = event.get("error")
+            structured_error = error_value if isinstance(error_value, dict) else event
+            safe_detail = sanitize_provider_error_text(
+                json.dumps(structured_error, ensure_ascii=False),
+                max_chars=cls.LIVE_ERROR_DETAIL_LIMIT,
+            )
+            raise OpenAICodexRequestError(
+                f"OpenAI Codex stream error event. Detail: {safe_detail}",
+                error_code=cls._error_code_from_value(structured_error),
+                failure_kind="stream_rejected",
+            )
+
+        if event_type in {"response.failed", "response.incomplete"}:
+            status = "failed" if event_type == "response.failed" else "incomplete"
+            terminal_value = response_dict or event
+            cls._raise_terminal_response_error(
+                terminal_value,
+                status=status,
+                source=f"SSE event {event_type}",
+            )
+
+        if event_type == "response.output_text.delta":
+            state["output_text_parts"].append(str(event.get("delta") or ""))
+        elif event_type == "response.output_text.done" and not state["output_text_parts"]:
+            text = event.get("text")
+            if text:
+                state["output_text_parts"].append(str(text))
+
+        if response_dict:
+            state["response_data"] = response_dict
+
+        if event_type == "response.completed":
+            if not response_dict:
+                raise OpenAICodexRequestError(
+                    "OpenAI Codex response.completed event did not include a response object.",
+                    failure_kind="invalid_terminal_state",
+                )
+            status = str(response_dict.get("status") or "").strip().lower()
+            if status and status != "completed":
+                raise OpenAICodexRequestError(
+                    "OpenAI Codex response.completed event carried a non-completed "
+                    f"response status ({status or 'missing'}).",
+                    failure_kind="invalid_terminal_state",
+                )
+            state["terminal_seen"] = True
+
+    @classmethod
+    def _finalize_stream_state(cls, state: Dict[str, Any]) -> Dict[str, Any]:
+        if not state["terminal_seen"]:
+            raise OpenAICodexRequestError(
+                "OpenAI Codex stream ended without response.completed "
+                f"(valid_events={state['valid_events']}, malformed_events={state['malformed_events']}, "
+                f"output_characters={sum(len(part) for part in state['output_text_parts'])}, "
+                f"done_seen={bool(state['done_seen'])}). Remote outcome is unknown.",
+                failure_kind="terminal_missing",
+            )
+        response_data = dict(state["response_data"] or {})
+        if state["output_text_parts"] and not response_data.get("output_text"):
+            response_data["output_text"] = "".join(state["output_text_parts"])
+        return response_data
+
+    @classmethod
+    async def _iter_stream_data(cls, response: httpx.Response) -> AsyncIterator[str]:
+        data_lines: List[str] = []
+        async for line in response.aiter_lines():
+            stripped = line.rstrip("\r")
+            if not stripped:
+                if data_lines:
+                    yield "\n".join(data_lines)
+                    data_lines = []
+                continue
+            if stripped.startswith(":"):
+                continue
+            if stripped.startswith("data:"):
+                data_lines.append(stripped[5:].lstrip())
+        if data_lines:
+            yield "\n".join(data_lines)
 
     @staticmethod
     def _extract_output(response: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
@@ -949,8 +1156,22 @@ class OpenAICodexClient:
                                 "max_attempts": max_attempts,
                                 "retry_after_seconds": delay,
                                 "reason": "transient_http_error",
+                                "error_summary": error_detail,
                             })
-                        await asyncio.sleep(delay)
+                        else:
+                            await assured_retry_wait(
+                                {
+                                    "provider": "openai_codex_oauth",
+                                    "provider_label": "OpenAI Codex",
+                                    "model": retry_model,
+                                    "retry_attempt": attempt + 1,
+                                    "max_attempts": max_attempts,
+                                    "retry_after_seconds": delay,
+                                    "reason": "transient_http_error",
+                                    "error_summary": error_detail,
+                                },
+                                role_id="openai_codex_direct",
+                            )
                         continue
                     raise OpenAICodexRequestError(
                         f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries: "
@@ -982,14 +1203,458 @@ class OpenAICodexClient:
                             "max_attempts": max_attempts,
                             "retry_after_seconds": delay,
                             "reason": "connection_error",
+                            "error_summary": f"[{error_type}] {error_detail}",
                         })
-                    await asyncio.sleep(delay)
+                    else:
+                        await assured_retry_wait(
+                            {
+                                "provider": "openai_codex_oauth",
+                                "provider_label": "OpenAI Codex",
+                                "model": retry_model,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": max_attempts,
+                                "retry_after_seconds": delay,
+                                "reason": "connection_error",
+                                "error_summary": f"[{error_type}] {error_detail}",
+                            },
+                            role_id="openai_codex_direct",
+                        )
                     continue
                 raise OpenAICodexRequestError(
                     f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries: "
                     f"[{error_type}] {error_detail}",
                     failure_kind="transport_exhausted",
                 )
+
+    @classmethod
+    def _websocket_url(cls) -> str:
+        base = cls.CODEX_BASE_URL
+        for http_scheme, ws_scheme in (("https://", "wss://"), ("http://", "ws://")):
+            if base.startswith(http_scheme):
+                base = ws_scheme + base[len(http_scheme):]
+                break
+        return f"{base}/responses"
+
+    @classmethod
+    def _websocket_headers(cls, headers: Dict[str, str]) -> Dict[str, str]:
+        """Handshake headers: the auth/account headers plus the websocket beta marker."""
+        ws_headers = {
+            name: value
+            for name, value in headers.items()
+            if name.lower() not in {"accept", "content-type"}
+        }
+        ws_headers["OpenAI-Beta"] = cls.CODEX_WEBSOCKET_BETA_HEADER
+        ws_headers["originator"] = cls.DEFAULT_ORIGINATOR
+        return ws_headers
+
+    @staticmethod
+    def _websocket_request_text(payload: Dict[str, Any]) -> str:
+        # The backend accepts the HTTP request body plus the event type, including
+        # stream=true, which is how the Codex CLI serializes websocket turns.
+        return json.dumps({"type": "response.create", **payload}, ensure_ascii=False)
+
+    def _websocket_transport_allowed(self) -> bool:
+        return bool(self.websocket_transport_enabled) and self._websocket_disabled_reason is None
+
+    def _open_websocket(self, url: str, headers: Dict[str, str]):
+        """Return the websocket connection context manager; tests inject a fake here."""
+        return websocket_connect(
+            url,
+            additional_headers=headers,
+            open_timeout=self.WEBSOCKET_OPEN_TIMEOUT_SECONDS,
+            ping_interval=self.WEBSOCKET_PING_INTERVAL_SECONDS,
+            ping_timeout=self.WEBSOCKET_PING_TIMEOUT_SECONDS,
+            max_size=None,
+        )
+
+    def _note_websocket_unavailable(self, exc: OpenAICodexWebsocketUnavailableError) -> None:
+        detail = sanitize_provider_error_text(str(exc), max_chars=self.LIVE_ERROR_DETAIL_LIMIT)
+        if exc.permanent:
+            if self._websocket_disabled_reason is None:
+                self._websocket_disabled_reason = detail
+                logger.warning(
+                    "OpenAI Codex websocket transport is unavailable for this process (%s); "
+                    "using the SSE transport for later requests.",
+                    detail,
+                )
+            return
+        logger.warning(
+            "OpenAI Codex websocket transport is unavailable for this request (%s); "
+            "using the SSE transport.",
+            detail,
+        )
+
+    @staticmethod
+    def _websocket_close_code(exc: ConnectionClosed) -> Optional[int]:
+        for frame in (getattr(exc, "rcvd", None), getattr(exc, "sent", None)):
+            code = getattr(frame, "code", None)
+            if code is not None:
+                return int(code)
+        return None
+
+    @staticmethod
+    def _transport_drop_guidance(transport: str, elapsed: float) -> str:
+        """Plain-language cause and repair hint for a stream cut before completion."""
+        minutes = max(1, round(elapsed / 60.0))
+        duration = "under a minute" if elapsed < 45 else f"about {minutes} minute{'s' if minutes != 1 else ''}"
+        if transport == "websocket":
+            cause = (
+                "What this means: OpenAI's Codex service closed this connection on its side after "
+                f"{duration} while the model was still working. This is a server-side connection refresh "
+                "at OpenAI, not a problem with your computer, your network, or MOTO's connection, which was healthy."
+            )
+        else:
+            cause = (
+                "What this means: OpenAI's Codex service closed this HTTP stream on its side after "
+                f"{duration} while the model was still working. OpenAI ends these streams at about 15 minutes; "
+                "this is not a problem with your computer or network."
+            )
+        return (
+            f"{cause} MOTO will send the request again, but a request that needs more thinking time than "
+            "the connection stays open will keep getting cut off. How to fix: lower this role's reasoning "
+            "effort in Settings so each call finishes sooner, or route this role through a different provider."
+        )
+
+    @staticmethod
+    async def _monitor_event_loop_stalls(stall: Dict[str, float], interval: float = 1.0) -> None:
+        """Record the longest event-loop stall while a websocket turn is open.
+
+        Keepalive pongs are sent from this process's event loop, so a stall longer
+        than the server's pong deadline looks to the server like a dead client.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            started = loop.time()
+            await asyncio.sleep(interval)
+            lag = loop.time() - started - interval
+            if lag > stall["max"]:
+                stall["max"] = lag
+
+    async def _websocket_completion_attempt(
+        self,
+        *,
+        payload: Dict[str, Any],
+        headers: Dict[str, str],
+        state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Run one response.create turn over the Responses websocket.
+
+        Raises OpenAICodexWebsocketUnavailableError when the handshake fails (the
+        caller falls back to SSE for this attempt), OpenAICodexWebsocketTransportError
+        when the socket ends before response.completed (the caller retries), and
+        OpenAICodexRequestError for provider-reported terminal failures, exactly like
+        the SSE path.
+        """
+        request_text = self._websocket_request_text(payload)
+        handshake_complete = False
+        active_connection = None
+        last_event_at = time.monotonic()
+        stall: Dict[str, float] = {"max": 0.0}
+        stall_monitor = asyncio.create_task(self._monitor_event_loop_stalls(stall))
+        try:
+            return await self._run_websocket_turn(
+                request_text=request_text,
+                headers=headers,
+                state=state,
+                stall=stall,
+            )
+        finally:
+            stall_monitor.cancel()
+            try:
+                await stall_monitor
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _run_websocket_turn(
+        self,
+        *,
+        request_text: str,
+        headers: Dict[str, str],
+        state: Dict[str, Any],
+        stall: Dict[str, float],
+    ) -> Dict[str, Any]:
+        handshake_complete = False
+        active_connection = None
+        last_event_at = time.monotonic()
+        try:
+            async with self._open_websocket(
+                self._websocket_url(),
+                self._websocket_headers(headers),
+            ) as connection:
+                handshake_complete = True
+                active_connection = connection
+                await connection.send(request_text)
+                async for message in connection:
+                    last_event_at = time.monotonic()
+                    if isinstance(message, (bytes, bytearray)):
+                        raise OpenAICodexWebsocketTransportError(
+                            "OpenAI Codex websocket sent an unexpected binary frame before response.completed."
+                        )
+                    self._consume_websocket_event_text(message, state)
+                    if state["terminal_seen"]:
+                        break
+        except asyncio.CancelledError:
+            raise
+        except ConnectionClosed as exc:
+            if state["terminal_seen"]:
+                logger.warning(
+                    "OpenAI Codex websocket closed after response.completed; "
+                    "using the confirmed terminal response (close_code=%s)",
+                    self._websocket_close_code(exc),
+                )
+                return self._finalize_stream_state(state)
+            raise OpenAICodexWebsocketTransportError(
+                f"[{type(exc).__name__}] websocket closed (close_code={self._websocket_close_code(exc)}) "
+                f"before response.completed (events={state['valid_events']}, "
+                f"idle_seconds={time.monotonic() - last_event_at:.1f}, "
+                f"max_loop_stall_seconds={stall['max']:.1f})"
+            ) from exc
+        except InvalidStatus as exc:
+            status = int(exc.response.status_code)
+            raise OpenAICodexWebsocketUnavailableError(
+                f"websocket handshake rejected with HTTP {status}",
+                status_code=status,
+                permanent=status in self.WEBSOCKET_UNSUPPORTED_STATUS_CODES,
+            ) from exc
+        except (WebSocketException, OSError, TimeoutError, asyncio.TimeoutError) as exc:
+            detail = f"[{type(exc).__name__}] {exc}"
+            if not handshake_complete:
+                raise OpenAICodexWebsocketUnavailableError(
+                    f"websocket connection failed: {detail}"
+                ) from exc
+            raise OpenAICodexWebsocketTransportError(detail) from exc
+        if not state["terminal_seen"]:
+            close_code = getattr(active_connection, "close_code", None)
+            close_reason = str(getattr(active_connection, "close_reason", None) or "")
+            idle_seconds = time.monotonic() - last_event_at
+            event_count = state["valid_events"]
+            raise OpenAICodexWebsocketTransportError(
+                "websocket closed by server before response.completed "
+                f"(close_code={close_code}, close_reason={close_reason!r}, "
+                f"events={event_count}, idle_seconds={idle_seconds:.1f}, "
+                f"max_loop_stall_seconds={stall['max']:.1f})"
+            )
+        return self._finalize_stream_state(state)
+
+    async def _stream_completion_with_retry(
+        self,
+        url: str,
+        *,
+        payload: Dict[str, Any],
+        headers: Dict[str, str],
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+        retry_model: str,
+        request_attempt_start: int = 0,
+    ) -> tuple[Optional[Dict[str, Any]], int, str]:
+        """Consume a Codex turn incrementally, websocket first, retrying transport/HTTP failures.
+
+        A rejected websocket handshake falls back to the HTTP/SSE stream for that
+        attempt; a websocket or SSE stream that ends before response.completed is
+        retried sequentially with the transport named in the activity detail.
+        """
+        # Compatibility for narrow injected test transports. The production
+        # httpx.AsyncClient always exposes stream(), so runtime Codex traffic
+        # cannot enter this buffered adapter.
+        if not hasattr(self.client, "stream"):
+            response = await self._post_with_retry(
+                url,
+                retry_callback=retry_callback,
+                retry_model=retry_model,
+                json=payload,
+                headers=headers,
+            )
+            if hasattr(response, "aread"):
+                raw_body = (await response.aread()).decode("utf-8", errors="replace")
+            else:
+                raw_body = str(getattr(response, "text", "") or "")
+            if response.status_code >= 400:
+                return None, response.status_code, raw_body
+            return self._decode_response_body(raw_body), response.status_code, ""
+
+        max_attempts = self._max_attempts()
+        for attempt in range(request_attempt_start, max_attempts):
+            state = self._new_stream_state()
+            started_at = time.monotonic()
+            transport = "websocket" if self._websocket_transport_allowed() else "SSE"
+            try:
+                if transport == "websocket":
+                    try:
+                        data = await self._websocket_completion_attempt(
+                            payload=payload,
+                            headers=headers,
+                            state=state,
+                        )
+                        return data, 200, ""
+                    except OpenAICodexWebsocketUnavailableError as exc:
+                        self._note_websocket_unavailable(exc)
+                        transport = "SSE"
+                        state = self._new_stream_state()
+                        started_at = time.monotonic()
+                async with self.client.stream(
+                    "POST",
+                    url,
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    if response.status_code >= 400:
+                        raw_body = (await response.aread()).decode("utf-8", errors="replace")
+                        if self._is_transient_completion_response_text(response.status_code, raw_body):
+                            detail = sanitize_provider_error_text(
+                                raw_body,
+                                max_chars=self.LIVE_ERROR_DETAIL_LIMIT,
+                            )
+                            if attempt < max_attempts - 1:
+                                delay = self._retry_delay(attempt)
+                                await self._notify_stream_retry(
+                                    retry_callback,
+                                    retry_model=retry_model,
+                                    attempt=attempt,
+                                    max_attempts=max_attempts,
+                                    delay=delay,
+                                    reason="transient_http_error",
+                                    detail=(
+                                        f"HTTP {response.status_code} transient response. Detail: {detail}"
+                                    ),
+                                )
+                                if retry_callback is None:
+                                    await assured_retry_wait(
+                                        {
+                                            "provider": "openai_codex_oauth",
+                                            "provider_label": "OpenAI Codex",
+                                            "model": retry_model,
+                                            "retry_attempt": attempt + 1,
+                                            "max_attempts": max_attempts,
+                                            "retry_after_seconds": delay,
+                                            "reason": "transient_http_error",
+                                            "error_summary": detail,
+                                        },
+                                        role_id="openai_codex_direct",
+                                    )
+                                continue
+                            raise OpenAICodexRequestError(
+                                f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries: "
+                                f"HTTP {response.status_code}: {detail}",
+                                status_code=response.status_code,
+                                error_code=self._error_code_from_text(raw_body),
+                                failure_kind="transient_http_exhausted",
+                            )
+                        return None, response.status_code, raw_body
+
+                    content_type = str(response.headers.get("content-type") or "").lower()
+                    if "application/json" in content_type:
+                        raw_body = (await response.aread()).decode("utf-8", errors="replace")
+                        return self._decode_response_body(raw_body), response.status_code, ""
+
+                    try:
+                        async for event_data in self._iter_stream_data(response):
+                            self._consume_stream_event_data(event_data, state)
+                    except httpx.TransportError as exc:
+                        if state["terminal_seen"]:
+                            logger.warning(
+                                "OpenAI Codex transport ended after response.completed; "
+                                "using the confirmed terminal response (error=%s)",
+                                sanitize_provider_error_text(
+                                    f"[{type(exc).__name__}] {exc}",
+                                    max_chars=self.LIVE_ERROR_DETAIL_LIMIT,
+                                ),
+                            )
+                            return self._finalize_stream_state(state), response.status_code, ""
+                        raise
+                    return self._finalize_stream_state(state), response.status_code, ""
+            except asyncio.CancelledError:
+                raise
+            except (httpx.TransportError, OpenAICodexWebsocketTransportError) as exc:
+                elapsed = time.monotonic() - started_at
+                detail = sanitize_provider_error_text(
+                    f"[{type(exc).__name__}] {exc}",
+                    max_chars=self.LIVE_ERROR_DETAIL_LIMIT,
+                )
+                terminal_seen = bool(state["terminal_seen"])
+                outcome = (
+                    "A terminal completion was received."
+                    if terminal_seen
+                    else "No terminal completion was received; the remote outcome is unknown."
+                )
+                safe_detail = (
+                    f"A remote peer or network intermediary closed the Codex {transport} stream after "
+                    f"{elapsed:.1f}s. {outcome} Detail: {detail}"
+                )
+                if terminal_seen:
+                    return self._finalize_stream_state(state), 200, ""
+                safe_detail = f"{safe_detail} {self._transport_drop_guidance(transport, elapsed)}"
+                if attempt < max_attempts - 1:
+                    delay = self._retry_delay(attempt)
+                    await self._notify_stream_retry(
+                        retry_callback,
+                        retry_model=retry_model,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        delay=delay,
+                        reason="connection_error",
+                        detail=safe_detail,
+                    )
+                    if retry_callback is None:
+                        await assured_retry_wait(
+                            {
+                                "provider": "openai_codex_oauth",
+                                "provider_label": "OpenAI Codex",
+                                "model": retry_model,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": max_attempts,
+                                "retry_after_seconds": delay,
+                                "reason": "connection_error",
+                                "error_summary": safe_detail,
+                            },
+                            role_id="openai_codex_direct",
+                        )
+                    continue
+                raise OpenAICodexRequestError(
+                    f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries: {safe_detail}",
+                    failure_kind="transport_exhausted",
+                ) from exc
+        raise AssertionError("unreachable Codex stream retry state")
+
+    @classmethod
+    def _is_transient_completion_response_text(cls, status_code: int, body: str) -> bool:
+        return status_code in cls.TRANSIENT_COMPLETION_STATUS_CODES
+
+    async def _notify_stream_retry(
+        self,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+        *,
+        retry_model: str,
+        attempt: int,
+        max_attempts: int,
+        delay: float,
+        reason: str,
+        detail: str,
+    ) -> None:
+        safe_detail = sanitize_provider_error_text(
+            detail,
+            max_chars=self.LIVE_ERROR_DETAIL_LIMIT,
+        )
+        logger.warning(
+            "OpenAI Codex request attempt %s/%s failed; retrying in %.1fs: %s",
+            attempt + 1,
+            max_attempts,
+            delay,
+            safe_detail,
+        )
+        if retry_callback is not None:
+            await retry_callback({
+                "provider": "openai_codex_oauth",
+                "provider_label": "OpenAI Codex",
+                "model": retry_model,
+                "retry_attempt": attempt + 1,
+                "max_attempts": max_attempts,
+                "retry_after_seconds": delay,
+                "reason": reason,
+                "error_summary": safe_detail,
+                "message": (
+                    f"OpenAI Codex request attempt {attempt + 1}/{max_attempts} failed. "
+                    f"{safe_detail} Retrying in {delay:g} seconds."
+                ),
+            })
 
     async def generate_completion(
         self,
@@ -1023,7 +1688,9 @@ class OpenAICodexClient:
             reasoning_metadata = await self._model_reasoning_metadata(requested_model)
         reasoning = self._reasoning_config(reasoning_effort, reasoning_metadata)
         if reasoning:
-            payload["reasoning"] = reasoning
+            # Reasoning summaries keep events flowing during long thinking phases so
+            # the websocket (or SSE) stream is never idle for minutes at a time.
+            payload["reasoning"] = {**reasoning, "summary": "auto"}
         text_format = self._response_format(response_format)
         if text_format:
             payload["text"] = text_format
@@ -1034,34 +1701,42 @@ class OpenAICodexClient:
                 payload["tool_choice"] = "auto" if tool_choice == "auto" else tool_choice
 
         auth_retry_used = False
-        stream_retries_used = 0
+        request_attempt_start = 0
         while True:
-            response = await self._post_with_retry(
-                f"{self.CODEX_BASE_URL}/responses",
-                retry_callback=retry_callback,
-                retry_model=requested_model,
-                json=payload,
-                headers=self._headers(tokens, accept_stream=True),
-            )
-            if response.status_code >= 400:
-                usage_error = self._usage_limit_error_from_text(response.text)
-                if usage_error is not None:
-                    raise usage_error
-                message = f"OpenAI Codex completion failed: {sanitize_provider_error_text(response.text)}"
-                if response.status_code in {401, 403}:
-                    if not auth_retry_used:
-                        tokens = await self._recover_tokens_after_auth_failure(tokens, context="completion")
-                        auth_retry_used = True
-                        continue
-                    raise OpenAICodexAuthError(message)
-                raise OpenAICodexRequestError(
-                    message,
-                    status_code=response.status_code,
-                    error_code=self._error_code_from_text(response.text),
-                    failure_kind="http_rejected",
-                )
             try:
-                data = self._decode_response_body(response.text)
+                data, status_code, response_text = await self._stream_completion_with_retry(
+                    f"{self.CODEX_BASE_URL}/responses",
+                    payload=payload,
+                    headers=self._headers(tokens, accept_stream=True),
+                    retry_callback=retry_callback,
+                    retry_model=requested_model,
+                    request_attempt_start=request_attempt_start,
+                )
+                if status_code >= 400:
+                    usage_error = self._usage_limit_error_from_text(response_text)
+                    if usage_error is not None:
+                        raise usage_error
+                    message = (
+                        "OpenAI Codex completion failed: "
+                        f"{sanitize_provider_error_text(response_text, max_chars=self.LIVE_ERROR_DETAIL_LIMIT)}"
+                    )
+                    if status_code in {401, 403}:
+                        if not auth_retry_used:
+                            tokens = await self._recover_tokens_after_auth_failure(tokens, context="completion")
+                            auth_retry_used = True
+                            continue
+                        raise OpenAICodexAuthError(message)
+                    raise OpenAICodexRequestError(
+                        message,
+                        status_code=status_code,
+                        error_code=self._error_code_from_text(response_text),
+                        failure_kind="http_rejected",
+                    )
+                if data is None:
+                    raise OpenAICodexRequestError(
+                        "OpenAI Codex stream returned no response data.",
+                        failure_kind="empty_stream",
+                    )
                 break
             except OpenAICodexRequestError as exc:
                 if self._is_auth_failure_text(str(exc)) and not auth_retry_used:
@@ -1070,29 +1745,62 @@ class OpenAICodexClient:
                     continue
                 if self._is_auth_failure_text(str(exc)):
                     raise OpenAICodexAuthError(str(exc)) from exc
+                if exc.failure_kind in {
+                    "response_incomplete",
+                    "transient_http_exhausted",
+                    "transport_exhausted",
+                }:
+                    raise
                 if self._is_transient_completion_text(str(exc)):
-                    if stream_retries_used < self.MAX_RETRIES:
-                        delay = self._retry_delay(stream_retries_used)
-                        stream_retries_used += 1
+                    if request_attempt_start < self.MAX_RETRIES:
+                        failed_attempt = request_attempt_start
+                        delay = self._retry_delay(failed_attempt)
+                        request_attempt_start += 1
                         logger.warning(
-                            "OpenAI Codex transient streamed response (retry %s/%s): %s; "
+                            "OpenAI Codex transient streamed response (request attempt %s/%s): %s; "
                             "retrying in %.1fs",
-                            stream_retries_used,
-                            self.MAX_RETRIES,
+                            failed_attempt + 1,
+                            self._max_attempts(),
                             sanitize_provider_error_text(str(exc)),
                             delay,
                         )
                         if retry_callback is not None:
+                            safe_detail = sanitize_provider_error_text(
+                                str(exc),
+                                max_chars=self.LIVE_ERROR_DETAIL_LIMIT,
+                            )
                             await retry_callback({
                                 "provider": "openai_codex_oauth",
                                 "provider_label": "OpenAI Codex",
                                 "model": requested_model,
-                                "retry_attempt": stream_retries_used,
-                                "max_attempts": self.MAX_RETRIES,
+                                "retry_attempt": failed_attempt + 1,
+                                "max_attempts": self._max_attempts(),
                                 "retry_after_seconds": delay,
                                 "reason": "stream_error",
+                                "error_summary": safe_detail,
+                                "message": (
+                                    f"OpenAI Codex returned a transient stream error. "
+                                    f"Detail: {safe_detail} Retrying in {delay:g} seconds "
+                                    f"(request attempt {failed_attempt + 1}/{self._max_attempts()})."
+                                ),
                             })
-                        await asyncio.sleep(delay)
+                        else:
+                            await assured_retry_wait(
+                                {
+                                    "provider": "openai_codex_oauth",
+                                    "provider_label": "OpenAI Codex",
+                                    "model": requested_model,
+                                    "retry_attempt": failed_attempt + 1,
+                                    "max_attempts": self._max_attempts(),
+                                    "retry_after_seconds": delay,
+                                    "reason": "stream_error",
+                                    "error_summary": sanitize_provider_error_text(
+                                        str(exc),
+                                        max_chars=self.LIVE_ERROR_DETAIL_LIMIT,
+                                    ),
+                                },
+                                role_id="openai_codex_direct",
+                            )
                         continue
                     raise OpenAICodexRequestError(
                         f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries "

@@ -20,7 +20,7 @@ from backend.shared.proof_search.models import (
 )
 
 RESULT_CAP = 7
-PROOF_SEARCH_INDEX_SCHEMA_VERSION = 4
+PROOF_SEARCH_INDEX_SCHEMA_VERSION = 7
 
 
 class ProofSearchIndexer:
@@ -517,6 +517,9 @@ class ProofSearchIndexer:
                 canonical_identity_version TEXT NOT NULL DEFAULT '',
                 canonical_lean_code_hash TEXT NOT NULL DEFAULT '',
                 canonical_theorem_statement_hash TEXT NOT NULL DEFAULT '',
+                client_proof_id TEXT NOT NULL DEFAULT '',
+                canonical_locator_json TEXT NOT NULL DEFAULT '',
+                canonical_locator_digest TEXT NOT NULL DEFAULT '',
                 imports_json TEXT NOT NULL,
                 dependency_names_json TEXT NOT NULL,
                 topic_tags_json TEXT NOT NULL,
@@ -525,6 +528,9 @@ class ProofSearchIndexer:
                 source_path TEXT NOT NULL,
                 novelty_tier TEXT NOT NULL,
                 novelty_reasoning TEXT NOT NULL,
+                novelty_scope TEXT NOT NULL DEFAULT 'standalone',
+                novelty_group_claim TEXT NOT NULL DEFAULT '',
+                novelty_group_proof_ids_json TEXT NOT NULL DEFAULT '[]',
                 verified INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 live_context_status TEXT NOT NULL DEFAULT 'active',
@@ -550,6 +556,30 @@ class ProofSearchIndexer:
         if "canonical_theorem_statement_hash" not in columns:
             conn.execute(
                 "ALTER TABLE proof_records ADD COLUMN canonical_theorem_statement_hash TEXT NOT NULL DEFAULT ''"
+            )
+        if "client_proof_id" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN client_proof_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "canonical_locator_json" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN canonical_locator_json TEXT NOT NULL DEFAULT ''"
+            )
+        if "canonical_locator_digest" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN canonical_locator_digest TEXT NOT NULL DEFAULT ''"
+            )
+        if "novelty_scope" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN novelty_scope TEXT NOT NULL DEFAULT 'standalone'"
+            )
+        if "novelty_group_claim" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN novelty_group_claim TEXT NOT NULL DEFAULT ''"
+            )
+        if "novelty_group_proof_ids_json" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN novelty_group_proof_ids_json TEXT NOT NULL DEFAULT '[]'"
             )
         if "live_context_status" not in columns:
             conn.execute(
@@ -600,10 +630,20 @@ class ProofSearchIndexer:
         payload = record.model_dump(mode="json")
         return {
             **payload,
+            "canonical_locator_json": (
+                json.dumps(
+                    record.canonical_locator.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if record.canonical_locator is not None
+                else ""
+            ),
             "imports_json": json.dumps(record.imports),
             "dependency_names_json": json.dumps(record.dependency_names),
             "topic_tags_json": json.dumps(record.topic_tags),
             "domain_tags_json": json.dumps(record.domain_tags),
+            "novelty_group_proof_ids_json": json.dumps(record.novelty_group_proof_ids),
             "metadata_json": json.dumps(record.metadata),
             "verified": 1 if record.verified else 0,
         }
@@ -825,6 +865,13 @@ class ProofSearchIndexer:
             canonical_theorem_statement_hash=str(
                 row["canonical_theorem_statement_hash"] or ""
             ),
+            client_proof_id=str(row["client_proof_id"] or ""),
+            canonical_locator=(
+                json.loads(str(row["canonical_locator_json"]))
+                if str(row["canonical_locator_json"] or "")
+                else None
+            ),
+            canonical_locator_digest=str(row["canonical_locator_digest"] or ""),
             imports=_json_list("imports_json"),
             dependency_names=_json_list("dependency_names_json"),
             topic_tags=_json_list("topic_tags_json"),
@@ -833,6 +880,9 @@ class ProofSearchIndexer:
             source_path=row["source_path"],
             novelty_tier=row["novelty_tier"],
             novelty_reasoning=row["novelty_reasoning"],
+            novelty_scope=row["novelty_scope"],
+            novelty_group_claim=row["novelty_group_claim"],
+            novelty_group_proof_ids=_json_list("novelty_group_proof_ids_json"),
             verified=bool(row["verified"]),
             created_at=row["created_at"],
             live_context_status=row["live_context_status"],
@@ -897,8 +947,10 @@ _PROOF_RECORD_INSERT_SQL = """
         informal_statement, proof_description, formal_sketch, lean_code,
         lean_code_hash, theorem_statement_hash, canonical_identity_version,
         canonical_lean_code_hash, canonical_theorem_statement_hash, imports_json,
+        client_proof_id, canonical_locator_json, canonical_locator_digest,
         dependency_names_json, topic_tags_json, domain_tags_json, module,
-        source_path, novelty_tier, novelty_reasoning, verified, created_at,
+        source_path, novelty_tier, novelty_reasoning, novelty_scope,
+        novelty_group_claim, novelty_group_proof_ids_json, verified, created_at,
         live_context_status, live_context_owner_run_id, live_context_pruned_at,
         live_context_pruned_by, canonical_uri, metadata_json
     ) VALUES (
@@ -908,8 +960,10 @@ _PROOF_RECORD_INSERT_SQL = """
         :informal_statement, :proof_description, :formal_sketch, :lean_code,
         :lean_code_hash, :theorem_statement_hash, :canonical_identity_version,
         :canonical_lean_code_hash, :canonical_theorem_statement_hash, :imports_json,
+        :client_proof_id, :canonical_locator_json, :canonical_locator_digest,
         :dependency_names_json, :topic_tags_json, :domain_tags_json, :module,
-        :source_path, :novelty_tier, :novelty_reasoning, :verified, :created_at,
+        :source_path, :novelty_tier, :novelty_reasoning, :novelty_scope,
+        :novelty_group_claim, :novelty_group_proof_ids_json, :verified, :created_at,
         :live_context_status, :live_context_owner_run_id, :live_context_pruned_at,
         :live_context_pruned_by, :canonical_uri, :metadata_json
     )

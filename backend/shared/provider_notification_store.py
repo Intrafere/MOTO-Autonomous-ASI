@@ -17,6 +17,18 @@ logger = logging.getLogger(__name__)
 PROVIDER_NOTIFICATIONS_FILENAME = "provider_notifications.json"
 MAX_PROVIDER_NOTIFICATIONS = 20
 PROVIDER_NOTIFICATION_TTL_SECONDS = 7 * 24 * 60 * 60
+# Route identity fields stored right after ``model``. ``route_identity`` holds
+# the composed display prefix and must fit it byte-for-byte (composer cap 480).
+_ROUTE_IDENTITY_TEXT_LIMITS = (
+    ("model_role_id", 160),
+    ("role_label", 160),
+    ("route_kind", 40),
+    ("configured_host_provider", 80),
+    ("effective_host_provider", 120),
+    ("host_routing", 20),
+    ("provider_request_id", 80),
+    ("route_identity", 600),
+)
 
 _store_lock = threading.Lock()
 
@@ -62,15 +74,17 @@ def _read_payload() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {"notifications": []}
 
 
-def _write_payload(payload: dict[str, Any]) -> None:
+def _write_payload(payload: dict[str, Any]) -> bool:
     path = _notifications_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_name(f".{path.name}.tmp")
         temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temp_path.replace(path)
+        return True
     except OSError as exc:
         logger.warning("Failed to persist provider notifications file %s: %s", redact_log_text(path, 240), exc)
+        return False
 
 
 def _clean_notifications(notifications: list[Any]) -> list[dict[str, Any]]:
@@ -117,19 +131,30 @@ def record_provider_notification(event_type: str, payload: Dict[str, Any]) -> di
     key_model = model
     if reason == "usage_limit_reached" and payload.get("cooldown_until") is not None:
         key_model = f"{model or '*'}@{payload.get('cooldown_until')}"
-    explicit_key = _safe_string(payload.get("notification_key"), 240)
+    explicit_key = _safe_string(
+        payload.get("notification_key") or payload.get("event_id"),
+        240,
+    )
     notification_key = explicit_key or _stable_notification_key(provider, role_id, reason, key_model)
     notification_id = _safe_string(payload.get("id"), 240) or notification_key
 
     notification = {
         "id": notification_id,
         "notification_key": notification_key,
-        "event_type": _safe_string(event_type, 120),
+        "event_type": _safe_string(payload.get("event_type"), 120)
+        or _safe_string(event_type, 120),
+        "legacy_event_type": _safe_string(event_type, 120),
+        "contract_version": max(1, int(payload.get("contract_version") or 1)),
         "created_at": created_at,
         "provider": provider,
         "provider_label": _safe_string(payload.get("provider_label"), 120),
         "role_id": role_id,
         "model": model,
+    }
+    for text_key, max_chars in _ROUTE_IDENTITY_TEXT_LIMITS:
+        if payload.get(text_key) is not None:
+            notification[text_key] = _safe_string(payload.get(text_key), max_chars)
+    notification.update({
         "reason": reason,
         "recoverable": bool(payload.get("recoverable", False)),
         "message": _safe_string(payload.get("message"), 700),
@@ -145,8 +170,32 @@ def record_provider_notification(event_type: str, payload: Dict[str, Any]) -> di
         "run_id": _safe_string(payload.get("run_id"), 160),
         "title": _safe_string(payload.get("title"), 240),
         "terminal_guidance": _safe_string(payload.get("terminal_guidance"), 1800),
-    }
-    for numeric_key in ("resets_at", "resets_in_seconds", "cooldown_until"):
+    })
+    for text_key, max_chars in (
+        ("event_id", 240),
+        ("correlation_id", 240),
+        ("task_id", 160),
+        ("retry_layer", 40),
+        ("recovery_action", 80),
+        ("configured_provider", 120),
+        ("configured_model", 240),
+        ("effective_provider", 120),
+        ("effective_model", 240),
+        ("fallback_provider", 120),
+        ("source_type", 40),
+        ("source_id", 240),
+        ("proof_run_id", 120),
+    ):
+        if text_key in payload:
+            notification[text_key] = _safe_string(payload.get(text_key), max_chars)
+    for numeric_key in (
+        "retry_attempt",
+        "max_attempts",
+        "retry_after_seconds",
+        "resets_at",
+        "resets_in_seconds",
+        "cooldown_until",
+    ):
         raw_value = payload.get(numeric_key)
         if raw_value is None:
             continue
@@ -168,8 +217,19 @@ def record_provider_notification(event_type: str, payload: Dict[str, Any]) -> di
         ]
         notifications.append(notification)
         stored_payload["notifications"] = notifications[-MAX_PROVIDER_NOTIFICATIONS:]
-        _write_payload(stored_payload)
+        persisted = _write_payload(stored_payload)
 
+    notification["persistence_status"] = "durable" if persisted else "degraded"
+    notification["persistence_degraded"] = not persisted
+    if not persisted:
+        persistence_detail = (
+            "Live activity was delivered, but durable recovery storage was unavailable."
+        )
+        notification["persistence_detail"] = persistence_detail
+        notification["activity_detail"] = persistence_detail
+        notification["message"] = " ".join(
+            part for part in (notification.get("message", ""), persistence_detail) if part
+        )
     return notification
 
 

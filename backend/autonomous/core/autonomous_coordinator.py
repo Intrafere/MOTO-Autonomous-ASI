@@ -49,6 +49,13 @@ from backend.shared.provider_pause import (
     wait_for_provider_resume,
 )
 from backend.shared.provider_errors import ProviderRepairRequiredError
+from backend.shared.provider_route_identity import (
+    is_model_provider,
+    merge_route_identity,
+    route_identity_fields,
+    route_identity_from_error,
+    with_route_identity,
+)
 
 # Memory managers
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
@@ -115,6 +122,61 @@ def _proof_recovery_config_fingerprint(config: Dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _merge_route_fields(payload: Dict[str, Any], fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill missing route identity keys without overriding producer-supplied values.
+
+    ``configured_host_provider`` keeps ``""`` (OpenRouter auto routing) distinct
+    from an absent or ``None`` host, so only those are filled.
+    """
+    merged = merge_route_identity(payload, fields)
+    host = fields.get("configured_host_provider")
+    if host is not None and merged.get("configured_host_provider") is None:
+        merged["configured_host_provider"] = host
+    return merged
+
+
+def _terminal_route_identity(details: Dict[str, Any]) -> Dict[str, str]:
+    """Compose Autonomous route identity from a terminal payload's model-route keys.
+
+    Only payloads naming a role and a model provider qualify, so workflow-loop
+    terminals never gain a fabricated model or host. Composed host fields from a
+    child payload are mapped back to raw inputs so the upstream host survives.
+    """
+    role_id = str(details.get("role_id") or "")
+    provider = str(details.get("effective_provider") or details.get("provider") or "")
+    if details.get("route_identity") or not role_id or not is_model_provider(provider):
+        return {}
+    host_routing = str(details.get("host_routing") or "")
+    configured_host = details.get("configured_host_provider")
+    effective_host = str(details.get("effective_host_provider") or "")
+    upstream_host = str(details.get("upstream_host_provider") or "")
+    if not upstream_host and effective_host and (
+        host_routing in ("auto", "auto_fallback")
+        or (configured_host and effective_host != configured_host)
+    ):
+        upstream_host = effective_host
+    auto_fallback_from = str(details.get("auto_fallback_from_host") or "")
+    if host_routing == "auto_fallback" and not auto_fallback_from:
+        auto_fallback_from = str(configured_host or "")
+    return route_identity_fields(
+        workflow_mode="autonomous",
+        role_id=role_id,
+        model_role_id=details.get("model_role_id") or "",
+        model=details.get("effective_model") or details.get("model") or "",
+        provider=provider,
+        provider_label_text=details.get("provider_label") or "",
+        route_kind=details.get("route_kind") or "",
+        task_id=details.get("task_id") or "",
+        configured_model=details.get("configured_model") or "",
+        configured_provider=details.get("configured_provider") or "",
+        configured_host_provider=None if configured_host is None else str(configured_host),
+        upstream_host_provider=upstream_host,
+        auto_fallback_from_host=auto_fallback_from,
+        provider_request_id=details.get("provider_request_id") or "",
+    )
+
 
 _PARENT_PHASE_SHUTDOWN_TIMEOUT_SECONDS = 60 * 60
 _WORKFLOW_PHASE_UNSET = object()
@@ -304,7 +366,15 @@ class AutonomousCoordinator:
         """Broadcast an event through WebSocket."""
         if self._broadcast_callback:
             # broadcast_event expects (event_type, data) as separate arguments
-            await self._broadcast_callback(event, data or {})
+            payload = dict(data or {})
+            payload.setdefault("activity_workflow", "autonomous")
+            payload.setdefault(
+                "run_id",
+                self._run_id or getattr(session_manager, "session_id", "") or "",
+            )
+            payload.setdefault("lifecycle_generation", self._lifecycle_generation)
+            payload.setdefault("phase", str(self._state.current_tier or ""))
+            await self._broadcast_callback(event, payload)
 
     def _build_terminal_event(
         self,
@@ -314,6 +384,19 @@ class AutonomousCoordinator:
         payload: Optional[Dict[str, Any]] = None,
     ) -> AutonomousTerminalEvent:
         details = dict(payload or {})
+        child_mode = str(details.get("workflow_mode") or "").strip().lower()
+        if child_mode and child_mode != "autonomous":
+            # A child Aggregator/Compiler payload may name its own workflow surface;
+            # the terminal event is always Autonomous-owned, so its identity is
+            # recomposed for this run instead of copied.
+            details.pop("workflow_mode", None)
+            child_identity = str(details.pop("route_identity", "") or "").strip()
+            if child_identity and message.startswith(child_identity):
+                message = message[len(child_identity):].lstrip()
+        if reason != CONTEXT_OVERFLOW_STOP_REASON:
+            # Overflow terminals keep their dedicated route-identity contract.
+            details = _merge_route_fields(details, _terminal_route_identity(details))
+            message = with_route_identity(message, details)
         run_id = self._run_id or getattr(session_manager, "session_id", "") or "legacy"
         event_seed = (
             f"{run_id}:{self._lifecycle_generation}:{reason}:"
@@ -391,18 +474,31 @@ class AutonomousCoordinator:
             f"Research stopped because {error.provider_label} could not serve "
             f"model '{model}' for role '{role_id}'."
         )
+        route = api_client_manager.route_identity_for_role(
+            error.role_id,
+            workflow_mode="autonomous",
+            error=error,
+        )
         self._mark_terminal_stop(
             reason=error.reason or "provider_repair_required",
             message=message,
             payload={
                 "notification_kind": "model_error",
                 "role_id": role_id,
+                "role_label": route.get("role_label"),
                 "configured_model": error.configured_model or model,
                 "configured_provider": error.configured_provider or error.provider,
+                "configured_host_provider": route.get("configured_host_provider"),
                 "effective_model": model,
                 "effective_provider": error.provider,
-                "effective_host_provider": error.effective_host_provider or None,
+                "effective_host_provider": (
+                    error.effective_host_provider
+                    or route.get("effective_host_provider")
+                    or None
+                ),
+                "host_routing": route.get("host_routing"),
                 "route_kind": error.route_kind or None,
+                "route_identity": route.get("route_identity"),
                 "resolution": error.terminal_guidance,
                 "terminal_guidance": error.terminal_guidance,
                 "error_detail": error.safe_message,
@@ -488,6 +584,16 @@ class AutonomousCoordinator:
     def _get_effective_user_research_prompt(self) -> str:
         """Return the current research prompt with all proof context applied."""
         return self._apply_proof_context(self._user_research_prompt)
+
+    async def _get_brainstorm_model_context(self, topic_id: str) -> str:
+        """Read the run projection, retaining compatibility with scoped adapters."""
+        getter = getattr(brainstorm_memory, "get_model_context_content", None)
+        if getter is not None:
+            return await getter(topic_id)
+        return await brainstorm_memory.get_database_content(
+            topic_id,
+            strip_proofs=True,
+        )
 
     async def _get_effective_brainstorm_prompt(self, topic_prompt: str) -> str:
         """Return the brainstorm prompt with proof context applied."""
@@ -1233,33 +1339,44 @@ class AutonomousCoordinator:
                     )
                     mark_provider_paused()
                     await self._save_workflow_state(phase=f"{source_type}_proof_verification")
+                    pause_route = api_client_manager.route_identity_for_role(
+                        route_identity_from_error(exc).get("role_id") or "autonomous_proof",
+                        workflow_mode="autonomous",
+                        error=exc,
+                    )
                     await self._broadcast(
                         "autonomous_proof_provider_paused",
-                        {
-                            "source_type": source_type,
-                            "source_id": source_id,
-                            "source_title": source_title,
-                            "trigger": round_trigger,
-                            "proof_round_index": proof_round_index,
-                            "proof_max_rounds": proof_max_rounds,
-                            "reason": "openrouter_credit_exhaustion",
-                            "message": message,
-                        },
+                        _merge_route_fields(
+                            {
+                                "source_type": source_type,
+                                "source_id": source_id,
+                                "source_title": source_title,
+                                "trigger": round_trigger,
+                                "proof_round_index": proof_round_index,
+                                "proof_max_rounds": proof_max_rounds,
+                                "reason": "openrouter_credit_exhaustion",
+                                "message": message,
+                            },
+                            pause_route,
+                        ),
                     )
                     await wait_for_provider_resume(self._stop_event.is_set)
                     if self._stop_event.is_set():
                         return "stopped", None
                     await self._broadcast(
                         "autonomous_proof_provider_resumed",
-                        {
-                            "source_type": source_type,
-                            "source_id": source_id,
-                            "source_title": source_title,
-                            "trigger": round_trigger,
-                            "proof_round_index": proof_round_index,
-                            "proof_max_rounds": proof_max_rounds,
-                            "reason": "openrouter_credit_exhaustion",
-                        },
+                        _merge_route_fields(
+                            {
+                                "source_type": source_type,
+                                "source_id": source_id,
+                                "source_title": source_title,
+                                "trigger": round_trigger,
+                                "proof_round_index": proof_round_index,
+                                "proof_max_rounds": proof_max_rounds,
+                                "reason": "openrouter_credit_exhaustion",
+                            },
+                            pause_route,
+                        ),
                     )
                 except RetryableProviderError as exc:
                     checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
@@ -1285,18 +1402,26 @@ class AutonomousCoordinator:
                         message,
                     )
                     await self._save_workflow_state(phase=f"{source_type}_proof_verification")
+                    pause_route = api_client_manager.route_identity_for_role(
+                        route_identity_from_error(exc).get("role_id") or "autonomous_proof",
+                        workflow_mode="autonomous",
+                        error=exc,
+                    )
                     await self._broadcast(
                         "autonomous_proof_provider_paused",
-                        {
-                            "source_type": source_type,
-                            "source_id": source_id,
-                            "source_title": source_title,
-                            "trigger": round_trigger,
-                            "proof_round_index": proof_round_index,
-                            "proof_max_rounds": proof_max_rounds,
-                            "reason": exc.reason or "transient_provider_error",
-                            "message": message,
-                        },
+                        _merge_route_fields(
+                            {
+                                "source_type": source_type,
+                                "source_id": source_id,
+                                "source_title": source_title,
+                                "trigger": round_trigger,
+                                "proof_round_index": proof_round_index,
+                                "proof_max_rounds": proof_max_rounds,
+                                "reason": exc.reason or "transient_provider_error",
+                                "message": message,
+                            },
+                            pause_route,
+                        ),
                     )
                     await api_client_manager.wait_for_retryable_provider_error(
                         exc,
@@ -1307,15 +1432,18 @@ class AutonomousCoordinator:
                         return "stopped", None
                     await self._broadcast(
                         "autonomous_proof_provider_resumed",
-                        {
-                            "source_type": source_type,
-                            "source_id": source_id,
-                            "source_title": source_title,
-                            "trigger": round_trigger,
-                            "proof_round_index": proof_round_index,
-                            "proof_max_rounds": proof_max_rounds,
-                            "reason": exc.reason or "transient_provider_error",
-                        },
+                        _merge_route_fields(
+                            {
+                                "source_type": source_type,
+                                "source_id": source_id,
+                                "source_title": source_title,
+                                "trigger": round_trigger,
+                                "proof_round_index": proof_round_index,
+                                "proof_max_rounds": proof_max_rounds,
+                                "reason": exc.reason or "transient_provider_error",
+                            },
+                            pause_route,
+                        ),
                     )
                 except Exception as exc:
                     if not is_provider_credit_pause_error(exc):
@@ -1344,33 +1472,44 @@ class AutonomousCoordinator:
                     )
                     mark_provider_paused()
                     await self._save_workflow_state(phase=f"{source_type}_proof_verification")
+                    pause_route = api_client_manager.route_identity_for_role(
+                        route_identity_from_error(exc).get("role_id") or "autonomous_proof",
+                        workflow_mode="autonomous",
+                        error=exc,
+                    )
                     await self._broadcast(
                         "autonomous_proof_provider_paused",
-                        {
-                            "source_type": source_type,
-                            "source_id": source_id,
-                            "source_title": source_title,
-                            "trigger": round_trigger,
-                            "proof_round_index": proof_round_index,
-                            "proof_max_rounds": proof_max_rounds,
-                            "reason": "openrouter_credit_exhaustion",
-                            "message": message,
-                        },
+                        _merge_route_fields(
+                            {
+                                "source_type": source_type,
+                                "source_id": source_id,
+                                "source_title": source_title,
+                                "trigger": round_trigger,
+                                "proof_round_index": proof_round_index,
+                                "proof_max_rounds": proof_max_rounds,
+                                "reason": "openrouter_credit_exhaustion",
+                                "message": message,
+                            },
+                            pause_route,
+                        ),
                     )
                     await wait_for_provider_resume(self._stop_event.is_set)
                     if self._stop_event.is_set():
                         return "stopped", None
                     await self._broadcast(
                         "autonomous_proof_provider_resumed",
-                        {
-                            "source_type": source_type,
-                            "source_id": source_id,
-                            "source_title": source_title,
-                            "trigger": round_trigger,
-                            "proof_round_index": proof_round_index,
-                            "proof_max_rounds": proof_max_rounds,
-                            "reason": "openrouter_credit_exhaustion",
-                        },
+                        _merge_route_fields(
+                            {
+                                "source_type": source_type,
+                                "source_id": source_id,
+                                "source_title": source_title,
+                                "trigger": round_trigger,
+                                "proof_round_index": proof_round_index,
+                                "proof_max_rounds": proof_max_rounds,
+                                "reason": "openrouter_credit_exhaustion",
+                            },
+                            pause_route,
+                        ),
                     )
             return "stopped", None
 
@@ -1425,9 +1564,8 @@ class AutonomousCoordinator:
         )
 
         metadata = await brainstorm_memory.get_metadata(self._current_topic_id)
-        brainstorm_content = await brainstorm_memory.get_database_content(
+        brainstorm_content = await self._get_brainstorm_model_context(
             self._current_topic_id,
-            strip_proofs=True,
         )
         proof_status = await self._run_proof_verification(
             brainstorm_content,
@@ -1473,7 +1611,7 @@ class AutonomousCoordinator:
             recovered_count = max(recovered_count, int(metadata.submission_count or 0))
 
         try:
-            content = await brainstorm_memory.get_database_content(topic_id, strip_proofs=True)
+            content = await self._get_brainstorm_model_context(topic_id)
             file_count = len(
                 re.findall(r"^SUBMISSION\s+#\d+\s*\|", content or "", flags=re.MULTILINE)
             )
@@ -3338,7 +3476,18 @@ class AutonomousCoordinator:
                                     break
                                 if self._brainstorm_missing_during_paper:
                                     break
-                                await asyncio.sleep(5)
+                                await api_client_manager.emit_and_wait_for_retry(
+                                    {
+                                        "provider": "unknown",
+                                        "provider_label": "Autonomous paper compiler",
+                                        "role_id": "autonomous_paper_compiler",
+                                        "retry_attempt": 1,
+                                        "retry_after_seconds": 5,
+                                        "reason": "paper_compilation_retry",
+                                    },
+                                    role_id="autonomous_paper_compiler",
+                                    should_stop=self._stop_event.is_set,
+                                )
 
                             if self._stop_event.is_set():
                                 break
@@ -3366,7 +3515,18 @@ class AutonomousCoordinator:
                                     next_ok = await self._paper_compilation_workflow(skip_reference_selection=True)
                                     if next_ok or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                         break
-                                    await asyncio.sleep(5)
+                                    await api_client_manager.emit_and_wait_for_retry(
+                                        {
+                                            "provider": "unknown",
+                                            "provider_label": "Autonomous paper compiler",
+                                            "role_id": "autonomous_paper_compiler",
+                                            "retry_attempt": self._brainstorm_paper_count + 1,
+                                            "retry_after_seconds": 5,
+                                            "reason": "paper_compilation_retry",
+                                        },
+                                        role_id="autonomous_paper_compiler",
+                                        should_stop=self._stop_event.is_set,
+                                    )
                                 if self._brainstorm_missing_during_paper:
                                     break
                                 if not next_ok or self._stop_event.is_set():
@@ -3500,7 +3660,18 @@ class AutonomousCoordinator:
                                         f"Resume paper compilation attempt {_resume_paper_attempt} "
                                         f"for brainstorm {self._current_topic_id} - retrying..."
                                     )
-                                    await asyncio.sleep(5)
+                                    await api_client_manager.emit_and_wait_for_retry(
+                                        {
+                                            "provider": "unknown",
+                                            "provider_label": "Autonomous paper compiler",
+                                            "role_id": "autonomous_paper_compiler",
+                                            "retry_attempt": _resume_paper_attempt,
+                                            "retry_after_seconds": 5,
+                                            "reason": "paper_compilation_retry",
+                                        },
+                                        role_id="autonomous_paper_compiler",
+                                        should_stop=self._stop_event.is_set,
+                                    )
                                 if await self._paper_compilation_workflow(
                                     emit_resume_event=(_resume_paper_attempt == 1)
                                 ):
@@ -3534,7 +3705,18 @@ class AutonomousCoordinator:
                                     next_ok = await self._paper_compilation_workflow(skip_reference_selection=True)
                                     if next_ok or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                         break
-                                    await asyncio.sleep(5)
+                                    await api_client_manager.emit_and_wait_for_retry(
+                                        {
+                                            "provider": "unknown",
+                                            "provider_label": "Autonomous paper compiler",
+                                            "role_id": "autonomous_paper_compiler",
+                                            "retry_attempt": self._brainstorm_paper_count + 1,
+                                            "retry_after_seconds": 5,
+                                            "reason": "paper_compilation_retry",
+                                        },
+                                        role_id="autonomous_paper_compiler",
+                                        should_stop=self._stop_event.is_set,
+                                    )
                                 if self._brainstorm_missing_during_paper:
                                     break
                                 if not next_ok or self._stop_event.is_set():
@@ -3628,7 +3810,18 @@ class AutonomousCoordinator:
                                         f"Resume paper compilation attempt {_resume_paper_attempt} "
                                         f"for brainstorm {self._current_topic_id} - retrying..."
                                     )
-                                    await asyncio.sleep(5)
+                                    await api_client_manager.emit_and_wait_for_retry(
+                                        {
+                                            "provider": "unknown",
+                                            "provider_label": "Autonomous paper compiler",
+                                            "role_id": "autonomous_paper_compiler",
+                                            "retry_attempt": _resume_paper_attempt,
+                                            "retry_after_seconds": 5,
+                                            "reason": "paper_compilation_retry",
+                                        },
+                                        role_id="autonomous_paper_compiler",
+                                        should_stop=self._stop_event.is_set,
+                                    )
                                 if await self._paper_compilation_workflow():
                                     break
                                 if self._brainstorm_missing_during_paper:
@@ -3662,7 +3855,18 @@ class AutonomousCoordinator:
                                     next_ok = await self._paper_compilation_workflow(skip_reference_selection=True)
                                     if next_ok or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                         break
-                                    await asyncio.sleep(5)
+                                    await api_client_manager.emit_and_wait_for_retry(
+                                        {
+                                            "provider": "unknown",
+                                            "provider_label": "Autonomous paper compiler",
+                                            "role_id": "autonomous_paper_compiler",
+                                            "retry_attempt": self._brainstorm_paper_count + 1,
+                                            "retry_after_seconds": 5,
+                                            "reason": "paper_compilation_retry",
+                                        },
+                                        role_id="autonomous_paper_compiler",
+                                        should_stop=self._stop_event.is_set,
+                                    )
                                 if self._brainstorm_missing_during_paper:
                                     break
                                 if not next_ok or self._stop_event.is_set():
@@ -3829,7 +4033,18 @@ class AutonomousCoordinator:
                             f"Paper compilation attempt {_paper_attempt} for brainstorm "
                             f"{self._current_topic_id} (previous attempt failed) - retrying..."
                         )
-                        await asyncio.sleep(5)
+                        await api_client_manager.emit_and_wait_for_retry(
+                            {
+                                "provider": "unknown",
+                                "provider_label": "Autonomous paper compiler",
+                                "role_id": "autonomous_paper_compiler",
+                                "retry_attempt": _paper_attempt,
+                                "retry_after_seconds": 5,
+                                "reason": "paper_compilation_retry",
+                            },
+                            role_id="autonomous_paper_compiler",
+                            should_stop=self._stop_event.is_set,
+                        )
 
                     paper_success = await self._paper_compilation_workflow()
 
@@ -3868,7 +4083,18 @@ class AutonomousCoordinator:
                         while not self._stop_event.is_set():
                             _next_attempt += 1
                             if _next_attempt > 1:
-                                await asyncio.sleep(5)
+                                await api_client_manager.emit_and_wait_for_retry(
+                                    {
+                                        "provider": "unknown",
+                                        "provider_label": "Autonomous paper compiler",
+                                        "role_id": "autonomous_paper_compiler",
+                                        "retry_attempt": _next_attempt,
+                                        "retry_after_seconds": 5,
+                                        "reason": "paper_compilation_retry",
+                                    },
+                                    role_id="autonomous_paper_compiler",
+                                    should_stop=self._stop_event.is_set,
+                                )
                             next_paper_success = await self._paper_compilation_workflow(
                                 skip_reference_selection=True
                             )
@@ -3923,18 +4149,31 @@ class AutonomousCoordinator:
               except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
                 logger.warning(f"AutonomousCoordinator: all free models exhausted: {e}")
-                await self._broadcast("free_models_exhausted", {
-                    "role_id": "autonomous",
-                    "message": "All free models exhausted, waiting to retry",
-                })
-                await api_client_manager.broadcast_retry_cooldown(
+                # The exhausted role is named only when the error carries it;
+                # otherwise the event stays at mode and role level.
+                exhausted_route = api_client_manager.route_identity_for_role(
+                    route_identity_from_error(e).get("role_id") or "autonomous",
+                    workflow_mode="autonomous",
+                    error=e,
                     provider="openrouter",
-                    provider_label="OpenRouter free models",
-                    role_id="autonomous",
-                    retry_after_seconds=120,
-                    reason="free_models_exhausted",
                 )
-                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+                exhausted_role = exhausted_route.get("role_id") or "autonomous"
+                await self._broadcast("free_models_exhausted", _merge_route_fields({
+                    "role_id": exhausted_role,
+                    "message": "All free models exhausted, waiting to retry",
+                }, exhausted_route))
+                await api_client_manager.emit_and_wait_for_retry(
+                    _merge_route_fields({
+                        "provider": "openrouter",
+                        "provider_label": "OpenRouter free models",
+                        "role_id": exhausted_role,
+                        "retry_after_seconds": 120,
+                        "reason": "free_models_exhausted",
+                    }, exhausted_route),
+                    role_id=exhausted_role,
+                    should_stop=self._stop_event.is_set,
+                    error=e,
+                )
               except RetryableProviderError as e:
                 logger.warning("AutonomousCoordinator paused for retryable provider failure: %s", e)
                 await self._save_workflow_state()
@@ -4403,7 +4642,18 @@ class AutonomousCoordinator:
                             f"Paper compilation attempt {_paper_attempt} for brainstorm "
                             f"{self._current_topic_id} (previous attempt failed) - retrying..."
                         )
-                        await asyncio.sleep(5)
+                        await api_client_manager.emit_and_wait_for_retry(
+                            {
+                                "provider": "unknown",
+                                "provider_label": "Autonomous paper compiler",
+                                "role_id": "autonomous_paper_compiler",
+                                "retry_attempt": _paper_attempt,
+                                "retry_after_seconds": 5,
+                                "reason": "paper_compilation_retry",
+                            },
+                            role_id="autonomous_paper_compiler",
+                            should_stop=self._stop_event.is_set,
+                        )
 
                     paper_success = await self._paper_compilation_workflow()
 
@@ -4442,7 +4692,18 @@ class AutonomousCoordinator:
                         while not self._stop_event.is_set():
                             _next_attempt += 1
                             if _next_attempt > 1:
-                                await asyncio.sleep(5)
+                                await api_client_manager.emit_and_wait_for_retry(
+                                    {
+                                        "provider": "unknown",
+                                        "provider_label": "Autonomous paper compiler",
+                                        "role_id": "autonomous_paper_compiler",
+                                        "retry_attempt": _next_attempt,
+                                        "retry_after_seconds": 5,
+                                        "reason": "paper_compilation_retry",
+                                    },
+                                    role_id="autonomous_paper_compiler",
+                                    should_stop=self._stop_event.is_set,
+                                )
                             next_paper_success = await self._paper_compilation_workflow(
                                 skip_reference_selection=True
                             )
@@ -4497,18 +4758,42 @@ class AutonomousCoordinator:
               except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
                 logger.warning(f"Resumed research: all free models exhausted: {e}")
-                await self._broadcast("free_models_exhausted", {
-                    "role_id": "autonomous_resumed",
-                    "message": "All free models exhausted, waiting to retry",
-                })
-                await api_client_manager.broadcast_retry_cooldown(
+                # The exhausted role is named only when the error carries it;
+                # otherwise the event stays at mode and role level.
+                exhausted_route = api_client_manager.route_identity_for_role(
+                    route_identity_from_error(e).get("role_id") or "autonomous_resumed",
+                    workflow_mode="autonomous",
+                    error=e,
                     provider="openrouter",
-                    provider_label="OpenRouter free models",
-                    role_id="autonomous_resumed",
-                    retry_after_seconds=120,
-                    reason="free_models_exhausted",
                 )
-                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+                exhausted_role = exhausted_route.get("role_id") or "autonomous_resumed"
+                await self._broadcast("free_models_exhausted", _merge_route_fields({
+                    "role_id": exhausted_role,
+                    "message": "All free models exhausted, waiting to retry",
+                }, exhausted_route))
+                await api_client_manager.emit_and_wait_for_retry(
+                    _merge_route_fields({
+                        "provider": "openrouter",
+                        "provider_label": "OpenRouter free models",
+                        "role_id": exhausted_role,
+                        "retry_after_seconds": 120,
+                        "reason": "free_models_exhausted",
+                    }, exhausted_route),
+                    role_id=exhausted_role,
+                    should_stop=self._stop_event.is_set,
+                    error=e,
+                )
+              except RetryableProviderError as e:
+                logger.warning(
+                    "Resumed Autonomous research paused for retryable provider failure: %s",
+                    e,
+                )
+                await self._save_workflow_state()
+                await api_client_manager.wait_for_retryable_provider_error(
+                    e,
+                    role_id=e.role_id or "autonomous_resumed",
+                    should_stop=self._stop_event.is_set,
+                )
 
         except ProviderRepairRequiredError as e:
             logger.error("Resumed Autonomous research stopped for provider repair: %s", e)
@@ -4661,7 +4946,7 @@ class AutonomousCoordinator:
             
             # Set WebSocket broadcaster so aggregator events flow through
             if self._broadcast_callback:
-                exploration_aggregator.websocket_broadcaster = self._broadcast_callback
+                exploration_aggregator.websocket_broadcaster = self._broadcast
             
             # Start the aggregator (parallel submitters + batch validator)
             await exploration_aggregator.start()
@@ -4845,7 +5130,18 @@ class AutonomousCoordinator:
             
             if submission is None:
                 logger.warning("Failed to generate topic selection")
-                await asyncio.sleep(5)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": "Autonomous topic selector",
+                        "role_id": "autonomous_topic_selector",
+                        "retry_attempt": attempt,
+                        "retry_after_seconds": 5,
+                        "reason": "empty_topic_selection_retry",
+                    },
+                    role_id="autonomous_topic_selector",
+                    should_stop=self._stop_event.is_set,
+                )
                 continue
             
             validation = await self._topic_validator.validate(
@@ -5114,7 +5410,20 @@ class AutonomousCoordinator:
                 if api_client_manager.is_provider_failure(e):
                     raise
                 logger.error(f"Error in continuation decision attempt {attempt}: {e}")
-                await asyncio.sleep(3)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": "Autonomous continuation decision",
+                        "role_id": "autonomous_continuation",
+                        "retry_attempt": attempt,
+                        "retry_after_seconds": 3,
+                        "reason": "continuation_decision_retry",
+                        "error_summary": str(e),
+                    },
+                    role_id="autonomous_continuation",
+                    should_stop=self._stop_event.is_set,
+                    error=e,
+                )
         
         return "move_on"
     
@@ -5308,7 +5617,7 @@ class AutonomousCoordinator:
             if not metadata or metadata.status != "complete":
                 logger.info("Skipping non-complete reference brainstorm %s", topic_id)
                 continue
-            content = await brainstorm_memory.get_database_content(topic_id, strip_proofs=True)
+            content = await self._get_brainstorm_model_context(topic_id)
             if not content.strip():
                 logger.info("Skipping empty reference brainstorm %s after proof stripping", topic_id)
                 continue
@@ -5536,7 +5845,7 @@ class AutonomousCoordinator:
             
             # Set WebSocket broadcaster for aggregator events
             if self._broadcast_callback:
-                self._brainstorm_aggregator.websocket_broadcaster = self._broadcast_callback
+                self._brainstorm_aggregator.websocket_broadcaster = self._broadcast
             
             # Check if manual override was triggered during initialization
             # (force_paper_writing() can fire while RAG ingestion is in progress)
@@ -6154,9 +6463,8 @@ class AutonomousCoordinator:
             logger.error("Cannot run completion review: brainstorm not found")
             return False
         
-        brainstorm_content = await brainstorm_memory.get_database_content(
+        brainstorm_content = await self._get_brainstorm_model_context(
             self._current_topic_id,
-            strip_proofs=True,
         )
         
         # Run completion review with self-validation
@@ -6628,7 +6936,7 @@ class AutonomousCoordinator:
                 )
                 
                 if self._broadcast_callback:
-                    exploration_aggregator.websocket_broadcaster = self._broadcast_callback
+                    exploration_aggregator.websocket_broadcaster = self._broadcast
                 
                 await exploration_aggregator.start()
                 logger.info("Title exploration aggregator started with parallel submitters")
@@ -6865,7 +7173,7 @@ class AutonomousCoordinator:
             
             # Set WebSocket broadcaster for compiler events
             if self._broadcast_callback:
-                self._paper_compiler.websocket_broadcaster = self._broadcast_callback
+                self._paper_compiler.websocket_broadcaster = self._broadcast
             
             # Enable autonomous section order constraint
             self._paper_compiler.enable_autonomous_mode()
@@ -6917,8 +7225,10 @@ class AutonomousCoordinator:
             brainstorm_db_path = brainstorm_memory.get_database_path(self._current_topic_id)
             if os.path.exists(brainstorm_db_path):
                 logger.info(f"Loading brainstorm database into compiler RAG: {brainstorm_db_path}")
-                brainstorm_content_for_rag = await brainstorm_memory.get_database_content(
-                    self._current_topic_id, strip_proofs=True
+                brainstorm_content_for_rag = (
+                    await self._get_brainstorm_model_context(
+                        self._current_topic_id
+                    )
                 )
                 if brainstorm_content_for_rag:
                     await rag_manager.add_text(
@@ -8593,7 +8903,7 @@ class AutonomousCoordinator:
             
             # Set WebSocket broadcaster
             if self._broadcast_callback:
-                self._paper_compiler.websocket_broadcaster = self._broadcast_callback
+                self._paper_compiler.websocket_broadcaster = self._broadcast
             
             # Enable autonomous mode
             self._paper_compiler.enable_autonomous_mode()

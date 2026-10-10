@@ -13,6 +13,7 @@ from datetime import datetime
 from backend.shared.config import system_config, rag_config
 from backend.shared.models import CompilerState, CompilerSubmission, CompilerValidationResult, WorkflowTask, ValidationResult, ModelConfig
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
+from backend.shared.activity import fill_missing_activity_metadata, normalize_activity_payload
 from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
 from backend.shared.brainstorm_proof_gate import BRAINSTORM_LEAN_PROOF_MARKER
 from backend.shared.free_model_manager import free_model_manager
@@ -29,7 +30,8 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
 )
-from backend.shared.provider_errors import ProviderRepairRequiredError
+from backend.shared.provider_errors import ProviderContextLengthError, ProviderRepairRequiredError
+from backend.shared.provider_route_identity import merge_route_identity
 from backend.compiler.agents.writer_submitter import WritingSubmitter
 from backend.compiler.agents.high_param_submitter import HighParamSubmitter
 from backend.compiler.validation.compiler_validator import CompilerValidator, normalize_unicode_hyphens, find_with_normalized_hyphens
@@ -800,9 +802,10 @@ class CompilerCoordinator:
             try:
                 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
 
-                content = await brainstorm_memory.get_database_content(
+                content = await brainstorm_memory.get_model_context_content(
                     self._current_topic_id,
-                    strip_proofs=True,
+                    proof_database=proof_database,
+                    requesting_run_id=self.proof_context_requesting_run_id,
                 )
                 return content or "", f"Source brainstorm {self._current_topic_id}"
             except Exception as exc:
@@ -810,13 +813,13 @@ class CompilerCoordinator:
                 return "", ""
 
         try:
-            shared_path = Path(system_config.shared_training_file)
-            if not shared_path.exists():
-                return "", ""
-            content = await asyncio.to_thread(shared_path.read_text, encoding="utf-8")
-            proof_marker = "=== PROOFS GENERATED FROM THIS BRAINSTORM"
-            if proof_marker in content:
-                content = content.split(proof_marker, 1)[0].rstrip()
+            from backend.aggregator.memory.shared_training import shared_training_memory
+            content = await shared_training_memory.get_model_context_content(
+                proof_database=manual_proof_database,
+                requesting_run_id=self.proof_context_requesting_run_id,
+                source_id="manual_aggregator",
+                formatted=True,
+            )
             return content or "", "Part 1 aggregator database"
         except Exception as exc:
             logger.debug("Unable to load manual aggregator context for rigor: %s", exc)
@@ -853,6 +856,10 @@ class CompilerCoordinator:
         logger.info("Compiler stopped")
         self._notify_top_level_terminal()
 
+    def _workflow_mode(self) -> str:
+        """Return the Live Activity workflow mode that owns this compiler run."""
+        return "autonomous" if self.autonomous_mode else "compiler"
+
     async def _handle_context_overflow(self, error: BaseException, *, role_id: str, mode: Optional[str] = None) -> None:
         """Stop the compiler when mandatory direct context cannot fit."""
         self.fatal_error_type = CONTEXT_OVERFLOW_STOP_REASON
@@ -873,7 +880,7 @@ class CompilerCoordinator:
             if value
         }
         payload = {
-            "workflow_mode": "autonomous" if self.autonomous_mode else "compiler",
+            "workflow_mode": self._workflow_mode(),
             "role_id": role_id,
             **context_overflow_model_payload(
                 api_client_manager.get_role_config(config_role_id)
@@ -885,9 +892,25 @@ class CompilerCoordinator:
             "error_detail": str(error),
             "resolution": CONTEXT_OVERFLOW_RESOLUTION,
         }
-        self.fatal_error_payload = dict(payload)
+        payload = fill_missing_activity_metadata(
+            payload,
+            workflow="compiler",
+            source_type="paper",
+            role_id=role_id,
+            phase=mode or self.current_mode or "",
+            classification="operational",
+            category="workflow",
+            severity="error",
+            outcome="error",
+            feedback=CONTEXT_OVERFLOW_STOP_REASON,
+            detail=str(error),
+        )
+        self.fatal_error_payload = normalize_activity_payload(
+            "context_overflow_error",
+            payload,
+        )
         logger.error("Compiler context overflow in %s: %s", role_id, error)
-        await self._broadcast("context_overflow_error", payload)
+        await self._broadcast("context_overflow_error", self.fatal_error_payload)
     
     async def _main_workflow(self) -> None:
         """Main compiler workflow loop."""
@@ -942,18 +965,29 @@ class CompilerCoordinator:
         except FreeModelExhaustedError as e:
             # All free models exhausted after retries - wait briefly and retry
             logger.warning(f"Compiler: all free models exhausted: {e}")
-            await self._broadcast("free_models_exhausted", {
+            # The workflow loop cannot tell which role's call exhausted the free
+            # chain, so model and host are named only when the error carries them.
+            await self._broadcast("free_models_exhausted", merge_route_identity({
                 "role_id": "compiler",
                 "message": "All free models exhausted, waiting to retry",
-            })
-            await api_client_manager.broadcast_retry_cooldown(
-                provider="openrouter",
-                provider_label="OpenRouter free models",
+            }, api_client_manager.route_identity_for_role(
+                "compiler",
+                workflow_mode=self._workflow_mode(),
+                error=e,
+            )))
+            await api_client_manager.emit_and_wait_for_retry(
+                {
+                    "provider": "openrouter",
+                    "provider_label": "OpenRouter free models",
+                    "workflow_mode": self._workflow_mode(),
+                    "role_id": "compiler",
+                    "retry_after_seconds": 120,
+                    "reason": "free_models_exhausted",
+                },
                 role_id="compiler",
-                retry_after_seconds=120,
-                reason="free_models_exhausted",
+                should_stop=lambda: not self.is_running,
+                error=e,
             )
-            await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             if self.is_running:
                 self._main_task = asyncio.create_task(self._main_workflow())
         except RetryableProviderError as e:
@@ -970,8 +1004,8 @@ class CompilerCoordinator:
             self.is_running = False
             self.fatal_error_type = "provider_repair_required"
             self.fatal_error_message = str(e)
-            self.fatal_error_payload = {
-                "workflow_mode": "autonomous" if self.autonomous_mode else "compiler",
+            payload = {
+                "workflow_mode": self._workflow_mode(),
                 "notification_kind": "model_error",
                 "role_id": e.role_id,
                 "provider": e.provider,
@@ -994,6 +1028,28 @@ class CompilerCoordinator:
                 "error_detail": e.safe_message,
                 "terminal_guidance": e.terminal_guidance,
             }
+            payload = merge_route_identity(payload, api_client_manager.route_identity_for_role(
+                e.role_id,
+                workflow_mode=payload["workflow_mode"],
+                error=e,
+            ))
+            payload = fill_missing_activity_metadata(
+                payload,
+                workflow="compiler",
+                source_type="paper",
+                role_id=e.role_id or "compiler",
+                phase=self.current_mode or "",
+                classification="operational",
+                category="provider",
+                severity="error",
+                outcome="error",
+                detail=e.safe_message,
+                guidance=e.terminal_guidance,
+            )
+            self.fatal_error_payload = normalize_activity_payload(
+                "provider_repair_required",
+                payload,
+            )
             await self._broadcast(
                 "provider_repair_required",
                 dict(self.fatal_error_payload),
@@ -1156,25 +1212,73 @@ INVALID:
                 submission = await self.writer_submitter.submit_outline_create()
             except FreeModelExhaustedError:
                 raise
+            except RetryableProviderError:
+                raise
+            except ProviderContextLengthError as e:
+                await self._handle_context_overflow(
+                    e,
+                    role_id="compiler_writer",
+                    mode="outline_create",
+                )
+                return
             except ValueError as e:
                 label, _ = _classify_submitter_error(e)
                 if label == "Context overflow":
                     await self._handle_context_overflow(e, role_id="compiler_writer", mode="outline_create")
                     return
                 logger.error(f"Iteration {iteration}: Outline submission failed with error: {e} - retrying")
-                await asyncio.sleep(5)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": "Compiler writer",
+                        "role_id": "compiler_writer",
+                        "retry_attempt": iteration,
+                        "retry_after_seconds": 5,
+                        "reason": "outline_generation_retry",
+                        "error_summary": str(e),
+                    },
+                    role_id="compiler_writer",
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
                 iteration -= 1
                 continue
             except Exception as e:
+                if api_client_manager.is_provider_failure(e):
+                    raise
                 logger.error(f"Iteration {iteration}: Outline submission failed with error: {e} - retrying")
-                await asyncio.sleep(5)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": "Compiler writer",
+                        "role_id": "compiler_writer",
+                        "retry_attempt": iteration,
+                        "retry_after_seconds": 5,
+                        "reason": "outline_generation_retry",
+                        "error_summary": str(e),
+                    },
+                    role_id="compiler_writer",
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
                 iteration -= 1
                 continue
             
             if submission is None:
                 logger.error(f"Iteration {iteration}: Failed to generate outline submission")
                 # Don't count as iteration, retry
-                await asyncio.sleep(1)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": "Compiler writer",
+                        "role_id": "compiler_writer",
+                        "retry_attempt": iteration,
+                        "retry_after_seconds": 1,
+                        "reason": "empty_outline_retry",
+                    },
+                    role_id="compiler_writer",
+                    should_stop=lambda: not self.is_running,
+                )
                 continue
             
             last_submission = submission
@@ -1209,6 +1313,15 @@ INVALID:
                 
                 # Log rejection
                 await compiler_rejection_log.add_rejection(result, "outline_create", submission.content)
+                await self._broadcast("compiler_rejection", {
+                    "mode": "outline_create",
+                    "iteration": iteration,
+                    "submission_id": submission.submission_id,
+                    "decision": "reject",
+                    "validator_feedback": pre_validation_error,
+                    "validator_summary": result.summary,
+                    "validation_stage": "pre-validation",
+                })
                 
                 logger.info(f"✗ Iteration {iteration}: Outline REJECTED (pre-validation)")
                 logger.info(f"  Reason: {pre_validation_error[:150]}...")
@@ -1244,7 +1357,10 @@ INVALID:
                 await self._broadcast("compiler_acceptance", {
                     "mode": "outline_create",
                     "iteration": iteration,
-                    "submission_id": submission.submission_id
+                    "submission_id": submission.submission_id,
+                    "decision": "accept",
+                    "validator_feedback": result.reasoning,
+                    "validator_summary": result.summary,
                 })
                 
                 logger.info(f"✓ Iteration {iteration}: Outline ACCEPTED")
@@ -1287,7 +1403,10 @@ INVALID:
                     "mode": "outline_create",
                     "iteration": iteration,
                     "submission_id": submission.submission_id,
-                    "reasoning": result.reasoning
+                    "reasoning": result.reasoning,
+                    "decision": "reject",
+                    "validator_feedback": result.reasoning,
+                    "validator_summary": result.summary,
                 })
                 
                 logger.info(f"✗ Iteration {iteration}: Outline REJECTED")
@@ -1352,7 +1471,11 @@ INVALID:
                 if self.autonomous_mode and self._current_topic_id:
                     try:
                         from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
-                        first_brainstorm_content = await brainstorm_memory.get_database_content(self._current_topic_id, strip_proofs=True)
+                        first_brainstorm_content = await brainstorm_memory.get_model_context_content(
+                            self._current_topic_id,
+                            proof_database=proof_database,
+                            requesting_run_id=self.proof_context_requesting_run_id,
+                        )
                         first_brainstorm_source = f"brainstorm_{self._current_topic_id}.txt"
                     except Exception as exc:
                         logger.debug("Unable to load initial brainstorm context for construction: %s", exc)
@@ -1375,7 +1498,18 @@ INVALID:
                         "attempt": attempt,
                         "reason": "Empty submission returned"
                     })
-                    await asyncio.sleep(backoff_time)
+                    await api_client_manager.emit_and_wait_for_retry(
+                        {
+                            "provider": "unknown",
+                            "provider_label": "Compiler writer",
+                            "role_id": "compiler_writer",
+                            "retry_attempt": attempt,
+                            "retry_after_seconds": backoff_time,
+                            "reason": "empty_construction_retry",
+                        },
+                        role_id="compiler_writer",
+                        should_stop=lambda: not self.is_running,
+                    )
                     continue
                 else:
                     if attempt > 1:
@@ -1383,7 +1517,16 @@ INVALID:
                     
             except FreeModelExhaustedError:
                 raise
-            except (ValueError, OpenRouterInvalidResponseError) as e:
+            except RetryableProviderError:
+                raise
+            except ProviderContextLengthError as e:
+                await self._handle_context_overflow(
+                    e,
+                    role_id="compiler_writer",
+                    mode="construction",
+                )
+                return
+            except ValueError as e:
                 label, reason_prefix = _classify_submitter_error(e)
                 if label == "Context overflow":
                     await self._handle_context_overflow(e, role_id="compiler_writer", mode="construction")
@@ -1391,7 +1534,8 @@ INVALID:
                 logger.error(f"Construction {label.lower()} in initial loop (attempt {attempt}): {e}")
                 await self._broadcast("compiler_rejection", {
                     "mode": "construction",
-                    "reasoning": f"{reason_prefix}: {e}"
+                    "reasoning": f"{reason_prefix}: {e}",
+                    "validation_stage": "internal_error",
                 })
                 await compiler_rejection_log.add_rejection(
                     CompilerValidationResult(
@@ -1402,9 +1546,24 @@ INVALID:
                         validation_stage="internal_error"
                     ), "construction", ""
                 )
-                await asyncio.sleep(backoff_time)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": "Compiler writer",
+                        "role_id": "compiler_writer",
+                        "retry_attempt": attempt,
+                        "retry_after_seconds": backoff_time,
+                        "reason": "construction_retry",
+                        "error_summary": str(e),
+                    },
+                    role_id="compiler_writer",
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
                 continue
             except Exception as e:
+                if api_client_manager.is_provider_failure(e):
+                    raise
                 logger.error(f"Construction submission failed with error (attempt {attempt}): {e}")
                 await self._broadcast("compiler_retry", {
                     "mode": "construction",
@@ -1412,7 +1571,20 @@ INVALID:
                     "reason": str(e)
                 })
                 logger.info(f"Retrying in {backoff_time}s...")
-                await asyncio.sleep(backoff_time)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": "Compiler writer",
+                        "role_id": "compiler_writer",
+                        "retry_attempt": attempt,
+                        "retry_after_seconds": backoff_time,
+                        "reason": "construction_retry",
+                        "error_summary": str(e),
+                    },
+                    role_id="compiler_writer",
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
                 continue
             
             # submission is valid if we reach here
@@ -1452,7 +1624,10 @@ INVALID:
                 
                 await self._broadcast("compiler_acceptance", {
                     "mode": "construction",
-                    "submission_id": submission.submission_id
+                    "submission_id": submission.submission_id,
+                    "decision": "accept",
+                    "validator_feedback": result.reasoning,
+                    "validator_summary": result.summary,
                 })
                 
                 await self._broadcast("paper_updated", {
@@ -1477,7 +1652,10 @@ INVALID:
                 await self._broadcast("compiler_rejection", {
                     "mode": "construction",
                     "submission_id": submission.submission_id,
-                    "reasoning": result.reasoning
+                    "reasoning": result.reasoning,
+                    "decision": "reject",
+                    "validator_feedback": result.reasoning,
+                    "validator_summary": result.summary,
                 })
                 
                 # Store rejection feedback for next retry attempt
@@ -1639,7 +1817,11 @@ INVALID:
         if self.autonomous_mode and self._current_topic_id:
             try:
                 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
-                brainstorm_content_for_submitter = await brainstorm_memory.get_database_content(self._current_topic_id, strip_proofs=True)
+                brainstorm_content_for_submitter = await brainstorm_memory.get_model_context_content(
+                    self._current_topic_id,
+                    proof_database=proof_database,
+                    requesting_run_id=self.proof_context_requesting_run_id,
+                )
                 brainstorm_source_for_submitter = f"brainstorm_{self._current_topic_id}.txt"
                 if brainstorm_content_for_submitter:
                     logger.info(f"Loaded brainstorm content for retroactive corrections: {len(brainstorm_content_for_submitter)} chars")
@@ -1674,7 +1856,8 @@ INVALID:
             )
             await self._broadcast("compiler_rejection", {
                 "mode": "construction",
-                "reasoning": overflow_reason
+                "reasoning": overflow_reason,
+                "validation_stage": "internal_error",
             })
             return False, overflow_reason
         
@@ -1768,7 +1951,8 @@ INVALID:
                     
                     await self._broadcast("compiler_rejection", {
                         "mode": "construction",
-                        "reasoning": rejection_reason
+                        "reasoning": rejection_reason,
+                        "validation_stage": "pre-validation",
                     })
                     
                     # RETRY WITH FEEDBACK - instead of just returning False
@@ -1850,7 +2034,8 @@ INVALID:
                     
                     await self._broadcast("compiler_rejection", {
                         "mode": "construction",
-                        "reasoning": rejection_reason
+                        "reasoning": rejection_reason,
+                        "validation_stage": "pre-validation",
                     })
                     
                     # RETRY WITH FEEDBACK - instead of just returning False
@@ -1978,7 +2163,8 @@ INVALID:
                 await self._broadcast("compiler_rejection", {
                     "mode": "construction",
                     "submission_id": submission.submission_id,
-                    "reasoning": "Exact string match failed"
+                    "reasoning": "Exact string match failed",
+                    "validation_stage": "pre-validation",
                 })
                 
                 return False, rejection_result.reasoning
@@ -2000,7 +2186,10 @@ INVALID:
             
             await self._broadcast("compiler_acceptance", {
                 "mode": "construction",
-                "submission_id": submission.submission_id
+                "submission_id": submission.submission_id,
+                "decision": "accept",
+                "validator_feedback": result.reasoning,
+                "validator_summary": result.summary,
             })
             
             await self._broadcast("paper_updated", {
@@ -2028,7 +2217,10 @@ INVALID:
             await self._broadcast("compiler_rejection", {
                 "mode": "construction",
                 "submission_id": submission.submission_id,
-                "reasoning": result.reasoning
+                "reasoning": result.reasoning,
+                "decision": "reject",
+                "validator_feedback": result.reasoning,
+                "validator_summary": result.summary,
             })
             
             logger.info("Construction rejected")
@@ -2055,7 +2247,11 @@ INVALID:
         logger.info(f"Processing retroactive brainstorm {brainstorm_op.action} for topic {topic_id}")
         
         try:
-            brainstorm_content = await brainstorm_memory.get_database_content(topic_id, strip_proofs=True)
+            brainstorm_content = await brainstorm_memory.get_model_context_content(
+                topic_id,
+                proof_database=proof_database,
+                requesting_run_id=self.proof_context_requesting_run_id,
+            )
             if not brainstorm_content:
                 logger.warning(f"Brainstorm {topic_id} is empty, skipping retroactive operation")
                 return
@@ -2114,18 +2310,37 @@ INVALID:
                         "action": action,
                         "topic_id": topic_id,
                         "submission_number": brainstorm_op.submission_number,
+                        "decision": "accept",
+                        "validator_feedback": result.reasoning,
+                        "validator_summary": result.summary,
                     })
                 else:
                     logger.error(f"Retroactive brainstorm {action} was validated but failed to apply")
+                    await self._broadcast("brainstorm_retroactive_rejected", {
+                        "action": action,
+                        "topic_id": topic_id,
+                        "submission_number": brainstorm_op.submission_number,
+                        "error_summary": "The validated brainstorm operation could not be applied.",
+                        "validation_stage": "internal_error",
+                    })
             else:
                 logger.info(f"Retroactive brainstorm {brainstorm_op.action} rejected: {result.reasoning[:200]}")
                 await self._broadcast("brainstorm_retroactive_rejected", {
                     "action": brainstorm_op.action,
                     "topic_id": topic_id,
                     "reasoning": result.reasoning[:500],
+                    "decision": "reject",
+                    "validator_feedback": result.reasoning,
+                    "validator_summary": result.summary,
                 })
         except Exception as e:
             logger.error(f"Error handling retroactive brainstorm operation: {e}")
+            await self._broadcast("brainstorm_retroactive_rejected", {
+                "action": getattr(brainstorm_op, "action", ""),
+                "topic_id": topic_id,
+                "error_summary": str(e),
+                "validation_stage": "internal_error",
+            })
 
     @staticmethod
     def _parse_brainstorm_submission_content(brainstorm_content: str, submission_number: int) -> str:
@@ -2226,6 +2441,7 @@ INVALID:
             "topic_id": topic_id,
             "submission_number": getattr(brainstorm_op, "submission_number", None),
             "reasoning": reasoning[:500],
+            "validation_stage": "pre-validation",
             "automatic": True,
             "protected_lean_proof": True,
         })
@@ -2302,7 +2518,8 @@ INVALID:
                 await self._broadcast("compiler_rejection", {
                     "mode": "outline_update",
                     "submission_id": submission.submission_id,
-                    "reasoning": "Outline exact string match failed"
+                    "reasoning": "Outline exact string match failed",
+                    "validation_stage": "pre-validation",
                 })
                 
                 return False
@@ -2319,7 +2536,10 @@ INVALID:
             
             await self._broadcast("compiler_acceptance", {
                 "mode": "outline_update",
-                "submission_id": submission.submission_id
+                "submission_id": submission.submission_id,
+                "decision": "accept",
+                "validator_feedback": result.reasoning,
+                "validator_summary": result.summary,
             })
             
             await self._broadcast("outline_updated", {
@@ -2336,7 +2556,10 @@ INVALID:
             await self._broadcast("compiler_rejection", {
                 "mode": "outline_update",
                 "submission_id": submission.submission_id,
-                "reasoning": result.reasoning
+                "reasoning": result.reasoning,
+                "decision": "reject",
+                "validator_feedback": result.reasoning,
+                "validator_summary": result.summary,
             })
             
             logger.info("Outline update rejected")
@@ -2361,7 +2584,8 @@ INVALID:
             await self._broadcast("compiler_decline", {
                 "mode": "review",
                 "review_focus": review_focus,
-                "reasoning": f"{reason_prefix}: {e}"
+                "reasoning": f"{reason_prefix}: {e}",
+                "validation_stage": "internal_error",
             })
             return False
         
@@ -2432,7 +2656,8 @@ INVALID:
                     "mode": "review",
                     "submission_id": submission.submission_id,
                     "review_focus": review_focus,
-                    "reasoning": "Exact string match failed"
+                    "reasoning": "Exact string match failed",
+                    "validation_stage": "pre-validation",
                 })
                 
                 return False
@@ -2452,7 +2677,10 @@ INVALID:
             await self._broadcast("compiler_acceptance", {
                 "mode": "review",
                 "submission_id": submission.submission_id,
-                "review_focus": review_focus
+                "review_focus": review_focus,
+                "decision": "accept",
+                "validator_feedback": result.reasoning,
+                "validator_summary": result.summary,
             })
             
             await self._broadcast("paper_updated", {
@@ -2471,7 +2699,10 @@ INVALID:
                 "mode": "review",
                 "submission_id": submission.submission_id,
                 "review_focus": review_focus,
-                "reasoning": result.reasoning
+                "reasoning": result.reasoning,
+                "decision": "reject",
+                "validator_feedback": result.reasoning,
+                "validator_summary": result.summary,
             })
             
             logger.info(f"{review_label.capitalize()} edit rejected")
@@ -2566,7 +2797,12 @@ INVALID:
             self.rigor_declines += 1
             await compiler_rejection_log.add_decline("rigor", f"LLM error: {exc}")
             await self._broadcast(
-                "compiler_decline", {"mode": "rigor", "reasoning": f"LLM error: {exc}"}
+                "compiler_decline",
+                {
+                    "mode": "rigor",
+                    "reasoning": f"LLM error: {exc}",
+                    "validation_stage": "internal_error",
+                },
             )
             return False
         except Exception as exc:
@@ -2579,7 +2815,11 @@ INVALID:
             )
             await self._broadcast(
                 "compiler_decline",
-                {"mode": "rigor", "reasoning": f"Internal error: {exc}"},
+                {
+                    "mode": "rigor",
+                    "reasoning": f"Internal error: {exc}",
+                    "validation_stage": "internal_error",
+                },
             )
             return False
 
@@ -2704,6 +2944,7 @@ INVALID:
                             "submission_id": submission.submission_id,
                             "reasoning": validator_feedback,
                             "placement_attempt": placement_attempt,
+                            "validation_stage": "pre-validation",
                         },
                     )
                     self.rigor_rejections += 1
@@ -2752,6 +2993,7 @@ INVALID:
                                 ),
                                 "placement_outcome": "inline_appendix_persistence_failed",
                                 "lean_proof_id": lean_result.proof_id,
+                                "validation_stage": "internal_error",
                             },
                         )
                 except Exception as exc:
@@ -2777,6 +3019,9 @@ INVALID:
                         "lean_proof_id": lean_result.proof_id,
                         "is_novel": lean_result.is_novel,
                         "placement_attempt": placement_attempt,
+                        "decision": "accept",
+                        "validator_feedback": result.reasoning,
+                        "validator_summary": result.summary,
                     },
                 )
                 await self._broadcast(
@@ -2803,6 +3048,9 @@ INVALID:
                     "mode": "rigor",
                     "submission_id": submission.submission_id,
                     "reasoning": result.reasoning,
+                    "decision": "reject",
+                    "validator_feedback": result.reasoning,
+                    "validator_summary": result.summary,
                     "placement_attempt": placement_attempt,
                 },
             )
@@ -2858,6 +3106,7 @@ INVALID:
                         ),
                         "placement_outcome": "appendix_persistence_failed",
                         "lean_proof_id": lean_result.proof_id,
+                        "validation_stage": "internal_error",
                     },
                 )
                 return False
@@ -3341,6 +3590,9 @@ INVALID:
         total_attempts = 0  # Track all attempts (accepted + rejected + declines)
         
         while self.is_running and self.in_critique_phase:
+            # Retry activity names the role whose step failed: the Rigor & Proofs
+            # critique generator, or the critique validator while it validates.
+            failing_role_id = self.critique_submitter.role_id
             try:
                 # Get current critique count
                 critique_count = await critique_memory.get_critique_count()
@@ -3402,25 +3654,46 @@ INVALID:
                 
                 if submission is None:
                     logger.warning("Critique generation returned None - retrying")
-                    await asyncio.sleep(5)
+                    await api_client_manager.emit_and_wait_for_retry(
+                        {
+                            "provider": "unknown",
+                            "provider_label": "Compiler critique submitter",
+                            "workflow_mode": self._workflow_mode(),
+                            "role_id": failing_role_id,
+                            "retry_attempt": total_attempts + 1,
+                            "retry_after_seconds": 5,
+                            "reason": "empty_critique_retry",
+                        },
+                        role_id=failing_role_id,
+                        should_stop=lambda: not self.is_running,
+                    )
                     continue
-                
+
                 logger.info(f"Critique generated: {submission.submission_id}")
-                
+
                 # Validate critique using critique-specific validator prompts.
+                failing_role_id = "critique_validator"
                 validation_result = await self._validate_critique(submission)
-                
+                if validation_result is None:
+                    raise RuntimeError(
+                        "Critique validation returned no decision after contract validation."
+                    )
+                failing_role_id = self.critique_submitter.role_id
+
                 # Handle decline submissions differently
                 if submission.is_decline:
                     total_attempts += 1  # Count decline as attempt
                     # This is a decline assessment (critique_needed=false)
-                    if validation_result and validation_result.decision == "accept":
+                    if validation_result.decision == "accept":
                         # Validator agrees - body is academically acceptable, no critique needed
                         logger.info(f"Decline ACCEPTED - validator agrees body is academically acceptable")
                         
                         await self._broadcast("critique_decline_accepted", {
                             "submission_id": submission.submission_id,
-                            "reasoning": submission.reasoning,
+                            "reasoning": validation_result.reasoning,
+                            "validator_feedback": validation_result.reasoning,
+                            "validator_summary": validation_result.summary,
+                            "decision": "accept",
                             "version": self.paper_version,
                             "total_attempts": total_attempts,
                             "target": CRITIQUE_ATTEMPT_TARGET
@@ -3429,11 +3702,14 @@ INVALID:
                         # Validator disagrees - there ARE issues that need critique
                         consecutive_rejections += 1
                         rejection_count += 1
-                        logger.info(f"Decline REJECTED - validator found issues: {validation_result.reasoning if validation_result else 'Unknown'}")
+                        logger.info(f"Decline REJECTED - validator found issues: {validation_result.reasoning}")
                         
                         await self._broadcast("critique_decline_rejected", {
                             "submission_id": submission.submission_id,
-                            "reasoning": validation_result.reasoning if validation_result else "Unknown",
+                            "reasoning": validation_result.reasoning,
+                            "validator_feedback": validation_result.reasoning,
+                            "validator_summary": validation_result.summary,
+                            "decision": "reject",
                             "consecutive": consecutive_rejections,
                             "total_attempts": total_attempts,
                             "target": CRITIQUE_ATTEMPT_TARGET
@@ -3442,7 +3718,7 @@ INVALID:
                     # Regular critique submission
                     total_attempts += 1  # Count critique as attempt
                     
-                    if validation_result and validation_result.decision == "accept":
+                    if validation_result.decision == "accept":
                         # Accept critique
                         consecutive_rejections = 0
                         await critique_memory.add_accepted_critique(submission.content)
@@ -3452,6 +3728,9 @@ INVALID:
                         
                         await self._broadcast("critique_accepted", {
                             "critique_id": submission.submission_id,
+                            "validator_feedback": validation_result.reasoning,
+                            "validator_summary": validation_result.summary,
+                            "decision": "accept",
                             "count": new_count,
                             "target": CRITIQUE_ATTEMPT_TARGET,
                             "version": self.paper_version,
@@ -3468,10 +3747,10 @@ INVALID:
                         # Reject critique
                         consecutive_rejections += 1
                         rejection_count += 1
-                        logger.info(f"Critique REJECTED: {validation_result.reasoning if validation_result else 'Unknown reason'}")
+                        logger.info(f"Critique REJECTED: {validation_result.reasoning}")
                         
                         # Store rejection feedback for learning
-                        if validation_result and validation_result.summary:
+                        if validation_result.summary:
                             await self.critique_submitter.handle_critique_rejection(
                                 summary=validation_result.summary,
                                 content=submission.content
@@ -3479,7 +3758,10 @@ INVALID:
                         
                         await self._broadcast("critique_rejected", {
                             "critique_id": submission.submission_id,
-                            "reasoning": validation_result.reasoning if validation_result else "Unknown",
+                            "reasoning": validation_result.reasoning,
+                            "validator_feedback": validation_result.reasoning,
+                            "validator_summary": validation_result.summary,
+                            "decision": "reject",
                             "consecutive": consecutive_rejections,
                             "total_attempts": total_attempts,
                             "target": CRITIQUE_ATTEMPT_TARGET
@@ -3489,8 +3771,28 @@ INVALID:
                 await asyncio.sleep(3)
                 
             except Exception as e:
+                if api_client_manager.is_provider_failure(e):
+                    raise
                 logger.error(f"Error in critique aggregation loop: {e}", exc_info=True)
-                await asyncio.sleep(5)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": (
+                            "Compiler critique validator"
+                            if failing_role_id == "critique_validator"
+                            else "Compiler critique submitter"
+                        ),
+                        "workflow_mode": self._workflow_mode(),
+                        "role_id": failing_role_id,
+                        "retry_attempt": total_attempts + 1,
+                        "retry_after_seconds": 5,
+                        "reason": "critique_retry",
+                        "error_summary": str(e),
+                    },
+                    role_id=failing_role_id,
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
     
     async def _validate_critique(self, submission) -> Optional[ValidationResult]:
         """
@@ -3588,24 +3890,21 @@ INVALID:
                 data = parse_json(extract_message_text(retry_message))
             
             if data is None:
-                logger.error("Failed to parse critique validation response")
-                return None
+                raise ValueError("Critique validator returned no parsed JSON object")
             
             # Handle array responses
             if isinstance(data, list):
                 logger.warning("Validator returned array - using first element")
                 if not data:
-                    return None
+                    raise ValueError("Critique validator returned an empty JSON array")
                 data = data[0]
             from backend.shared.solution_path.integration import enqueue_optional_update
             critique_decision = str(data.get("decision", "reject")).lower()
             reasoning = data.get("reasoning")
             if critique_decision not in {"accept", "reject"}:
-                logger.error("Critique validator returned invalid decision")
-                return None
+                raise ValueError("Critique validator returned an invalid decision")
             if not isinstance(reasoning, str) or not reasoning.strip():
-                logger.error("Critique validator returned empty reasoning")
-                return None
+                raise ValueError("Critique validator returned empty reasoning")
             await enqueue_optional_update(
                 data,
                 self.solution_path_manager,
@@ -3632,7 +3931,7 @@ INVALID:
             if _is_rigor_model_call_failure(e):
                 raise
             logger.error(f"Error validating critique: {e}", exc_info=True)
-            return None
+            raise RuntimeError(f"Critique validation failed: {e}") from e
     
     async def _perform_critique_cleanup(self) -> None:
         """
@@ -4009,7 +4308,10 @@ INVALID:
             minuscule_edit_count=self.minuscule_edit_count,
             in_critique_phase=self.in_critique_phase,
             critique_acceptances=self.critique_acceptances,
-            paper_version=self.paper_version
+            paper_version=self.paper_version,
+            fatal_error_type=self.fatal_error_type,
+            fatal_error_message=self.fatal_error_message,
+            terminal_event=self.fatal_error_payload,
         )
     
     def get_model_tracking_data(self) -> Optional[Dict]:
@@ -4107,7 +4409,65 @@ INVALID:
         """Broadcast event via WebSocket."""
         if self.websocket_broadcaster:
             try:
-                await self.websocket_broadcaster(event_type, data)
+                semantic = any(
+                    marker in event_type
+                    for marker in ("accepted", "rejected", "declined", "validation")
+                ) and not any(
+                    marker in event_type
+                    for marker in ("error", "failed", "overflow", "provider", "parse")
+                )
+                if str(data.get("validation_stage") or "").lower() in {
+                    "internal_error",
+                    "provider_error",
+                    "parse_error",
+                    "context_error",
+                    "pre-validation",
+                    "pre_validation",
+                }:
+                    semantic = False
+                operational = any(
+                    marker in event_type
+                    for marker in ("error", "failed", "overflow", "provider", "parse", "stopped")
+                ) or str(data.get("validation_stage") or "").lower() in {
+                    "internal_error",
+                    "provider_error",
+                    "parse_error",
+                    "context_error",
+                    "pre-validation",
+                    "pre_validation",
+                }
+                await self.websocket_broadcaster(
+                    event_type,
+                    fill_missing_activity_metadata(
+                        data,
+                        workflow="compiler",
+                        run_id=str(data.get("run_id") or data.get("paper_id") or ""),
+                        generation=data.get("lifecycle_generation", ""),
+                        source_type=str(data.get("source_type") or "paper"),
+                        source_id=str(data.get("source_id") or data.get("paper_id") or ""),
+                        role_id=str(data.get("role_id") or ""),
+                        phase=str(data.get("phase") or self.current_mode or ""),
+                        classification=(
+                            "semantic" if semantic else "operational" if operational else "informational"
+                        ),
+                        category="validator" if semantic else "workflow",
+                        outcome=(
+                            "rejected"
+                            if "rejected" in event_type or "declined" in event_type
+                            else "error"
+                            if operational
+                            else "success"
+                            if "accepted" in event_type or "complete" in event_type
+                            else "info"
+                        ),
+                        feedback=(
+                            data.get("validator_feedback")
+                            or data.get("reasoning")
+                            or data.get("reason")
+                        ),
+                        detail=data.get("error_summary") or data.get("error"),
+                    ),
+                )
             except Exception as e:
                 logger.error(f"Broadcast failed: {e}")
 

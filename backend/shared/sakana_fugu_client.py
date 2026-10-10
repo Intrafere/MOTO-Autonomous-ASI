@@ -19,7 +19,9 @@ import httpx
 
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.openrouter_client import sanitize_provider_error_text
+from backend.shared.provider_recovery.runtime import assured_retry_wait
 from backend.shared.secret_store import (
+    SecretStoreError,
     clear_sakana_fugu_api_key,
     load_sakana_fugu_api_key,
     store_sakana_fugu_api_key,
@@ -139,13 +141,15 @@ class SakanaFuguClient:
         key = (api_key or "").strip()
         if not key:
             raise ValueError("Sakana Fugu API key is required.")
-        self._api_key = key
         if persist:
             store_sakana_fugu_api_key(key)
+            if load_sakana_fugu_api_key() != key:
+                raise SecretStoreError("Stored Sakana Fugu credential could not be verified")
+        self._api_key = key
 
     async def clear_api_key(self) -> None:
-        self._api_key = None
         clear_sakana_fugu_api_key()
+        self._api_key = None
 
     async def status(self) -> Dict[str, Any]:
         return {
@@ -288,6 +292,12 @@ class SakanaFuguClient:
                     str((matched or {}).get("message") or "The Sakana Fugu usage limit has been reached.")
                 )
             )
+            if resets_at is None:
+                return SakanaFuguEntitlementError(
+                    message,
+                    error_code=matched_code,
+                    status_code=response.status_code,
+                )
             return SakanaFuguUsageLimitError(
                 message,
                 resets_at=resets_at,
@@ -345,8 +355,22 @@ class SakanaFuguClient:
                                 "max_attempts": self.MAX_RETRIES,
                                 "retry_after_seconds": delay,
                                 "reason": "transient_http_error",
+                                "error_summary": detail,
                             })
-                        await asyncio.sleep(delay)
+                        else:
+                            await assured_retry_wait(
+                                {
+                                    "provider": "sakana_fugu",
+                                    "provider_label": "Sakana Fugu",
+                                    "model": retry_model,
+                                    "retry_attempt": attempt + 1,
+                                    "max_attempts": self.MAX_RETRIES,
+                                    "retry_after_seconds": delay,
+                                    "reason": "transient_http_error",
+                                    "error_summary": detail,
+                                },
+                                role_id="sakana_fugu_direct",
+                            )
                         continue
                     raise SakanaFuguRequestError(
                         f"Sakana Fugu connection failed after retries: HTTP {response.status_code}: {detail}"
@@ -365,8 +389,24 @@ class SakanaFuguClient:
                             "max_attempts": self.MAX_RETRIES,
                             "retry_after_seconds": delay,
                             "reason": "connection_error",
+                            "error_summary": (
+                                f"[{type(exc).__name__}] {detail}"
+                            ),
                         })
-                    await asyncio.sleep(delay)
+                    else:
+                        await assured_retry_wait(
+                            {
+                                "provider": "sakana_fugu",
+                                "provider_label": "Sakana Fugu",
+                                "model": retry_model,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": self.MAX_RETRIES,
+                                "retry_after_seconds": delay,
+                                "reason": "connection_error",
+                                "error_summary": f"[{type(exc).__name__}] {detail}",
+                            },
+                            role_id="sakana_fugu_direct",
+                        )
                     continue
                 raise SakanaFuguRequestError(f"Sakana Fugu connection failed after retries: {detail}") from exc
         raise SakanaFuguRequestError("Sakana Fugu request failed after retries.")

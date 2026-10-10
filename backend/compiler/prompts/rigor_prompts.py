@@ -20,7 +20,7 @@ a two-stage agent:
         the validator's rejection feedback from attempt 1.
 
 Context assembly follows the RAG offload priority documented in
-`.cursor/rules/rag-design-for-overall-program.mdc`:
+`.claude/rules/rag-design-for-overall-program.md`:
 
     Submitter: Shared Training DB -> Local Submitter DB -> Rejection Log -> User Upload Files
 

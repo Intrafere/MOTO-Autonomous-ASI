@@ -7,6 +7,13 @@
   ],
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "outputs.at_least_one_output_enabled",
+    "outputs.papers_only_skips_proof_work",
+    "proof_runtime.no_lean_when_disabled",
+    "proof_runtime.no_smt_when_disabled"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {
     "final_mode": "autonomous",
     "final_phase": "paper_title_selection"
@@ -20,6 +27,9 @@
     "outputs.papers_only_skips_proof_work",
     "proof_runtime.no_lean_when_disabled",
     "proof_runtime.no_smt_when_disabled"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
   ],
   "fields": [
     "proof_runtime_gating",
@@ -37,6 +47,8 @@
     "provider_pause_resume",
     "workflow_filesystem_state"
   ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
   "replay": [
     "start_autonomous_with_no_outputs()",
     "start_autonomous(lean_enabled=False, papers=False, proofs=False)",
@@ -45,9 +57,14 @@
     "complete_brainstorm()"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "generated_output_and_proof_runtime_gating_seed_7",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 7,
+  "source_identity": "workflow-source-v1:ddf7278dd7ac1b05c6641ef78dbb8fea69c3d82e6235058bf2afbf438b2d1de6",
   "target_artifact": "targets/generated_output_and_proof_runtime_gating.json",
-  "target_id": "generated_output_and_proof_runtime_gating"
+  "target_id": "generated_output_and_proof_runtime_gating",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
 }

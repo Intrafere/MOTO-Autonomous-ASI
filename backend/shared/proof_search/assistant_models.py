@@ -166,6 +166,9 @@ class AssistantProofSupport(BaseModel):
     source_title: str = ""
     novelty_tier: str = ""
     novelty_reasoning: str = ""
+    novelty_scope: Literal["standalone", "group"] = "standalone"
+    novelty_group_claim: str = ""
+    novelty_group_proof_ids: list[str] = Field(default_factory=list)
     created_at: str = ""
     relevance_reason: str = ""
     transfer_hint: str = ""
@@ -229,6 +232,9 @@ class AssistantProofSupport(BaseModel):
             source_title=record.source_title,
             novelty_tier=record.novelty_tier,
             novelty_reasoning=record.novelty_reasoning,
+            novelty_scope=record.novelty_scope,
+            novelty_group_claim=record.novelty_group_claim,
+            novelty_group_proof_ids=list(record.novelty_group_proof_ids),
             created_at=record.created_at,
             relevance_reason=relevance_reason,
             transfer_hint=transfer_hint,
@@ -359,6 +365,20 @@ class AssistantProofPack(BaseModel):
                     f"Fingerprint: {support.fingerprint or '[none]'}",
                     f"Why relevant: {support.relevance_reason or '[ranked as relevant by Assistant retrieval]'}",
                     f"Transfer hint: {support.transfer_hint or '[inspect statement/dependencies for reusable proof shape]'}",
+                    (
+                        "Novelty scope: finite verified group only; do not attribute the stored "
+                        "novelty tier or combined claim to this theorem alone."
+                        if support.novelty_scope == "group"
+                        else "Novelty scope: accepted Lean statement alone."
+                    ),
+                    *(
+                        [
+                            f"Group claim: {support.novelty_group_claim or '[not recorded]'}",
+                            f"Required group proof IDs: {', '.join(support.novelty_group_proof_ids) or '[not recorded]'}",
+                        ]
+                        if support.novelty_scope == "group"
+                        else []
+                    ),
                     f"Statement: {support.theorem_statement}",
                     f"Description: {support.proof_description or '[none]'}",
                     f"Imports: {', '.join(support.imports) or '[none]'}",

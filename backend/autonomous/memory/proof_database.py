@@ -13,6 +13,7 @@ import re
 import shutil
 import tempfile
 import uuid
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Mapping, Optional, Union
@@ -20,6 +21,10 @@ from typing import Dict, Any, List, Mapping, Optional, Union
 import aiofiles
 
 from backend.shared.config import system_config
+from backend.shared.installation_identity import (
+    InstallationIdentityError,
+    ensure_installation_binding,
+)
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import (
     FailedProofCandidate,
@@ -31,8 +36,24 @@ from backend.shared.models import (
     ProofPruneSnapshot,
     ProofRecord,
 )
-from backend.shared.path_safety import resolve_filename_within_root, validate_single_path_component
+from backend.shared.path_safety import (
+    resolve_filename_within_root,
+    resolve_path_within_root,
+    validate_single_path_component,
+)
 from backend.shared.proof_identity import canonical_proof_identity
+from backend.shared.proof_locator import (
+    build_proof_locator,
+    canonical_locator_digest,
+    is_valid_client_proof_id,
+    new_client_proof_id,
+    new_stable_store_id,
+)
+from backend.shared.local_novelty_receipt import finalize_local_novelty_receipt
+from backend.shared.legacy_port_receipt import (
+    finalize_legacy_port_receipt,
+    legacy_source_rank,
+)
 from backend.autonomous.proof_pruning_evidence import (
     EVIDENCE_POLICY_VERSION,
     dependency_fingerprint,
@@ -241,6 +262,10 @@ class ProofDatabase:
         safe_id = self._safe_proof_id(proof_id)
         return self._resolve_storage_path(f"proof_{safe_id}_lean.lean")
 
+    def _get_checked_lean_path(self, proof_id: str) -> Path:
+        safe_id = self._safe_proof_id(proof_id)
+        return self._resolve_storage_path(f"proof_{safe_id}_checked.lean")
+
     def _get_failed_dir(self) -> Path:
         self._refresh_runtime_root()
         return self._base_dir / "failed"
@@ -258,8 +283,172 @@ class ProofDatabase:
         return {
             "next_proof_id": 1,
             "proof_set_revision": 0,
+            "stable_store_id": new_stable_store_id(),
             "proofs": [],
         }
+
+    def _store_kind(self) -> str:
+        self._refresh_runtime_root()
+        if self._session_manager is not None and self._session_manager.is_session_active:
+            return "autonomous"
+        try:
+            relative = self._base_dir.resolve(strict=False).relative_to(
+                Path(system_config.data_dir).resolve(strict=False)
+            )
+        except ValueError:
+            return "shared_legacy"
+        normalized = relative.as_posix().strip("/")
+        if normalized == "manual_proofs" or normalized.startswith("manual_proof_runs/"):
+            return "manual"
+        if normalized.startswith("auto_sessions/"):
+            return "autonomous"
+        if normalized == "proofs":
+            return "autonomous_legacy"
+        return "shared_legacy"
+
+    def _logical_session_id(self) -> str:
+        session_manager = self._session_manager
+        if session_manager is not None and session_manager.is_session_active:
+            return str(getattr(session_manager, "session_id", "") or "").strip()
+        return ""
+
+    async def _qualify_new_record(
+        self,
+        record: ProofRecord,
+        proof_id: str,
+    ) -> ProofRecord:
+        """Assign immutable occurrence identity only during canonical persistence."""
+        existing_locator = record.canonical_locator
+        if record.client_proof_id or existing_locator is not None:
+            if not record.client_proof_id or existing_locator is None:
+                raise ValueError("Proof occurrence identity must be complete")
+            if existing_locator.proof_id != proof_id:
+                raise ValueError("Proof locator proof ID does not match the stored proof ID")
+            digest = canonical_locator_digest(existing_locator)
+            if record.canonical_locator_digest and record.canonical_locator_digest != digest:
+                raise ValueError("Proof locator digest does not match the canonical locator")
+            qualified = record.model_copy(update={"canonical_locator_digest": digest})
+            provenance = qualified.local_novelty_assessment_provenance
+            if provenance is not None:
+                qualified = qualified.model_copy(
+                    update={
+                        "local_novelty_assessment_receipt": (
+                            finalize_local_novelty_receipt(
+                                record=qualified,
+                                provenance=provenance,
+                            )
+                        ),
+                        "local_novelty_assessment_provenance": None,
+                    }
+                )
+            return qualified
+
+        identity = canonical_proof_identity(record.theorem_statement, record.lean_code)
+        canonical_version = record.canonical_identity_version or identity.version
+        theorem_hash = (
+            record.canonical_theorem_statement_hash
+            or identity.theorem_statement_hash
+        )
+        lean_code_hash = record.canonical_lean_code_hash or identity.lean_code_hash
+        run_id = str(record.run_id or "").strip()
+        if not run_id:
+            run_id = str(self._index_data.get("active_run_id") or "").strip()
+        if not run_id:
+            run_id = f"manual-{uuid.uuid4().hex}"
+            self._index_data["active_run_id"] = run_id
+
+        supplied_identity_conflicts = (
+            (
+                bool(record.canonical_identity_version)
+                and record.canonical_identity_version != identity.version
+            )
+            or (
+                bool(record.canonical_theorem_statement_hash)
+                and record.canonical_theorem_statement_hash
+                != identity.theorem_statement_hash
+            )
+            or (
+                bool(record.canonical_lean_code_hash)
+                and record.canonical_lean_code_hash != identity.lean_code_hash
+            )
+        )
+        if supplied_identity_conflicts:
+            logger.warning(
+                "Stored proof %s as unqualified because supplied canonical identity conflicts with its content",
+                proof_id,
+            )
+            return record.model_copy(update={"proof_id": proof_id, "run_id": run_id})
+
+        try:
+            binding = await asyncio.to_thread(ensure_installation_binding)
+        except InstallationIdentityError as exc:
+            logger.warning(
+                "Stored proof without a trade locator because installation identity is unavailable: %s",
+                exc,
+            )
+            return record.model_copy(
+                update={
+                    "proof_id": proof_id,
+                    "run_id": run_id,
+                    "canonical_identity_version": canonical_version,
+                    "canonical_theorem_statement_hash": theorem_hash,
+                    "canonical_lean_code_hash": lean_code_hash,
+                }
+            )
+
+        locator = build_proof_locator(
+            binding=binding,
+            store_kind=self._store_kind(),
+            stable_store_id=str(self._index_data["stable_store_id"]),
+            session_id=self._logical_session_id(),
+            run_id=run_id,
+            proof_id=proof_id,
+            canonical_identity_version=canonical_version,
+            theorem_hash=theorem_hash,
+            lean_code_hash=lean_code_hash,
+        )
+        qualified = record.model_copy(
+            update={
+                "proof_id": proof_id,
+                "run_id": run_id,
+                "canonical_identity_version": canonical_version,
+                "canonical_theorem_statement_hash": theorem_hash,
+                "canonical_lean_code_hash": lean_code_hash,
+                "client_proof_id": new_client_proof_id(),
+                "canonical_locator": locator,
+                "canonical_locator_digest": canonical_locator_digest(locator),
+            }
+        )
+        provenance = qualified.local_novelty_assessment_provenance
+        if provenance is not None:
+            qualified = qualified.model_copy(
+                update={
+                    "local_novelty_assessment_receipt": (
+                        finalize_local_novelty_receipt(
+                            record=qualified,
+                            provenance=provenance,
+                        )
+                    ),
+                    "local_novelty_assessment_provenance": None,
+                }
+            )
+        return qualified
+
+    def _assert_new_occurrence_identity(self, record: ProofRecord) -> None:
+        if record.client_proof_id and not is_valid_client_proof_id(
+            record.client_proof_id
+        ):
+            raise ValueError("Client proof ID is malformed.")
+        for existing in self._index_data.get("proofs", []):
+            if existing.get("proof_id") == record.proof_id:
+                raise ValueError(f"Proof ID already exists in this store: {record.proof_id}")
+            if (
+                record.client_proof_id
+                and existing.get("client_proof_id") == record.client_proof_id
+            ):
+                raise ValueError(
+                    f"Client proof ID already exists in this store: {record.client_proof_id}"
+                )
 
     @staticmethod
     def _atomic_write_text_sync(path: Path, content: str) -> None:
@@ -380,9 +569,34 @@ class ProofDatabase:
             match = re.search(r"(\d+)$", proof_id)
             if match:
                 max_numeric_id = max(max_numeric_id, int(match.group(1)))
+        locator_store_ids = {
+            str((proof.get("canonical_locator") or {}).get("stable_store_id") or "").strip()
+            for proof in proofs
+            if isinstance(proof.get("canonical_locator"), dict)
+        }
+        locator_store_ids.discard("")
+        if len(locator_store_ids) > 1:
+            raise RuntimeError(
+                "Proof store contains conflicting canonical stable store IDs."
+            )
+        proof_ids = [str(proof.get("proof_id") or "").strip() for proof in proofs]
+        if len(proof_ids) != len(set(proof_ids)):
+            raise RuntimeError("Proof store contains duplicate proof IDs.")
+        client_ids = [
+            str(proof.get("client_proof_id") or "").strip()
+            for proof in proofs
+            if str(proof.get("client_proof_id") or "").strip()
+        ]
+        if len(client_ids) != len(set(client_ids)):
+            raise RuntimeError("Proof store contains duplicate client proof IDs.")
         return {
             "next_proof_id": max(max_numeric_id + 1, len(proofs) + 1, 1),
             "proof_set_revision": self._load_durable_revision_sync(),
+            "stable_store_id": (
+                next(iter(locator_store_ids))
+                if len(locator_store_ids) == 1
+                else new_stable_store_id()
+            ),
             "proofs": proofs,
         }
 
@@ -440,17 +654,61 @@ class ProofDatabase:
             self._index_data = self._default_index()
             await self._save_index()
 
+        metadata_changed = False
         if "next_proof_id" not in self._index_data:
             self._index_data["next_proof_id"] = len(self._index_data.get("proofs", [])) + 1
+            metadata_changed = True
         if "proofs" not in self._index_data:
             self._index_data["proofs"] = []
+            metadata_changed = True
+        if not str(self._index_data.get("stable_store_id") or "").strip():
+            locator_store_ids = {
+                str((proof.get("canonical_locator") or {}).get("stable_store_id") or "").strip()
+                for proof in self._index_data["proofs"]
+                if isinstance(proof.get("canonical_locator"), dict)
+            }
+            locator_store_ids.discard("")
+            if len(locator_store_ids) > 1:
+                raise RuntimeError(
+                    "Proof index contains conflicting canonical stable store IDs."
+                )
+            self._index_data["stable_store_id"] = (
+                next(iter(locator_store_ids))
+                if locator_store_ids
+                else new_stable_store_id()
+            )
+            metadata_changed = True
+        stable_store_id = str(self._index_data["stable_store_id"]).strip()
+        proof_ids = [
+            str(proof.get("proof_id") or "").strip()
+            for proof in self._index_data["proofs"]
+        ]
+        if len(proof_ids) != len(set(proof_ids)):
+            raise RuntimeError("Proof index contains duplicate proof IDs.")
+        client_ids = [
+            str(proof.get("client_proof_id") or "").strip()
+            for proof in self._index_data["proofs"]
+            if str(proof.get("client_proof_id") or "").strip()
+        ]
+        if len(client_ids) != len(set(client_ids)):
+            raise RuntimeError("Proof index contains duplicate client proof IDs.")
+        for proof in self._index_data["proofs"]:
+            locator = proof.get("canonical_locator")
+            if (
+                isinstance(locator, dict)
+                and str(locator.get("stable_store_id") or "").strip()
+                != stable_store_id
+            ):
+                raise RuntimeError(
+                    "Proof locator stable store ID conflicts with the proof index."
+                )
         self._index_data["proof_set_revision"] = max(
             int(self._index_data.get("proof_set_revision", 0)),
             await asyncio.to_thread(self._load_durable_revision_sync),
         )
         reconciled = await asyncio.to_thread(self._reconcile_index_from_record_files_sync)
         self._rebuild_reverse_indexes()
-        if reconciled:
+        if reconciled or metadata_changed:
             await self._save_index()
 
     def _ensure_index_loaded_sync(self) -> None:
@@ -470,6 +728,7 @@ class ProofDatabase:
 
         self._index_data.setdefault("next_proof_id", len(self._index_data.get("proofs", [])) + 1)
         self._index_data.setdefault("proofs", [])
+        self._index_data.setdefault("stable_store_id", new_stable_store_id())
         self._index_data["proof_set_revision"] = max(
             int(self._index_data.get("proof_set_revision", 0)),
             self._load_durable_revision_sync(),
@@ -549,16 +808,88 @@ class ProofDatabase:
         stored_record, _duplicate = await self.add_proof_if_absent(record)
         return stored_record
 
+    async def ensure_complete_novelty_group(self, proof_id: str) -> ProofRecord:
+        """Persist the group anchor ID in its own finite novelty membership."""
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+            for index, serialized in enumerate(self._index_data.get("proofs", [])):
+                if serialized.get("proof_id") != proof_id:
+                    continue
+                record = self._deserialize_record(serialized)
+                if record.novelty_scope != "group":
+                    return record
+                member_ids = list(dict.fromkeys([
+                    *record.novelty_group_proof_ids,
+                    record.proof_id,
+                ]))
+                if member_ids == record.novelty_group_proof_ids:
+                    return record
+                stored_record = record.model_copy(
+                    update={"novelty_group_proof_ids": member_ids}
+                )
+                receipt = stored_record.local_novelty_assessment_receipt
+                if receipt is not None:
+                    receipt_payload = receipt.model_dump(mode="json")
+                    receipt_payload["group_proof_ids"] = member_ids
+                    from backend.shared.local_novelty_receipt import (
+                        local_novelty_receipt_digest,
+                    )
+
+                    receipt_payload["receipt_digest"] = (
+                        local_novelty_receipt_digest(receipt_payload)
+                    )
+                    stored_record = stored_record.model_copy(
+                        update={
+                            "local_novelty_assessment_receipt": (
+                                type(receipt).model_validate(receipt_payload)
+                            )
+                        }
+                    )
+                updated = self._serialize_record(stored_record)
+                await self._persist_record_files(stored_record, updated)
+                self._index_data["proofs"][index] = updated
+                await self._increment_proof_set_revision()
+                await self._save_index()
+                return stored_record
+        raise KeyError(f"Proof {proof_id!r} was not found after registration")
+
     async def _persist_record_files(
         self,
         stored_record: ProofRecord,
         serialized: Dict[str, Any],
     ) -> None:
-        """Persist one proof's Lean source before publishing its metadata record."""
+        """Persist canonical and exact checked source before publishing metadata."""
+        from backend.shared.lean_source_evidence import receipt_digest, source_sha256
+
         record_path = self._get_record_path(stored_record.proof_id)
         lean_path = self._get_lean_path(stored_record.proof_id)
+        checked_path = self._get_checked_lean_path(stored_record.proof_id)
+        receipt = stored_record.compile_receipt
+        if stored_record.verification_evidence_status == "complete":
+            if receipt is None:
+                raise ValueError("Complete proof evidence requires a compile receipt")
+            if receipt.checked_source_sha256 != source_sha256(stored_record.lean_code):
+                raise ValueError("Compile receipt checked hash does not match canonical Lean source")
+            if receipt.receipt_digest != receipt_digest(receipt.model_dump(mode="json")):
+                raise ValueError("Compile receipt digest is invalid")
+            artifact_name = checked_path.name
+            if receipt.checked_source_artifact != artifact_name:
+                receipt = receipt.model_copy(update={"checked_source_artifact": artifact_name})
+                payload = receipt.model_dump(mode="json")
+                payload["receipt_digest"] = receipt_digest(payload)
+                receipt = type(receipt).model_validate(payload)
+                stored_record.compile_receipt = receipt
+                serialized["compile_receipt"] = receipt.model_dump(mode="json")
         lean_existed = await asyncio.to_thread(lean_path.exists)
+        checked_existed = await asyncio.to_thread(checked_path.exists)
         await asyncio.to_thread(self._atomic_write_text_sync, lean_path, stored_record.lean_code)
+        if receipt is not None:
+            await asyncio.to_thread(
+                self._atomic_write_text_sync,
+                checked_path,
+                stored_record.lean_code,
+            )
         try:
             await self._atomic_write_json(record_path, serialized)
         except Exception:
@@ -571,6 +902,9 @@ class ProofDatabase:
                         lean_path,
                         cleanup_exc,
                     )
+            if receipt is not None and not checked_existed:
+                with suppress(Exception):
+                    await asyncio.to_thread(checked_path.unlink, True)
             raise
 
     async def _increment_proof_set_revision(self) -> int:
@@ -586,15 +920,12 @@ class ProofDatabase:
                 await self._load_index()
 
             proof_id = record.proof_id or f"proof_{self._index_data['next_proof_id']:03d}"
-            stored_record = record.model_copy(update={"proof_id": proof_id})
+            stored_record = await self._qualify_new_record(record, proof_id)
+            self._assert_new_occurrence_identity(stored_record)
             serialized = self._serialize_record(stored_record)
             await self._persist_record_files(stored_record, serialized)
 
-            proofs = [
-                proof
-                for proof in self._index_data.get("proofs", [])
-                if proof.get("proof_id") != proof_id
-            ]
+            proofs = list(self._index_data.get("proofs", []))
             proofs.append(serialized)
             proofs.sort(key=lambda proof: proof.get("created_at", ""), reverse=True)
             self._index_data["proofs"] = proofs
@@ -624,15 +955,12 @@ class ProofDatabase:
                 return self._deserialize_record(existing), True
 
             proof_id = record.proof_id or f"proof_{self._index_data['next_proof_id']:03d}"
-            stored_record = record.model_copy(update={"proof_id": proof_id})
+            stored_record = await self._qualify_new_record(record, proof_id)
+            self._assert_new_occurrence_identity(stored_record)
             serialized = self._serialize_record(stored_record)
             await self._persist_record_files(stored_record, serialized)
 
-            proofs = [
-                proof
-                for proof in self._index_data.get("proofs", [])
-                if proof.get("proof_id") != proof_id
-            ]
+            proofs = list(self._index_data.get("proofs", []))
             proofs.append(serialized)
             proofs.sort(key=lambda proof: proof.get("created_at", ""), reverse=True)
 
@@ -1571,6 +1899,7 @@ class ProofDatabase:
         proof_id: str,
         dependencies,
         *,
+        portable_dependencies=None,
         extraction_status: str = "complete",
         extraction_detail: str = "",
     ) -> Optional[ProofRecord]:
@@ -1592,6 +1921,7 @@ class ProofDatabase:
                 updated_record = record.model_copy(
                     update={
                         "dependencies": list(dependencies or []),
+                        "portable_dependencies": list(portable_dependencies or []),
                         "dependency_extraction_status": extraction_status,
                         "dependency_extraction_detail": str(
                             extraction_detail or ""
@@ -1614,6 +1944,149 @@ class ProofDatabase:
             await self._increment_proof_set_revision()
             await self._save_index()
             return updated_record
+
+    @staticmethod
+    def _legacy_port_skip_reason(record: ProofRecord) -> str:
+        """Return why a record is not a released-build legacy port candidate."""
+        if record.legacy_port_receipt is not None:
+            return "legacy_port_already_migrated"
+        if record.client_proof_id or record.canonical_locator is not None:
+            return "legacy_port_already_qualified"
+        if (
+            record.verification_evidence_status != "legacy_unrecorded"
+            or record.compile_receipt is not None
+            or record.local_novelty_assessment_receipt is not None
+        ):
+            return "legacy_port_not_legacy_record"
+        if not str(record.lean_code or "").strip():
+            return "legacy_port_lean_source_missing"
+        if legacy_source_rank(record) is None:
+            return "legacy_port_rank_unknown"
+        identity = canonical_proof_identity(record.theorem_statement, record.lean_code)
+        if (
+            (
+                record.canonical_identity_version
+                and record.canonical_identity_version != identity.version
+            )
+            or (
+                record.canonical_theorem_statement_hash
+                and record.canonical_theorem_statement_hash
+                != identity.theorem_statement_hash
+            )
+            or (
+                record.canonical_lean_code_hash
+                and record.canonical_lean_code_hash != identity.lean_code_hash
+            )
+        ):
+            return "legacy_port_identity_conflict"
+        return ""
+
+    async def migrate_legacy_identity(
+        self,
+        *,
+        store_kind: str,
+        session_id: str = "",
+        archive_id: str = "",
+    ) -> Dict[str, Any]:
+        """Explicitly mint port identity for proofs stored by released builds.
+
+        Released builds stored proofs before client identity, compile receipts,
+        or local novelty receipts existed. SyntheticLib ports those proofs
+        without a compile receipt, so this one-time migration mints a client
+        proof ID and locator and records a digest-bound legacy-port receipt.
+        Lean source, theorem text, and novelty fields are never changed, and
+        no proof-time evidence is invented. Installation-binding errors
+        propagate so nothing is written for a copied or moved root.
+        """
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+            skipped: Dict[str, int] = {}
+            already = 0
+            candidates: List[tuple[int, ProofRecord, str]] = []
+            for position, data in enumerate(self._index_data.get("proofs", [])):
+                try:
+                    record = self._deserialize_record(data)
+                except Exception:
+                    skipped["legacy_port_record_invalid"] = (
+                        skipped.get("legacy_port_record_invalid", 0) + 1
+                    )
+                    continue
+                reason = self._legacy_port_skip_reason(record)
+                if reason in {"legacy_port_already_migrated", "legacy_port_already_qualified"}:
+                    already += 1
+                elif reason:
+                    skipped[reason] = skipped.get(reason, 0) + 1
+                else:
+                    candidates.append((position, record, legacy_source_rank(record) or ""))
+            result: Dict[str, Any] = {
+                "eligible_count": len(candidates),
+                "migrated_count": 0,
+                "already_qualified_count": already,
+                "skipped": skipped,
+            }
+            if not candidates:
+                return result
+
+            binding = await asyncio.to_thread(ensure_installation_binding)
+            # Index-only legacy stores: publish every record file first, so the
+            # next index reconciliation (which trusts record files once any
+            # exist) cannot drop records this migration skipped.
+            for data in self._index_data.get("proofs", []):
+                record_path = self._get_record_path(str(data.get("proof_id") or ""))
+                if await asyncio.to_thread(record_path.exists):
+                    continue
+                try:
+                    unchanged = self._deserialize_record(data)
+                except Exception:
+                    await self._atomic_write_json(record_path, data)
+                    continue
+                await self._persist_record_files(unchanged, dict(data))
+            stable_store_id = str(self._index_data["stable_store_id"])
+            for position, record, rank in candidates:
+                identity = canonical_proof_identity(record.theorem_statement, record.lean_code)
+                run_id = str(record.run_id or "").strip() or (
+                    f"legacy:{record.source_type}:{record.source_id}"
+                )
+                locator = build_proof_locator(
+                    binding=binding,
+                    store_kind=store_kind,
+                    stable_store_id=stable_store_id,
+                    session_id=session_id,
+                    archive_id=archive_id,
+                    run_id=run_id,
+                    proof_id=record.proof_id,
+                    canonical_identity_version=identity.version,
+                    theorem_hash=identity.theorem_statement_hash,
+                    lean_code_hash=identity.lean_code_hash,
+                )
+                qualified = record.model_copy(
+                    update={
+                        "run_id": run_id,
+                        "canonical_identity_version": identity.version,
+                        "canonical_theorem_statement_hash": identity.theorem_statement_hash,
+                        "canonical_lean_code_hash": identity.lean_code_hash,
+                        "client_proof_id": new_client_proof_id(),
+                        "canonical_locator": locator,
+                        "canonical_locator_digest": canonical_locator_digest(locator),
+                    }
+                )
+                qualified = qualified.model_copy(
+                    update={
+                        "legacy_port_receipt": finalize_legacy_port_receipt(
+                            record=qualified,
+                            source_local_rank=rank,
+                        )
+                    }
+                )
+                serialized = self._serialize_record(qualified)
+                await self._persist_record_files(qualified, serialized)
+                self._index_data["proofs"][position] = serialized
+                result["migrated_count"] += 1
+            await self._increment_proof_set_revision()
+            self._rebuild_reverse_indexes()
+            await self._save_index()
+            return result
 
     async def get_dependencies(self, proof_id: str):
         """Return dependency edges for one proof."""
@@ -1867,6 +2340,11 @@ class ProofDatabase:
         """Format the novel proofs block for highest-priority prompt injection."""
         self._ensure_index_loaded_sync()
         proofs = self._index_data.get("proofs", []) if self._index_data else []
+        proofs_by_id = {
+            str(proof.get("proof_id") or ""): proof
+            for proof in proofs
+            if str(proof.get("proof_id") or "")
+        }
         novel_proofs = [
             proof for proof in proofs
             if proof.get("novel") and (
@@ -1885,6 +2363,7 @@ class ProofDatabase:
             "Novelty tiers: Major Mathematical Discovery (highest — possible prize-level discovery), Mathematical Discovery (new result), Novel Reformulation (novel reformulation of known proof), Novel Formalization (citable formulation/formalization absent from standard references or Mathlib).]",
             "",
         ]
+        rendered_count = 0
         for index, proof in enumerate(novel_proofs, start=1):
             tier = proof.get("novelty_tier", "")
             tier_label = {
@@ -1893,17 +2372,70 @@ class ProofDatabase:
                 "novel_variant": "Novel Reformulation",
                 "novel_formulation": "Novel Formalization",
             }.get(tier, "Novel")
-            lines.extend(
-                [
-                    f"PROOF {index} [{tier_label}]: {proof.get('theorem_statement', '').strip()}",
-                    f"Source: {proof.get('source_type', '')} {proof.get('source_id', '')}".strip(),
-                    "Lean 4 Code:",
-                    proof.get("lean_code", "").strip(),
-                    "---",
+            if str(proof.get("novelty_scope") or "standalone") == "group":
+                member_ids = list(dict.fromkeys([
+                    *list(proof.get("novelty_group_proof_ids") or []),
+                    str(proof.get("proof_id") or ""),
+                ]))
+                members = [
+                    proofs_by_id[member_id]
+                    for member_id in member_ids
+                    if member_id in proofs_by_id
+                    and is_live_context_active(proofs_by_id[member_id], requesting_run_id)
                 ]
-            )
+                if len(members) != len(member_ids):
+                    continue
+                lines.extend(
+                    [
+                        f"PROOF GROUP {index} [{tier_label}]: {str(proof.get('novelty_group_claim') or '').strip()}",
+                        "This tier applies only to the finite verified group below, not to any member alone.",
+                        f"Member proof IDs: {', '.join(member_ids)}",
+                    ]
+                )
+                for member in members:
+                    lines.extend(
+                        [
+                            f"GROUP MEMBER {member.get('proof_id', '')}: {str(member.get('theorem_statement') or '').strip()}",
+                            "Lean 4 Code:",
+                            str(member.get("lean_code") or "").strip(),
+                        ]
+                    )
+                lines.append("---")
+                rendered_count += 1
+            else:
+                lines.extend(
+                    [
+                        f"PROOF {index} [{tier_label}]: {proof.get('theorem_statement', '').strip()}",
+                        f"Source: {proof.get('source_type', '')} {proof.get('source_id', '')}".strip(),
+                        "Lean 4 Code:",
+                        proof.get("lean_code", "").strip(),
+                        "---",
+                    ]
+                )
+                rendered_count += 1
+        if rendered_count == 0:
+            return ""
         lines.append("=== END VERIFIED PROOFS ===")
         return "\n".join(lines)
+
+    @staticmethod
+    def strip_injected_proof_context(prompt: str) -> str:
+        """Remove complete MOTO verified-proof blocks from a materialized prompt."""
+        start_marker = "=== VERIFIED NOVEL MATHEMATICAL PROOFS (Lean 4 Verified) ==="
+        end_marker = "=== END VERIFIED PROOFS ==="
+        remaining = str(prompt or "")
+        while True:
+            start = remaining.find(start_marker)
+            if start < 0:
+                break
+            end = remaining.find(end_marker, start + len(start_marker))
+            if end < 0:
+                # Internally generated blocks are always delimited. Preserve malformed
+                # external text rather than deleting unrelated trailing prompt content.
+                break
+            end += len(end_marker)
+            remaining = f"{remaining[:start]}\n{remaining[end:]}"
+        return remaining.strip()
 
     def inject_into_prompt(self, prompt: str, requesting_run_id: str = "") -> str:
         """Prepend the verified novel proofs block when available."""
@@ -1915,6 +2447,24 @@ class ProofDatabase:
         if not prompt:
             return proofs_block
         return f"{proofs_block}\n\n{prompt}"
+
+    async def refresh_injected_proof_context(
+        self,
+        prompt: str,
+        requesting_run_id: str = "",
+    ) -> tuple[str, int]:
+        """Rebuild an injected proof block from one revision-consistent store snapshot."""
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+            base_prompt = self.strip_injected_proof_context(prompt)
+            proofs_block = self.get_novel_proofs_for_injection(requesting_run_id)
+            revision = int(self._index_data.get("proof_set_revision", 0))
+            if not proofs_block:
+                return base_prompt, revision
+            if not base_prompt:
+                return proofs_block, revision
+            return f"{proofs_block}\n\n{base_prompt}", revision
 
     async def inject_failure_hints_into_prompt(
         self,
@@ -2012,10 +2562,11 @@ class ProofDatabase:
                 suffix += 1
 
             run_dir = history_root / run_id
-            target_proofs_dir = run_dir / "proofs"
+            temporary_run_dir = history_root / f".{run_id}.{uuid.uuid4().hex}.tmp"
+            target_proofs_dir = temporary_run_dir / "proofs"
 
             def _copy_active_run() -> None:
-                run_dir.mkdir(parents=True, exist_ok=True)
+                temporary_run_dir.mkdir(parents=True, exist_ok=False)
                 shutil.copytree(self._base_dir, target_proofs_dir)
                 if proof_count:
                     shutil.rmtree(target_proofs_dir / "failed", ignore_errors=True)
@@ -2024,7 +2575,10 @@ class ProofDatabase:
 
             metadata = {
                 "session_id": run_id,
+                "run_id": base_run_id,
+                "archive_placement_id": run_id,
                 "run_type": "manual",
+                "stable_store_id": str(self._index_data.get("stable_store_id") or ""),
                 "status": "cleared",
                 "reason": reason,
                 "user_prompt": (user_prompt or "").strip(),
@@ -2033,12 +2587,13 @@ class ProofDatabase:
                 "proof_count": proof_count,
                 "has_failed_state": has_failed_state,
             }
-            metadata_path = run_dir / "session_metadata.json"
+            metadata_path = temporary_run_dir / "session_metadata.json"
             await asyncio.to_thread(
-                metadata_path.write_text,
+                self._atomic_write_text_sync,
+                metadata_path,
                 json.dumps(metadata, indent=2),
-                "utf-8",
             )
+            await asyncio.to_thread(os.replace, temporary_run_dir, run_dir)
 
             await asyncio.to_thread(shutil.rmtree, self._base_dir, True)
             self._base_dir.mkdir(parents=True, exist_ok=True)
@@ -2123,8 +2678,39 @@ class ProofDatabase:
                 "novel": is_novel,
                 "novelty_tier": proof_data.get("novelty_tier", "not_novel"),
                 "novelty_reasoning": proof_data.get("novelty_reasoning", ""),
+                "novelty_scope": proof_data.get("novelty_scope", "standalone"),
+                "novelty_group_claim": proof_data.get("novelty_group_claim", ""),
+                "novelty_group_proof_ids": proof_data.get(
+                    "novelty_group_proof_ids", []
+                ),
+                "independent_novelty_tier": proof_data.get(
+                    "independent_novelty_tier", ""
+                ),
+                "independent_novelty_reasoning": proof_data.get(
+                    "independent_novelty_reasoning", ""
+                ),
+                "exact_duplicate_proof_id": proof_data.get(
+                    "exact_duplicate_proof_id", ""
+                ),
+                "exact_duplicate_run_id": proof_data.get(
+                    "exact_duplicate_run_id", ""
+                ),
                 "artifact_purpose": proof_data.get(
                     "artifact_purpose", "verified_occurrence"
+                ),
+                "canonical_identity_version": proof_data.get(
+                    "canonical_identity_version", ""
+                ),
+                "canonical_theorem_statement_hash": proof_data.get(
+                    "canonical_theorem_statement_hash", ""
+                ),
+                "canonical_lean_code_hash": proof_data.get(
+                    "canonical_lean_code_hash", ""
+                ),
+                "client_proof_id": proof_data.get("client_proof_id", ""),
+                "canonical_locator": proof_data.get("canonical_locator"),
+                "canonical_locator_digest": proof_data.get(
+                    "canonical_locator_digest", ""
                 ),
                 "verification_notes": proof_data.get("verification_notes", ""),
                 "attempt_count": proof_data.get("attempt_count", 0),

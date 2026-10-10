@@ -288,11 +288,11 @@ const AutonomousResearchInterface = ({
       try {
         const response = await api.forcePaperWriting();
         if (response.success) {
-          alert(`Success! Brainstorm will now transition to paper writing.\nTopic: ${response.topic_prompt}`);
+          alert(`Success! Brainstorm will now transition to the next enabled output.\nTopic: ${response.topic_prompt}`);
           setShowForceConfirm(false);
         }
       } catch (error) {
-        alert(`Failed to force paper writing: ${error.details || error.message}`);
+        alert(`Failed to skip AI autonomy: ${error.details || error.message}`);
       } finally {
         setIsForcing(false);
       }
@@ -534,39 +534,6 @@ const AutonomousResearchInterface = ({
                 ⧗ {status.current_brainstorm.queue_size || 0} in queue
               </span>
             </div>
-            
-            {/* Manual Control Button */}
-            {status?.current_tier === 'tier1_aggregation' && (
-              <div className="manual-controls">
-                <button
-                  className={`btn-force-paper ${showForceConfirm ? 'btn-confirm' : ''}`}
-                  onClick={handleForcePaperWriting}
-                  disabled={isForcing || !isRunning}
-                >
-                  {showForceConfirm 
-                    ? (isForcing ? 'Forcing...' : 'Confirm Force Paper Writing') 
-                    : (
-                      <span className="force-paper-text">
-                        <span className="force-paper-action">Skip AI Autonomy</span>
-                        <span className="force-paper-hint" role="tooltip">
-                          We recommend at minimum 7 ACCEPTED submissions. A very low acceptance rate is normal because the validator is seeking novel solutions. Higher parameter models may improve acceptance, though optimizing for both speed and knowledge can also work well. Validator feedback on rejections helps avoid rejection loops. Harder problems may require hundreds or more rejections before a single acceptance, and the first acceptance often takes the longest. View brainstorms in the brainstorm tab.
-                        </span>
-                      </span>
-                    )}
-                </button>
-                {showForceConfirm && !isForcing && (
-                  <button 
-                    className="btn-cancel"
-                    onClick={() => setShowForceConfirm(false)}
-                  >
-                    Cancel
-                  </button>
-                )}
-                <p className="manual-help-text">
-                  Skip completion review and begin paper writing immediately
-                </p>
-              </div>
-            )}
           </div>
         )}
 
@@ -610,6 +577,40 @@ const AutonomousResearchInterface = ({
           </div>
         )}
       </div>
+
+      {/* Keep this active while the rest of the running workflow is visually muted. */}
+      {status?.current_brainstorm && status?.current_tier === 'tier1_aggregation' && (
+        <div className="manual-controls manual-controls--active">
+          <button
+            className={`btn-force-paper ${showForceConfirm ? 'btn-confirm' : ''}`}
+            onClick={handleForcePaperWriting}
+            disabled={isForcing || !isRunning}
+            aria-label={showForceConfirm ? 'Confirm Skip AI Autonomy' : 'Skip AI Autonomy'}
+          >
+            {showForceConfirm
+              ? (isForcing ? 'Skipping...' : 'Confirm Skip AI Autonomy')
+              : (
+                <span className="force-paper-text">
+                  <span className="force-paper-action">Skip AI Autonomy</span>
+                  <span className="force-paper-hint" role="tooltip">
+                    We recommend at minimum 7 ACCEPTED submissions. A very low acceptance rate is normal because the validator is seeking novel solutions. Higher parameter models may improve acceptance, though optimizing for both speed and knowledge can also work well. Validator feedback on rejections helps avoid rejection loops. Harder problems may require hundreds or more rejections before a single acceptance, and the first acceptance often takes the longest. View brainstorms in the brainstorm tab.
+                  </span>
+                </span>
+              )}
+          </button>
+          {showForceConfirm && !isForcing && (
+            <button
+              className="btn-cancel"
+              onClick={() => setShowForceConfirm(false)}
+            >
+              Cancel
+            </button>
+          )}
+          <p className="manual-help-text">
+            Skip the remaining AI autonomy and move directly to proof writing, paper writing, or both—based on your Allowed Outputs selections.
+          </p>
+        </div>
+      )}
 
       {/* Force Tier 3 Button - Only visible when running, tier3 enabled, and not already in Tier 3 */}
       {isRunning && config?.tier3_enabled && !status?.is_tier3_active && status?.stats?.total_papers_completed > 0 && (

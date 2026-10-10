@@ -1,11 +1,18 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "state.runtime_roots_are_active_roots"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "persisted_result_hydration",
     "temp_root",
     "blocked_clear_no_archive"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "workflow_filesystem_state",
@@ -15,11 +22,23 @@
   "invariants": [
     "state.runtime_roots_are_active_roots"
   ],
+  "observed_transition": "persisted_result_hydration; temp_root; blocked_clear_no_archive",
+  "real_components": [
+    "backend/api/routes/aggregator.py",
+    "backend/api/routes/compiler.py",
+    "backend/api/routes/leanoj.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_manual_aggregator_durable_hydration_and_clear_blocker",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+  "source_identity": "workflow-source-v1:7e6c93cdac2e5dff021baff153d1f6dae8465027486c84e07008f4261310fd6e",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_manual_aggregator_durable_results_hydrate_from_temp_root",
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_manual_aggregator_clear_blocker_has_no_destructive_side_effects"
+  ]
 }

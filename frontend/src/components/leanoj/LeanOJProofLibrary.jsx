@@ -3,6 +3,7 @@ import { downloadTextFile } from '../../utils/downloadHelpers';
 import {
   getCanonicalProofIdentity,
   getLeanOJProofPresentation,
+  getNoveltyGroupAnchorIds,
   sanitizeDomId,
 } from '../../utils/proofPresentation';
 import { formatRunPromptPreview } from '../../utils/researchRunHistory';
@@ -256,6 +257,24 @@ export default function LeanOJProofLibrary({
     downloadTextFile(leanCode, `${proofForDownload.theorem_name || proof.theorem_name || proof.proof_id}.lean`);
   };
 
+  const handleDownloadNoveltyGroup = async (proof, event) => {
+    event?.stopPropagation();
+    try {
+      const anchorId = getNoveltyGroupAnchorIds(proof)[0] || proof.proof_id;
+      const group = await api.getLibraryProofNoveltyGroup(
+        proof.session_id,
+        anchorId
+      );
+      downloadTextFile(
+        JSON.stringify(group, null, 2),
+        `${proof.shared_proof_id || proof.proof_id}_novelty_group.json`,
+        'application/json'
+      );
+    } catch (err) {
+      setError(`Failed to download novelty-ranked proof group: ${err.message}`);
+    }
+  };
+
   if (loading) {
     return (
       <div className="final-answer-library proof-library">
@@ -391,6 +410,15 @@ export default function LeanOJProofLibrary({
                                 >
                                   Download .lean
                                 </button>
+                                {getNoveltyGroupAnchorIds(proof).length > 0 && (
+                                  <button
+                                    type="button"
+                                    className="proof-header-download"
+                                    onClick={(event) => handleDownloadNoveltyGroup(proof, event)}
+                                  >
+                                    Download Ranked Group
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   className="expand-button"
@@ -461,6 +489,19 @@ export default function LeanOJProofLibrary({
                                     </div>
                                   )}
 
+                                  <div className="proof-detail-section">
+                                    <h4>Discovery Ranking Scope</h4>
+                                    <p>
+                                      {expandedProof.novelty_scope === 'group'
+                                        ? 'Finite verified proof group'
+                                        : 'Accepted Lean statement alone'}
+                                    </p>
+                                    {expandedProof.novelty_group_claim && <p>{expandedProof.novelty_group_claim}</p>}
+                                    {expandedProof.novelty_scope === 'group' && expandedProof.novelty_group_proof_ids?.length > 0 && (
+                                      <p>Ranked with: {expandedProof.novelty_group_proof_ids.join(', ')}</p>
+                                    )}
+                                  </div>
+
                                   <div className="quick-download-buttons">
                                     {expandedProof.lean_code && (
                                       <button
@@ -468,6 +509,14 @@ export default function LeanOJProofLibrary({
                                         onClick={() => handleDownloadLean(expandedProof)}
                                       >
                                         Download .lean
+                                      </button>
+                                    )}
+                                    {getNoveltyGroupAnchorIds(expandedProof).length > 0 && (
+                                      <button
+                                        className="quick-download-raw"
+                                        onClick={() => handleDownloadNoveltyGroup(expandedProof)}
+                                      >
+                                        Download Ranked Group (JSON)
                                       </button>
                                     )}
                                   </div>

@@ -13,7 +13,10 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from backend.autonomous.agents.lemma_search_agent import MathlibLemmaSearchAgent
-from backend.autonomous.agents.proof_formalization_agent import ProofFormalizationAgent
+from backend.autonomous.agents.proof_formalization_agent import (
+    ProofFormalizationAgent,
+    transient_provider_retry_error,
+)
 from backend.autonomous.agents.proof_identification_agent import (
     ProofIdentificationAgent,
     ProofIdentificationContextError,
@@ -35,11 +38,11 @@ from backend.shared.context_overflow import (
 )
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import (
-    format_transient_provider_error,
     is_non_retryable_model_error,
     is_transient_model_call_error,
 )
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
+from backend.shared.activity import fill_missing_activity_metadata
 from backend.shared.models import (
     ProofAttemptFeedback,
     ProofAttemptResult,
@@ -53,6 +56,11 @@ from backend.shared.models import (
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.provider_errors import ProviderContextLengthError
 from backend.shared.provider_pause import is_provider_credit_pause_error
+from backend.shared.provider_route_identity import (
+    is_model_provider,
+    merge_route_identity,
+    route_identity_from_error,
+)
 from backend.shared.smt_client import get_smt_client
 from backend.shared.utils import count_tokens
 from .proof_dependency_extractor import ProofDependencyExtractor
@@ -222,9 +230,8 @@ def _normalize_candidate_list_checkpoint(
         ]
         if validated_approved_ids != approved_ids:
             return {}
-        if not ProofCandidateListValidator.threshold_met(
+        if not ProofCandidateListValidator.list_accepted(
             approved_count=len(approved_ids),
-            proposed_count=len(proposed_ids),
         ):
             return {}
         normalized["validation"] = validation.model_dump(mode="json")
@@ -280,6 +287,41 @@ class ProofVerificationStage:
         if trigger == "manual":
             return "manual_proof_check"
         return "autonomous"
+
+    @classmethod
+    def _provider_retry_workflow_mode(cls, trigger: str) -> str:
+        """Return the workflow named on this stage's provider retry waits.
+
+        A user-triggered check may run while another workflow owns the session,
+        so retry waits name the stage's own workflow. The proofs-only Compiler
+        run (``manual_compiler_aggregator``) is owned as a manual proof check, so
+        its waits stay with that run's adapter-level provider retries.
+        """
+        if trigger == "manual_compiler_aggregator":
+            return "manual_proof_check"
+        return cls._proof_workflow_mode(trigger)
+
+    @staticmethod
+    def _provider_error_route_identity(
+        error: Optional[BaseException],
+        *,
+        workflow_mode: str,
+    ) -> dict[str, str]:
+        """Return Live Activity route identity when ``error`` names a provider route.
+
+        Exceptions without a typed model-provider route add nothing, so workflow
+        failures never gain a fabricated model or host.
+        """
+        if error is None:
+            return {}
+        identity = route_identity_from_error(error)
+        if not is_model_provider(identity.get("provider")):
+            return {}
+        return api_client_manager.route_identity_for_role(
+            str(identity.get("role_id") or ""),
+            workflow_mode=workflow_mode,
+            error=error,
+        )
 
     @classmethod
     def _get_active_sources_lock(cls) -> asyncio.Lock:
@@ -356,7 +398,55 @@ class ProofVerificationStage:
 
     async def _broadcast(self, broadcast_fn: BroadcastFn, event: str, data: dict[str, Any]) -> None:
         if broadcast_fn:
-            await broadcast_fn(event, data)
+            semantic_events = {
+                "proof_candidate_list_review_accepted",
+                "proof_candidate_list_review_rejected",
+                "proof_integrity_rejected",
+                "proof_downshifted",
+            }
+            operational_events = {
+                "smt_check_error",
+                "proof_candidate_list_review_interrupted",
+                "proof_competitor_unavailable",
+                "proof_attempts_exhausted",
+                "proof_truncation_recovery_exhausted",
+                "proof_context_overflow",
+                "proof_attempt_failed",
+            }
+            classification = (
+                "semantic"
+                if event in semantic_events
+                else "operational"
+                if event in operational_events
+                else "informational"
+            )
+            outcome = (
+                "rejected"
+                if event in {"proof_candidate_list_review_rejected", "proof_integrity_rejected"}
+                else "error"
+                if event in operational_events
+                else "success"
+                if event in {"proof_candidate_list_review_accepted", "proof_verified", "proof_lean_accepted"}
+                else "info"
+            )
+            await broadcast_fn(
+                event,
+                fill_missing_activity_metadata(
+                    data,
+                    workflow="proof_verification",
+                    run_id=str(data.get("proof_run_id") or data.get("run_id") or ""),
+                    generation=data.get("lifecycle_generation", ""),
+                    source_type=str(data.get("source_type") or ""),
+                    source_id=str(data.get("source_id") or ""),
+                    role_id=str(data.get("role_id") or ""),
+                    phase="proof_verification",
+                    classification=classification,
+                    category="validator" if classification == "semantic" else "workflow",
+                    outcome=outcome,
+                    feedback=data.get("validator_feedback") or data.get("reasoning") or data.get("reason"),
+                    detail=data.get("error_summary") or data.get("error") or data.get("detail"),
+                ),
+            )
 
     @staticmethod
     def _role_suffix(
@@ -785,26 +875,56 @@ class ProofVerificationStage:
         from backend.autonomous.core.proof_competition import ProofCompetition
         competition_reporter = None
         competition_data = competition_config.model_dump(mode="json") if hasattr(competition_config, "model_dump") else dict(competition_config or {})
+        competition_role_suffix = self._role_suffix(
+            source_type,
+            role_suffix_override,
+            proof_run_context,
+        )
         if competition_data.get("enabled") and (proof_run_context or {}).get("scope") == "autonomous":
             from pathlib import Path
             from backend.autonomous.core.proof_competition_reporting import CompetitionReporter
             store_path = Path(getattr(novel_proofs_db, "_base_dir", ""))
             if store_path.name == "proofs" and store_path.parent.parent.resolve() == Path(system_config.auto_sessions_base_dir).resolve():
-                primary_route = api_client_manager.get_role_config(f"autonomous_proof_formalization_{role_suffix}")
+                primary_route = api_client_manager.get_role_config(f"autonomous_proof_formalization_{competition_role_suffix}")
                 competition_reporter = CompetitionReporter(
                     session_id=store_path.parent.name, run_id=run_id,
                     primary_route=primary_route or {"provider": "unknown", "model_id": submitter_model,
                         "context_window": submitter_context, "max_output_tokens": submitter_max_tokens},
                     secondaries=competition_data.get("secondaries", []),
                 )
+
+        def competitor_route_identity(competitor_index: int) -> dict[str, str]:
+            """Return the configured route identity of one secondary proof model."""
+            from backend.autonomous.core.proof_competition import fingerprint
+            secondaries = list(competition_data.get("secondaries") or [])
+            if not 0 < competitor_index <= len(secondaries):
+                return {}
+            route_data = dict(secondaries[competitor_index - 1])
+            provider = str(route_data.get("provider") or "")
+            return api_client_manager.route_identity_for_role(
+                f"autonomous_proof_formalization_{competition_role_suffix}"
+                f"_competition_{competitor_index}_{fingerprint(route_data)[:16]}",
+                workflow_mode=self._proof_workflow_mode(trigger),
+                model=str(route_data.get("model_id") or ""),
+                provider=provider,
+                configured_host_provider=(
+                    str(route_data.get("openrouter_provider") or "")
+                    if provider == "openrouter"
+                    else None
+                ),
+            )
+
         async def observe_competition(event):
             if competition_reporter:
                 await competition_reporter(event)
             if event.get("competitor_index", 0) and event.get("status") == "unavailable":
-                await self._broadcast(broadcast_fn, "proof_competitor_unavailable", {
-                    **(proof_run_context or {}), **event,
-                    "message": "Secondary proof model unavailable; research continues with the remaining competitors.",
-                })
+                await self._broadcast(broadcast_fn, "proof_competitor_unavailable", merge_route_identity(
+                    {
+                        **(proof_run_context or {}), **event,
+                        "message": "Secondary proof model unavailable; research continues with the remaining competitors.",
+                    },
+                    competitor_route_identity(int(event.get("competitor_index") or 0)),
+                ))
             if competition_observer:
                 await competition_observer(event)
         competition = ProofCompetition(
@@ -824,6 +944,29 @@ class ProofVerificationStage:
             source_type=source_type,
             source_id=source_id,
         )
+        proof_context_revision: Optional[int] = None
+
+        async def refresh_user_prompt() -> str:
+            """Snapshot current owning-run proof context at a model-call boundary."""
+            nonlocal proof_context_revision
+            refresh = getattr(
+                novel_proofs_db,
+                "refresh_injected_proof_context",
+                None,
+            )
+            if not callable(refresh):
+                return user_prompt
+            refreshed = await refresh(
+                user_prompt,
+                requesting_run_id=run_id,
+            )
+            if not isinstance(refreshed, tuple) or len(refreshed) != 2:
+                # Compatibility for lightweight proof-store test doubles and
+                # external adapters that do not implement the refresh contract.
+                return user_prompt
+            refreshed_prompt, revision = refreshed
+            proof_context_revision = int(revision)
+            return refreshed_prompt
 
         async def save_checkpoint(status: str) -> None:
             nonlocal checkpoint_revision
@@ -882,6 +1025,7 @@ class ProofVerificationStage:
                     "fatal_stop_reason": result.fatal_stop_reason,
                     "fatal_stop_payload": dict(result.fatal_stop_payload),
                     "candidate_list_review": dict(candidate_list_state),
+                    "proof_context_revision": proof_context_revision,
                     **({"competition_state": competition.state} if competition.enabled else {}),
                 }
                 # Keep persistence in the same critical section as snapshot
@@ -903,6 +1047,7 @@ class ProofVerificationStage:
             *,
             error_kind: str,
             error_message: str,
+            error: Optional[BaseException] = None,
         ) -> None:
             nonlocal candidate_list_review_active
             if not candidate_list_review_active:
@@ -911,17 +1056,23 @@ class ProofVerificationStage:
             await self._broadcast(
                 broadcast_fn,
                 "proof_candidate_list_review_interrupted",
-                {
-                    **base_event,
-                    "list_attempt": candidate_list_review_attempt,
-                    "proposed_count": candidate_list_review_count,
-                    "error_kind": error_kind,
-                    "message": (
-                        "Validator proof-list review was interrupted without an "
-                        "acceptance or semantic rejection. "
-                        f"{self._summarize_error(error_message, limit=600)}"
+                merge_route_identity(
+                    {
+                        **base_event,
+                        "list_attempt": candidate_list_review_attempt,
+                        "proposed_count": candidate_list_review_count,
+                        "error_kind": error_kind,
+                        "message": (
+                            "Validator proof-list review was interrupted without an "
+                            "acceptance or semantic rejection. "
+                            f"{self._summarize_error(error_message, limit=600)}"
+                        ),
+                    },
+                    self._provider_error_route_identity(
+                        error,
+                        workflow_mode=self._proof_workflow_mode(trigger),
                     ),
-                },
+                ),
             )
         owned_reservation_token = source_reservation_token
         if not source_reserved:
@@ -968,6 +1119,7 @@ class ProofVerificationStage:
                 proof_run_context,
             )
             novelty_role_id = f"autonomous_proof_novelty_{role_suffix}"
+            provider_retry_workflow_mode = self._provider_retry_workflow_mode(trigger)
             list_validator = ProofCandidateListValidator(
                 model_id=validator_model,
                 context_window=validator_context,
@@ -982,6 +1134,7 @@ class ProofVerificationStage:
                 role_id=f"autonomous_proof_identification_{role_suffix}",
                 solution_path_manager=self.solution_path_manager,
             )
+            identification_user_prompt = await refresh_user_prompt()
 
             resume_requires_regeneration = (
                 candidate_list_state.get("status") == "rejected"
@@ -993,7 +1146,7 @@ class ProofVerificationStage:
                 else await self._resolve_candidates(
                     theorem_candidates=theorem_candidates,
                     identification_agent=identification_agent,
-                    user_prompt=user_prompt,
+                    user_prompt=identification_user_prompt,
                     source_type=source_type,
                     source_id=source_id,
                     source_title=source_title,
@@ -1013,7 +1166,9 @@ class ProofVerificationStage:
                 if isinstance(item, dict)
             ][-5:]
 
-            async def regenerate_candidate_list(feedback_text: str) -> list[ProofCandidate]:
+            async def regenerate_candidate_list(
+                feedback_text: str,
+            ) -> tuple[bool, list[ProofCandidate]]:
                 nonlocal generation_attempt, candidate_list_state
                 generation_attempt += 1
                 await self._broadcast(
@@ -1030,9 +1185,10 @@ class ProofVerificationStage:
                     f"Attempt {item.generation_attempt}: {item.feedback}"
                     for item in semantic_rejections
                 )
+                regenerated_user_prompt = await refresh_user_prompt()
                 has_candidates, regenerated = (
                     await identification_agent.identify_candidates(
-                        user_research_prompt=user_prompt,
+                        user_research_prompt=regenerated_user_prompt,
                         source_type=source_type,
                         source_id=source_id,
                         source_content=content,
@@ -1045,27 +1201,19 @@ class ProofVerificationStage:
                     )
                 )
                 candidate_list_state["generation_attempt"] = generation_attempt
-                return regenerated if has_candidates else []
+                return has_candidates, regenerated
 
             if (
                 candidate_list_state.get("status") == "rejected"
                 and semantic_rejections
             ):
-                resolved_candidates = await regenerate_candidate_list(
-                    semantic_rejections[-1].feedback
-                )
-                while not resolved_candidates and not _stop_requested():
-                    candidate_list_state = {
-                        **candidate_list_state,
-                        "status": "rejected",
-                        "list_fingerprint": "",
-                        "proposed_candidates": [],
-                        "approved_candidate_ids": [],
-                    }
-                    await save_checkpoint("candidate_list_rejected")
-                    resolved_candidates = await regenerate_candidate_list(
+                has_regenerated_candidates, resolved_candidates = (
+                    await regenerate_candidate_list(
                         semantic_rejections[-1].feedback
                     )
+                )
+                if not has_regenerated_candidates:
+                    resolved_candidates = []
                 if _stop_requested():
                     await save_checkpoint("stopped")
                     return result
@@ -1176,7 +1324,6 @@ class ProofVerificationStage:
                         **base_event,
                         "list_attempt": generation_attempt,
                         "proposed_count": len(resolved_candidates),
-                        "threshold_percent": 75,
                         "candidate_ids": [
                             candidate.theorem_id for candidate in resolved_candidates
                         ],
@@ -1202,9 +1349,8 @@ class ProofVerificationStage:
                 candidate_list_state = {
                     "status": (
                         "approved"
-                        if list_validator.threshold_met(
+                        if list_validator.list_accepted(
                             approved_count=len(approved_candidates),
-                            proposed_count=len(resolved_candidates),
                         )
                         else "rejected"
                     ),
@@ -1233,7 +1379,6 @@ class ProofVerificationStage:
                             "list_attempt": generation_attempt,
                             "proposed_count": len(validation.results),
                             "approved_count": len(approved_candidates),
-                            "threshold_percent": 75,
                             "candidate_ids": approved_ids,
                             "candidate_reasons": [
                                 item.model_dump(mode="json")
@@ -1270,7 +1415,6 @@ class ProofVerificationStage:
                         "list_attempt": generation_attempt,
                         "proposed_count": len(resolved_candidates),
                         "approved_count": len(approved_candidates),
-                        "threshold_percent": 75,
                         "candidate_ids": [
                             candidate.theorem_id for candidate in resolved_candidates
                         ],
@@ -1282,19 +1426,11 @@ class ProofVerificationStage:
                         "feedback": validation.feedback,
                     },
                 )
-                resolved_candidates = await regenerate_candidate_list(validation.feedback)
-                while not resolved_candidates and not _stop_requested():
-                    candidate_list_state = {
-                        **candidate_list_state,
-                        "status": "rejected",
-                        "list_fingerprint": "",
-                        "proposed_candidates": [],
-                        "approved_candidate_ids": [],
-                    }
-                    await save_checkpoint("candidate_list_rejected")
-                    resolved_candidates = await regenerate_candidate_list(
-                        validation.feedback
-                    )
+                has_regenerated_candidates, resolved_candidates = (
+                    await regenerate_candidate_list(validation.feedback)
+                )
+                if not has_regenerated_candidates:
+                    resolved_candidates = []
                 if _stop_requested():
                     await save_checkpoint("stopped")
                     return result
@@ -1393,6 +1529,7 @@ class ProofVerificationStage:
                         lean_code="",
                         attempts=[],
                     )
+                phase_a_user_prompt = await refresh_user_prompt()
 
                 async def record_attempts(updated_candidate: ProofCandidate, attempts: list[ProofAttemptFeedback]) -> None:
                     if local_save:
@@ -1435,7 +1572,7 @@ class ProofVerificationStage:
                         if local_state and local_state.get("prepared_candidate") else theorem_candidate),
                     base_event={**base_event, **({"competitor_index": competitor_index} if competition.enabled else {})},
                     proof_label=proof_label,
-                    user_prompt=(canonical_user_prompt if competitor_index else user_prompt),
+                    user_prompt=(canonical_user_prompt if competitor_index else phase_a_user_prompt),
                     source_type=source_type,
                     source_id=source_id,
                     source_content=content,
@@ -1835,6 +1972,7 @@ class ProofVerificationStage:
                                     provider_error,
                                     role_id=novelty_role_id,
                                     should_stop=should_stop,
+                                    workflow_mode=provider_retry_workflow_mode,
                                 )
                                 if should_stop and should_stop():
                                     raise asyncio.CancelledError()
@@ -1955,6 +2093,9 @@ class ProofVerificationStage:
                             "verification_notes": verification_notes,
                             "attempt_count": len(attempts),
                             "attempts": attempts,
+                            "compile_receipt": (
+                                attempts[-1].compile_receipt if attempts else None
+                            ),
                             "solver_hints": solver_hints,
                             "broadcast_fn": broadcast_fn,
                             "base_event": base_event,
@@ -1983,6 +2124,7 @@ class ProofVerificationStage:
                                     provider_error,
                                     role_id=novelty_role_id,
                                     should_stop=should_stop,
+                                    workflow_mode=provider_retry_workflow_mode,
                                 )
                                 if should_stop and should_stop():
                                     raise asyncio.CancelledError()
@@ -2030,9 +2172,21 @@ class ProofVerificationStage:
                                 relevant_lemmas=candidate.relevant_lemmas,
                                 current_proof_id=stored_record.proof_id,
                             )
+                            portable_dependencies = (
+                                await self._dependency_extractor.build_portable_dependencies(
+                                    dependencies=dependencies,
+                                    proof_database=novel_proofs_db,
+                                    mathlib_revision=(
+                                        stored_record.compile_receipt.mathlib_revision
+                                        if stored_record.compile_receipt
+                                        else ""
+                                    ),
+                                )
+                            )
                             updated_record = await novel_proofs_db.update_proof_dependencies(
                                 stored_record.proof_id,
                                 dependencies,
+                                portable_dependencies=portable_dependencies,
                                 extraction_status="complete",
                             )
                             if (
@@ -2181,6 +2335,7 @@ class ProofVerificationStage:
             await broadcast_candidate_list_interrupted(
                 error_kind="retryable_provider_error",
                 error_message=str(exc),
+                error=exc,
             )
             await save_checkpoint("provider_paused")
             raise
@@ -2188,6 +2343,7 @@ class ProofVerificationStage:
             await broadcast_candidate_list_interrupted(
                 error_kind="provider_exhausted",
                 error_message=str(exc),
+                error=exc,
             )
             await save_checkpoint("provider_paused")
             raise
@@ -2199,6 +2355,7 @@ class ProofVerificationStage:
             await broadcast_candidate_list_interrupted(
                 error_kind="context_overflow",
                 error_message=str(exc),
+                error=exc,
             )
             role_suffix = self._role_suffix(
                 source_type,
@@ -2284,6 +2441,7 @@ class ProofVerificationStage:
                 await broadcast_candidate_list_interrupted(
                     error_kind="provider_repair_required",
                     error_message=str(exc),
+                    error=exc,
                 )
                 await save_checkpoint("provider_paused")
                 raise
@@ -2291,6 +2449,7 @@ class ProofVerificationStage:
                 await broadcast_candidate_list_interrupted(
                     error_kind="transient_provider_error",
                     error_message=str(exc),
+                    error=exc,
                 )
                 await save_checkpoint("provider_paused")
                 logger.warning(
@@ -2304,13 +2463,10 @@ class ProofVerificationStage:
                     role_suffix_override,
                     proof_run_context,
                 )
-                raise RetryableProviderError(
-                    provider="unknown",
-                    provider_label="Inference provider",
+                raise transient_provider_retry_error(
+                    exc,
                     role_id=f"autonomous_proof_{role_suffix}",
                     model=submitter_model,
-                    reason="transient_provider_error",
-                    message=format_transient_provider_error(exc),
                 ) from exc
             await broadcast_candidate_list_interrupted(
                 error_kind=(

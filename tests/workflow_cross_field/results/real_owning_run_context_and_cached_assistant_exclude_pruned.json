@@ -1,24 +1,38 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
-  "diagnostics": {},
-  "evidence": [
-    "cached_pack_refiltered",
-    "owning_run_excluded"
+  "asserted_invariants": [],
+  "blocked_dependencies": [
+    "direct proof injection",
+    "all Assistant cache reuse paths"
   ],
+  "diagnostics": {
+    "reason": "The linked focused test proves one cached-pack filter, not every owning-run direct-context and Assistant reuse surface claimed by the invariant."
+  },
+  "evidence": [],
+  "faked_dependencies": [],
   "fields": [
     "proof_pruning",
     "prompt_context",
-    "assistant_memory"
+    "assistant_memory",
+    "proof_scope_isolation"
   ],
   "invariants": [
     "proof_pruning.owning_run_context_excludes_pruned"
   ],
+  "observed_transition": null,
+  "real_components": [
+    "backend/autonomous/memory/proof_database.py",
+    "backend/shared/proof_search/assistant_cache.py"
+  ],
   "replay": [],
-  "result": "passed",
+  "result": "blocked",
+  "runner": null,
   "scenario_id": "real_owning_run_context_and_cached_assistant_exclude_pruned",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/unit/test_assistant_proof_search.py"
+  "source_identity": "workflow-source-v1:4c73e0f6c69679e2df26dc6724be0c4d4748bd08d499c16e9e4f27787e80fba3",
+  "test_file": "tests/workflow_real_adapters/test_build_07_source_mappings.py",
+  "test_selectors": []
 }

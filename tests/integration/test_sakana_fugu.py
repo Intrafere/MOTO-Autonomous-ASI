@@ -172,6 +172,31 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
         sleep.assert_not_awaited()
         self.assertEqual(ctx.exception.resets_in_seconds, 45)
 
+    async def test_usage_limit_without_reset_is_hard_entitlement(self) -> None:
+        client = SakanaFuguClient()
+        client._api_key = "test-key"
+        response = self._response(
+            429,
+            {
+                "error": {
+                    "code": "usage_limit_reached",
+                    "message": "Plan allowance exhausted",
+                }
+            },
+        )
+        with (
+            mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
+            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+        ):
+            with self.assertRaises(SakanaFuguEntitlementError):
+                await client.generate_completion(
+                    model="fugu",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+
+        self.assertEqual(request.await_count, 1)
+        sleep.assert_not_awaited()
+
     async def test_models_hard_entitlement_error_is_typed_and_not_retried(self) -> None:
         client = SakanaFuguClient()
         client._api_key = "test-key"
@@ -224,7 +249,10 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
                 mock.AsyncMock(side_effect=[rate_limited, success]),
             ) as request,
             mock.patch("backend.shared.sakana_fugu_client.random.uniform", return_value=0.5),
-            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+            mock.patch(
+                "backend.shared.sakana_fugu_client.assured_retry_wait",
+                new=mock.AsyncMock(return_value=True),
+            ) as wait_mock,
         ):
             result = await client.generate_completion(
                 model="fugu",
@@ -232,7 +260,11 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(request.await_count, 2)
-        sleep.assert_awaited_once_with(7.5)
+        wait_mock.assert_awaited_once()
+        self.assertEqual(
+            wait_mock.await_args.args[0]["retry_after_seconds"],
+            7.5,
+        )
         self.assertEqual(result["choices"][0]["message"]["content"], "ok")
 
 
@@ -246,8 +278,14 @@ class SakanaFuguSecretStoreTests(IsolatedAsyncioTestCase):
             secret_store.store_sakana_fugu_api_key("sk-sakana-test")
             self.assertEqual(secret_store.load_sakana_fugu_api_key(), "sk-sakana-test")
             secret_store.clear_sakana_fugu_api_key()
-            set_secret.assert_called_once()
-            delete_secret.assert_called_once()
+            self.assertEqual(
+                set_secret.call_args_list[:2],
+                [
+                    mock.call("sakana_fugu_api_key_a", "sk-sakana-test"),
+                    mock.call("sakana_fugu_api_key_active", "a"),
+                ],
+            )
+            self.assertGreaterEqual(delete_secret.call_count, 4)
 
 
 class SakanaFuguRouteTests(IsolatedAsyncioTestCase):

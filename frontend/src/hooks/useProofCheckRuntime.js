@@ -552,6 +552,10 @@ export function useProofCheckRuntime() {
 
     const unsubscribeComplete = websocket.on('proof_check_complete', (data) => {
       const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
+      if (data.run_mode === 'loop_with_pruning' && data.proof_run_id) {
+        refreshProofStatus();
+        return;
+      }
       setActiveChecks((prev) => {
         if (!prev[sourceKey]) {
           return prev;

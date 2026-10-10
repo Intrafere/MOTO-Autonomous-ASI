@@ -8,6 +8,7 @@ import {
   formatAssistantProofPackMessage,
   formatContextOverflowActivityMessage,
   formatEmptyProofDiscoveryMessage,
+  formatHungConnectionMessage,
   formatProofRunEventMessage,
   formatProviderRetryCooldownMessage,
   formatProviderUsageLimitActivityMessage,
@@ -22,6 +23,7 @@ import {
   isProviderUsageLimitActive,
   shouldShowProviderUsageLimitPopup,
   shouldAddRejectionFeedbackNotice,
+  withRouteIdentity,
 } from './activityStyles';
 
 test('context overflow activity identifies the effective or configured model', () => {
@@ -66,6 +68,11 @@ test('proof candidate-list Validator events have visible activity styles', () =>
   expect(getActivityClass('proof_candidate_list_review_accepted')).toBe('activity-success');
   expect(getActivityClass('proof_candidate_list_review_rejected')).toBe('activity-reject');
   expect(getActivityClass('proof_candidate_list_review_interrupted')).toBe('activity-reject');
+});
+
+test('proof novelty assessment start is visible as in-progress activity', () => {
+  expect(getActivityIcon('proof_novelty_assessment_started')).toBe('?');
+  expect(getActivityClass('proof_novelty_assessment_started')).toBe('activity-info');
 });
 
 test('candidate-list activity identity preserves each attempt and deduplicates replay only', () => {
@@ -141,6 +148,37 @@ test('formats additive provider retry cooldown activity', () => {
   expect(getActivityClass('provider_retry_cooldown')).toBe('activity-warning');
 });
 
+test('formats provider error detail with retry cooldown and preserves legacy fallback', () => {
+  expect(formatProviderRetryCooldownMessage({
+    provider_label: 'OpenRouter',
+    retry_after_seconds: 60,
+    retry_attempt: 1,
+    reason: 'http_error',
+    error_summary: 'HTTP 503 upstream unavailable.',
+  })).toBe(
+    'OpenRouter server-side error: HTTP 503 upstream unavailable. '
+    + 'OpenRouter API call will retry after a 60-second cooldown (retry 1).'
+  );
+  expect(formatProviderRetryCooldownMessage({
+    provider_label: 'OpenAI Codex',
+    retry_after_seconds: 2,
+    retry_attempt: 1,
+    reason: 'connection_error',
+    error_summary: '[RemoteProtocolError] incomplete chunked read',
+  })).toContain('OpenAI Codex connection error: [RemoteProtocolError] incomplete chunked read.');
+  expect(formatProviderRetryCooldownMessage({
+    provider_label: 'OpenRouter',
+    retry_after_seconds: 60,
+    retry_attempt: 2,
+  })).toBe('OpenRouter API call will retry after a 60-second cooldown (retry 2).');
+  expect(formatProviderRetryCooldownMessage({
+    provider_label: 'LM Studio',
+    retry_after_seconds: 3,
+    retry_attempt: 3,
+    activity_detail: 'Embedding endpoint temporarily unavailable.',
+  })).toContain('Embedding endpoint temporarily unavailable.');
+});
+
 test('shows usage-limit popup only for an active waiting cooldown', () => {
   const now = 1_700_000_000_000;
   const active = {
@@ -178,7 +216,7 @@ test('formats proof-run lifecycle activity and source-specific state', () => {
   expect(getActivityClass('proof_run_repair_required')).toBe('activity-warning');
 });
 
-test('formats detailed continuous round activity without no-candidate exhaustion', () => {
+test('formats detailed continuous round activity with no-discovery progress', () => {
   expect(formatEmptyProofDiscoveryMessage()).toBe(
     'Proof discovery: the model searched for useful novel proof candidates and found none, '
     + 'so no Lean proof attempts were needed.'
@@ -191,11 +229,14 @@ test('formats detailed continuous round activity without no-candidate exhaustion
     run_mode: 'loop_with_pruning',
     current_round: 1,
     candidate_count: 0,
+    consecutive_no_discovery_rounds: 1,
+    no_discovery_round_limit: 10,
     next_round_automatic: true,
   })).toBe(
     'Round 1 complete. Discovery: the model searched for useful novel proof candidates and found none, '
-    + 'so no Lean proof attempts were needed. '
-    + 'The next round will start automatically; the loop continues until you press Stop.'
+    + 'so no Lean proof attempts were needed. No candidates found; 1/10 consecutive no-discovery rounds. '
+    + 'The next round will start automatically; the loop continues until you press Stop or '
+    + '10 consecutive rounds find no candidates.'
   );
   expect(formatProofRunEventMessage('proof_run_round_complete', {
     run_mode: 'loop_with_pruning',
@@ -203,6 +244,10 @@ test('formats detailed continuous round activity without no-candidate exhaustion
     candidate_count: 2,
     next_round_automatic: true,
   })).toContain('Discovery found 2 candidates for this round');
+  expect(formatProofRunEventMessage('proof_run_terminal', {
+    terminal_reason: 'consecutive_no_discovery_limit',
+    no_discovery_round_limit: 10,
+  })).toContain('completed after 10 consecutive rounds');
 });
 
 test('dedupes proof activity by notification or run identity while preserving scope', () => {
@@ -457,4 +502,157 @@ test('distinguishes autonomous proof transient provider pauses from credit pause
   });
   expect(credit.isCreditPause).toBe(true);
   expect(credit.message).toContain('credits are reset');
+});
+
+describe('provider route identity', () => {
+  const ROUTE_IDENTITY = '[Autonomous · Submitter 2 · vendor/test-free:free via OpenRouter · host auto → TestHost]';
+  const routeData = {
+    workflow_mode: 'autonomous',
+    role_id: 'aggregator_submitter_2',
+    role_label: 'Submitter 2',
+    model: 'vendor/test-free:free',
+    provider: 'openrouter',
+    provider_label: 'OpenRouter',
+    host_routing: 'auto',
+    configured_host_provider: '',
+    effective_host_provider: 'TestHost',
+    route_identity: ROUTE_IDENTITY,
+  };
+
+  test('prefixes provider error lines with backend route identity once', () => {
+    const backendMessage = 'OpenRouter server-side error: OpenRouter returned a successful response without '
+      + 'completion choices (upstream 429: rate limited). OpenRouter API call will retry after a '
+      + '2-second cooldown (retry 1).';
+    const rendered = formatProviderRetryCooldownMessage({ ...routeData, message: backendMessage });
+
+    expect(rendered).toBe(`${ROUTE_IDENTITY} ${backendMessage}`);
+    expect(rendered.split(ROUTE_IDENTITY)).toHaveLength(2);
+    expect(withRouteIdentity(rendered, routeData)).toBe(rendered);
+    expect(formatProviderRetryCooldownMessage({ ...routeData, message: rendered })).toBe(rendered);
+  });
+
+  test('prefixes the built retry cooldown fallback with route identity', () => {
+    expect(formatProviderRetryCooldownMessage({
+      ...routeData,
+      retry_after_seconds: 60,
+      retry_attempt: 1,
+      reason: 'invalid_response',
+      error_summary: 'OpenRouter returned a successful response without completion choices.',
+    })).toBe(
+      `${ROUTE_IDENTITY} OpenRouter server-side error: OpenRouter returned a successful response `
+      + 'without completion choices. OpenRouter API call will retry after a 60-second cooldown (retry 1).'
+    );
+  });
+
+  test('leaves legacy items without route identity unchanged', () => {
+    const legacyMessage = 'OpenRouter API call will retry after a 2-second cooldown (retry 1).';
+    expect(withRouteIdentity(`  ${legacyMessage}  `, {})).toBe(legacyMessage);
+    expect(withRouteIdentity(legacyMessage, null)).toBe(legacyMessage);
+    expect(withRouteIdentity(legacyMessage, { route_identity: '   ' })).toBe(legacyMessage);
+    expect(formatProviderRetryCooldownMessage({
+      provider_label: 'OpenRouter',
+      message: legacyMessage,
+      role_id: 'aggregator_submitter_2',
+      model: 'vendor/test-free:free',
+    })).toBe(legacyMessage);
+    expect(formatHungConnectionMessage({
+      model: 'vendor/test-model',
+      provider: 'openrouter',
+      elapsed_minutes: 25,
+    })).toBe(
+      'Possible hung model call: vendor/test-model via openrouter (25+ min). It may still be thinking; '
+      + 'you can keep waiting or lower reasoning effort in Settings if this repeats.'
+    );
+  });
+
+  test('does not duplicate identity already composed into the backend message', () => {
+    const composed = `${ROUTE_IDENTITY} OpenRouter API call will retry after a 60-second cooldown (retry 2).`;
+    expect(withRouteIdentity(composed, routeData)).toBe(composed);
+    expect(withRouteIdentity(`Detail first ${ROUTE_IDENTITY} then more`, routeData))
+      .toBe(`Detail first ${ROUTE_IDENTITY} then more`);
+    expect(withRouteIdentity('', routeData)).toBe(ROUTE_IDENTITY);
+  });
+
+  test('prefixes usage-limit, resumed, Assistant failure, pause, and hung formatters', () => {
+    const codexIdentity = '[Compiler · Writing Submitter · gpt-test via OpenAI Codex]';
+    const codexData = {
+      provider: 'openai_codex_oauth',
+      provider_label: 'OpenAI Codex',
+      role_id: 'compiler_writer',
+      reason: 'usage_limit_reached',
+      route_identity: codexIdentity,
+    };
+    expect(formatProviderUsageLimitActivityMessage(codexData)).toBe(
+      `${codexIdentity} OpenAI Codex usage limit reached for compiler_writer. `
+      + 'This role is waiting for the provider cooldown to end.'
+    );
+    expect(formatProviderUsageLimitActivityMessage({ ...codexData, fallback_model: 'local-test-model' }))
+      .toBe(
+        `${codexIdentity} OpenAI Codex usage limit reached for compiler_writer. `
+        + 'Using LM Studio fallback (local-test-model) until reset.'
+      );
+    expect(formatProviderUsageLimitResumedMessage(codexData)).toBe(
+      `${codexIdentity} OpenAI Codex usage limit ended for compiler_writer; provider work resumed.`
+    );
+
+    const assistantIdentity = '[Autonomous · Assistant (autonomous) · vendor/test-ultra:free via OpenRouter · host TestHost (pinned)]';
+    expect(formatAssistantProofPackEventMessage('assistant_proof_pack_failed', {
+      target_kind: 'brainstorm_context',
+      assistant_role_id: 'autonomous_assistant',
+      assistant_model_id: 'vendor/test-ultra:free',
+      error_message: 'No JSON found in response',
+      route_identity: assistantIdentity,
+    })).toBe(
+      `${assistantIdentity} Assistant memory model call failed for brainstorm context `
+      + 'via Assistant (vendor/test-ultra:free): No JSON found in response'
+    );
+
+    const pause = buildAutonomousProofProviderPauseActivity({
+      ...routeData,
+      reason: 'transient_provider_error',
+      message: 'OpenRouter gateway timeout',
+    });
+    expect(pause.isCreditPause).toBe(false);
+    expect(pause.message).toBe(
+      `${ROUTE_IDENTITY} Autonomous proof verification paused for a transient provider error `
+      + 'and will retry automatically: OpenRouter gateway timeout'
+    );
+
+    expect(formatHungConnectionMessage({
+      ...routeData,
+      elapsed_minutes: 25,
+    })).toBe(
+      `${ROUTE_IDENTITY} Possible hung model call: vendor/test-free:free via openrouter (25+ min). `
+      + 'It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.'
+    );
+  });
+
+  test('keeps the LeanOJ model-call failure error text after the identity prefix', () => {
+    const leanojIdentity = '[LeanOJ · Brainstorm Submitter 2 · vendor/test-free:free via OpenRouter · host auto (upstream not reported; request gen-test-1)]';
+    const errorText = 'OpenRouter returned a successful response without completion choices.';
+    const composed = `Brainstorm Submitter 2 call failed; retrying: ${errorText}`;
+    const rendered = withRouteIdentity(composed, { route_identity: leanojIdentity, message: errorText });
+
+    expect(rendered).toBe(`${leanojIdentity} ${composed}`);
+    expect(rendered).toContain(errorText);
+    expect(rendered.endsWith(errorText)).toBe(true);
+  });
+
+  test('prefixes proof run pruning and solution path provider lines once', () => {
+    const paused = formatProofRunEventMessage('proof_run_provider_paused', routeData);
+    expect(paused).toBe(`${ROUTE_IDENTITY} Proof run paused for provider credits.`);
+    const resumed = formatProofRunEventMessage('proof_run_provider_resumed', {
+      ...routeData,
+      message: `${ROUTE_IDENTITY} Proof run resumed after the provider pause.`,
+    });
+    expect(resumed).toBe(`${ROUTE_IDENTITY} Proof run resumed after the provider pause.`);
+    expect(formatProofRunEventMessage('proof_prune_repair_required', routeData)).toBe(
+      `${ROUTE_IDENTITY} Pruning needs provider or settings repair; healthy proof solving continues independently.`,
+    );
+    expect(formatSolutionPathEventMessage('solution_path_proposal_user_repair_required', routeData)
+      .startsWith(`${ROUTE_IDENTITY} A solution-path update needs`)).toBe(true);
+    expect(formatProofRunEventMessage('proof_run_provider_paused', {})).toBe('Proof run paused for provider credits.');
+    expect(formatSolutionPathEventMessage('solution_path_updated', { revision: 2 }))
+      .toBe('Main Submitter 1 approved solution path revision 2.');
+  });
 });

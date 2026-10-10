@@ -3,6 +3,7 @@ import {
   formatOpenRouterProviderLabel,
   getOpenRouterProviderTitle,
   isOpenRouterUsHostProvider,
+  normalizeOpenRouterReasoningEffort,
   USA_HOST_TOOLTIP,
 } from './openRouterSelection';
 
@@ -27,4 +28,11 @@ test('auto-fills Sakana Fugu models from provider metadata', () => {
   });
   expect(autoSettings.contextWindow).toBe(1000000);
   expect(autoSettings.maxOutputTokens).toBe(100000);
+});
+
+test('normalizes legacy xAI effort values to visible supported choices', () => {
+  expect(normalizeOpenRouterReasoningEffort('xhigh', 'xai_grok_oauth')).toBe('high');
+  expect(normalizeOpenRouterReasoningEffort('max', 'xai_grok_oauth')).toBe('high');
+  expect(normalizeOpenRouterReasoningEffort('minimal', 'xai_grok_oauth')).toBe('low');
+  expect(normalizeOpenRouterReasoningEffort('none', 'xai_grok_oauth')).toBe('none');
 });

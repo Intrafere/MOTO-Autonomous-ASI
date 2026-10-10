@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from .invariant_catalog import provider_error_activity_events, provider_error_route_identity_problem
 from .model import WorkflowModel
 
 
@@ -40,6 +41,17 @@ KNOWN_EXERCISE_TOKENS = frozenset(
         "continuous_ownership",
         "automatic_round_policy",
         "occurrence_scope",
+        "candidate_local_overflow",
+        "autonomous_mandatory_overflow",
+        "continuous_manual_overflow",
+        "current_product_laws",
+        "overflow_lifecycle",
+        "provider_retry_each_wait_visible",
+        "provider_retry_attempts_distinct",
+        "provider_retry_correlation_stable",
+        "provider_retry_secret_redacted",
+        "provider_retry_reload_visible",
+        "provider_error_route_identity",
     }
 )
 
@@ -179,7 +191,20 @@ def observed_exercise_tokens(model: WorkflowModel) -> frozenset[str]:
         and "mandatory_source_overflow_rejected_visible" in model.exercise_observations
     ):
         observed.add("mandatory_source_overflow")
+    provider_error_events = provider_error_activity_events(model.events)
+    if provider_error_events and not any(
+        provider_error_route_identity_problem(event) for event in provider_error_events
+    ):
+        observed.add("provider_error_route_identity")
     observed.update(KNOWN_EXERCISE_TOKENS.intersection(model.exercise_observations))
+    if model.law_observations and not model.law_violations:
+        observed.add("current_product_laws")
+    if {
+        "candidate_local_overflow",
+        "autonomous_mandatory_overflow",
+        "continuous_manual_overflow",
+    }.issubset(model.exercise_observations):
+        observed.add("overflow_lifecycle")
 
     return frozenset(observed)
 

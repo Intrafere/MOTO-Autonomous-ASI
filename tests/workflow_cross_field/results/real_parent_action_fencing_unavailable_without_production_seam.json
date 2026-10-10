@@ -1,10 +1,15 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [],
+  "blocked_dependencies": [
+    "unavailable bounded production transition seam"
+  ],
   "diagnostics": {
     "reason": "The invariant catalog declares model-only support and no existing isolated production seam exposes stale child output acceptance after parent takeover."
   },
   "evidence": [],
+  "faked_dependencies": [],
   "fields": [
     "runtime_exclusivity",
     "workflow_filesystem_state",
@@ -13,11 +18,16 @@
   "invariants": [
     "runtime.parent_action_fences_child_outputs"
   ],
+  "observed_transition": null,
+  "real_components": [],
   "replay": [],
   "result": "blocked",
+  "runner": null,
   "scenario_id": "real_parent_action_fencing_unavailable_without_production_seam",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+  "source_identity": "workflow-source-v1:d4052ff0ad677f0e688adcb93aed31978156e686569980d06265d6083a381797",
+  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py",
+  "test_selectors": []
 }

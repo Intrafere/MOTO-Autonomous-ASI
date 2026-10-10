@@ -20,6 +20,7 @@ from backend.shared.models import (
     ProofRunCollectionResponse,
     ProofRunSnapshot,
     ProofRunSourceLookupResponse,
+    ProofStageResult,
 )
 
 
@@ -1014,6 +1015,39 @@ class ManualProofScopeRouteTests(TestCase):
 
 
 class ManualAggregatorProofEventLogTests(IsolatedAsyncioTestCase):
+    def test_no_discovery_streak_classification_resets_on_discovery_even_if_round_errors(self) -> None:
+        discovered_then_failed = ProofStageResult(
+            source_type="paper",
+            source_id="paper-1",
+            total_candidates=2,
+            had_error=True,
+        )
+        empty_failure = ProofStageResult(
+            source_type="paper",
+            source_id="paper-1",
+            total_candidates=0,
+            had_error=True,
+        )
+        valid_empty = ProofStageResult(
+            source_type="paper",
+            source_id="paper-1",
+            total_candidates=0,
+        )
+
+        self.assertEqual(
+            proofs_route._candidate_count_for_no_discovery_streak(
+                discovered_then_failed
+            ),
+            2,
+        )
+        self.assertIsNone(
+            proofs_route._candidate_count_for_no_discovery_streak(empty_failure)
+        )
+        self.assertEqual(
+            proofs_route._candidate_count_for_no_discovery_streak(valid_empty),
+            0,
+        )
+
     def test_empty_discovery_messages_explain_model_search_without_changing_counts(self) -> None:
         no_candidates = proofs_route._manual_aggregator_proof_event_message(
             "proof_check_no_candidates",
@@ -1025,6 +1059,8 @@ class ManualAggregatorProofEventLogTests(IsolatedAsyncioTestCase):
                 "round_index": 3,
                 "candidate_count": 0,
                 "run_mode": "loop_with_pruning",
+                "consecutive_no_discovery_rounds": 4,
+                "no_discovery_round_limit": 10,
                 "next_round_automatic": True,
             },
         )
@@ -1036,8 +1072,22 @@ class ManualAggregatorProofEventLogTests(IsolatedAsyncioTestCase):
         self.assertIn("model searched for useful novel proof candidates", no_candidates)
         self.assertIn("no Lean proof attempts were needed", no_candidates)
         self.assertIn("model searched for useful novel proof candidates", round_complete)
+        self.assertIn("4/10 consecutive no-discovery rounds", round_complete)
         self.assertIn("next round will start automatically", round_complete.lower())
+        self.assertIn("10 consecutive rounds find no candidates", round_complete)
         self.assertEqual(completion, "Proof check complete: 0 verified, 0 novel")
+
+    def test_no_discovery_terminal_message_explains_normal_completion(self) -> None:
+        message = proofs_route._manual_aggregator_proof_event_message(
+            "proof_run_terminal",
+            {
+                "terminal_reason": "consecutive_no_discovery_limit",
+                "no_discovery_round_limit": 10,
+            },
+        )
+
+        self.assertIn("completed after 10 consecutive rounds", message)
+        self.assertIn("finished normally", message)
 
     async def test_manual_aggregator_proof_event_is_broadcast_and_persisted_with_same_id(self) -> None:
         with (

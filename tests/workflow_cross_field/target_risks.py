@@ -11,7 +11,7 @@ from tests.workflow_harness.coverage_metadata import (
 from tests.workflow_harness.invariant_catalog import FIRST_BUILD_FIELDS, INVARIANTS_BY_ID
 
 
-TARGET_RISK_SCHEMA_VERSION = 1
+TARGET_RISK_SCHEMA_VERSION = 2
 RiskPriority = Literal["critical", "high", "medium"]
 SupportStatus = Literal["passed", "failed", "skipped", "blocked", "uncovered"]
 PRIORITY_WEIGHT: dict[RiskPriority, int] = {"critical": 3, "high": 2, "medium": 1}
@@ -47,7 +47,7 @@ class TargetRiskAnalysis:
     missing_isolated_artifacts: tuple[str, ...]
 
 
-TARGET_RISKS: tuple[TargetRisk, ...] = (
+_EXPLICIT_TARGET_RISKS: tuple[TargetRisk, ...] = (
     TargetRisk(
         "risk.pruned_paper_context_leak",
         "Pruned paper remains in model context",
@@ -74,6 +74,19 @@ TARGET_RISKS: tuple[TargetRisk, ...] = (
         ("proof_runtime.no_lean_when_disabled", "proof_runtime.no_smt_when_disabled"),
         ("model", "real_coordinator"),
         "Lean or SMT runs despite disabled proof-runtime controls.",
+    ),
+    TargetRisk(
+        "risk.candidate_list_ownership_mismatch",
+        "Candidate-list review crosses its ownership boundary",
+        "critical",
+        ("proof_runtime_gating", "workflow_filesystem_state", "runtime_exclusivity"),
+        (
+            "proof_runtime.candidate_list_validator_gate",
+            "proof_runtime.candidate_list_autonomous_restart_owned",
+            "proof_runtime.candidate_list_manual_process_local",
+        ),
+        ("focused_production",),
+        "Proof cost starts before list approval, or durable Autonomous and process-local manual review state are confused.",
     ),
     TargetRisk(
         "risk.proofs_only_enters_paper",
@@ -177,6 +190,8 @@ TARGET_RISKS: tuple[TargetRisk, ...] = (
             "events.context_overflow_persists_across_reload",
             "events.context_overflow_terminal_stop_once",
             "events.proof_context_overflow_nonfatal",
+            "events.autonomous_mandatory_overflow_checkpoint_preserved",
+            "events.continuous_manual_overflow_terminal_after_drain",
         ),
         ("model", "real_coordinator"),
         (
@@ -199,10 +214,95 @@ TARGET_RISKS: tuple[TargetRisk, ...] = (
             "silently replaces mandatory source text when the configured context is too small."
         ),
     ),
+    TargetRisk("risk.solution_path_stale_commit", "Solution path accepts stale or unreviewed revision", "critical", ("solution_path", "workflow_filesystem_state"), ("solution_path.activation_review_fenced",), ("model",), "Activation or proposal review bypasses parent count, exact role, or generation fences."),
+    TargetRisk("risk.proof_competition_wrong_order", "Proof competition violates ordered fallback", "high", ("proof_competition", "proof_runtime_gating"), ("proof_competition.secondary_after_primary_exhaustion",), ("model",), "A secondary formalizer starts early, after success, or shares attempt authority."),
+    TargetRisk("risk.provider_role_or_cooldown_alias", "Provider role or cooldown scope aliases", "critical", ("provider_routing", "provider_pause_resume"), ("provider.exact_role_and_cooldown_scope",), ("model",), "An unconfigured role reaches a provider or provider-wide cooldown is scoped incorrectly."),
+    TargetRisk("risk.feedback_projection_corruption", "Feedback projection truncates or drops newest", "high", ("feedback_projection", "prompt_context"), ("feedback_projection.newest_five_whole",), ("model",), "Prompt feedback exceeds five whole entries, truncates an entry, or drops newest feedback."),
+    TargetRisk("risk.bulk_mutation_partial_publish", "Bulk mutation partially publishes", "critical", ("bulk_mutation", "workflow_filesystem_state"), ("bulk_mutation.atomic_revision_fenced",), ("model",), "A stale or canceled bulk proof/paper mutation publishes a partial result."),
+    TargetRisk("risk.runtime_root_double_owner", "Runtime root gains competing owner", "critical", ("runtime_root_ownership", "runtime_exclusivity"), ("runtime_root.single_owner_bound_paths",), ("model",), "Two processes own one mutable root or path rebinding leaves split stores."),
+    TargetRisk("risk.proof_run_identity_drift", "Proof run identity drifts across lifecycle", "critical", ("proof_run_identity", "websocket_api_contracts"), ("proof_run.identity_generation_fenced",), ("model",), "Reload/control activity attaches to the wrong proof run or lifecycle generation."),
+    TargetRisk("risk.proof_framing_output_mismatch", "Proof framing ignores output gate", "high", ("proof_framing", "allowed_outputs"), ("proof_framing.allowed_outputs_gate",), ("model",), "Proof framing is skipped when enabled or injected into papers-only work."),
+    TargetRisk("risk.sleep_owner_leak", "Sleep inhibition owner leaks", "medium", ("sleep_ownership", "runtime_exclusivity"), ("sleep.unique_owner_released",), ("model",), "A workflow or manual proof sleep owner collides or survives terminal cleanup."),
+    TargetRisk("risk.answer_wrapper_semantic_mix", "Answer wrappers alter routing semantics", "high", ("answer_wrappers", "provider_pause_resume"), ("supercharge_creativity.routing_separation",), ("model",), "Supercharge or creativity steering changes concurrency, routing, or validator behavior."),
+    TargetRisk("risk.group_novelty_partial_context", "Group novelty becomes partial or cross-run", "critical", ("group_novelty", "proof_scope_isolation"), ("proof_novelty.group_atomic_same_run",), ("model",), "A group rank is applied to an incomplete or cross-run member set."),
+    TargetRisk("risk.leanoj_parent_control_stale_commit", "LeanOJ child overrides parent control", "critical", ("leanoj_parent_control", "runtime_exclusivity"), ("leanoj.parent_control_generation_fences_children",), ("model",), "Stale child work commits after Skip or Force advances parent control generation."),
+    TargetRisk(
+        "risk.provider_retry_activity_incomplete",
+        "Provider retry activity is missing, ambiguous, unsafe, or ephemeral",
+        "critical",
+        (
+            "websocket_api_contracts",
+            "provider_pause_resume",
+            "provider_routing",
+            "workflow_filesystem_state",
+        ),
+        (
+            "live_activity.provider_retry_each_wait_visible",
+            "live_activity.provider_retry_identity_stable",
+            "live_activity.provider_retry_secret_safe",
+            "live_activity.provider_retry_persists_reload",
+            "live_activity.all_retry_wait_sources_accounted",
+            "live_activity.provider_error_route_identity",
+        ),
+        ("model", "focused_production", "browser_smoke"),
+        (
+            "A real provider wait is invisible, repeated attempts collapse together, "
+            "error detail leaks credentials, reload loses the retry history, or the "
+            "line omits the workflow mode, role, model, provider, or host that failed."
+        ),
+    ),
+    TargetRisk(
+        "risk.provider_error_activity_source_unattributed",
+        "Provider-error activity source publishes without route identity",
+        "critical",
+        ("websocket_api_contracts", "provider_routing", "provider_pause_resume"),
+        ("live_activity.provider_error_sources_route_attributed",),
+        ("model", "real_coordinator"),
+        (
+            "A new or changed production provider/API-error activity source publishes "
+            "a line that cannot name its mode, role, model, provider, or host, or "
+            "escapes the attributed/exempt inventory."
+        ),
+    ),
 )
 
 
-def validate_target_risks(risks: tuple[TargetRisk, ...] = TARGET_RISKS) -> None:
+def _catalog_owner_risks() -> tuple[TargetRisk, ...]:
+    """Give every stable product law an inverse-risk owner.
+
+    Explicit cross-field risks remain the preferred owners.  A deterministic
+    catalog owner is emitted only for a law that would otherwise be orphaned.
+    """
+    owned = {
+        invariant_id
+        for risk in _EXPLICIT_TARGET_RISKS
+        for invariant_id in risk.supporting_invariants
+    }
+    return tuple(
+        TargetRisk(
+            risk_id=f"risk.invariant.{invariant_id}",
+            title=f"Product law is violated: {invariant_id}",
+            priority="medium",
+            required_fields=(spec.field, *spec.crossed_fields),
+            supporting_invariants=(invariant_id,),
+            required_adapters=spec.adapters,
+            description=(
+                "The stable invariant is violated on one of its declared observation adapters."
+            ),
+        )
+        for invariant_id, spec in sorted(INVARIANTS_BY_ID.items())
+        if invariant_id not in owned
+    )
+
+
+TARGET_RISKS: tuple[TargetRisk, ...] = _EXPLICIT_TARGET_RISKS + _catalog_owner_risks()
+
+
+def validate_target_risks(
+    risks: tuple[TargetRisk, ...] = TARGET_RISKS,
+    *,
+    require_complete_ownership: bool | None = None,
+) -> None:
     ids = [risk.risk_id for risk in risks]
     if len(ids) != len(set(ids)):
         raise AssertionError("Target-risk ids must be unique.")
@@ -226,6 +326,19 @@ def validate_target_risks(risks: tuple[TargetRisk, ...] = TARGET_RISKS) -> None:
             recognized_fields.update(invariant.crossed_fields)
         if not set(risk.required_fields).issubset(recognized_fields):
             raise AssertionError(f"{risk.risk_id} has fields disconnected from its invariants.")
+    if require_complete_ownership is None:
+        require_complete_ownership = risks is TARGET_RISKS
+    if require_complete_ownership:
+        owners = {
+            invariant_id
+            for risk in risks
+            for invariant_id in risk.supporting_invariants
+        }
+        orphaned = set(INVARIANTS_BY_ID) - owners
+        if orphaned:
+            raise AssertionError(
+                f"Invariant catalog contains target-risk orphans: {sorted(orphaned)!r}."
+            )
 
 
 def analyze_target_risks(

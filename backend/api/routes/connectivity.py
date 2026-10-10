@@ -21,6 +21,10 @@ from backend.shared.runtime_settings import (
     save_connectivity_runtime_settings,
 )
 from backend.shared.syntheticlib4_client import syntheticlib4_client
+from backend.shared.syntheticlib_product import (
+    get_syntheticlib_product_state,
+    syntheticlib_runtime_allowed,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/connectivity", tags=["connectivity"])
@@ -91,6 +95,15 @@ async def _openrouter_oauth_status() -> dict[str, Any]:
 
 async def _syntheticlib4_status() -> dict[str, Any]:
     enabled = bool(system_config.syntheticlib4_enabled)
+    if not syntheticlib_runtime_allowed():
+        return {
+            "status": "coming soon",
+            "enabled": enabled,
+            "ready": False,
+            "product_state": get_syntheticlib_product_state().value,
+            "runtime_available": False,
+            "message": "SyntheticLib is not launched. Private runtime access is disabled.",
+        }
     if not enabled:
         return {
             "status": "disabled",

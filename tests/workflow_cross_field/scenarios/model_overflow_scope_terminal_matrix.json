@@ -1,0 +1,44 @@
+{
+  "actions": [
+    "exercise_overflow_lifecycle_contracts"
+  ],
+  "adapter": "model",
+  "artifact_type": "scenario",
+  "asserted_invariants": [
+    "events.proof_context_overflow_nonfatal",
+    "events.autonomous_mandatory_overflow_checkpoint_preserved",
+    "events.continuous_manual_overflow_terminal_after_drain"
+  ],
+  "blocked_dependencies": [],
+  "coverage_classification": "deterministic_model_evidence",
+  "expected_result": "passed",
+  "faked_dependencies": [
+    "workflow executable state model"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "proof_runtime_gating",
+    "workflow_filesystem_state",
+    "runtime_exclusivity",
+    "continuous_proof_loop"
+  ],
+  "invariants": [
+    "events.proof_context_overflow_nonfatal",
+    "events.autonomous_mandatory_overflow_checkpoint_preserved",
+    "events.continuous_manual_overflow_terminal_after_drain"
+  ],
+  "must_exercise": [
+    "candidate_local_overflow",
+    "autonomous_mandatory_overflow",
+    "continuous_manual_overflow"
+  ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
+  "runner": "pytest",
+  "scenario_id": "model_overflow_scope_terminal_matrix",
+  "schema_version": 2,
+  "source_identity": "workflow-source-v1:a17528abfc04fed11ea4d6bfdbd507761bf3cac130818b598cec5125fae52843",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
+}

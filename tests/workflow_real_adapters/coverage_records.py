@@ -369,57 +369,219 @@ _UNLINKED_REAL_ADAPTER_COVERAGE = (
 )
 
 
-def _ranked_selectors_from_test_file(record: InteractionCoverage) -> tuple[str, ...]:
-    """Resolve exact pytest nodes from the uniquely matching scenario words."""
-    import ast
-    from pathlib import Path
+_EXPLICIT_EVIDENCE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "real_manual_compiler_proof_only_uses_rigor_settings_and_manual_scope": (
+        (_node("test_proof_routes.py", "test_manual_compiler_proof_only_uses_rigor_settings_and_manual_scope"),),
+        ("proof_scope.manual_not_in_autonomous_current",),
+    ),
+    "real_autonomous_proofs_only_handoff_returns_to_topic_exploration": (
+        (_node("test_proof_routes.py", "test_autonomous_proofs_only_brainstorm_handoff_returns_to_topic_exploration"),),
+        ("outputs.proofs_only_no_paper_phase",),
+    ),
+    "real_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes": (
+        (_node("test_proof_routes.py", "test_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes"),),
+        ("provider.pause_preserves_checkpoint",),
+    ),
+    "real_leanoj_master_proof_stop_resume_preserves_isolated_state": (
+        (_node("test_proof_routes.py", "test_leanoj_master_proof_stop_resume_preserves_isolated_state"),),
+        ("proof_scope.autonomous_events_not_manual",),
+    ),
+    "real_route_start_conflicts_preserve_single_workflow": (
+        (_node("test_route_conflicts.py", "test_real_route_start_conflicts_preserve_single_workflow_invariant"),),
+        ("runtime.single_active_workflow",),
+    ),
+    "real_route_pending_child_activity_counts_as_active": (
+        (_node("test_route_conflicts.py", "test_real_autonomous_route_counts_pending_child_activity_as_active"),),
+        ("runtime.single_active_workflow",),
+    ),
+    "real_disabled_proof_runtime_skips_autonomous_checkpoint": (
+        (_node("test_high_value_scenarios.py", "test_disabled_proof_runtime_skips_autonomous_checkpoint"),),
+        ("proof_runtime.no_lean_when_disabled",),
+    ),
+    "real_hosted_proof_settings_returns_desktop_unavailable": (
+        (_node("test_high_value_scenarios.py", "test_hosted_proof_settings_returns_desktop_unavailable"),),
+        ("proof_runtime.hosted_proof_settings_unavailable",),
+    ),
+    "real_manual_aggregator_route_lifecycle_output_and_temp_root": (
+        (_node("test_build_bc_lifecycles.py", "test_manual_aggregator_real_route_start_stop_output_and_temp_root"),),
+        ("runtime.single_active_workflow",),
+    ),
+    "real_manual_aggregator_clear_archives_before_clear": (
+        (_node("test_build_bc_lifecycles.py", "test_manual_aggregator_clear_archives_before_destructive_clear"),),
+        ("proof_scope.manual_clear_archives_active",),
+    ),
+    "real_actual_route_start_conflict_matrix_no_side_effects": (
+        (_node("test_build_bc_lifecycles.py", "test_actual_route_start_conflict_matrix_has_no_start_side_effects"),),
+        ("runtime.single_active_workflow", "runtime.child_tasks_count_as_active"),
+    ),
+    "real_manual_aggregator_durable_hydration_and_clear_blocker": (
+        (
+            _node("test_build_bc_lifecycles.py", "test_manual_aggregator_durable_results_hydrate_from_temp_root"),
+            _node("test_build_bc_lifecycles.py", "test_manual_aggregator_clear_blocker_has_no_destructive_side_effects"),
+        ),
+        ("state.runtime_roots_are_active_roots",),
+    ),
+    "real_manual_compiler_rejects_no_allowed_outputs": (
+        (_node("test_build_bc_lifecycles.py", "test_manual_compiler_rejects_invalid_output_selection_before_start"),),
+        ("outputs.at_least_one_output_enabled",),
+    ),
+    "real_generated_proof_appendix_stripping": (
+        (_node("test_build_bc_lifecycles.py", "test_generated_proof_appendices_are_stripped_without_truncating_body"),),
+        ("proof_scope.generated_appendices_stripped_from_prompts",),
+    ),
+    "real_manual_compiler_papers_lifecycle_and_clear_archive": (
+        (
+            _node("test_build_bc_lifecycles.py", "test_manual_compiler_real_papers_only_route_start_stop"),
+            _node("test_build_bc_lifecycles.py", "test_manual_compiler_clear_archives_before_paper_clear"),
+        ),
+        ("proof_scope.manual_clear_archives_active", "state.clear_removes_active_preserves_history"),
+    ),
+    "real_manual_compiler_proof_only_background_ownership": (
+        (_node("test_build_bc_lifecycles.py", "test_manual_compiler_proof_only_route_owns_background_task"),),
+        ("runtime.child_tasks_count_as_active",),
+    ),
+    "real_leanoj_coordinator_skip_force_clear_and_intermediate_edit": (
+        (
+            _node("test_build_bc_lifecycles.py", "test_leanoj_real_coordinator_skip_force_consume_and_route_clear"),
+            _node("test_build_bc_lifecycles.py", "test_leanoj_real_intermediate_master_proof_edit_stays_in_temp_root"),
+        ),
+        ("state.runtime_roots_are_active_roots",),
+    ),
+    "real_shared_start_guard_representative_race": (
+        (_node("test_build_bc_lifecycles.py", "test_actual_compiler_and_aggregator_route_start_race_has_one_winner"),),
+        ("runtime.single_active_workflow",),
+    ),
+    "real_manual_aggregator_overflow_identity_persists_across_reload": (
+        (_node("test_build_d_overflow_lifecycles.py", "test_manual_aggregator_fatal_overflow_preserves_route_and_reloads"),),
+        ("events.context_overflow_route_identity", "events.context_overflow_persists_across_reload"),
+    ),
+    "real_autonomous_overflow_terminal_stop_once": (
+        (_node("test_build_d_overflow_lifecycles.py", "test_autonomous_fatal_overflow_terminal_stop_emits_exactly_once"),),
+        ("events.context_overflow_route_identity", "events.context_overflow_terminal_stop_once"),
+    ),
+    "real_proof_context_overflow_is_scoped_nonfatal": (
+        (_node("test_build_d_overflow_lifecycles.py", "test_nonfatal_proof_overflow_emits_once_without_parent_stop"),),
+        ("events.context_overflow_route_identity", "events.proof_context_overflow_nonfatal"),
+    ),
+    "real_proof_scope_matrix_isolated_under_temp_root": (
+        (
+            _node("test_build_d_proof_scope_filesystem.py", "test_autonomous_current_and_library_routes_do_not_read_manual_scope"),
+            _node("test_build_d_proof_scope_filesystem.py", "test_manual_clear_archive_moves_active_proofs_to_history_only"),
+            _node("test_build_d_proof_scope_filesystem.py", "test_leanoj_current_and_history_routes_are_disjoint_then_clear_removes_root"),
+        ),
+        ("proof_scope.manual_not_in_autonomous_current",),
+    ),
+    "real_manual_archive_and_leanoj_clear_preserve_scope_contract": (
+        (
+            _node("test_build_d_proof_scope_filesystem.py", "test_manual_clear_archive_moves_active_proofs_to_history_only"),
+            _node("test_build_d_proof_scope_filesystem.py", "test_leanoj_current_and_history_routes_are_disjoint_then_clear_removes_root"),
+        ),
+        ("proof_scope.manual_clear_archives_active", "state.clear_removes_active_preserves_history"),
+    ),
+    "real_pruned_paper_preserved_but_removed_from_active_context": (
+        (_node("test_build_d_proof_scope_filesystem.py", "test_pruned_paper_moves_to_temp_history_and_route_excludes_active_file"),),
+        ("state.pruned_papers_excluded_from_context",),
+    ),
+    "real_direct_source_rag_exclusion_matrix": (
+        tuple(
+            _node("test_build_e_rag_prompt_context.py", name)
+            for name in (
+                "test_build_e_aggregator_mixed_direct_and_offloaded_sources_are_excluded",
+                "test_build_e_aggregator_source_becomes_retrievable_when_offloaded",
+                "test_build_e_compiler_construction_excludes_direct_sources_and_keeps_references",
+                "test_build_e_compiler_rigor_excludes_direct_outline_and_paper",
+            )
+        ),
+        ("prompt.direct_sources_excluded_from_rag",),
+    ),
+    "real_model_visible_prompts_strip_generated_proof_appendices": (
+        (
+            _node("test_build_e_prompt_boundaries.py", "test_real_proof_formalization_message_keeps_source_boundaries_and_verified_library"),
+            _node("test_build_e_prompt_boundaries.py", "test_real_compiler_rigor_message_strips_theorem_appendix_and_keeps_proof_summary"),
+        ),
+        ("prompt.generated_appendices_stripped", "proof_scope.generated_appendices_stripped_from_prompts"),
+    ),
+    "real_rigor_mandatory_source_overflow_fails_before_model_or_rag": (
+        (_node("test_build_e_prompt_boundaries.py", "test_real_compiler_rigor_mandatory_full_source_overflow_is_visible_and_pre_llm"),),
+        ("prompt.mandatory_source_overflow_fails_visible",),
+    ),
+}
 
-    test_path = Path(record.test_file)
-    source = test_path.read_text(encoding="utf-8")
-    functions = [
-        node.name
-        for node in ast.parse(source).body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name.startswith("test_")
-    ]
-    scenario_words = set(record.scenario_id.removeprefix("real_").split("_"))
-    ranked = sorted(
-        functions,
-        key=lambda name: len(scenario_words.intersection(name.removeprefix("test_").split("_"))),
-        reverse=True,
-    )
-    if not ranked:
-        raise AssertionError(f"No pytest selector found for {record.scenario_id}")
-    return tuple(f"{record.test_file}::{name}" for name in ranked)
+_PRODUCTION_COMPONENTS_BY_TEST_FILE = {
+    "tests/workflow_real_adapters/test_proof_routes.py": (
+        "backend/api/routes/compiler.py",
+        "backend/autonomous/core/autonomous_coordinator.py",
+        "backend/leanoj/core/leanoj_coordinator.py",
+    ),
+    "tests/workflow_real_adapters/test_route_conflicts.py": (
+        "backend/shared/workflow_start_guard.py",
+        "backend/api/routes/autonomous.py",
+    ),
+    "tests/workflow_real_adapters/test_high_value_scenarios.py": (
+        "backend/autonomous/core/autonomous_coordinator.py",
+        "backend/api/routes/proofs.py",
+    ),
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py": (
+        "backend/api/routes/aggregator.py",
+        "backend/api/routes/compiler.py",
+        "backend/api/routes/leanoj.py",
+    ),
+    "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py": (
+        "backend/aggregator/core/coordinator.py",
+        "backend/autonomous/core/autonomous_coordinator.py",
+    ),
+    "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py": (
+        "backend/api/routes/proofs.py",
+        "backend/autonomous/memory/proof_database.py",
+    ),
+    "tests/workflow_real_adapters/test_build_e_rag_prompt_context.py": (
+        "backend/aggregator/core/context_allocator.py",
+        "backend/compiler/core/compiler_rag_manager.py",
+    ),
+    "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py": (
+        "backend/autonomous/agents/proof_formalization_agent.py",
+        "backend/compiler/agents/high_param_submitter.py",
+    ),
+}
 
 
 def _link_passed_records() -> tuple[InteractionCoverage, ...]:
-    used_selectors: set[str] = set()
     linked: list[InteractionCoverage] = []
     for record in _UNLINKED_REAL_ADAPTER_COVERAGE:
         if record.result != "passed":
-            linked.append(record)
+            linked.append(
+                replace(
+                    record,
+                    blocked_dependencies=record.blocked_dependencies
+                    or ("unavailable bounded production transition seam",),
+                )
+            )
             continue
-        explicit = tuple(
-            candidate for candidate in record.test_selectors if candidate not in used_selectors
-        )
-        selector = explicit[0] if explicit else next(
-            (
-                candidate
-                for candidate in _ranked_selectors_from_test_file(record)
-                if candidate not in used_selectors
-            ),
-            None,
-        )
-        if selector is None:
-            raise AssertionError(f"No unique pytest selector found for {record.scenario_id}")
-        used_selectors.add(selector)
+        if record.test_selectors:
+            selectors = record.test_selectors
+            asserted_invariants = record.asserted_invariants
+            real_components = record.real_components
+            faked_dependencies = record.faked_dependencies
+            observed_transition = record.observed_transition
+        else:
+            try:
+                selectors, asserted_invariants = _EXPLICIT_EVIDENCE[record.scenario_id]
+                real_components = _PRODUCTION_COMPONENTS_BY_TEST_FILE[record.test_file]
+            except KeyError as exc:
+                raise AssertionError(
+                    f"Passed coverage record {record.scenario_id} lacks an explicit evidence declaration"
+                ) from exc
+            faked_dependencies = ("external providers and proof toolchains",)
+            observed_transition = "; ".join(record.evidence)
         linked.append(
             replace(
                 record,
-                runner="pytest",
-                test_selectors=(selector,),
-                asserted_invariants=record.invariants,
+                runner=record.runner or "pytest",
+                test_selectors=selectors,
+                asserted_invariants=asserted_invariants,
+                real_components=real_components,
+                faked_dependencies=faked_dependencies,
+                observed_transition=observed_transition,
             )
         )
     return tuple(linked)

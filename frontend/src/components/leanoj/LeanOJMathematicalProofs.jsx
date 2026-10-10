@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { downloadTextFile } from '../../utils/downloadHelpers';
+import { getNoveltyGroupAnchorIds } from '../../utils/proofPresentation';
 import '../autonomous/MathematicalProofs.css';
 
 function formatDate(isoString) {
@@ -123,6 +124,19 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
   const handleDownloadLean = (proof) => {
     if (!proof.lean_code) return;
     downloadTextFile(proof.lean_code, `${proof.theorem_name || proof.proof_id}.lean`);
+  };
+  const handleDownloadNoveltyGroup = async (proof) => {
+    try {
+      const anchorId = getNoveltyGroupAnchorIds(proof)[0] || proof.proof_id;
+      const group = await api.getProofNoveltyGroup(anchorId);
+      downloadTextFile(
+        JSON.stringify(group, null, 2),
+        `${proof.shared_proof_id || proof.proof_id}_novelty_group.json`,
+        'application/json'
+      );
+    } catch (err) {
+      setError(`Failed to download novelty-ranked proof group: ${err.message}`);
+    }
   };
 
   return (
@@ -251,6 +265,15 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
                     >
                       Download .lean
                     </button>
+                    {getNoveltyGroupAnchorIds(proof).length > 0 && (
+                      <button
+                        type="button"
+                        className="math-proof-download math-proof-download--compact"
+                        onClick={() => handleDownloadNoveltyGroup(proof)}
+                      >
+                        Download Ranked Group (JSON)
+                      </button>
+                    )}
                     <button
                       className="math-proof-expand"
                       onClick={() => setExpandedProofId(isExpanded ? null : proof.library_id)}
@@ -277,6 +300,15 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
                       >
                         Download .lean
                       </button>
+                      {getNoveltyGroupAnchorIds(proof).length > 0 && (
+                        <button
+                          type="button"
+                          className="math-proof-download"
+                          onClick={() => handleDownloadNoveltyGroup(proof)}
+                        >
+                          Download Ranked Group (JSON)
+                        </button>
+                      )}
                     </div>
 
                     <div className="math-proof-detail-block">
@@ -297,6 +329,19 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
                         <div>{proof.novelty_reasoning}</div>
                       </div>
                     )}
+
+                    <div className="math-proof-detail-block">
+                      <strong>Discovery Ranking Scope</strong>
+                      <div>
+                        {proof.novelty_scope === 'group'
+                          ? 'Finite verified proof group'
+                          : 'Accepted Lean statement alone'}
+                      </div>
+                      {proof.novelty_group_claim && <div>{proof.novelty_group_claim}</div>}
+                      {proof.novelty_scope === 'group' && proof.novelty_group_proof_ids?.length > 0 && (
+                        <div>Ranked with: {proof.novelty_group_proof_ids.join(', ')}</div>
+                      )}
+                    </div>
 
                     <div className="math-proof-detail-block">
                       <strong>Proof Solver Proof Kind</strong>

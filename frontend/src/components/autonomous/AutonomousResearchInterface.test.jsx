@@ -80,6 +80,31 @@ test('keeps autonomous start and output controls available in the prompt compose
   expect(screen.getByLabelText('Creativity Emphasis Boost')).toBeInTheDocument();
 });
 
+test('keeps Skip AI Autonomy active and explains Allowed Outputs during brainstorming', () => {
+  const { container } = render(
+    <AutonomousResearchInterface
+      {...baseProps}
+      isRunning={true}
+      status={{
+        current_tier: 'tier1_aggregation',
+        current_brainstorm: {
+          topic_id: 'topic-1',
+          topic_prompt: 'Test brainstorm',
+        },
+      }}
+      api={{ forcePaperWriting: vi.fn() }}
+    />
+  );
+
+  expect(screen.getByRole('button', { name: 'Skip AI Autonomy' })).toBeEnabled();
+  expect(screen.getByText(
+    'Skip the remaining AI autonomy and move directly to proof writing, paper writing, or both—based on your Allowed Outputs selections.'
+  )).toBeInTheDocument();
+  expect(container.querySelector(
+    '.workflow-main-interface--running > .manual-controls--active'
+  )).toBeInTheDocument();
+});
+
 test('shows the red stop control immediately but locks it until start is confirmed', async () => {
   let resolveStart;
   const onStart = vi.fn(() => new Promise((resolve) => {

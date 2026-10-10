@@ -10,11 +10,12 @@ from fastapi import APIRouter, HTTPException
 
 from backend.aggregator.core.coordinator import coordinator
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
+from backend.autonomous.memory.proof_database import proof_database
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 from backend.shared.config import system_config
 from backend.shared.embedding_readiness import require_embedding_provider_ready
-from backend.shared.models import LeanOJStartRequest
+from backend.shared.models import LeanOJStartRequest, ProofNoveltyGroupResponse
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.workflow_start_guard import WorkflowLease, workflow_start_guard
 
@@ -133,6 +134,11 @@ def _build_leanoj_final_proof(payload: dict[str, Any]) -> dict[str, Any] | None:
         "novel": bool(payload.get("final_novel")),
         "novelty_tier": str(payload.get("final_novelty_tier") or "not_novel"),
         "novelty_reasoning": str(payload.get("final_novelty_reasoning") or ""),
+        "novelty_scope": str(payload.get("final_novelty_scope") or "standalone"),
+        "novelty_group_claim": str(payload.get("final_novelty_group_claim") or ""),
+        "novelty_group_proof_ids": list(
+            payload.get("final_novelty_group_proof_ids") or []
+        ),
         "created_at": _leanoj_created_at(payload),
         "phase": str(payload.get("phase") or ""),
     }
@@ -184,6 +190,13 @@ def _build_leanoj_subproofs(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "novel": bool(subproof.get("novel")),
                 "novelty_tier": str(subproof.get("novelty_tier") or "not_novel"),
                 "novelty_reasoning": str(subproof.get("novelty_reasoning") or ""),
+                "novelty_scope": str(subproof.get("novelty_scope") or "standalone"),
+                "novelty_group_claim": str(
+                    subproof.get("novelty_group_claim") or ""
+                ),
+                "novelty_group_proof_ids": list(
+                    subproof.get("novelty_group_proof_ids") or []
+                ),
                 "role": str(subproof.get("role") or ""),
                 "created_at": str(subproof.get("created_at") or "") or created_at_fallback,
                 "phase": str(payload.get("phase") or ""),
@@ -199,7 +212,182 @@ def _extract_leanoj_proofs(payload: dict[str, Any], *, include_subproofs: bool =
         proofs.append(final_proof)
     if include_subproofs:
         proofs.extend(_build_leanoj_subproofs(payload))
+    by_shared_id = {
+        str(proof.get("shared_proof_id") or ""): proof
+        for proof in proofs
+        if str(proof.get("shared_proof_id") or "")
+    }
+    for anchor in proofs:
+        if str(anchor.get("novelty_scope") or "standalone") != "group":
+            continue
+        anchor_id = str(anchor.get("shared_proof_id") or "")
+        member_ids = list(dict.fromkeys([
+            *list(anchor.get("novelty_group_proof_ids") or []),
+            anchor_id,
+        ]))
+        anchor["novelty_group_proof_ids"] = member_ids
+        for member_id in member_ids:
+            member = by_shared_id.get(member_id)
+            if member is None:
+                continue
+            backlinks = list(member.get("novelty_group_anchor_proof_ids") or [])
+            if anchor_id and anchor_id not in backlinks:
+                backlinks.append(anchor_id)
+            member["novelty_group_anchor_proof_ids"] = backlinks
     return proofs
+
+
+async def _extract_leanoj_proofs_with_canonical_members(
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Include same-run canonical occurrences that state publication missed."""
+    proofs = _extract_leanoj_proofs(payload)
+    run_id = str(payload.get("session_id") or "")
+    if not run_id:
+        return proofs
+    known_shared_ids = {
+        str(proof.get("shared_proof_id") or "")
+        for proof in proofs
+        if str(proof.get("shared_proof_id") or "")
+    }
+    canonical_records = await proof_database.get_all_proofs()
+    canonical_by_id = {
+        record.proof_id: record
+        for record in canonical_records
+        if record.run_id == run_id
+    }
+    for proof in proofs:
+        shared_id = str(proof.get("shared_proof_id") or "").strip()
+        canonical = canonical_by_id.get(shared_id)
+        if canonical is None:
+            continue
+        proof["client_proof_id"] = canonical.client_proof_id
+        proof["canonical_locator"] = (
+            canonical.canonical_locator.model_dump(mode="json")
+            if canonical.canonical_locator is not None
+            else None
+        )
+        proof["canonical_locator_digest"] = canonical.canonical_locator_digest
+    for record in canonical_records:
+        if record.run_id != run_id or record.proof_id in known_shared_ids:
+            continue
+        proofs.append({
+            "proof_id": record.proof_id,
+            "shared_proof_id": record.proof_id,
+            "session_id": run_id,
+            "run_id": run_id,
+            "theorem_name": record.theorem_name,
+            "theorem_statement": record.theorem_statement,
+            "lean_code": record.lean_code,
+            "novelty_tier": record.novelty_tier,
+            "novelty_scope": record.novelty_scope,
+            "novelty_group_claim": record.novelty_group_claim,
+            "novelty_group_proof_ids": list(record.novelty_group_proof_ids),
+            "client_proof_id": record.client_proof_id,
+            "canonical_locator": (
+                record.canonical_locator.model_dump(mode="json")
+                if record.canonical_locator is not None
+                else None
+            ),
+            "canonical_locator_digest": record.canonical_locator_digest,
+        })
+    by_shared_id = {
+        str(proof.get("shared_proof_id") or ""): proof
+        for proof in proofs
+        if str(proof.get("shared_proof_id") or "")
+    }
+    for anchor in proofs:
+        if str(anchor.get("novelty_scope") or "standalone") != "group":
+            continue
+        anchor_id = str(anchor.get("shared_proof_id") or "")
+        member_ids = list(dict.fromkeys([
+            *list(anchor.get("novelty_group_proof_ids") or []),
+            anchor_id,
+        ]))
+        anchor["novelty_group_proof_ids"] = member_ids
+        for member_id in member_ids:
+            member = by_shared_id.get(member_id)
+            if member is None:
+                continue
+            backlinks = list(member.get("novelty_group_anchor_proof_ids") or [])
+            if anchor_id and anchor_id not in backlinks:
+                backlinks.append(anchor_id)
+            member["novelty_group_anchor_proof_ids"] = backlinks
+    return proofs
+
+
+def _build_leanoj_novelty_group(
+    proofs: list[dict[str, Any]],
+    anchor_proof_id: str,
+) -> dict[str, Any]:
+    anchor = next(
+        (proof for proof in proofs if str(proof.get("proof_id") or "") == anchor_proof_id),
+        None,
+    )
+    if anchor is None:
+        raise HTTPException(status_code=404, detail="Proof Solver proof work not found")
+    if str(anchor.get("novelty_scope") or "standalone") != "group":
+        anchor_shared_id = str(anchor.get("shared_proof_id") or "")
+        matching_anchors = [
+            proof
+            for proof in proofs
+            if str(proof.get("novelty_scope") or "standalone") == "group"
+            and anchor_shared_id in (proof.get("novelty_group_proof_ids") or [])
+        ]
+        if len(matching_anchors) != 1:
+            raise HTTPException(
+                status_code=409 if matching_anchors else 404,
+                detail=(
+                    "This proof belongs to multiple novelty-ranked groups; select a group anchor."
+                    if matching_anchors
+                    else "This proof has no finite novelty-ranked proof group."
+                ),
+            )
+        anchor = matching_anchors[0]
+    requested_ids = list(anchor.get("novelty_group_proof_ids") or [])
+    shared_anchor_id = str(anchor.get("shared_proof_id") or "")
+    if shared_anchor_id and shared_anchor_id not in requested_ids:
+        requested_ids.append(shared_anchor_id)
+    by_shared_id = {
+        str(proof.get("shared_proof_id") or ""): proof
+        for proof in proofs
+        if str(proof.get("shared_proof_id") or "")
+    }
+    missing = [proof_id for proof_id in requested_ids if proof_id not in by_shared_id]
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "The stored novelty group references unavailable Proof Solver proof occurrences.",
+                "missing_proof_ids": missing,
+            },
+        )
+    run_id = str(anchor.get("run_id") or anchor.get("session_id") or "")
+    members = [by_shared_id[proof_id] for proof_id in requested_ids]
+    if any(str(member.get("run_id") or member.get("session_id") or "") != run_id for member in members):
+        raise HTTPException(
+            status_code=409,
+            detail="The stored novelty group contains proof occurrences from another run.",
+        )
+    return {
+        "anchor_proof_id": shared_anchor_id or anchor_proof_id,
+        "run_id": run_id,
+        "novelty_tier": str(anchor.get("novelty_tier") or "not_novel"),
+        "novelty_scope": "group",
+        "group_claim": str(anchor.get("novelty_group_claim") or ""),
+        "group_proof_ids": requested_ids,
+        "proofs": [
+            {
+                "proof_id": str(member.get("shared_proof_id") or member.get("proof_id") or ""),
+                "theorem_name": str(member.get("theorem_name") or ""),
+                "theorem_statement": str(member.get("theorem_statement") or ""),
+                "lean_code": str(member.get("lean_code") or ""),
+                "run_id": run_id,
+                "novelty_tier": str(member.get("novelty_tier") or "not_novel"),
+            }
+            for member in members
+        ],
+    }
 
 
 def _build_leanoj_session_summary(payload: dict[str, Any], proofs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -404,6 +592,20 @@ async def get_leanoj_proofs():
     }
 
 
+@router.get(
+    "/proofs/{proof_id}/novelty-group",
+    response_model=ProofNoveltyGroupResponse,
+)
+async def get_leanoj_proof_novelty_group(proof_id: str):
+    """Return the finite novelty-ranked group for a current Proof Solver proof."""
+    return _build_leanoj_novelty_group(
+        await _extract_leanoj_proofs_with_canonical_members(
+            leanoj_coordinator.get_status()
+        ),
+        proof_id,
+    )
+
+
 @router.get("/library")
 async def get_leanoj_library(include_subproofs: bool = True):
     """Return completed Proof Solver proof works across saved sessions."""
@@ -454,6 +656,27 @@ async def get_leanoj_library_proof(session_id: str, proof_id: str):
                 return proof
         break
 
+    raise HTTPException(status_code=404, detail="Proof Solver proof work not found")
+
+
+@router.get(
+    "/library/{session_id}/{proof_id}/novelty-group",
+    response_model=ProofNoveltyGroupResponse,
+)
+async def get_leanoj_library_proof_novelty_group(session_id: str, proof_id: str):
+    """Return an archived Proof Solver novelty-ranked group."""
+    current_status = leanoj_coordinator.get_status()
+    if str(current_status.get("session_id") or "") == session_id:
+        return _build_leanoj_novelty_group(
+            await _extract_leanoj_proofs_with_canonical_members(current_status),
+            proof_id,
+        )
+    for payload in _iter_leanoj_state_payloads():
+        if str(payload.get("session_id") or "") == session_id:
+            return _build_leanoj_novelty_group(
+                await _extract_leanoj_proofs_with_canonical_members(payload),
+                proof_id,
+            )
     raise HTTPException(status_code=404, detail="Proof Solver proof work not found")
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -35,7 +36,7 @@ SUMMARY_PATH = ROOT / "SUMMARY.md"
 TARGET_RISKS_JSON_PATH = ROOT / "target_risks.json"
 TARGET_RISKS_MARKDOWN_PATH = ROOT / "TARGET_RISKS.md"
 SEEDS = (7, 29)
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ADAPTERS: tuple[AdapterType, ...] = (
     "model",
     "real_route",
@@ -57,6 +58,10 @@ def render_artifacts() -> dict[Path, bytes]:
 
     for scenario in CROSS_FIELD_SCENARIOS:
         path = SCENARIOS_DIR / f"{scenario.scenario_id}.json"
+        model_selector = (
+            "tests/workflow_scenarios/test_cross_field_analysis.py::"
+            "test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+        )
         rendered[path] = _json_bytes(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -68,9 +73,42 @@ def render_artifacts() -> dict[Path, bytes]:
                 "actions": tuple(action.__name__ for action in scenario.actions),
                 "must_exercise": scenario.must_exercise,
                 "expected_result": scenario.expected_result,
+                "coverage_classification": "deterministic_model_evidence",
+                "runner": "pytest",
+                "test_selectors": (model_selector,),
+                "asserted_invariants": scenario.invariants,
+                "real_components": (),
+                "faked_dependencies": ("workflow executable state model",),
+                "blocked_dependencies": (),
+                "observed_transition": (
+                    "direct model actions preserve declared product laws"
+                ),
+                "source_identity": _source_identity(
+                    {
+                        "runner": "pytest",
+                        "test_selectors": (model_selector,),
+                        "test_file": (
+                            "tests/workflow_scenarios/test_cross_field_analysis.py"
+                        ),
+                        "asserted_invariants": scenario.invariants,
+                        "real_components": (),
+                    }
+                ),
             }
         )
         record = scenario.coverage_record("tests/workflow_scenarios/test_cross_field_analysis.py")
+        record = InteractionCoverage(
+            **{
+                **record.__dict__,
+                "runner": "pytest",
+                "test_selectors": (
+                    "tests/workflow_scenarios/test_cross_field_analysis.py::"
+                    "test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+                ),
+                "asserted_invariants": record.invariants,
+                "observed_transition": "direct model actions preserve declared product laws",
+            }
+        )
         records.append(record)
         result_path = RESULTS_DIR / f"{scenario.scenario_id}.json"
         rendered[result_path] = _json_bytes(_result_payload(record, source="curated"))
@@ -119,11 +157,24 @@ def render_artifacts() -> dict[Path, bytes]:
                     "action_ids": run.action_ids,
                     "replay": run.replay,
                     "evidence": sorted(run.observed_evidence),
+                    "runner": "pytest",
+                    "test_selectors": (
+                        "tests/workflow_recombinatory/test_mode_aware_generator.py::"
+                        "test_every_default_target_can_complete_for_normal_seed",
+                    ),
+                    "asserted_invariants": run.invariants,
+                    "real_components": (),
+                    "faked_dependencies": ("workflow executable state model",),
+                    "blocked_dependencies": (),
+                    "observed_transition": (
+                        "seeded model planner reached the declared target"
+                    ),
                     "diagnostics": {
                         "final_mode": run.final_mode.value,
                         "final_phase": run.final_phase.value,
                     },
                 }
+                payload["source_identity"] = _source_identity(payload)
                 rendered[path] = _json_bytes(payload)
                 records.append(
                     InteractionCoverage(
@@ -137,6 +188,13 @@ def render_artifacts() -> dict[Path, bytes]:
                         replay=run.replay,
                         diagnostics=payload["diagnostics"],
                         evidence=tuple(sorted(run.observed_evidence)),
+                        runner="pytest",
+                        test_selectors=(
+                            "tests/workflow_recombinatory/test_mode_aware_generator.py::"
+                            "test_every_default_target_can_complete_for_normal_seed",
+                        ),
+                        asserted_invariants=run.invariants,
+                        observed_transition="seeded model planner reached the declared target",
                     )
                 )
 
@@ -194,6 +252,47 @@ def render_artifacts() -> dict[Path, bytes]:
     return rendered
 
 
+def render_metadata_artifacts() -> dict[Path, bytes]:
+    """Render registry metadata without running the recombinatory planner.
+
+    This is the fast path for schema/provenance checks when full generated
+    scenario execution is intentionally deferred.
+    """
+    rendered: dict[Path, bytes] = {}
+    for scenario in CROSS_FIELD_SCENARIOS:
+        rendered[SCENARIOS_DIR / f"{scenario.scenario_id}.json"] = _json_bytes(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "scenario",
+                "scenario_id": scenario.scenario_id,
+                "adapter": scenario.adapter,
+                "coverage_classification": "deterministic_model_evidence",
+                "fields": scenario.fields,
+                "invariants": scenario.invariants,
+                "actions": tuple(action.__name__ for action in scenario.actions),
+                "must_exercise": scenario.must_exercise,
+                "expected_result": scenario.expected_result,
+            }
+        )
+    for target in DEFAULT_TARGETS:
+        rendered[TARGETS_DIR / f"{target.target_id}.json"] = _json_bytes(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "generation_target",
+                "coverage_classification": "recombinatory_model_evidence",
+                "target_id": target.target_id,
+                "fields": target.fields,
+                "invariants": target.invariants,
+                "must_exercise": target.must_exercise,
+                "max_steps": target.max_steps,
+                "result_ids": tuple(
+                    f"{target.target_id}_seed_{seed}" for seed in SEEDS
+                ),
+            }
+        )
+    return rendered
+
+
 def _risk_payload(analysis) -> dict[str, object]:
     return {
         "risk_id": analysis.risk.risk_id,
@@ -221,7 +320,7 @@ def _risk_payload(analysis) -> dict[str, object]:
 
 
 def _result_payload(record: InteractionCoverage, *, source: str) -> dict[str, object]:
-    return {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "result",
         "source": source,
@@ -235,7 +334,29 @@ def _result_payload(record: InteractionCoverage, *, source: str) -> dict[str, ob
         "replay": record.replay,
         "diagnostics": record.diagnostics or {},
         "evidence": record.evidence,
+        "runner": record.runner,
+        "test_selectors": record.test_selectors,
+        "asserted_invariants": record.asserted_invariants,
+        "real_components": record.real_components,
+        "faked_dependencies": record.faked_dependencies,
+        "blocked_dependencies": record.blocked_dependencies,
+        "observed_transition": record.observed_transition,
     }
+    payload["source_identity"] = _source_identity(payload)
+    return payload
+
+
+def _source_identity(payload: dict[str, object]) -> str:
+    """Hash stable test provenance, never repository or dirty-worktree state."""
+    basis = {
+        "runner": payload.get("runner"),
+        "test_selectors": payload.get("test_selectors") or (),
+        "test_file": payload.get("test_file"),
+        "asserted_invariants": payload.get("asserted_invariants") or (),
+        "real_components": payload.get("real_components") or (),
+    }
+    encoded = json.dumps(basis, sort_keys=True, separators=(",", ":")).encode()
+    return f"workflow-source-v1:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _status_cell(

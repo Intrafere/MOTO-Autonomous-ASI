@@ -34,13 +34,19 @@ def context_overflow_model_payload(
         payload["configured_model"] = configured_model
     if configured_provider:
         payload["configured_provider"] = configured_provider
+    configured_host = route.host_provider if route else ""
+    if not configured_host and config is not None:
+        configured_host = config.openrouter_provider or ""
+    if configured_host:
+        payload["configured_host_provider"] = configured_host
     if route is not None:
         if route.model:
             payload["effective_model"] = route.model
         if route.provider:
             payload["effective_provider"] = route.provider
-        if route.host_provider:
-            payload["effective_host_provider"] = route.host_provider
+        effective_host = route.upstream_host_provider or route.host_provider
+        if effective_host:
+            payload["effective_host_provider"] = effective_host
         if route.route_kind:
             payload["route_kind"] = route.route_kind
     return payload

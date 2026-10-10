@@ -1,5 +1,6 @@
 import { formatContextOverflowActivityMessage } from './activityStyles';
 import { sanitizePersistedActivityValue } from './activityPersistence';
+import { normalizeActivityEvent } from './activityNormalization';
 
 const DISMISSED_PROVIDER_NOTIFICATION_IDS_STORAGE_KEY = 'dismissedOAuthProviderNotifications';
 const DISMISSED_PROVIDER_NOTIFICATION_FINGERPRINT_PREFIX = 'dismissedOAuthProviderNotificationFingerprint:';
@@ -100,8 +101,7 @@ export function readPersistedLiveActivity(storageKey) {
             eventName !== 'proof_run_idle'
             && eventName !== 'proof_run_next_round_required'
             && event?.data?.status !== 'idle_between_rounds'
-            && event?.data?.terminal_reason !== 'three_consecutive_zero_candidate_rounds'
-            && !/waiting for Run Next Round|three consecutive valid.*no candidates/i.test(message)
+            && !/waiting for Run Next Round/i.test(message)
           );
         })
         .map((event) => {
@@ -111,9 +111,10 @@ export function readPersistedLiveActivity(storageKey) {
               (eventName === 'auto_research_stopped' || eventName === 'leanoj_stopped')
               && event?.data?.reason === 'context_overflow'
             );
-          return isOverflow
+          const restored = isOverflow
             ? { ...event, message: formatContextOverflowActivityMessage(event.data || {}) }
             : event;
+          return normalizeActivityEvent(restored);
         })
         .slice(-MAX_LIVE_ACTIVITY_EVENTS)
       : [];
@@ -161,10 +162,16 @@ export function compactLiveActivityEvent(event) {
   if (!event || typeof event !== 'object') {
     return null;
   }
-  const sanitizedEvent = sanitizePersistedActivityValue(event);
+  const sanitizedEvent = normalizeActivityEvent(sanitizePersistedActivityValue(event));
   return {
     event: sanitizedEvent.event || sanitizedEvent.type || '',
     type: sanitizedEvent.type,
+    activityIdentity: sanitizedEvent.activityIdentity,
+    category: sanitizedEvent.category,
+    severity: sanitizedEvent.severity,
+    outcome: sanitizedEvent.outcome,
+    validatorFeedback: compactPersistedActivityValue(sanitizedEvent.validatorFeedback),
+    errorDetail: compactPersistedActivityValue(sanitizedEvent.errorDetail),
     timestamp: sanitizedEvent.timestamp || sanitizedEvent.fullTimestamp || '',
     fullTimestamp: sanitizedEvent.fullTimestamp,
     // Persist the user-visible message after recursive credential redaction so

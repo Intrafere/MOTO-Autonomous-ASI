@@ -13,6 +13,7 @@ import {
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
 } from '../utils/openRouterSelection';
+import SecretInput from './SecretInput';
 import './BoostControlModal.css';
 
 const BOOST_SETTINGS_STORAGE_KEY = 'boost_modal_settings';
@@ -246,8 +247,11 @@ export default function BoostControlModal({
 
       let useGlobalKey = false;
       try {
-        const keyStatus = await openRouterAPI.getApiKeyStatus();
-        useGlobalKey = Boolean(keyStatus.has_key);
+        let keyStatus = await openRouterAPI.getApiKeyStatus();
+        if (keyStatus.has_key && keyStatus.validation_state !== 'valid') {
+          keyStatus = await openRouterAPI.validateCurrentApiKey();
+        }
+        useGlobalKey = Boolean(keyStatus.has_key && keyStatus.validation_state === 'valid');
         setHasGlobalKey(useGlobalKey);
       } catch (error) {
         console.error('Failed to check OpenRouter key status for boost modal:', error);
@@ -288,13 +292,13 @@ export default function BoostControlModal({
     setSuccess('');
 
     try {
-      const response = await boostAPI.getOpenRouterModels(effectiveKey);
-      if (response.models && response.models.length > 0) {
-        setSuccess(`✓ Connected successfully${usingGlobalKey ? ' using the active OpenRouter key' : ''}! Found ${response.models.length} models.`);
-        setModels(response.models);
+      if (usingGlobalKey) {
+        await openRouterAPI.validateCurrentApiKey();
       } else {
-        setError('Connected but no models found');
+        await openRouterAPI.testConnection(effectiveKey);
       }
+      setSuccess(`✓ Authenticated successfully${usingGlobalKey ? ' using the active OpenRouter key' : ''}.`);
+      await fetchModels(freeOnly, { silent: true, keyOverride: effectiveKey });
     } catch (error) {
       setError(error.message || 'Connection failed');
     } finally {
@@ -334,6 +338,7 @@ export default function BoostControlModal({
         response = await boostAPI.updateModel(config);
         
         if (response.success) {
+          setApiKey('');
           setSuccess(`✓ Boost model updated! State preserved: ${response.preserved_state.boost_next_count} next calls`);
           await fetchBoostStatus();
           
@@ -345,6 +350,7 @@ export default function BoostControlModal({
         response = await boostAPI.enable(config);
         
         if (response.success) {
+          setApiKey('');
           setSuccess('✓ Boost enabled successfully!');
           await fetchBoostStatus();
           
@@ -386,11 +392,18 @@ export default function BoostControlModal({
   const handleOverlayMouseDown = (e) => {
     mouseDownTargetRef.current = e.target;
   };
+
+  const handleClose = () => {
+    setApiKey('');
+    setError('');
+    setSuccess('');
+    onClose();
+  };
   
   const handleOverlayClick = (e) => {
     // Only close if both mousedown and click happened on the overlay itself
     if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
-      onClose();
+      handleClose();
     }
     mouseDownTargetRef.current = null;
   };
@@ -406,7 +419,7 @@ export default function BoostControlModal({
       <div className="boost-modal">
         <div className="modal-header">
           <h2>API Boost Configuration</h2>
-          <button className="close-btn" onClick={onClose}>×</button>
+          <button className="close-btn" onClick={handleClose}>×</button>
         </div>
 
         <div className="modal-body">
@@ -430,9 +443,10 @@ export default function BoostControlModal({
           )}
 
           <div className="boost-form-group">
-            <label>OpenRouter API Key</label>
-            <input
-              type="password"
+            <label htmlFor="boost-openrouter-api-key">OpenRouter API Key</label>
+            <SecretInput
+              id="boost-openrouter-api-key"
+              name="moto-boost-openrouter-api-key"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder="sk-or-..."
@@ -643,7 +657,7 @@ export default function BoostControlModal({
               {loading ? 'Enabling...' : 'Enable Boost'}
             </button>
           )}
-          <button onClick={onClose} className="secondary">
+          <button onClick={handleClose} className="secondary">
             Close
           </button>
         </div>

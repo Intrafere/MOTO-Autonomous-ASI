@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, patch
 from backend.leanoj.core import leanoj_context as leanoj_context_module
 from backend.leanoj.core import leanoj_coordinator as leanoj_module
 from backend.leanoj.core.leanoj_context import LeanOJContextAllocation, leanoj_context_manager
-from backend.leanoj.core.leanoj_coordinator import LeanOJConfigurationError, LeanOJCoordinator
+from backend.leanoj.core.leanoj_coordinator import (
+    LeanOJBatchValidationContractError,
+    LeanOJConfigurationError,
+    LeanOJCoordinator,
+)
 from backend.leanoj.prompts import (
     LEANOJ_FORMALIZATION_GUARDRAILS,
     build_final_solution_review_prompt,
@@ -15,9 +19,19 @@ from backend.leanoj.prompts import (
 )
 from backend.shared.boost_manager import BoostManager
 from backend.shared.config import system_config
-from backend.shared.models import DocumentChunk, LeanOJRoleConfig, LeanOJStartRequest, ProofRecord
+from backend.shared.models import (
+    DocumentChunk,
+    LeanOJRoleConfig,
+    LeanOJStartRequest,
+    ModelConfig,
+    ProofRecord,
+)
 from backend.shared.proof_search.assistant_models import AssistantProofPack, AssistantProofSupport
 from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
+
+
+_JSON_RETRY_CLOUD_MODEL = "vendor/test:free"
+_JSON_RETRY_FALLBACK_MODEL = "local/test-fallback"
 
 
 def _role() -> LeanOJRoleConfig:
@@ -42,6 +56,14 @@ def _request() -> LeanOJStartRequest:
 
 
 class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # Session History Memory is off unless a test opts in: its non-blocking
+        # Assistant retrieval rebuilds the proof-search index on a background
+        # thread that can outlive a test's temporary data root.
+        patcher = patch.object(system_config, "agent_conversation_memory_enabled", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def _initialized_coordinator(self) -> LeanOJCoordinator:
         coordinator = LeanOJCoordinator()
         await coordinator.initialize(_request())
@@ -140,6 +162,97 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["decision"], "accept")
         self.assertEqual(prompts, ["large prompt with old feedback", "smaller prompt with newest feedback"])
+
+    async def _invalid_json_retry_event(self, *, fallback_active: bool) -> dict:
+        """Run three unusable JSON replies and return the invalid-JSON retry row."""
+        manager = leanoj_module.api_client_manager
+        role_id = "leanoj_brainstorm_submitter_2"
+        coordinator = LeanOJCoordinator()
+        coordinator._running = True  # type: ignore[attr-defined]
+
+        async def noop(*_args, **_kwargs):
+            return None
+
+        coordinator._persist_state = noop  # type: ignore[method-assign]
+        coordinator._broadcast = noop  # type: ignore[method-assign]
+        calls = 0
+
+        async def generate_completion(**_kwargs):
+            nonlocal calls
+            calls += 1
+            content = '{"decision": "accept"}' if calls > 3 else "not json"
+            return {"choices": [{"message": {"content": content}}]}
+
+        provider_broadcast = AsyncMock()
+        with tempfile.TemporaryDirectory() as data_dir,                 patch.object(system_config, "data_dir", data_dir),                 patch.object(system_config, "generic_mode", False),                 patch.object(system_config, "agent_conversation_memory_enabled", False),                 patch.dict(manager._role_model_configs),                 patch.dict(manager._role_fallback_state),                 patch.object(manager, "generate_completion", new=generate_completion),                 patch.object(manager, "_sleep_with_optional_stop", new=AsyncMock(return_value=False)),                 patch.object(manager, "_broadcast", new=provider_broadcast):
+            manager.configure_role(
+                role_id,
+                ModelConfig(
+                    provider="openrouter",
+                    model_id=_JSON_RETRY_CLOUD_MODEL,
+                    openrouter_model_id=_JSON_RETRY_CLOUD_MODEL,
+                    lm_studio_fallback_id=_JSON_RETRY_FALLBACK_MODEL,
+                    context_window=8192,
+                    max_output_tokens=1024,
+                ),
+            )
+            if fallback_active:
+                manager._role_fallback_state[role_id] = "lm_studio"
+            result = await coordinator._call_json(  # type: ignore[attr-defined]
+                LeanOJRoleConfig(
+                    provider="openrouter",
+                    model_id=_JSON_RETRY_CLOUD_MODEL,
+                    lm_studio_fallback_id=_JSON_RETRY_FALLBACK_MODEL,
+                    context_window=8192,
+                    max_output_tokens=1024,
+                ),
+                "leanoj_brainstorm_sub2",
+                role_id,
+                "brainstorm prompt",
+            )
+
+        self.assertEqual(result["decision"], "accept")
+        (retry,) = [
+            call.args[1]
+            for call in provider_broadcast.await_args_list
+            if call.args[0] == "provider_retry_cooldown"
+        ]
+        self.assertEqual(retry["reason"], "invalid_json_retry")
+        self.assertEqual(retry["workflow_mode"], "leanoj")
+        self.assertEqual(retry["role_id"], role_id)
+        self.assertTrue(retry["message"].startswith(f"{retry['route_identity']} "))
+        self.assertNotIn(retry["route_identity"], retry["error_summary"])
+        return retry
+
+    async def test_invalid_json_retry_names_the_active_lm_studio_fallback_route(self) -> None:
+        retry = await self._invalid_json_retry_event(fallback_active=True)
+
+        identity = (
+            "[LeanOJ · Brainstorm Submitter 2 (LM Studio fallback) · "
+            f"{_JSON_RETRY_FALLBACK_MODEL} via LM Studio]"
+        )
+        self.assertEqual(retry["provider"], "lm_studio")
+        self.assertEqual(retry["route_kind"], "fallback")
+        self.assertEqual(retry["model"], _JSON_RETRY_FALLBACK_MODEL)
+        self.assertEqual(retry["route_identity"], identity)
+        self.assertTrue(retry["message"].startswith(f"{identity} LM Studio API error:"))
+        self.assertEqual(retry["host_routing"], "direct")
+        self.assertNotIn("configured_host_provider", retry)
+        self.assertNotIn("effective_host_provider", retry)
+
+    async def test_invalid_json_retry_names_the_configured_primary_route(self) -> None:
+        retry = await self._invalid_json_retry_event(fallback_active=False)
+
+        identity = (
+            "[LeanOJ · Brainstorm Submitter 2 · "
+            f"{_JSON_RETRY_CLOUD_MODEL} via OpenRouter · host auto (upstream not reported)]"
+        )
+        self.assertEqual(retry["provider"], "openrouter")
+        self.assertEqual(retry["model"], _JSON_RETRY_CLOUD_MODEL)
+        self.assertEqual(retry["configured_host_provider"], "")
+        self.assertEqual(retry["host_routing"], "auto")
+        self.assertEqual(retry["route_identity"], identity)
+        self.assertTrue(retry["message"].startswith(f"{identity} OpenRouter API error:"))
 
     async def test_solution_path_restores_from_cumulative_acceptance_events(self) -> None:
         coordinator = LeanOJCoordinator()
@@ -1209,7 +1322,19 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 coordinator._call_json = fake_call_json  # type: ignore[method-assign]
                 leanoj_module.get_lean4_client = lambda: FakeLean()  # type: ignore[assignment]
 
-                await coordinator._final_proof_loop(request)
+                # This watchdog test does not exercise Assistant proof retrieval.
+                # Prevent its non-blocking refresh from writing into tmpdir while
+                # TemporaryDirectory is tearing that directory down.
+                with patch.object(
+                    leanoj_module.assistant_proof_search_coordinator,
+                    "submit_target",
+                    return_value="",
+                ), patch.object(
+                    leanoj_module.assistant_proof_search_coordinator,
+                    "get_latest_pack",
+                    return_value=None,
+                ):
+                    await coordinator._final_proof_loop(request)
 
                 self.assertEqual(coordinator.get_state().phase, "recursive_brainstorm")
                 self.assertEqual(coordinator.get_state().current_path_decision, "need_more_brainstorming")
@@ -1665,6 +1790,54 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("leanoj_brainstorm_submitter_2", submitter_calls)
         self.assertEqual(coordinator.get_state().accepted_brainstorm_count, 2)
         self.assertTrue(any("SUBMISSION 1:" in prompt and "SUBMISSION 2:" in prompt for prompt in validator_prompts))
+
+    async def test_topic_batch_retains_per_item_validator_feedback(self) -> None:
+        coordinator = await self._initialized_coordinator()
+
+        async def fake_call_json(*_args, **_kwargs):
+            return {
+                "decisions": [
+                    {
+                        "topic_number": 1,
+                        "decision": "accept",
+                        "reasoning": "first reasoning",
+                        "summary": "first summary",
+                    },
+                    {
+                        "topic_number": 2,
+                        "decision": "reject",
+                        "reasoning": "second reasoning",
+                        "summary": "second summary",
+                    },
+                ]
+            }
+
+        coordinator._call_json = fake_call_json  # type: ignore[method-assign]
+
+        decisions = await coordinator._validate_topic_batch(  # type: ignore[attr-defined]
+            _request(), ["topic one", "topic two"]
+        )
+
+        self.assertEqual(decisions, [True, False])
+        self.assertEqual(
+            [item["reasoning"] for item in coordinator._last_brainstorm_validation_decisions],  # type: ignore[attr-defined]
+            ["first reasoning", "second reasoning"],
+        )
+
+    async def test_malformed_brainstorm_batch_is_operational_contract_failure(self) -> None:
+        coordinator = await self._initialized_coordinator()
+
+        async def fake_call_json(*_args, **_kwargs):
+            return {"decisions": [{"submission_number": 1, "decision": "reject"}]}
+
+        coordinator._call_json = fake_call_json  # type: ignore[method-assign]
+
+        with self.assertRaises(LeanOJBatchValidationContractError):
+            await coordinator._validate_brainstorm_batch(  # type: ignore[attr-defined]
+                _request(), ["submission one", "submission two"]
+            )
+
+        self.assertEqual(coordinator._last_brainstorm_validation_decisions, [])  # type: ignore[attr-defined]
 
     def test_template_mismatch_rejects_unrelated_compiling_code(self) -> None:
         template = "import Mathlib\n\nexample : 1 = 1 := by\n  sorry"

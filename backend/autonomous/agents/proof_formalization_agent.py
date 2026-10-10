@@ -22,6 +22,7 @@ from backend.shared.model_error_utils import (
 from backend.shared.models import ProofAttemptFeedback, ProofCandidate, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.provider_errors import ProviderContextLengthError
+from backend.shared.provider_route_identity import provider_label, route_identity_from_error
 from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
 from backend.shared.proof_search.tool_adapter import execute_search_lean_proofs
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
@@ -286,6 +287,44 @@ def _provider_context_overflow_feedback(
         effective_model=getattr(route, "model", None),
         effective_provider=getattr(route, "provider", None),
         overflow_origin="provider",
+    )
+
+
+def transient_provider_retry_error(
+    exc: BaseException,
+    *,
+    role_id: str,
+    model: str,
+) -> RetryableProviderError:
+    """Wrap a transient model-call failure for workflow-level provider retry.
+
+    The failed route's typed identity (provider, model, role, host) is carried in
+    structured fields for Live Activity; the message keeps the generic transient
+    wording so classification and backoff text stay unchanged. ``role_id`` and
+    ``model`` apply only when the exception carries no route identity.
+    """
+    identity = route_identity_from_error(exc)
+    provider = str(identity.get("provider") or "unknown")
+    error_role = str(identity.get("role_id") or "")
+    return RetryableProviderError(
+        provider=provider,
+        provider_label=(
+            provider_label(provider, identity.get("provider_label_text"))
+            if provider != "unknown"
+            else "Inference provider"
+        ),
+        role_id=error_role if error_role and error_role != "unknown" else role_id,
+        model=str(identity.get("model") or model),
+        reason="transient_provider_error",
+        message=format_transient_provider_error(exc),
+        route_kind=str(identity.get("route_kind") or ""),
+        task_id=str(identity.get("task_id") or ""),
+        configured_provider=str(identity.get("configured_provider") or ""),
+        configured_model=str(identity.get("configured_model") or ""),
+        configured_host_provider=identity.get("configured_host_provider"),
+        upstream_host_provider=str(identity.get("upstream_host_provider") or ""),
+        auto_fallback_from_host=str(identity.get("auto_fallback_from_host") or ""),
+        provider_request_id=str(identity.get("provider_request_id") or ""),
     )
 
 
@@ -631,11 +670,12 @@ class ProofFormalizationAgent:
                 attempt=attempt_number,
                 theorem_id=theorem_candidate.theorem_id,
                 reasoning=reasoning,
-                lean_code=lean_code,
+                lean_code=getattr(lean_result, "checked_source", "") or lean_code,
                 error_output=lean_result.error_output,
                 goal_states=lean_result.goal_states,
                 strategy="full_script",
                 success=lean_result.success,
+                    compile_receipt=getattr(lean_result, "compile_receipt", None),
                     failure_kind=None if lean_result.success else "lean_rejected",
                     recovery_step=attempt_number,
                     recovery_mode=recovery_mode,
@@ -709,13 +749,10 @@ class ProofFormalizationAgent:
                     ),
                 )
             if is_transient_model_call_error(exc):
-                raise RetryableProviderError(
-                    provider="unknown",
-                    provider_label="Inference provider",
+                raise transient_provider_retry_error(
+                    exc,
                     role_id=self.role_id,
                     model=self.model_id,
-                    reason="transient_provider_error",
-                    message=format_transient_provider_error(exc),
                 ) from exc
             is_parse_error = _is_json_parse_error(exc)
             if self.strict_execution_errors and not is_parse_error:
@@ -1070,12 +1107,13 @@ class ProofFormalizationAgent:
                     attempt=attempt_number,
                     theorem_id=theorem_candidate.theorem_id,
                     reasoning=reasoning,
-                    lean_code=lean_code,
+                    lean_code=getattr(lean_result, "checked_source", "") or lean_code,
                     error_output=lean_result.tactic_error_slice or lean_result.error_output,
                     goal_states=lean_result.goal_states,
                     strategy="tactic_script",
                     tactic_trace=tactic_trace,
                     success=lean_result.success,
+                    compile_receipt=getattr(lean_result, "compile_receipt", None),
                     failure_kind=None if lean_result.success else "lean_rejected",
                     recovery_step=attempt_number,
                     recovery_mode=recovery_mode,
@@ -1170,13 +1208,10 @@ class ProofFormalizationAgent:
                     attempt_offset += 1
                     continue
                 if is_transient_model_call_error(exc):
-                    raise RetryableProviderError(
-                        provider="unknown",
-                        provider_label="Inference provider",
+                    raise transient_provider_retry_error(
+                        exc,
                         role_id=self.role_id,
                         model=self.model_id,
-                        reason="transient_provider_error",
-                        message=format_transient_provider_error(exc),
                     ) from exc
                 is_parse_error = _is_json_parse_error(exc)
                 if self.strict_execution_errors and not is_parse_error:

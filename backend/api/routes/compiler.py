@@ -12,6 +12,7 @@ import aiofiles
 from backend.api.routes import websocket
 from backend.shared.models import CompilerStartRequest, CompilerState, CritiqueRequest, ModelConfig
 from backend.shared.config import system_config
+from backend.shared.credential_locks import wolfram_credential_mutation
 from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.token_tracker import token_tracker
 from backend.shared.api_client_manager import api_client_manager
@@ -1562,6 +1563,7 @@ async def get_compiler_default_critique_prompt():
 # =============================================================================
 
 @router.post("/wolfram/set-api-key")
+@wolfram_credential_mutation
 async def set_wolfram_api_key(request: dict):
     """
     Set and validate Wolfram Alpha API key.
@@ -1572,8 +1574,16 @@ async def set_wolfram_api_key(request: dict):
     Returns:
         Success status and validation result
     """
-    from backend.shared.secret_store import SecretStoreError, store_wolfram_api_key
-    from backend.shared.wolfram_alpha_client import initialize_wolfram_client, get_wolfram_client
+    from backend.shared.secret_store import (
+        SecretStoreError,
+        load_wolfram_api_key,
+        store_wolfram_api_key,
+    )
+    from backend.shared.wolfram_alpha_client import (
+        ToolResultStatus,
+        WolframAlphaClient,
+        replace_wolfram_client,
+    )
     
     try:
         api_key = request.get("api_key", "").strip()
@@ -1581,30 +1591,51 @@ async def set_wolfram_api_key(request: dict):
         if not api_key:
             raise HTTPException(status_code=400, detail="API key is required")
         
-        # Initialize client
-        initialize_wolfram_client(api_key)
-        
-        # Test connection with simple query
-        client = get_wolfram_client()
-        test_result = await client.query("What is 2+2?")
-        
-        if test_result is None:
+        client = WolframAlphaClient(api_key)
+        try:
+            validation = await client.query_result("What is 2+2?")
+        finally:
+            await client.close()
+
+        if validation.status == ToolResultStatus.REPAIR_REQUIRED:
             raise HTTPException(
                 status_code=400,
-                detail="Failed to connect to Wolfram Alpha - invalid API key or network error"
+                detail=validation.safe_error or "Wolfram Alpha rejected this App ID.",
             )
+        if validation.status == ToolResultStatus.RATE_LIMITED:
+            raise HTTPException(
+                status_code=429,
+                detail=validation.safe_error or "Wolfram Alpha rate limit reached. Try again later.",
+                headers=(
+                    {"Retry-After": str(validation.retry_after_seconds)}
+                    if validation.retry_after_seconds is not None
+                    else None
+                ),
+            )
+        if validation.status == ToolResultStatus.RETRYABLE_FAILURE:
+            raise HTTPException(
+                status_code=502,
+                detail=validation.safe_error or "Could not reach Wolfram Alpha to validate this App ID.",
+            )
+        if validation.status != ToolResultStatus.SUCCESS:
+            raise HTTPException(
+                status_code=502,
+                detail="Wolfram Alpha did not return a validation result. The App ID was not saved.",
+            )
+        test_result = validation.content
         
-        # Store in system config
-        system_config.wolfram_alpha_api_key = api_key
-        system_config.wolfram_alpha_enabled = True
-
         if system_config.generic_mode:
             logger.info("Generic mode active - keeping Wolfram Alpha API key in runtime memory only")
             success_message = "Wolfram Alpha API key validated and loaded into runtime memory"
         else:
-            # Persist to secure backend storage so the key survives restarts.
             store_wolfram_api_key(api_key)
+            if load_wolfram_api_key() != api_key:
+                raise SecretStoreError("Stored Wolfram Alpha credential could not be verified")
             success_message = "Wolfram Alpha API key validated successfully"
+
+        await replace_wolfram_client(api_key)
+        system_config.wolfram_alpha_api_key = api_key
+        system_config.wolfram_alpha_enabled = True
         
         logger.info("Wolfram Alpha API key set and validated")
         
@@ -1625,6 +1656,7 @@ async def set_wolfram_api_key(request: dict):
 
 
 @router.delete("/wolfram/api-key")
+@wolfram_credential_mutation
 async def clear_wolfram_api_key():
     """
     Clear Wolfram Alpha API key.
@@ -1636,19 +1668,16 @@ async def clear_wolfram_api_key():
     from backend.shared.wolfram_alpha_client import clear_wolfram_client
     
     try:
-        # Clear client
-        clear_wolfram_client()
-        
-        # Clear from config
-        system_config.wolfram_alpha_api_key = None
-        system_config.wolfram_alpha_enabled = False
-
         if system_config.generic_mode:
             logger.info("Generic mode active - cleared in-memory Wolfram Alpha API key")
             success_message = "Wolfram Alpha API key cleared from runtime memory"
         else:
             clear_persisted_wolfram_api_key()
             success_message = "Wolfram Alpha API key cleared"
+
+        await clear_wolfram_client()
+        system_config.wolfram_alpha_api_key = None
+        system_config.wolfram_alpha_enabled = False
         
         logger.info("Wolfram Alpha API key cleared")
         

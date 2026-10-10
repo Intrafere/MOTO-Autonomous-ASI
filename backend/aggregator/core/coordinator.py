@@ -19,13 +19,14 @@ from backend.shared.free_model_manager import free_model_manager
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.provider_errors import ProviderRepairRequiredError
+from backend.shared.provider_route_identity import merge_route_identity, with_route_identity
 from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_RESOLUTION,
     CONTEXT_OVERFLOW_STOP_MESSAGE,
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
 )
-from backend.aggregator.agents.submitter import SubmitterAgent
+from backend.aggregator.agents.submitter import SubmitterAgent, free_model_exhaustion_route_identity
 from backend.aggregator.agents.validator import ValidatorAgent
 from backend.aggregator.core.context_allocator import ContextAllocationError
 from backend.aggregator.core.queue_manager import queue_manager
@@ -318,6 +319,8 @@ class Coordinator:
         self._acceptance_cap_reached = False
         self.solution_path_manager = solution_path_manager
         self.solution_path_acceptance_count_owner = solution_path_acceptance_count_owner
+        self.proof_database_store = proof_database_store
+        self.proof_context_requesting_run_id = proof_context_requesting_run_id
         self.persist_event_log = not skip_stats_load
         
         # Validate submitter count
@@ -540,6 +543,7 @@ class Coordinator:
             proof_context_requesting_run_id=proof_context_requesting_run_id,
             solution_path_manager=solution_path_manager,
         )
+        self.validator.coordinator = self
         await self.validator.initialize()
         # Set task tracking callback for workflow panel integration
         self.validator.set_task_tracking_callback(self._handle_task_event)
@@ -862,16 +866,19 @@ class Coordinator:
         """Main validator loop - continuously process queue with batch validation."""
         logger.info("Validator loop started - will run continuously until stopped (batch mode: up to 3)")
         iteration = 0
+        in_flight_submissions = []
         
         while self.is_running:
             try:
                 iteration += 1
+                in_flight_submissions = []
                 
                 # Check queue size and update pause state BEFORE dequeuing (proactive pause)
                 await self._check_and_update_pause_state()
                 
                 # Get batch of up to 3 submissions from queue
                 submissions = await queue_manager.dequeue_batch(max_count=3)
+                in_flight_submissions = submissions
                 
                 if not submissions:
                     logger.debug(f"Validator iteration {iteration} - queue empty, waiting...")
@@ -888,6 +895,7 @@ class Coordinator:
                 if not self.is_running or self.fatal_error_type:
                     logger.info("Skipping validator result processing after workflow stop/context overflow")
                     break
+                in_flight_submissions = []
                 
                 # Process results
                 for submission, result in zip(submissions, results):
@@ -906,21 +914,33 @@ class Coordinator:
                 break
             except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
+                await queue_manager.prepend_batch(in_flight_submissions)
+                in_flight_submissions = []
                 logger.warning(f"Validator: all free models exhausted: {e}")
-                if self.broadcast_callback:
-                    await self.broadcast_callback("free_models_exhausted", {
-                        "role_id": "aggregator_validator",
-                        "message": "All free models exhausted, waiting to retry",
-                    })
-                await api_client_manager.broadcast_retry_cooldown(
-                    provider="openrouter",
-                    provider_label="OpenRouter free models",
-                    role_id="aggregator_validator",
-                    retry_after_seconds=120,
-                    reason="free_models_exhausted",
+                route_fields = free_model_exhaustion_route_identity(
+                    "aggregator_validator",
+                    error=e,
+                    workflow_mode=self._activity_workflow_mode(),
                 )
-                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+                await self._broadcast("free_models_exhausted", merge_route_identity({
+                    "role_id": "aggregator_validator",
+                    "message": "All free models exhausted, waiting to retry",
+                }, route_fields))
+                await api_client_manager.emit_and_wait_for_retry(
+                    merge_route_identity({
+                        "provider": "openrouter",
+                        "provider_label": "OpenRouter free models",
+                        "role_id": "aggregator_validator",
+                        "retry_after_seconds": 120,
+                        "reason": "free_models_exhausted",
+                    }, route_fields),
+                    role_id="aggregator_validator",
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
             except RetryableProviderError as e:
+                await queue_manager.prepend_batch(in_flight_submissions)
+                in_flight_submissions = []
                 logger.warning("Validator paused for retryable provider failure: %s", e)
                 await api_client_manager.wait_for_retryable_provider_error(
                     e,
@@ -938,7 +958,20 @@ class Coordinator:
                 break
             except Exception as e:
                 logger.error(f"Validator loop error on iteration {iteration}: {e}", exc_info=True)
-                await asyncio.sleep(2)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": "Aggregator validator",
+                        "role_id": "aggregator_validator",
+                        "retry_attempt": iteration,
+                        "retry_after_seconds": 2,
+                        "reason": "workflow_retry",
+                        "error_summary": str(e),
+                    },
+                    role_id="aggregator_validator",
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
         
         logger.warning(f"Validator loop EXITED after {iteration} iterations - is_running={self.is_running}")
     
@@ -956,12 +989,17 @@ class Coordinator:
         """
         logger.info("Single-model workflow started - round-based sequential execution")
         round_number = 0
-        
+        in_flight_submissions = []
+        # The configured role whose call is in flight, so a free-model wait that
+        # carries no role of its own is still attributed to the real role.
+        active_role_id = ""
+
         while self.is_running:
             try:
                 round_number += 1
+                in_flight_submissions = []
                 logger.info(f"Single-model workflow: Starting round {round_number}")
-                
+
                 # Phase 1: Run all submitters sequentially
                 submissions_generated = 0
                 for i, submitter in enumerate(self.submitters, 1):
@@ -969,8 +1007,9 @@ class Coordinator:
                         break
                     if submitter.submitter_id in self.disabled_submitter_ids:
                         continue
-                    
+
                     logger.debug(f"Round {round_number}: Submitter {i} generating...")
+                    active_role_id = submitter.role_id
                     submission = await submitter._generate_submission()
                     
                     if submission:
@@ -998,6 +1037,7 @@ class Coordinator:
                     await self._check_and_update_pause_state()
                     
                     submissions = await queue_manager.dequeue_batch(max_count=3)
+                    in_flight_submissions = submissions
                     
                     if not submissions:
                         # Queue empty - move to next round
@@ -1008,11 +1048,13 @@ class Coordinator:
                         f"{[s.submission_id for s in submissions]}"
                     )
                     
+                    active_role_id = self.validator.role_id
                     results = await self.validator.validate_batch(submissions)
                     validations_done += len(submissions)
                     if not self.is_running or self.fatal_error_type:
                         logger.info("Skipping single-model validator result processing after workflow stop/context overflow")
                         break
+                    in_flight_submissions = []
                     
                     for submission, result in zip(submissions, results):
                         if result.decision == "accept" or self._is_verified_brainstorm_proof_submission(submission):
@@ -1038,21 +1080,34 @@ class Coordinator:
                 break
             except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
+                await queue_manager.prepend_batch(in_flight_submissions)
+                in_flight_submissions = []
                 logger.warning(f"Single-model workflow: all free models exhausted: {e}")
-                if self.broadcast_callback:
-                    await self.broadcast_callback("free_models_exhausted", {
-                        "role_id": "aggregator_single_model",
-                        "message": "All free models exhausted, waiting to retry",
-                    })
-                await api_client_manager.broadcast_retry_cooldown(
-                    provider="openrouter",
-                    provider_label="OpenRouter free models",
-                    role_id="aggregator_single_model",
-                    retry_after_seconds=120,
-                    reason="free_models_exhausted",
+                route_fields = free_model_exhaustion_route_identity(
+                    active_role_id or "aggregator_single_model",
+                    error=e,
+                    display_role_id="aggregator_single_model",
+                    workflow_mode=self._activity_workflow_mode(),
                 )
-                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+                await self._broadcast("free_models_exhausted", merge_route_identity({
+                    "role_id": "aggregator_single_model",
+                    "message": "All free models exhausted, waiting to retry",
+                }, route_fields))
+                await api_client_manager.emit_and_wait_for_retry(
+                    merge_route_identity({
+                        "provider": "openrouter",
+                        "provider_label": "OpenRouter free models",
+                        "role_id": "aggregator_single_model",
+                        "retry_after_seconds": 120,
+                        "reason": "free_models_exhausted",
+                    }, route_fields),
+                    role_id="aggregator_single_model",
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
             except RetryableProviderError as e:
+                await queue_manager.prepend_batch(in_flight_submissions)
+                in_flight_submissions = []
                 logger.warning("Single-model workflow paused for retryable provider failure: %s", e)
                 await api_client_manager.wait_for_retryable_provider_error(
                     e,
@@ -1070,7 +1125,20 @@ class Coordinator:
                 break
             except Exception as e:
                 logger.error(f"Single-model workflow error at round {round_number}: {e}", exc_info=True)
-                await asyncio.sleep(5)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": "Aggregator single-model workflow",
+                        "role_id": "aggregator_single_model",
+                        "retry_attempt": round_number,
+                        "retry_after_seconds": 5,
+                        "reason": "workflow_retry",
+                        "error_summary": str(e),
+                    },
+                    role_id="aggregator_single_model",
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
         
         logger.warning(f"Single-model workflow EXITED after {round_number} rounds")
     
@@ -1122,6 +1190,9 @@ class Coordinator:
         await self._broadcast("submission_accepted", {
             "submission_id": submission.submission_id,
             "submitter_id": submission.submitter_id,
+            "decision": "accept",
+            "validator_feedback": result.reasoning,
+            "validator_summary": result.summary,
             "creativity_emphasized": creativity_emphasized,
             "submitter_model": actual_submitter_model,
             "submitter_provider": actual_submitter_provider,
@@ -1247,6 +1318,11 @@ class Coordinator:
                 item if isinstance(item, ProofAttemptFeedback) else ProofAttemptFeedback.model_validate(item)
                 for item in (proof_payload.get("attempts") or [])
             ]
+            compile_receipt = (
+                attempts[-1].compile_receipt
+                if attempts and attempts[-1].compile_receipt
+                else None
+            )
             source_id = self._brainstorm_proof_source_id()
             scoped_proof_database = (
                 manual_proof_database if source_id == "manual_aggregator" else proof_database
@@ -1271,6 +1347,7 @@ class Coordinator:
                 verification_notes="Lean 4 accepted this brainstorm proof before validator acceptance.",
                 attempt_count=int(proof_payload.get("attempt_count") or len(attempts)),
                 attempts=attempts,
+                compile_receipt=compile_receipt,
                 broadcast_fn=self._broadcast,
                 base_event={
                     "source_type": "brainstorm",
@@ -1315,6 +1392,9 @@ class Coordinator:
         await self._broadcast("submission_rejected", {
             "submission_id": submission.submission_id,
             "submitter_id": submission.submitter_id,
+            "decision": "reject",
+            "validator_feedback": result.reasoning,
+            "validator_summary": result.summary,
             "creativity_emphasized": creativity_emphasized,
             "submitter_model": actual_submitter_model,
             "submitter_provider": actual_submitter_provider,
@@ -1381,7 +1461,7 @@ class Coordinator:
         if role_id == "aggregator_single_model":
             config_role_id = "aggregator_validator"
         payload = {
-            "workflow_mode": "aggregator" if self.persist_event_log else "autonomous",
+            "workflow_mode": self._activity_workflow_mode(),
             "role_id": role_id,
             **context_overflow_model_payload(
                 api_client_manager.get_role_config(config_role_id),
@@ -1418,7 +1498,7 @@ class Coordinator:
             await self._handle_provider_repair_required(error, role_id=role_id)
             return
         payload = {
-            "workflow_mode": "aggregator" if self.persist_event_log else "autonomous",
+            "workflow_mode": self._activity_workflow_mode(),
             "role_id": role_id,
             "submitter_id": submitter.submitter_id,
             "provider": error.provider,
@@ -1434,6 +1514,7 @@ class Coordinator:
             ),
             "terminal_guidance": error.terminal_guidance,
         }
+        payload = self._with_provider_route_identity(payload, error, role_id=role_id)
         await self._broadcast("provider_role_disabled", payload)
         await self._add_persisted_event(
             "provider_role_disabled",
@@ -1461,7 +1542,7 @@ class Coordinator:
             await submitter.stop()
         await queue_manager.clear()
         payload = {
-            "workflow_mode": "aggregator" if self.persist_event_log else "autonomous",
+            "workflow_mode": self._activity_workflow_mode(),
             "role_id": role_id,
             "provider": error.provider,
             "provider_label": error.provider_label,
@@ -1476,6 +1557,7 @@ class Coordinator:
             "error_detail": str(error),
             "terminal_guidance": error.terminal_guidance,
         }
+        payload = self._with_provider_route_identity(payload, error, role_id=role_id)
         self.fatal_error_payload = dict(payload)
         await self._broadcast("provider_repair_required", payload)
         await self._add_persisted_event(
@@ -1483,6 +1565,23 @@ class Coordinator:
             payload["message"],
             payload,
         )
+
+    def _with_provider_route_identity(
+        self,
+        payload: Dict[str, Any],
+        error: ProviderRepairRequiredError,
+        *,
+        role_id: str,
+    ) -> Dict[str, Any]:
+        """Name the failing route in a provider-error payload and its persisted message."""
+        fields = api_client_manager.route_identity_for_role(
+            role_id,
+            workflow_mode=str(payload.get("workflow_mode") or ""),
+            error=error,
+        )
+        attributed = merge_route_identity(payload, fields)
+        attributed["message"] = with_route_identity(attributed.get("message"), fields)
+        return attributed
     
     async def _perform_cleanup_review(self) -> None:
         """
@@ -1655,10 +1754,42 @@ class Coordinator:
         # Launch re-chunking in background task
         self._rechunk_task = asyncio.create_task(self._rechunk_training_data())
         logger.info("Launched background re-chunking task (validator continues processing)")
+
+    def _brainstorm_context_source_id(self) -> str:
+        """Return the source ID used by linked inline brainstorm ProofRecords."""
+        return self._brainstorm_proof_source_id()
+
+    async def get_projected_shared_training_content(self, *, formatted: bool = False) -> str:
+        """Return the same run-scoped accepted-memory projection for every caller."""
+        return await shared_training_memory.get_model_context_content(
+            proof_database=self.proof_database_store,
+            requesting_run_id=self.proof_context_requesting_run_id,
+            source_id=self._brainstorm_context_source_id(),
+            formatted=formatted,
+        )
+
+    async def refresh_live_context_projection(
+        self,
+        *,
+        source_id: str,
+        requesting_run_id: str,
+    ) -> bool:
+        """Rebuild active shared-training RAG after a proof prune or restore."""
+        if (
+            not self.is_running
+            or source_id != self._brainstorm_context_source_id()
+            or requesting_run_id != self.proof_context_requesting_run_id
+        ):
+            return False
+        await self._rebuild_shared_training_rag_after_cleanup()
+        return True
     
     async def _rechunk_training_data(self) -> None:
         """Background task for incremental re-chunking training data with global lock."""
         try:
+            if self.proof_database_store is not None:
+                await self._rebuild_shared_training_rag_after_cleanup()
+                return
             async with rag_operation_lock.operation("Aggregator immediate re-chunk"):
                 logger.info("Background incremental re-chunking started...")
             
@@ -1750,14 +1881,17 @@ class Coordinator:
                 candidate_sources.append(f"rag_shared_training_update_{size}")
             
             for source in dict.fromkeys(candidate_sources):
-                if source in rag_manager.document_access_order:
-                    await rag_manager.remove_document(source)
+                await rag_manager.remove_document(source)
             
             if current_count > 0 and current_path.exists():
-                await rag_manager.add_document(
-                    str(current_path),
+                projected_content = await self.get_projected_shared_training_content(
+                    formatted=True
+                )
+                await rag_manager.add_text(
+                    projected_content,
+                    current_path.name,
                     chunk_sizes=rag_config.submitter_chunk_intervals,
-                    is_user_file=False,
+                    is_permanent=False,
                 )
             
             await shared_training_memory.mark_submissions_ragged(current_count)
@@ -1871,6 +2005,10 @@ class Coordinator:
     def set_websocket_broadcaster(self, broadcaster: Callable) -> None:
         """Set WebSocket broadcaster function."""
         self.websocket_broadcaster = broadcaster
+
+    def _activity_workflow_mode(self) -> str:
+        """Top-level manual runs own aggregator activity; child runs report to Autonomous."""
+        return "aggregator" if self.persist_event_log else "autonomous"
 
     async def _add_persisted_event(
         self,

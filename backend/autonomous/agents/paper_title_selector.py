@@ -71,6 +71,9 @@ class PaperTitleSelectorAgent:
         self.task_sequence: int = 0
         self.role_id = "autonomous_paper_title_selector"
         self.task_tracking_callback: Optional[Callable] = None
+        # Failure behind the latest empty title generation; its typed route
+        # identity (when present) attributes the retry activity.
+        self._last_generation_error: Optional[BaseException] = None
     
     def set_task_tracking_callback(self, callback: Callable) -> None:
         """Set callback for task tracking (workflow panel integration)."""
@@ -133,7 +136,21 @@ class PaperTitleSelectorAgent:
 
             if selection is None:
                 logger.error("PaperTitleSelector: Failed to generate title - will retry")
-                await asyncio.sleep(5)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "configured_role",
+                        "provider_label": "Configured title provider",
+                        "role_id": self.role_id,
+                        "retry_attempt": attempt,
+                        "retry_after_seconds": 5,
+                        "reason": "title_generation_failed",
+                        "activity_category": "workflow",
+                        "activity_classification": "operational",
+                    },
+                    role_id=self.role_id,
+                    should_stop=(stop_event.is_set if stop_event is not None else None),
+                    error=self._last_generation_error,
+                )
                 continue
 
             # Validate title
@@ -157,7 +174,25 @@ class PaperTitleSelectorAgent:
                 rejection_history.append(
                     f"Title '{selection.paper_title}' was rejected because: {rejection_reason}"
                 )
-                await asyncio.sleep(2)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "configured_role",
+                        "provider_label": "Configured title provider",
+                        "role_id": self.role_id,
+                        "retry_attempt": attempt,
+                        "retry_after_seconds": 2,
+                        "reason": "semantic_title_rejection",
+                        "error_summary": rejection_reason,
+                        "message": (
+                            "Paper title was rejected with validator feedback; "
+                            f"selection will retry after a 2-second delay (attempt {attempt})."
+                        ),
+                        "activity_category": "workflow",
+                        "activity_classification": "informational",
+                    },
+                    role_id=self.role_id,
+                    should_stop=(stop_event.is_set if stop_event is not None else None),
+                )
     
     async def _generate_title(
         self,
@@ -172,6 +207,7 @@ class PaperTitleSelectorAgent:
         candidate_titles: str = ""
     ) -> Optional[PaperTitleSelection]:
         """Generate a paper title selection."""
+        self._last_generation_error = None
         try:
             max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
 
@@ -309,6 +345,7 @@ class PaperTitleSelectorAgent:
             if _is_title_model_call_failure(e):
                 raise
             logger.error(f"PaperTitleSelector: Error generating title: {e}")
+            self._last_generation_error = e
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
             return None

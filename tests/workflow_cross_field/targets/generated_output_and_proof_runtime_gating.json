@@ -19,6 +19,6 @@
     "generated_output_and_proof_runtime_gating_seed_7",
     "generated_output_and_proof_runtime_gating_seed_29"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "target_id": "generated_output_and_proof_runtime_gating"
 }

@@ -16,6 +16,7 @@ from typing import Any, Dict, Tuple
 from fastapi import APIRouter, HTTPException
 
 from backend.shared.config import system_config
+from backend.shared.trade_data_boundary import redact_trade_text
 
 router = APIRouter(tags=["update"])
 logger = logging.getLogger(__name__)
@@ -288,5 +289,15 @@ async def start_pull() -> Dict[str, Any]:
 
 @router.get("/api/update/pull-status")
 async def get_pull_status() -> Dict[str, Any]:
-    """Return current update state including streamed output lines."""
-    return _pull_state
+    """Return current update state including streamed output lines.
+
+    Updater diagnostics pass through the proof-trade data boundary so git
+    output and exception text never expose credentials, private paths, or
+    local account/host identity.
+    """
+    return {
+        **_pull_state,
+        "output_lines": [
+            redact_trade_text(line) for line in list(_pull_state.get("output_lines") or [])
+        ],
+    }

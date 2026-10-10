@@ -142,15 +142,20 @@ class CompilerRAGManager:
             logger.info(f"Initial load: Processing aggregator database with {submission_count} submissions")
             
             async with rag_operation_lock.operation("Compiler initial load (all 4 chunk sizes)"):
-                # Load the aggregator database file directly as a user file
-                # This will chunk it at all 4 configs (256/512/768/1024)
                 aggregator_file_path = str(shared_training_memory.file_path)
-                
                 if Path(aggregator_file_path).exists():
-                    await rag_manager.add_document(
-                        aggregator_file_path,
+                    from backend.autonomous.memory.proof_database import manual_proof_database
+                    projected_content = await shared_training_memory.get_model_context_content(
+                        proof_database=manual_proof_database,
+                        requesting_run_id=await manual_proof_database.get_live_context_run_id(),
+                        source_id="manual_aggregator",
+                        formatted=True,
+                    )
+                    await rag_manager.add_text(
+                        projected_content,
+                        Path(aggregator_file_path).name,
                         chunk_sizes=rag_config.submitter_chunk_intervals,
-                        is_user_file=True,
+                        is_permanent=False,
                     )
                     
                     logger.info(f"Aggregator database loaded as user file: {submission_count} submissions, 4 chunk configs")
@@ -191,10 +196,18 @@ class CompilerRAGManager:
             
             # Re-add the entire updated file with all 4 chunk configs
                 if Path(aggregator_file_path).exists():
-                    await rag_manager.add_document(
-                        aggregator_file_path,
+                    from backend.autonomous.memory.proof_database import manual_proof_database
+                    projected_content = await shared_training_memory.get_model_context_content(
+                        proof_database=manual_proof_database,
+                        requesting_run_id=await manual_proof_database.get_live_context_run_id(),
+                        source_id="manual_aggregator",
+                        formatted=True,
+                    )
+                    await rag_manager.add_text(
+                        projected_content,
+                        Path(aggregator_file_path).name,
                         chunk_sizes=rag_config.submitter_chunk_intervals,
-                        is_user_file=True
+                        is_permanent=False,
                     )
                     logger.info(f"Incremental re-RAG complete: {new_submissions_count} new submissions added ({current_count} total)")
                 else:
@@ -206,6 +219,16 @@ class CompilerRAGManager:
             
         except Exception as e:
             logger.error(f"Failed to incrementally re-RAG aggregator database: {e}")
+            raise
+
+    async def refresh_aggregator_live_context_projection(self) -> None:
+        """Force replacement of manual Aggregator RAG after prune/restore."""
+        previous_count = self.aggregator_submissions_ragged
+        self.aggregator_submissions_ragged = -1
+        try:
+            await self.incremental_rerag_aggregator_database()
+        except BaseException:
+            self.aggregator_submissions_ragged = previous_count
             raise
     
     async def retrieve_for_mode(

@@ -571,16 +571,15 @@ class AutonomousProofFramingBoundaryTests(unittest.IsolatedAsyncioTestCase):
         persisted = coordinator_module.research_metadata.proof_framing_states[-1]
         self.assertTrue(persisted["active"])
         self.assertEqual(persisted["context"], PROOF_FRAMING_CONTEXT)
+        event_type, event_payload = events[-1]
+        self.assertEqual(event_type, "proof_framing_decided")
+        self.assertTrue(event_payload["is_proof_amenable"])
         self.assertEqual(
-            events[-1],
-            (
-                "proof_framing_decided",
-                {
-                    "is_proof_amenable": True,
-                    "reasoning": "Formal bounds directly serve the goal.",
-                },
-            ),
+            event_payload["reasoning"],
+            "Formal bounds directly serve the goal.",
         )
+        self.assertEqual(event_payload["activity_workflow"], "autonomous")
+        self.assertIn("lifecycle_generation", event_payload)
         self.assertEqual(len(fake_api.calls), 1)
         call = fake_api.calls[0]
         self.assertEqual(call["task_id"], "proof_framing_gate_000")
@@ -913,8 +912,8 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             "goal_supporting_lemma",
         ])
 
-    async def test_proofs_only_brainstorm_rounds_continue_until_no_candidates(self):
-        fake_stage = _FakeProofStage([1, 1, 0, 1])
+    async def test_proofs_only_brainstorm_rounds_run_all_rounds_after_empty_round(self):
+        fake_stage = _FakeProofStage([0, 1, 0, 1])
         coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
 
         await coordinator._run_proof_verification(
@@ -924,14 +923,14 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             source_title="Topic title",
         )
 
-        self.assertEqual(len(fake_stage.calls), 3)
+        self.assertEqual(len(fake_stage.calls), 4)
         self.assertEqual(
             [call["proof_round_index"] for call in fake_stage.calls],
-            [1, 2, 3],
+            [1, 2, 3, 4],
         )
         self.assertEqual(
             [call["trigger"] for call in fake_stage.calls],
-            ["automatic", "automatic_round_2", "automatic_round_3"],
+            ["automatic", "automatic_round_2", "automatic_round_3", "automatic_round_4"],
         )
 
     async def test_proofs_only_paper_rounds_cap_at_four(self):
@@ -1014,7 +1013,7 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             source_title="Paper title",
         )
 
-        self.assertEqual(len(fake_stage.calls), 2)
+        self.assertEqual(len(fake_stage.calls), 4)
         self.assertTrue(fake_stage.calls[0]["user_prompt"].startswith("proof_context_1::"))
         self.assertTrue(fake_stage.calls[1]["user_prompt"].startswith("proof_context_2::"))
 
@@ -1054,8 +1053,10 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             source_title="Paper title",
         )
 
-        self.assertEqual(len(fake_stage.calls), 1)
-        self.assertEqual(fake_stage.calls[0]["trigger"], "automatic_round_2")
+        self.assertEqual(
+            [call["trigger"] for call in fake_stage.calls],
+            ["automatic_round_2", "automatic_round_3", "automatic_round_4"],
+        )
         self.assertEqual(
             fake_stage.calls[0]["theorem_candidates"][0].theorem_id,
             "resume_target",
@@ -1117,7 +1118,7 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             source_title="Paper title",
         )
 
-        self.assertEqual(fake_stage.reserved_during_calls, [True, True])
+        self.assertEqual(fake_stage.reserved_during_calls, [True, True, True, True])
         self.assertTrue(all(call["source_reserved"] for call in fake_stage.calls))
         self.assertTrue(all(not call["release_source_on_exit"] for call in fake_stage.calls))
         self.assertFalse(

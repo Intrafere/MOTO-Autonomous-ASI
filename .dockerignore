@@ -1,6 +1,7 @@
 .git
 .github
 .cursor
+.claude
 
 __pycache__/
 *.py[cod]

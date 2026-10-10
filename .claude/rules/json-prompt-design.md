@@ -1,0 +1,43 @@
+---
+description: Protects MOTO prompt wording and defines cross-cutting JSON response invariants
+---
+
+# Prompt Engineering and JSON Contract Protection
+
+## Explicit Consent Required
+
+MOTO's production prompt language is carefully engineered workflow behavior. Do not edit, rewrite, shorten, generalize, reformat, reorganize, or “improve” production prompt wording unless the user explicitly consents to and directs that prompt-language change in the current task.
+
+Permission to change adjacent code, schemas, models, validators, workflows, documentation, or rules is not permission to alter prompt wording. If an explicitly requested behavior change necessarily requires a prompt change, explain that dependency and obtain explicit user direction before editing the prompt. Once authorized, make only the requested minimum change and preserve all unrelated wording.
+
+Production prompt builders together with their parsers/models and executable tests are authoritative for exact wording and JSON contracts. Rules contain only durable high-level invariants; never copy complete production prompts, per-role schema catalogs, full response examples, tool schemas, or event payloads into rule files.
+
+## Research Direction and Evidence
+
+- Ordinary research roles aggressively seek the strongest credible, genuinely novel solution to the user's exact objective. They prefer whole-question attacks, using the contribution form and claim-type rigor appropriate to the domain; necessary partial work must visibly advance the complete objective.
+- AI-generated databases, accepted submissions, papers, outlines, retrieved history, and prior model responses are working evidence, not authority. Prompts must require appropriate independent verification, provenance, uncertainty, and skepticism rather than trusting content because MOTO previously accepted or produced it.
+
+## JSON Contract Design
+
+- Give each role and mode one explicit response contract containing only fields that its consumer accepts. Do not casually combine mutually exclusive mode schemas into a superset.
+- Discriminator fields and dependent payloads must agree. A positive action requires its defined non-empty payload and valid operation fields; a decline/no-op uses that mode's defined empty or null form. A completion signal cannot substitute for required content.
+- Batched outputs return exactly one ordered, stably identified result for every input. Preserve independent item assessment before any batch-level redundancy resolution.
+- Parse optional cross-cutting extensions separately from the primary result. Omission is normal, and a malformed optional extension must not reject, alter, or invalidate an otherwise valid primary decision.
+- Run deterministic checks for structure, required fields, enums, uniqueness, exact anchors, and protected markers before semantic LLM validation. Semantic validators judge meaning, relevance, quality, rigor, and placement rather than re-deciding machine-verifiable facts.
+- Place authoritative role instructions and the response contract before untrusted working context, and keep any production-defined final response-format reminder after assembled context. Retrieved or AI-generated context must never become the terminal instruction.
+- Semantic rejection feedback must identify the failed criterion and provide an actionable correction. Structurally complex or repeatedly confused contracts should use focused correct/incorrect examples in production prompt code when needed; simple contracts do not require examples.
+- Ordinary compiler outline, construction, review, post-body critique, and semantic-validation contracts are domain-general and exact-objective-directed, using domain- and claim-type-appropriate rigor; mathematics, theorems, proofs, and LaTeX are conditional first-class content, not universal requirements.
+- In ordinary compiler modes, `rigor_check` means the submission satisfies the rigor applicable to its domain and claim types. Plain compiler `rigor` remains mathematics-specific; dedicated Lean-verified placement treats Lean as authoritative and limits validation to placement/narrative. The field must not turn ordinary modes into mandatory theorem/proof workflows.
+- Tier 3 certainty must preserve evidence status and never promote proposals, hypotheses, unbuilt artifacts, or unperformed experiments into demonstrated results. Format and volume selection follow actual solution dependencies rather than paper count; gap chapters may close proof, mechanism, implementation, evidence, validation, safety, or risk gaps while retaining mathematical/formal-proof support when relevant.
+
+## Parsing, Retries, and Escaping
+
+- Route model-authored JSON through the centralized shared parser/sanitizer. Direct `json.loads()` is reserved for trusted system-written persistence.
+- Malformed, truncated, incomplete, scalar, or otherwise contract-incompatible JSON is a parse/contract failure, not a semantic rejection and not content to silently repair into acceptance. The centralized parser may normalize explicitly supported provider compatibility wrappers, such as a non-empty top-level array whose first element is the expected object. Retry remaining contract failures within the role's defined retry path without consuming unrelated workflow attempt counters.
+- Never replay raw provider/model transport output or raw response excerpts embedded in parser errors. Retry context may contain only bounded, sanitized visible answer text; exact assistant/tool protocol turns are the narrow exception.
+- Keep retries within configured input and output budgets. Never increase user-configured limits to fit retry context; use a simpler bounded repair prompt when needed.
+- LaTeX and mathematical notation remain valid JSON string content. Preserve intended decoded text through correct JSON escaping; do not suppress notation, corrupt exact-edit anchors, or double-escape already valid content.
+
+## Authorized Contract Changes
+
+When the user explicitly directs a JSON or prompt-contract change, update the minimum necessary production prompt, parser/model, deterministic and semantic validation, and focused tests together. Update public API contracts and their version only when the externally consumed contract changes.

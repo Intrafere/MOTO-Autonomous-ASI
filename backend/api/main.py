@@ -36,6 +36,7 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.config import rag_config, system_config
 from backend.shared.lean4_client import clear_lean4_client, close_lean4_client
 from backend.shared.runtime_settings import apply_persisted_runtime_settings
+from backend.shared.trade_data_boundary import install_trade_data_log_boundary
 from backend.shared.workflow_start_guard import workflow_start_guard
 from backend.aggregator.core.coordinator import coordinator
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
@@ -48,6 +49,7 @@ logging.basicConfig(
     format='%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+install_trade_data_log_boundary()
 logger = logging.getLogger(__name__)
 
 
@@ -167,6 +169,12 @@ def _restore_desktop_provider_credentials(api_client_manager) -> None:
                 "No OpenRouter API key found in secure backend storage for this namespace"
             )
 
+    except SecretStoreError as exc:
+        logger.warning("OpenRouter secure credential restore unavailable: %s", exc)
+    except Exception as exc:
+        logger.warning("Failed to restore OpenRouter credentials on startup: %s", exc)
+
+    try:
         wolfram_api_key = load_wolfram_api_key()
         if wolfram_api_key:
             initialize_wolfram_client(wolfram_api_key)
@@ -179,9 +187,9 @@ def _restore_desktop_provider_credentials(api_client_manager) -> None:
                 "No Wolfram Alpha API key found in secure backend storage for this namespace"
             )
     except SecretStoreError as exc:
-        logger.warning("Secure credential storage unavailable on startup: %s", exc)
+        logger.warning("Wolfram Alpha secure credential restore unavailable: %s", exc)
     except Exception as exc:
-        logger.warning("Failed to restore provider credentials on startup: %s", exc)
+        logger.warning("Failed to restore Wolfram Alpha credentials on startup: %s", exc)
 
 
 @asynccontextmanager

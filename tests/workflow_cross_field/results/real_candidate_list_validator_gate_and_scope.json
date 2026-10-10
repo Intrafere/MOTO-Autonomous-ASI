@@ -1,10 +1,20 @@
 {
-  "adapter": "real_coordinator",
+  "adapter": "focused_production",
   "artifact_type": "result",
-  "diagnostics": {
-    "reason": "Focused stage tests observe exact threshold, approved-only forwarding, scope invalidation, and semantic-memory bounds, but no bounded real-coordinator adapter yet observes Autonomous restart plus manual process-local ownership without synthesizing the lifecycle owner."
-  },
-  "evidence": [],
+  "asserted_invariants": [
+    "proof_runtime.candidate_list_validator_gate"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "whole_list_review",
+    "any_novel_accepts",
+    "approved_only"
+  ],
+  "faked_dependencies": [
+    "candidate Validator response",
+    "Lean proof-stage boundary"
+  ],
   "fields": [
     "proof_runtime_gating",
     "provider_pause_resume",
@@ -14,11 +24,21 @@
   "invariants": [
     "proof_runtime.candidate_list_validator_gate"
   ],
+  "observed_transition": "whole-list review accepts a list with one of four novel candidates and forwards only that candidate before any Phase A proof cost",
+  "real_components": [
+    "backend/autonomous/agents/proof_candidate_list_validator.py",
+    "backend/autonomous/core/proof_verification_stage.py"
+  ],
   "replay": [],
-  "result": "blocked",
+  "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_candidate_list_validator_gate_and_scope",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
+  "source_identity": "workflow-source-v1:ede640101918a0a90681cbf55b052e36009b916c50fd2c88525b63053539b223",
+  "test_file": "tests/workflow_real_adapters/test_build_07_candidate_list_ownership.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_07_candidate_list_ownership.py::test_real_candidate_list_gate_precedes_phase_a_and_forwards_approved_subset"
+  ]
 }

@@ -1,0 +1,156 @@
+name: SyntheticLib Compatibility Release Evidence
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: syntheticlib-compatibility-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  attest:
+    name: Clean-source compatibility attestation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RELEASE_ROOT: ${{ runner.temp }}/moto-syntheticlib-release
+    steps:
+      - name: Check out immutable source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused test dependency
+        run: python -m pip install pytest
+
+      - name: Verify immutable clean checkout
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+
+      - name: Verify tracked MOTO compatibility evidence
+        shell: bash
+        run: |
+          git ls-files --error-unmatch \
+            .github/workflows/syntheticlib-compatibility-release.yml \
+            .gitignore \
+            backend/shared/syntheticlib_trade_compatibility.py \
+            scripts/check_syntheticlib_trade_contract.py \
+            scripts/run_local_syntheticlib_compatibility_ci.py \
+            tests/unit/test_syntheticlib_trade_compatibility.py \
+            tests/integration/test_syntheticlib_trade_contract_command.py \
+            tests/unit/test_local_syntheticlib_compatibility_ci.py \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/compatibility-matrix.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-contract-test-result.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-compatibility-receipt.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-compatibility-receipt.sha256 \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/frozen-asset-manifest.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/compatibility-bundle-manifest.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-preflight-attestation.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/MOTO_COMPATIBILITY_RECEIPT.md
+          python -m scripts.check_syntheticlib_trade_contract --check
+
+      - name: Run focused compatibility tests
+        run: >-
+          python -m pytest
+          tests/unit/test_syntheticlib_trade_compatibility.py
+          tests/integration/test_syntheticlib_trade_contract_command.py
+          tests/unit/test_local_syntheticlib_compatibility_ci.py
+
+      - name: Stage release package identity
+        shell: bash
+        run: |
+          mkdir -p "${RELEASE_ROOT}/plan/compatibility"
+          python -c 'import json, os, pathlib; source=json.loads(pathlib.Path("moto-update-manifest.json").read_text()); source["build_commit"]=os.environ["GITHUB_SHA"]; target=pathlib.Path(os.environ["RELEASE_ROOT"])/"moto-update-manifest.json"; target.write_text(json.dumps(source, indent=2)+"\n", encoding="utf-8")'
+          cp package.json "${RELEASE_ROOT}/package.json"
+
+      - name: Generate release-specific base evidence
+        run: >-
+          python -m scripts.check_syntheticlib_trade_contract
+          --write
+          --allow-custom-roots
+          --manifest "${RELEASE_ROOT}/moto-update-manifest.json"
+          --package-json "${RELEASE_ROOT}/package.json"
+          --plan-root "${RELEASE_ROOT}/plan"
+          --output-dir "${RELEASE_ROOT}/plan/compatibility"
+
+      - name: Generate clean-source release attestation
+        run: >-
+          python -m scripts.check_syntheticlib_trade_contract
+          --write-release-evidence
+          --allow-custom-roots
+          --manifest "${RELEASE_ROOT}/moto-update-manifest.json"
+          --package-json "${RELEASE_ROOT}/package.json"
+          --plan-root "${RELEASE_ROOT}/plan"
+          --output-dir "${RELEASE_ROOT}/plan/compatibility"
+          --release-output-dir "${RELEASE_ROOT}/release-evidence"
+
+      - name: Independently verify release evidence
+        run: >-
+          python -m scripts.check_syntheticlib_trade_contract
+          --check-release-evidence
+          --allow-custom-roots
+          --manifest "${RELEASE_ROOT}/moto-update-manifest.json"
+          --package-json "${RELEASE_ROOT}/package.json"
+          --plan-root "${RELEASE_ROOT}/plan"
+          --output-dir "${RELEASE_ROOT}/plan/compatibility"
+          --release-output-dir "${RELEASE_ROOT}/release-evidence"
+
+      - name: Run local workflow-equivalent regression
+        run: python -m scripts.run_local_syntheticlib_compatibility_ci
+
+      - name: Confirm generation did not mutate source
+        shell: bash
+        run: test -z "$(git status --porcelain --untracked-files=normal)"
+
+      - name: Publish evidence digests
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RELEASE_ROOT"])
+          receipt = root / "plan/compatibility/moto-compatibility-receipt.json"
+          bundle = json.loads(
+              (root / "release-evidence/moto-clean-source-attestation-bundle.json")
+              .read_text(encoding="utf-8")
+          )
+          summary = {
+              "sourceCommit": os.environ["GITHUB_SHA"],
+              "receiptSha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+              "releaseBundleDigest": bundle["bundleDigest"],
+          }
+          (root / "release-summary.json").write_text(
+              json.dumps(summary, sort_keys=True, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
+              stream.write("## SyntheticLib compatibility release evidence\n\n")
+              stream.write(f"- Source commit: `{summary['sourceCommit']}`\n")
+              stream.write(f"- Receipt SHA-256: `{summary['receiptSha256']}`\n")
+              stream.write(f"- Release bundle digest: `{summary['releaseBundleDigest']}`\n")
+          PY
+
+      - name: Upload clean-source release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: moto-syntheticlib-release-evidence-${{ github.sha }}
+          path: ${{ env.RELEASE_ROOT }}/
+          if-no-files-found: error
+          retention-days: 90

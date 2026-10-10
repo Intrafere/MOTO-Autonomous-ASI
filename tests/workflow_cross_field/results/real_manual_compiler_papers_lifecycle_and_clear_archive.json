@@ -1,11 +1,19 @@
 {
   "adapter": "real_route",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_scope.manual_clear_archives_active",
+    "state.clear_removes_active_preserves_history"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "papers_only_start_stop",
     "archive_before_appendix_and_paper_clear",
     "temp_archive_root"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "allowed_outputs",
@@ -16,11 +24,23 @@
     "proof_scope.manual_clear_archives_active",
     "state.clear_removes_active_preserves_history"
   ],
+  "observed_transition": "papers_only_start_stop; archive_before_appendix_and_paper_clear; temp_archive_root",
+  "real_components": [
+    "backend/api/routes/aggregator.py",
+    "backend/api/routes/compiler.py",
+    "backend/api/routes/leanoj.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_manual_compiler_papers_lifecycle_and_clear_archive",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+  "source_identity": "workflow-source-v1:8d97ef001293e78ec3a9b6e8aaa951d42b230b44716da215d5b09e2b85e01760",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_manual_compiler_real_papers_only_route_start_stop",
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_manual_compiler_clear_archives_before_paper_clear"
+  ]
 }

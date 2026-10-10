@@ -33,6 +33,17 @@ test.each([false, true])('Codex effort covers every visible LeanOJ role with run
   await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.disabled === isRunning)).toBe(true));
 });
 
+test.each([false, true])('xAI effort covers every visible LeanOJ role with running=%s', async isRunning => {
+  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: true } });
+  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [{ id: 'grok-4.3' }] });
+  const role = { provider: 'xai_grok_oauth', modelId: 'grok-4.3', openrouterReasoningEffort: 'low', contextWindow: 1000000, maxOutputTokens: 131072 };
+  const settings = normalizeLeanOJSettings({ numSubmitters: 1, submitterConfigs: [role], roles: Object.fromEntries(['topic_generator', 'topic_validator', 'brainstorm_validator', 'final_solver', 'assistant'].map(key => [key, role])) });
+  render(<LeanOJSettings settings={settings} onSettingsChange={vi.fn()} capabilities={{ lmStudioEnabled: true }} connectivityStatus={{ skills: { agent_conversation_memory: { enabled: true } } }} isRunning={isRunning} />);
+  const controls = await screen.findAllByRole('combobox', { name: 'xAI Reasoning Effort' });
+  expect(controls).toHaveLength(4);
+  expect(controls.every(node => node.value === 'low' && node.disabled === isRunning)).toBe(true);
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();

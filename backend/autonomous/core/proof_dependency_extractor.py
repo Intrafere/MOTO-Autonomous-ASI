@@ -7,7 +7,12 @@ import logging
 import re
 from typing import Iterable, List
 
-from backend.shared.models import MathlibLemmaHint, ProofDependency
+from backend.shared.models import (
+    MathlibLemmaHint,
+    PortableProofDependency,
+    ProofDependency,
+)
+from backend.shared.lean_source_evidence import contains_private_path
 
 logger = logging.getLogger(__name__)
 
@@ -203,3 +208,58 @@ class ProofDependencyExtractor:
                 )
 
         return self._dedupe_dependencies(dependencies)
+
+    async def build_portable_dependencies(
+        self,
+        *,
+        dependencies: Iterable[ProofDependency],
+        proof_database,
+        mathlib_revision: str,
+    ) -> List[PortableProofDependency]:
+        """Resolve local dependency hints into path-free canonical evidence."""
+        all_proofs = await proof_database.get_all_proofs()
+        proofs_by_id = {proof.proof_id: proof for proof in all_proofs}
+        proofs_by_name = {
+            proof.theorem_name: proof for proof in all_proofs if proof.theorem_name
+        }
+        portable: list[PortableProofDependency] = []
+        seen: set[tuple[str, str]] = set()
+        for dependency in dependencies:
+            if dependency.kind == "moto":
+                target = proofs_by_id.get(dependency.source_ref) or proofs_by_name.get(
+                    dependency.name
+                )
+                if target is None or target.canonical_locator is None:
+                    continue
+                key = ("moto", target.canonical_locator_digest)
+                if key in seen:
+                    continue
+                seen.add(key)
+                portable.append(
+                    PortableProofDependency(
+                        kind="moto",
+                        declaration_name=dependency.name,
+                        canonical_locator=target.canonical_locator,
+                        canonical_locator_digest=target.canonical_locator_digest,
+                        canonical_theorem_statement_hash=(
+                            target.canonical_theorem_statement_hash
+                        ),
+                        canonical_lean_code_hash=target.canonical_lean_code_hash,
+                    )
+                )
+                continue
+            if not mathlib_revision or contains_private_path(dependency.name):
+                continue
+            key = ("mathlib", dependency.name)
+            if key in seen:
+                continue
+            seen.add(key)
+            portable.append(
+                PortableProofDependency(
+                    kind="mathlib",
+                    declaration_name=dependency.name,
+                    module_name=".".join(dependency.name.split(".")[:-1]),
+                    mathlib_revision=mathlib_revision,
+                )
+            )
+        return portable

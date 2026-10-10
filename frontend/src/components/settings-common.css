@@ -101,6 +101,7 @@
   color: var(--text-secondary);
   display: block;
   font-size: 0.85rem;
+  font-style: normal;
   margin-top: 0.5rem;
   line-height: 1.4;
 }
@@ -391,6 +392,7 @@
   margin-top: 0.25rem;
   color: var(--text-secondary);
   font-size: 0.85rem;
+  font-style: normal;
   line-height: 1.45;
 }
 
@@ -701,7 +703,12 @@
   margin: 0;
   color: var(--text-secondary);
   font-size: 0.85rem;
+  font-style: normal;
   line-height: 1.45;
+}
+
+.settings-hint {
+  font-style: normal;
 }
 
 .collapse-chevron {
@@ -880,6 +887,39 @@
 
 .inline-modal-content h3 {
   margin-top: 0;
+}
+
+/* Opt-in reflow: lets a wide inline modal shrink to 320px viewports. */
+.inline-modal-content--fluid {
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+@media (max-width: 480px) {
+  .inline-modal-content--fluid {
+    padding: 1rem !important;
+  }
+}
+
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.wrap-anywhere {
+  overflow-wrap: anywhere;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* Model refresh controls row */

@@ -1,6 +1,6 @@
 # MOTO Autonomous ASI
 ## Autonomous Prototype Superintelligence for Rigorous Research and Solution Generation, with Optional Lean 4 Proof Verification
-**Version: 1.1.07**
+**Version: 1.1.08**
 
 **Runtime & License**
 
@@ -18,7 +18,7 @@
 
 **A breakthrough in AI-automated theorem generation. Press the one-click launcher file "Click To Launch MOTO.bat" to run the program. MOTO is an autonomous research and solution-generation system powered by Intrafere Research Group's prototype-superintelligence discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/): a combination of reiterative brainstorming, validation, feedback, and pruning that creates prototype-level superintelligence using creative/combinatory multi-model data from nearly any combination of AI models. When relevant and enabled, MOTO pairs this exploration with automated theorem generation and Lean 4 machine-checked proofs for the exact formal statements it successfully proves.**
 
-MOTO is a fully automated invention and research generator. It generates novel and publication-worthy research papers, and it can formalize candidate theorems and lemmas in Lean 4 while only storing proofs that Lean 4 accepts as mathematically verified. Lean 4 automation gives the user machine-checked verification for the exact formal statements produced, while informal papers and interpretations should still be reviewed with scrutiny. Unlike programs that may look similar, MOTO finds novel solutions with 0 creative user input required after launch: press start and let it run for hours or days while it autonomously searches for new solution paths. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness and the discovery of Top-P exploration can also easily be modified for topics such as chatbots, niche research, AI CAD and 3D model generation, AI image generation, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.
+MOTO is a fully automated invention and research generator. It generates novel and publication-worthy research papers in editable LaTeX code, and it can formalize candidate theorems and lemmas in Lean 4 while only storing proofs that Lean 4 accepts as mathematically verified. Lean 4 automation gives the user machine-checked verification for the exact formal statements produced, while informal papers and interpretations should still be reviewed with scrutiny. Unlike programs that may look similar, MOTO finds novel solutions with 0 creative user input required after launch: press start and let it run for hours or days while it autonomously searches for new solution paths. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness and the discovery of Top-P exploration can also easily be modified for topics such as chatbots, niche research, AI CAD and 3D model generation, AI image generation, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.
 
 ### The Core Discovery: Top-P Exploration 
 
@@ -228,6 +228,10 @@ bash linux-ubuntu-launcher.sh
 - **Context Allocator**: Direct injection vs RAG routing based on token budgets
 - **Workflow Predictor**: Predicts next 20 API calls for boost selection
 - **Boost Manager**: Selective task acceleration with OpenRouter
+- **Live Activity Assurance**: Model failures, retries, validator outcomes, and terminal
+  run causes use stable workflow-scoped identity and bounded secret-redacted detail so
+  live and recovered activity remain consistent without treating provider failures as
+  semantic rejections.
 
 ---
 
@@ -247,7 +251,7 @@ moto-math-variant/
 │   └── src/
 │       ├── components/      # React components for UI
 │       └── services/        # API and WebSocket clients
-├── .cursor/
+├── .claude/
 │   └── rules/               # AI agent design specifications (full system documentation)
 ├── Click To Launch MOTO.bat  # One-click Windows launcher
 ├── linux-ubuntu-launcher.sh  # Ubuntu 24.04 launcher
@@ -362,12 +366,12 @@ All configurable per role:
 
 ## 📚 Documentation
 
-- **.cursor/rules/**: Complete system design specifications
-  - `part-1-aggregator-tool-design-specifications.mdc`
-  - `part-2-compiler-tool-design-specification.mdc`
-  - `part-3-autonomous-research-mode.mdc`
-  - `rag-design-for-overall-program.mdc`
-  - `program-directory-and-file-definitions.mdc`
+- **.claude/rules/**: Complete system design specifications
+  - `part-1-aggregator-tool-design-specifications.md`
+  - `part-2-compiler-tool-design-specification.md`
+  - `part-3-autonomous-research-mode.md`
+  - `rag-design-for-overall-program.md`
+  - `program-directory-and-file-definitions.md`
 
 #### Manual Installation (All Platforms)
 
@@ -425,7 +429,7 @@ Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTIN
 
 For development with AI assistance:
 - Install [Cursor](https://cursor.com/) - AI-powered IDE
-- The `.cursor/rules/` folder contains complete design specifications
+- The `.claude/rules/` folder contains complete design specifications
 - Cursor can help you understand and modify the system
 
 ### Security
@@ -468,7 +472,7 @@ The software itself is provided under the MIT License. See [LICENSE](LICENSE) fo
 - **Program Info**: https://intrafere.com/moto-autonomous-home-ai/
 - **News & Updates**: https://intrafere.com/moto-news/
 - **Donate**: https://intrafere.com/donate/
-- **Agentic Programmers**: See `.cursor/rules/` folder and have your agent use the rules as scaffolding to edit the program. Don't forget to keep your rules updated as you go! We recommend you keep your rules on read-only access to prevent your agent from accidentally deviating from your programming plans.
+- **Agentic Programmers**: See `.claude/rules/` folder and have your agent use the rules as scaffolding to edit the program. Don't forget to keep your rules updated as you go! We recommend you keep your rules on read-only access to prevent your agent from accidentally deviating from your programming plans.
 - **Issues**: https://github.com/Intrafere/MOTO-Autonomous-ASI/issues
 - **LM Studio**: https://lmstudio.ai/
 - **OpenRouter**: https://openrouter.ai/

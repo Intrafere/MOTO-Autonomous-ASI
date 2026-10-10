@@ -1,0 +1,41 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "live_activity.provider_retry_secret_safe"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "bounded_error_summary",
+    "bearer_secret_redacted",
+    "user_visible_error_class"
+  ],
+  "faked_dependencies": [
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "provider_routing",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "live_activity.provider_retry_secret_safe"
+  ],
+  "observed_transition": "secret-bearing provider detail is redacted before retry activity reaches the broadcast boundary",
+  "real_components": [
+    "backend/shared/api_client_manager.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "real_provider_retry_activity_redacts_error_detail",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:fd4205fb6e7d69b29cb9b1a9dfb8665dd7de973f93973358b7b153451de8b07c",
+  "test_file": "tests/integration/test_oauth_provider_cooldown.py",
+  "test_selectors": [
+    "tests/integration/test_oauth_provider_cooldown.py::APIClientManagerOAuthCooldownTests::test_retry_activity_redacts_error_summary_at_broadcast_boundary"
+  ]
+}

@@ -33,6 +33,7 @@ from backend.autonomous.core.proof_round_driver import (
     summarize_round_result,
 )
 from backend.autonomous.core.proof_run_manager import (
+    NO_DISCOVERY_LIMIT_TERMINAL_REASON,
     ProofRunControl,
     ProofRunSourceInvalidError,
     proof_run_manager,
@@ -80,6 +81,8 @@ from backend.shared.models import (
     ProofLiveContextBulkMutationResult,
     ProofLibraryEntry,
     ProofLibraryResponse,
+    ProofNoveltyGroupMember,
+    ProofNoveltyGroupResponse,
     ProofStageResult,
     ProofRunQueueResponse,
     ProofRunCollectionResponse,
@@ -89,6 +92,7 @@ from backend.shared.models import (
     ProofRoleConfigSnapshot,
     ProofRuntimeConfigSnapshot,
     ProofSettingsUpdateRequest,
+    ProofStatusResponse,
 )
 from backend.shared.manual_proof_context import get_manual_proof_context_lock
 from backend.shared.model_error_utils import (
@@ -98,10 +102,18 @@ from backend.shared.model_error_utils import (
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.shared.provider_errors import ProviderRepairRequiredError
 from backend.shared.provider_pause import is_provider_credit_pause_error
+from backend.shared.provider_route_identity import (
+    route_identity_from_error,
+    with_route_identity,
+)
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.proof_search.search_service import proof_search_service
-from backend.shared.runtime_settings import RuntimeSettingsError, save_proof_runtime_settings
+from backend.shared.runtime_settings import (
+    RuntimeSettingsError,
+    reconcile_lean4_runtime_state,
+    save_proof_runtime_settings,
+)
 from backend.shared.sleep_inhibitor import sleep_inhibitor
 from backend.shared.smt_client import clear_smt_client, get_smt_client
 
@@ -174,6 +186,12 @@ def _log_lean_status_starting_up(detail: str) -> None:
 async def _invalidate_pruned_proof_context(proof_id: str) -> None:
     """Invalidate Assistant state and rebuild the derived human/search index."""
     assistant_proof_search_coordinator.invalidate_live_context_occurrence(proof_id)
+    asyncio.create_task(
+        _refresh_active_brainstorm_projection(
+            proof=updated,
+            requesting_run_id=owning_run_id,
+        )
+    )
     try:
         await proof_search_service.rebuild_index()
     except Exception as exc:
@@ -182,6 +200,45 @@ async def _invalidate_pruned_proof_context(proof_id: str) -> None:
             str(proof_id)[:120],
             str(exc)[:240],
         )
+
+
+async def _refresh_active_brainstorm_projection(
+    *,
+    proof,
+    requesting_run_id: str,
+) -> None:
+    """Refresh live Aggregator RAG when a linked inline proof changes visibility."""
+    if str(getattr(proof, "source_type", "") or "") != "brainstorm":
+        return
+    source_id = str(getattr(proof, "source_id", "") or "").strip()
+    if not source_id:
+        return
+    candidates = [coordinator, autonomous_coordinator._brainstorm_aggregator]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            if await candidate.refresh_live_context_projection(
+                source_id=source_id,
+                requesting_run_id=requesting_run_id,
+            ):
+                return
+        except Exception as exc:
+            logger.warning(
+                "Brainstorm context refresh failed after proof mutation %s: %s",
+                str(getattr(proof, "proof_id", ""))[:120],
+                str(exc)[:240],
+            )
+    if source_id == MANUAL_AGGREGATOR_SOURCE_ID and compiler_coordinator.is_running:
+        try:
+            from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
+            await compiler_rag_manager.refresh_aggregator_live_context_projection()
+        except Exception as exc:
+            logger.warning(
+                "Compiler Aggregator-context refresh failed after proof mutation %s: %s",
+                str(getattr(proof, "proof_id", ""))[:120],
+                str(exc)[:240],
+            )
 
 
 def _manual_proof_history_root() -> Path:
@@ -316,23 +373,55 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
                 "Discovery: the model searched for useful novel proof candidates and "
                 "found none, so no Lean proof attempts were needed."
             )
+            no_discovery_streak = int(
+                data.get("consecutive_no_discovery_rounds") or 0
+            )
+            no_discovery_limit = int(data.get("no_discovery_round_limit") or 0)
+            if no_discovery_streak > 0 and no_discovery_limit > 0:
+                detail += (
+                    f" No candidates found; {no_discovery_streak}/"
+                    f"{no_discovery_limit} consecutive no-discovery rounds."
+                )
         elif isinstance(candidate_count, int):
             subject = "candidate" if candidate_count == 1 else "candidates"
             detail = f"Discovery found {candidate_count} {subject} for this round."
         else:
             detail = "The round finished its proof discovery and verification work."
-        continuation = (
-            " The next round will start automatically; the loop continues until you press Stop."
-            if data.get("run_mode") == "loop_with_pruning"
+        continuation = ""
+        if (
+            data.get("run_mode") == "loop_with_pruning"
             and data.get("next_round_automatic") is not False
-            else ""
-        )
+        ):
+            no_discovery_limit = int(data.get("no_discovery_round_limit") or 0)
+            continuation = (
+                " The next round will start automatically; the loop continues until "
+                f"you press Stop or {no_discovery_limit} consecutive rounds find no candidates."
+                if no_discovery_limit > 0
+                else (
+                    " The next round will start automatically; the loop continues "
+                    "until you press Stop."
+                )
+            )
         return f"{round_label} complete. {detail}{continuation}"
+    # Provider events keep their route identity prefix in the persisted log.
+    if event_type in {"proof_retry_scheduled", "proof_retry_started"}:
+        retry_message = _compact(data.get("message"), limit=1800) or (
+            f"Proof retry {data.get('retry_attempt') or 1} "
+            f"{'scheduled' if event_type == 'proof_retry_scheduled' else 'started'}"
+        )
+        return with_route_identity(retry_message, data)
     if event_type == "proof_run_provider_paused":
-        return f"{round_label} paused for provider credits"
+        return with_route_identity(f"{round_label} paused for provider credits", data)
     if event_type == "proof_run_provider_resumed":
-        return f"{round_label} resumed after the provider pause"
+        return with_route_identity(f"{round_label} resumed after the provider pause", data)
     if event_type == "proof_run_terminal":
+        if data.get("terminal_reason") == NO_DISCOVERY_LIMIT_TERMINAL_REASON:
+            limit = int(data.get("no_discovery_round_limit") or 10)
+            return (
+                f"Proof run completed after {limit} consecutive rounds found no useful "
+                "novel proof candidates. The search finished normally; start a new loop "
+                "if you want to continue searching."
+            )
         error_detail = _compact(
             data.get("last_error_summary") or data.get("error_detail"),
             limit=1800,
@@ -342,6 +431,17 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
         reason = data.get("terminal_reason") or "completed"
         return f"Proof run ended: {reason}"
     return f"Proof event: {event_type}"
+
+
+def _candidate_count_for_no_discovery_streak(
+    result: ProofStageResult,
+) -> Optional[int]:
+    """Reset on discovery, but count an empty round only when it completed validly."""
+    if result.total_candidates > 0:
+        return result.total_candidates
+    if result.had_error or result.fatal_stop_reason:
+        return None
+    return 0
 
 
 async def _broadcast_manual_aggregator_proof_event(event_type: str, data: dict) -> None:
@@ -392,6 +492,14 @@ def _normalize_proof_response_provenance(proof) -> dict:
     if not tier:
         tier = "novel_formulation" if bool(payload.get("novel")) else "not_novel"
     payload["novelty_tier"] = tier
+    payload["novelty_scope"] = str(payload.get("novelty_scope") or "standalone")
+    payload["novelty_group_claim"] = str(payload.get("novelty_group_claim") or "")
+    payload["novelty_group_proof_ids"] = list(
+        payload.get("novelty_group_proof_ids") or []
+    )
+    payload["novelty_group_anchor_proof_ids"] = list(
+        payload.get("novelty_group_anchor_proof_ids") or []
+    )
     payload["independent_novelty_tier"] = str(
         payload.get("independent_novelty_tier") or tier
     )
@@ -416,6 +524,74 @@ def _normalize_proof_response_provenance(proof) -> dict:
         payload.get("live_context_prune_trigger_reasons") or []
     )
     return payload
+
+
+def _annotate_novelty_group_memberships(proofs: list) -> list[dict]:
+    """Project group-anchor backlinks without changing independent member ranks."""
+    normalized = [_normalize_proof_response_provenance(proof) for proof in proofs]
+    by_run_and_id = {
+        (proof["run_id"], str(proof.get("proof_id") or "")): proof
+        for proof in normalized
+        if str(proof.get("proof_id") or "")
+    }
+    for anchor in normalized:
+        if anchor.get("novelty_scope") != "group":
+            continue
+        anchor_id = str(anchor.get("proof_id") or "")
+        member_ids = list(dict.fromkeys([
+            *list(anchor.get("novelty_group_proof_ids") or []),
+            anchor_id,
+        ]))
+        anchor["novelty_group_proof_ids"] = member_ids
+        for member_id in member_ids:
+            member = by_run_and_id.get((anchor["run_id"], member_id))
+            if member is None:
+                continue
+            backlinks = list(member.get("novelty_group_anchor_proof_ids") or [])
+            if anchor_id not in backlinks:
+                backlinks.append(anchor_id)
+            member["novelty_group_anchor_proof_ids"] = backlinks
+    return normalized
+
+
+def _resolve_novelty_group_anchor(
+    proofs: list[dict],
+    requested_proof_id: str,
+) -> dict:
+    """Resolve a group anchor from either the anchor or one unambiguous member."""
+    direct = next(
+        (
+            proof
+            for proof in proofs
+            if proof.get("proof_id") == requested_proof_id
+            and proof.get("novelty_scope") == "group"
+        ),
+        None,
+    )
+    if direct is not None:
+        return direct
+    matches = [
+        proof
+        for proof in proofs
+        if proof.get("novelty_scope") == "group"
+        and requested_proof_id in (proof.get("novelty_group_proof_ids") or [])
+    ]
+    if not matches:
+        raise HTTPException(
+            status_code=404,
+            detail="This proof has no finite novelty-ranked proof group.",
+        )
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "This proof belongs to multiple novelty-ranked groups; select a group anchor.",
+                "group_anchor_proof_ids": [
+                    str(match.get("proof_id") or "") for match in matches
+                ],
+            },
+        )
+    return matches[0]
 
 
 def _get_request_proof_database(request: ProofCheckRequest) -> ProofDatabase:
@@ -683,20 +859,41 @@ async def _get_manual_check_status() -> Tuple[bool, str]:
     return True, ""
 
 
+def _manual_proof_role_suffix(source_type: str, proof_run_id: str = "") -> str:
+    from backend.autonomous.agents.proof_pruning_agent import proof_run_role_suffix
+
+    suffix = f"manual_{source_type}"
+    if proof_run_id:
+        suffix = f"{suffix}_{proof_run_role_suffix('manual', proof_run_id)}"
+    return suffix
+
+
+_MANUAL_PROOF_ROLE_KINDS = (
+    "identification",
+    "lemma_search",
+    "formalization",
+    "novelty",
+    "candidate_list_validator",
+    "prune_proposer",
+    "prune_validator",
+)
+
+
+def _manual_proof_role_ids(source_type: str, proof_run_id: str = "") -> list[str]:
+    suffix = _manual_proof_role_suffix(source_type, proof_run_id)
+    return [f"autonomous_proof_{kind}_{suffix}" for kind in _MANUAL_PROOF_ROLE_KINDS]
+
+
 def _configure_manual_roles(
     source_type: str,
     snapshot: ProofRuntimeConfigSnapshot,
     *,
     proof_run_id: str = "",
 ) -> ProofRoleConfigSnapshot:
-    from backend.autonomous.agents.proof_pruning_agent import proof_run_role_suffix
-
     role_config = snapshot.brainstorm if source_type == "brainstorm" else snapshot.paper
     if not role_config.model_id or not snapshot.validator.model_id:
         raise RuntimeError("Manual proof roles are missing a configured submitter or validator model.")
-    suffix = f"manual_{source_type}"
-    if proof_run_id:
-        suffix = f"{suffix}_{proof_run_role_suffix('manual', proof_run_id)}"
+    suffix = _manual_proof_role_suffix(source_type, proof_run_id)
     api_client_manager.configure_role(
         f"autonomous_proof_identification_{suffix}",
         _build_model_config(role_config),
@@ -732,6 +929,44 @@ def _configure_manual_roles(
         _build_model_config(assistant_config),
     )
     return role_config
+
+
+def _manual_proof_route_identity(
+    *,
+    error: BaseException,
+    source_type: str,
+    role_config: ProofRoleConfigSnapshot,
+) -> Dict[str, str]:
+    """Return Live Activity route identity for a manual proof-run provider error.
+
+    The failing role and route come from the typed error when it carries them;
+    otherwise the run's proof-solving role settings describe the route under a
+    manual-proof pseudo-role.
+    """
+    from_error = route_identity_from_error(error)
+    error_role = str(from_error.get("role_id") or "")
+    role_id = (
+        error_role
+        if error_role and error_role != "unknown"
+        else f"manual_proof_{source_type}"
+    )
+    # Pinning the model role keeps a placeholder error role from relabelling it.
+    if from_error.get("provider") or api_client_manager.get_role_config(role_id) is not None:
+        return api_client_manager.route_identity_for_role(
+            role_id,
+            workflow_mode="manual_proof_check",
+            error=error,
+            model_role_id=role_id,
+        )
+    return api_client_manager.route_identity_for_role(
+        role_id,
+        workflow_mode="manual_proof_check",
+        error=error,
+        model_role_id=role_id,
+        model=role_config.model_id,
+        provider=role_config.provider,
+        configured_host_provider=role_config.openrouter_provider or "",
+    )
 
 
 def _compact_manual_assistant_source(content: str) -> str:
@@ -831,6 +1066,13 @@ async def _prompt_with_verified_proof_context(
         return scoped_proof_database.inject_into_prompt(source_prompt)
 
 
+async def _proof_context_run_id(database) -> str:
+    getter = getattr(database, "get_live_context_run_id", None)
+    if getter is None:
+        return ""
+    return str(await getter() or "")
+
+
 def _history_session_dir(session_id: str) -> Optional[Path]:
     """Resolve an existing autonomous history session without creating it."""
     if not session_id:
@@ -900,15 +1142,24 @@ async def _augment_paper_content_with_source_brainstorms(
     paper_content: str,
     source_brainstorm_ids,
     source_brainstorm_memory=None,
+    scoped_proof_database: Optional[ProofDatabase] = None,
+    requesting_run_id: str = "",
 ) -> str:
     parts = [f"PAPER CONTENT:\n{(paper_content or '').strip()}"]
     memory = source_brainstorm_memory or brainstorm_memory
     for brainstorm_id in source_brainstorm_ids or []:
         try:
-            brainstorm_content = await memory.get_database_content(
-                str(brainstorm_id),
-                strip_proofs=True,
-            )
+            if hasattr(memory, "get_model_context_content"):
+                brainstorm_content = await memory.get_model_context_content(
+                    str(brainstorm_id),
+                    proof_database=scoped_proof_database,
+                    requesting_run_id=requesting_run_id,
+                )
+            else:
+                brainstorm_content = await memory.get_database_content(
+                    str(brainstorm_id),
+                    strip_proofs=True,
+                )
         except Exception as exc:
             logger.debug("Unable to load source brainstorm %s for manual proof check: %s", brainstorm_id, exc)
             continue
@@ -925,11 +1176,19 @@ async def _read_manual_aggregator_content(*, formatted: bool = True, strip_proof
     try:
         manual_path = Path(system_config.shared_training_file)
         if Path(shared_training_memory.file_path) == manual_path:
-            content = (
-                await shared_training_memory.get_all_content_formatted(strip_proofs=strip_proofs)
-                if formatted
-                else await shared_training_memory.get_all_content(strip_proofs=strip_proofs)
-            )
+            if strip_proofs:
+                content = await shared_training_memory.get_model_context_content(
+                    proof_database=manual_proof_database,
+                    requesting_run_id=await manual_proof_database.get_live_context_run_id(),
+                    source_id=MANUAL_AGGREGATOR_SOURCE_ID,
+                    formatted=formatted,
+                )
+            else:
+                content = (
+                    await shared_training_memory.get_all_content_formatted()
+                    if formatted
+                    else await shared_training_memory.get_all_content()
+                )
         else:
             content = ""
     except Exception as exc:
@@ -1035,10 +1294,18 @@ async def _resolve_manual_source(
         metadata = await brainstorm_memory.get_metadata(request.source_id)
         if metadata is None:
             raise HTTPException(status_code=404, detail="Brainstorm not found")
-        content = await brainstorm_memory.get_database_content(
-            request.source_id,
-            strip_proofs=True,
-        )
+        run_id = await _proof_context_run_id(scoped_proof_database)
+        if hasattr(brainstorm_memory, "get_model_context_content"):
+            content = await brainstorm_memory.get_model_context_content(
+                request.source_id,
+                proof_database=scoped_proof_database,
+                requesting_run_id=run_id,
+            )
+        else:
+            content = await brainstorm_memory.get_database_content(
+                request.source_id,
+                strip_proofs=True,
+            )
         if not content:
             raise HTTPException(status_code=404, detail="Brainstorm content not found")
         user_prompt = await _prompt_with_verified_proof_context(
@@ -1065,11 +1332,14 @@ async def _resolve_manual_source(
             raise HTTPException(status_code=404, detail="Paper content not found")
         source_brainstorm_ids = history_paper.get("source_brainstorm_ids") or []
         history_brainstorm_memory = _history_brainstorm_memory_for_session(session_id)
+        run_id = await _proof_context_run_id(scoped_proof_database)
         if source_brainstorm_ids and history_brainstorm_memory is not None:
             content = await _augment_paper_content_with_source_brainstorms(
                 content,
                 source_brainstorm_ids,
                 source_brainstorm_memory=history_brainstorm_memory,
+                scoped_proof_database=scoped_proof_database,
+                requesting_run_id=run_id,
             )
         user_prompt = await _prompt_with_history_proof_context(
             str(history_paper.get("user_prompt", "") or ""),
@@ -1085,6 +1355,8 @@ async def _resolve_manual_source(
     content = await _augment_paper_content_with_source_brainstorms(
         content,
         metadata.source_brainstorm_ids,
+        scoped_proof_database=scoped_proof_database,
+        requesting_run_id=await _proof_context_run_id(scoped_proof_database),
     )
     user_prompt = await _prompt_with_verified_proof_context(
         await research_metadata.get_user_prompt(),
@@ -1152,18 +1424,20 @@ async def _resolve_proof_source_adapter(request: ProofCheckRequest) -> ProofSour
             raise HTTPException(status_code=404, detail="Paper content not found")
         source_brainstorm_ids = history_paper.get("source_brainstorm_ids") or []
         history_brainstorm_memory = _history_brainstorm_memory_for_session(session_id)
+        run_id = await scoped_database.get_live_context_run_id()
         if source_brainstorm_ids and history_brainstorm_memory is not None:
             content = await _augment_paper_content_with_source_brainstorms(
                 content,
                 source_brainstorm_ids,
                 source_brainstorm_memory=history_brainstorm_memory,
+                scoped_proof_database=scoped_database,
+                requesting_run_id=run_id,
             )
         canonical_prompt = str(
             history_paper.get("user_prompt", "")
             or history_paper.get("title", "")
             or paper_id
         )
-        run_id = await scoped_database.get_live_context_run_id()
         user_prompt = await _prompt_with_history_proof_context(
             canonical_prompt,
             session_id,
@@ -1241,6 +1515,7 @@ async def _run_manual_proof_check(
 ) -> None:
     source_title = ""
     legacy_sleep_owner = None
+    manual_role_ids: list[str] = []
     manager_owned_run = isinstance(run_control, ProofRunControl)
     if not isinstance(run_control, ProofRunControl):
         legacy_sleep_owner = run_control
@@ -1276,6 +1551,18 @@ async def _run_manual_proof_check(
             role_config = _configure_manual_roles(
                 request.source_type,
                 snapshot,
+                proof_run_id=run_control.snapshot.proof_run_id,
+            )
+            # Provider activity from this run's roles names its source so the UI
+            # can route it to the feed that owns the check.
+            manual_role_ids = _manual_proof_role_ids(
+                request.source_type,
+                run_control.snapshot.proof_run_id,
+            )
+            api_client_manager.set_role_activity_source(
+                manual_role_ids,
+                source_type=request.source_type,
+                source_id=request.source_id,
                 proof_run_id=run_control.snapshot.proof_run_id,
             )
         stage = autonomous_coordinator._proof_verification_stage
@@ -1504,10 +1791,11 @@ async def _run_manual_proof_check(
                             "source_id": run_control.snapshot.source_id,
                             "round_index": round_index,
                             "proof_round_index": round_index,
-                            "message": (
+                            "message": with_route_identity(
                                 f"{retry_activity_payload.get('provider_label') or 'Provider'} "
                                 f"retry {retry_activity_payload.get('retry_attempt') or 1} "
-                                "succeeded; the preserved proof round resumed."
+                                "succeeded; the preserved proof round resumed.",
+                                retry_activity_payload,
                             ),
                         },
                     )
@@ -1516,13 +1804,22 @@ async def _run_manual_proof_check(
                     return "completed", None
             except Exception as exc:
                 if is_provider_credit_pause_error(exc):
-                    await proof_run_manager.provider_paused(run_control)
+                    pause_route_identity = _manual_proof_route_identity(
+                        error=exc,
+                        source_type=request.source_type,
+                        role_config=role_config,
+                    )
+                    await proof_run_manager.provider_paused(
+                        run_control,
+                        route_identity=pause_route_identity,
+                    )
                     await proof_run_manager.wait_for_provider_or_control_wake(run_control)
                     if run_control.stop_event.is_set():
                         return "stopped", None
                     await proof_run_manager.resumed(
                         run_control,
                         from_provider_pause=True,
+                        route_identity=pause_route_identity,
                     )
                     return "retry_same_round", None
                 if isinstance(exc, RetryableProviderError):
@@ -1533,6 +1830,20 @@ async def _run_manual_proof_check(
                         nonlocal retry_activity_payload
                         if state == "waiting":
                             retry_activity_payload = dict(payload)
+                        provider_message = str(payload.get("message") or "").strip()
+                        # The composed message also carries the retry sentence, so
+                        # the resume detail comes from the bounded error summary.
+                        error_summary = str(payload.get("error_summary") or "").strip()
+                        resume_detail = ""
+                        detail_marker = " Detail: "
+                        if detail_marker in error_summary:
+                            detail_text = error_summary.split(detail_marker, 1)[1]
+                            for wait_marker in (" Waiting ", " Retrying "):
+                                if wait_marker in detail_text:
+                                    detail_text = detail_text.split(wait_marker, 1)[0]
+                            detail_text = detail_text.strip()
+                            if detail_text:
+                                resume_detail = f" Last error: {detail_text}"
                         event_payload = {
                             **payload,
                             "proof_run_id": run_control.snapshot.proof_run_id,
@@ -1547,14 +1858,12 @@ async def _run_manual_proof_check(
                                 run_control.snapshot.run_mode == "loop_with_pruning"
                             ),
                             "message": (
-                                f"{payload.get('provider_label') or 'Provider'} could not complete "
-                                f"the current proof call. Retry {payload.get('retry_attempt') or 1} "
-                                f"will resume this same round after "
-                                f"{payload.get('retry_after_seconds') or 0} seconds."
+                                provider_message
                                 if state == "waiting"
-                                else (
+                                else with_route_identity(
                                     f"Retry {payload.get('retry_attempt') or 1} is starting now "
-                                    "from the preserved proof-round checkpoint."
+                                    f"from the preserved proof-round checkpoint.{resume_detail}",
+                                    payload,
                                 )
                             ),
                         }
@@ -1567,15 +1876,35 @@ async def _run_manual_proof_check(
 
                     await api_client_manager.wait_for_retryable_provider_error(
                         exc,
-                        role_id=exc.role_id or role_config.model_id,
+                        role_id=exc.role_id or f"manual_proof_{request.source_type}",
                         should_stop=run_control.stop_event.is_set,
                         activity_callback=broadcast_retry_activity,
+                        workflow_mode="manual_proof_check",
                     )
                     if run_control.stop_event.is_set():
                         return "stopped", None
                     return "retry_same_round", None
                 if is_transient_model_call_error(exc):
-                    await asyncio.sleep(5)
+                    retry_identity = _manual_proof_route_identity(
+                        error=exc,
+                        source_type=request.source_type,
+                        role_config=role_config,
+                    )
+                    await api_client_manager.emit_and_wait_for_retry(
+                        {
+                            **retry_identity,
+                            "retry_attempt": max(1, run_control.snapshot.current_round),
+                            "retry_after_seconds": 5,
+                            "reason": "transient_model_error",
+                            "error_summary": str(exc),
+                            "source_type": request.source_type,
+                            "source_id": request.source_id,
+                            "proof_run_id": run_control.snapshot.proof_run_id,
+                        },
+                        role_id=retry_identity["role_id"],
+                        should_stop=run_control.stop_event.is_set,
+                        error=exc,
+                    )
                     if run_control.stop_event.is_set():
                         return "stopped", None
                     return "retry_same_round", None
@@ -1590,6 +1919,11 @@ async def _run_manual_proof_check(
                         reason=ProofVerificationStage._summarize_error(
                             repair_detail,
                             limit=1800,
+                        ),
+                        route_identity=_manual_proof_route_identity(
+                            error=exc,
+                            source_type=request.source_type,
+                            role_config=role_config,
                         ),
                     )
                     return "stopped", None
@@ -1666,14 +2000,10 @@ async def _run_manual_proof_check(
                     run_control,
                     terminal_reason=result.fatal_stop_reason,
                 )
-            await proof_run_manager.complete_round(
+            round_snapshot = await proof_run_manager.complete_round(
                 run_control,
                 round_number=round_index,
-                valid_candidate_count=(
-                    result.total_candidates
-                    if not result.had_error and not result.fatal_stop_reason
-                    else None
-                ),
+                valid_candidate_count=_candidate_count_for_no_discovery_streak(result),
                 summary=summary,
                 candidate_checkpoint_reference=(
                     ""
@@ -1682,6 +2012,11 @@ async def _run_manual_proof_check(
                 ),
                 proof_set_revision=await scoped_proof_database.get_proof_set_revision(),
             )
+            if (
+                round_snapshot.terminal_reason
+                == NO_DISCOVERY_LIMIT_TERMINAL_REASON
+            ):
+                return "completed", result
             if result.fatal_stop_reason:
                 if result.fatal_stop_reason == CONTEXT_OVERFLOW_STOP_REASON:
                     await proof_run_manager.error(
@@ -1795,6 +2130,7 @@ async def _run_manual_proof_check(
         if manager_owned_run:
             raise
     finally:
+        api_client_manager.clear_role_activity_source(manual_role_ids)
         try:
             await assistant_proof_search_coordinator.stop_all(
                 broadcast=True,
@@ -1826,7 +2162,7 @@ async def list_proofs(
     scoped_proof_database = _get_scoped_proof_database(scope)
     proofs = await scoped_proof_database.get_all_proofs()
     return {
-        "proofs": [_normalize_proof_response_provenance(proof) for proof in proofs],
+        "proofs": _annotate_novelty_group_memberships(proofs),
         "counts": scoped_proof_database.count_proofs(),
         "scope": (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower(),
         "proof_set_revision": await scoped_proof_database.get_proof_set_revision(),
@@ -1839,7 +2175,7 @@ async def list_novel_proofs(scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS)):
     scoped_proof_database = _get_scoped_proof_database(scope)
     proofs = await scoped_proof_database.get_all_proofs(novel_only=True)
     return {
-        "proofs": [_normalize_proof_response_provenance(proof) for proof in proofs],
+        "proofs": _annotate_novelty_group_memberships(proofs),
         "counts": scoped_proof_database.count_proofs(),
         "scope": (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower(),
     }
@@ -1851,7 +2187,7 @@ async def list_known_proofs(scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS)):
     scoped_proof_database = _get_scoped_proof_database(scope)
     proofs = await scoped_proof_database.get_all_proofs(novel_only=False)
     return {
-        "proofs": [_normalize_proof_response_provenance(proof) for proof in proofs],
+        "proofs": _annotate_novelty_group_memberships(proofs),
         "counts": scoped_proof_database.count_proofs(),
         "scope": (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower(),
     }
@@ -1993,7 +2329,7 @@ async def cleanup_known_proofs_from_files(confirm: bool = Query(default=False)):
     return result
 
 
-@router.get("/status")
+@router.get("/status", response_model=ProofStatusResponse)
 async def get_proofs_status():
     """Return cached Lean 4 availability and proof-database status."""
     version = ""
@@ -2046,6 +2382,9 @@ async def get_proofs_status():
 
     return {
         "lean4_enabled": system_config.lean4_enabled,
+        "lean4_runtime_available": bool(system_config.lean4_runtime_available),
+        "lean4_user_enabled": bool(system_config.lean4_user_enabled),
+        "lean4_unavailable_reason": system_config.lean4_unavailable_reason,
         "lean4_lsp_enabled": system_config.lean4_lsp_enabled,
         "lean4_path": _safe_path_label(system_config.lean4_path),
         "lean4_path_configured": bool(system_config.lean4_path),
@@ -2076,7 +2415,7 @@ async def get_proofs_status():
     }
 
 
-@router.post("/settings")
+@router.post("/settings", response_model=ProofStatusResponse)
 async def update_proof_settings(request: ProofSettingsUpdateRequest):
     """Update runtime Lean 4 proof settings for the current backend process."""
     if system_config.generic_mode:
@@ -2094,7 +2433,8 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
         system_config.smt_timeout,
     )
 
-    system_config.lean4_enabled = bool(request.enabled)
+    system_config.lean4_user_enabled = bool(request.enabled)
+    reconcile_lean4_runtime_state()
     system_config.lean4_proof_timeout = int(request.timeout)
     if request.lean4_lsp_enabled is not None:
         system_config.lean4_lsp_enabled = bool(request.lean4_lsp_enabled)
@@ -2389,6 +2729,14 @@ async def update_proof_live_context_bulk(
     if changed_proof_ids:
         for proof_id in changed_proof_ids:
             assistant_proof_search_coordinator.invalidate_live_context_occurrence(proof_id)
+        for updated in updated_records:
+            if updated.proof_id in changed_ids:
+                asyncio.create_task(
+                    _refresh_active_brainstorm_projection(
+                        proof=updated,
+                        requesting_run_id=owning_run_id,
+                    )
+                )
 
         async def _refresh_proof_search_after_bulk_live_context_update() -> None:
             try:
@@ -2466,8 +2814,19 @@ async def get_proof_library(
     not_novel_count = sum(
         1 for p in all_proofs if is_not_novel_tier(p.get("novelty_tier", "not_novel"))
     )
-    normalized_all = [_normalize_proof_response_provenance(p) for p in all_proofs]
-    normalized_proofs = [_normalize_proof_response_provenance(p) for p in proofs]
+    normalized_all = _annotate_novelty_group_memberships(all_proofs)
+    listed_ids = {
+        (str(proof.get("run_id") or proof.get("session_id") or ""), str(proof.get("proof_id") or ""))
+        for proof in proofs
+    }
+    normalized_proofs = [
+        proof
+        for proof in normalized_all
+        if (
+            str(proof.get("run_id") or proof.get("session_id") or ""),
+            str(proof.get("proof_id") or ""),
+        ) in listed_ids
+    ]
     return {
         "proofs": normalized_proofs,
         "counts": {
@@ -2512,7 +2871,28 @@ async def get_library_proof(
         raise HTTPException(status_code=400, detail="Proof scope must be 'autonomous' or 'manual'.")
     if proof is None:
         raise HTTPException(status_code=404, detail="Proof not found")
-    return _normalize_proof_response_provenance(proof)
+    if normalized_scope == PROOF_SCOPE_MANUAL:
+        all_proofs = await manual_proof_database.list_proof_library_from_history(
+            _manual_proof_history_root(),
+            novel_only=None,
+            category="all",
+        )
+    else:
+        all_proofs = await proof_database.list_proof_library(
+            novel_only=None,
+            category="all",
+        )
+    annotated = _annotate_novelty_group_memberships(all_proofs)
+    normalized = _normalize_proof_response_provenance(proof)
+    return next(
+        (
+            item
+            for item in annotated
+            if item.get("run_id") == normalized.get("run_id")
+            and item.get("proof_id") == normalized.get("proof_id")
+        ),
+        normalized,
+    )
 
 
 @router.get("/library/{session_id}/{proof_id}/certificate", response_model=ProofCertificateResponse)
@@ -2540,30 +2920,123 @@ async def get_library_proof_certificate_lean(
     )
 
 
+@router.get(
+    "/library/{session_id}/{proof_id}/novelty-group",
+    response_model=ProofNoveltyGroupResponse,
+)
+async def get_library_proof_novelty_group(
+    session_id: str,
+    proof_id: str,
+    scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS),
+):
+    """Download an archived finite proof group used for one novelty ranking."""
+    normalized_scope = (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower()
+    if normalized_scope == PROOF_SCOPE_MANUAL:
+        archived_proofs = await manual_proof_database.list_proof_library_from_history(
+            _manual_proof_history_root(),
+            novel_only=None,
+            category="all",
+        )
+    elif normalized_scope == PROOF_SCOPE_AUTONOMOUS:
+        archived_proofs = await proof_database.list_proof_library(
+            novel_only=None,
+            category="all",
+        )
+        archived_proofs = [
+            proof
+            for proof in archived_proofs
+            if str(proof.get("session_id") or proof.get("run_id") or "") == session_id
+        ]
+    else:
+        raise HTTPException(status_code=400, detail="Proof scope must be 'autonomous' or 'manual'.")
+    normalized_anchor = _resolve_novelty_group_anchor(
+        _annotate_novelty_group_memberships(archived_proofs),
+        proof_id,
+    )
+    anchor_id = str(normalized_anchor.get("proof_id") or "")
+    requested_ids = list(normalized_anchor.get("novelty_group_proof_ids") or [])
+    if anchor_id not in requested_ids:
+        requested_ids.append(anchor_id)
+    members = []
+    missing = []
+    for member_id in requested_ids:
+        try:
+            member, lean_code = await _get_archived_export(session_id, member_id, scope)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                missing.append(member_id)
+                continue
+            raise
+        normalized_member = _normalize_proof_response_provenance(member)
+        if normalized_member["run_id"] != normalized_anchor["run_id"]:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "The stored novelty group references a proof occurrence from another run.",
+                    "proof_id": member_id,
+                    "expected_run_id": normalized_anchor["run_id"],
+                    "actual_run_id": normalized_member["run_id"],
+                },
+            )
+        members.append(
+            ProofNoveltyGroupMember(
+                proof_id=normalized_member["proof_id"],
+                theorem_name=normalized_member.get("theorem_name", ""),
+                theorem_statement=normalized_member["theorem_statement"],
+                lean_code=lean_code,
+                run_id=normalized_member["run_id"],
+                novelty_tier=normalized_member["novelty_tier"],
+            )
+        )
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "The stored novelty group references unavailable archived proof occurrences.",
+                "missing_proof_ids": missing,
+            },
+        )
+    payload = ProofNoveltyGroupResponse(
+        anchor_proof_id=anchor_id,
+        run_id=normalized_anchor["run_id"],
+        novelty_tier=normalized_anchor["novelty_tier"],
+        group_claim=normalized_anchor.get("novelty_group_claim", ""),
+        group_proof_ids=requested_ids,
+        proofs=members,
+    )
+    return JSONResponse(
+        content=payload.model_dump(mode="json"),
+        headers={
+            "Content-Disposition": f'attachment; filename="{anchor_id}_novelty_group.json"'
+        },
+    )
+
+
 async def _certificate_response(proof, lean_code: str) -> JSONResponse:
     """Build the common typed certificate payload for live and archived proofs."""
-    lean_version = ""
-    mathlib_commit = ""
-    if system_config.lean4_enabled:
-        try:
-            client = get_lean4_client()
-            lean_version = await asyncio.wait_for(client.get_version(), timeout=5.0)
-            mathlib_commit = client.get_mathlib_commit()
-        except (asyncio.TimeoutError, Exception) as exc:
-            logger.warning("Lean 4 certificate metadata lookup timed out or failed: %s", exc)
     normalized = _normalize_proof_response_provenance(proof)
+    compile_receipt = normalized.get("compile_receipt")
+    if compile_receipt and hasattr(compile_receipt, "model_dump"):
+        compile_receipt_payload = compile_receipt
+    elif compile_receipt:
+        from backend.shared.models import LeanCompileReceipt
+        compile_receipt_payload = LeanCompileReceipt.model_validate(compile_receipt)
+    else:
+        compile_receipt_payload = None
     payload = ProofCertificateResponse(
         proof_id=normalized["proof_id"],
         theorem_statement=normalized["theorem_statement"],
         theorem_name=normalized.get("theorem_name", ""),
         lean_code=lean_code,
         solver=normalized.get("solver") or "Lean 4",
-        lean_version=lean_version,
-        mathlib_commit=mathlib_commit,
+        lean_version=(compile_receipt_payload.lean_version if compile_receipt_payload else ""),
+        mathlib_commit=(
+            compile_receipt_payload.mathlib_revision if compile_receipt_payload else ""
+        ),
         verified_at=(
-            normalized["created_at"].isoformat()
-            if normalized.get("created_at") and hasattr(normalized["created_at"], "isoformat")
-            else str(normalized.get("created_at") or "") or None
+            compile_receipt_payload.completed_at.isoformat()
+            if compile_receipt_payload
+            else None
         ),
         source_type=normalized.get("source_type", ""),
         source_id=normalized.get("source_id", ""),
@@ -2573,6 +3046,11 @@ async def _certificate_response(proof, lean_code: str) -> JSONResponse:
         novel=bool(normalized.get("novel")),
         novelty_tier=normalized["novelty_tier"],
         novelty_reasoning=normalized.get("novelty_reasoning", ""),
+        novelty_scope=normalized.get("novelty_scope", "standalone"),
+        novelty_group_claim=normalized.get("novelty_group_claim", ""),
+        novelty_group_proof_ids=list(
+            normalized.get("novelty_group_proof_ids") or []
+        ),
         independent_novelty_tier=normalized["independent_novelty_tier"],
         independent_novelty_reasoning=normalized["independent_novelty_reasoning"],
         exact_duplicate_proof_id=normalized.get("exact_duplicate_proof_id", ""),
@@ -2584,6 +3062,14 @@ async def _certificate_response(proof, lean_code: str) -> JSONResponse:
             "",
         ),
         canonical_lean_code_hash=normalized.get("canonical_lean_code_hash", ""),
+        client_proof_id=normalized.get("client_proof_id", ""),
+        canonical_locator=normalized.get("canonical_locator"),
+        canonical_locator_digest=normalized.get("canonical_locator_digest", ""),
+        compile_receipt=compile_receipt_payload,
+        verification_evidence_status=normalized.get(
+            "verification_evidence_status", "legacy_unrecorded"
+        ),
+        portable_dependencies=list(normalized.get("portable_dependencies") or []),
         attempt_count=normalized.get("attempt_count") or 0,
         solver_hints=list(normalized.get("solver_hints") or []),
         dependencies=list(normalized.get("dependencies") or []),
@@ -2634,6 +3120,65 @@ async def get_proof_certificate_lean(
         content=lean_code or proof.lean_code,
         headers={
             "Content-Disposition": f'attachment; filename="{proof_id}.lean"',
+        },
+    )
+
+
+@router.get("/{proof_id}/novelty-group", response_model=ProofNoveltyGroupResponse)
+async def get_proof_novelty_group(
+    proof_id: str,
+    scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS),
+):
+    """Download the finite verified proof group used for a group-scoped novelty rank."""
+    scoped_proof_database = _get_scoped_proof_database(scope)
+    all_proofs = await scoped_proof_database.get_all_proofs()
+    normalized_anchor = _resolve_novelty_group_anchor(
+        _annotate_novelty_group_memberships(all_proofs),
+        proof_id,
+    )
+    anchor_id = str(normalized_anchor.get("proof_id") or "")
+    run_id = normalized_anchor["run_id"]
+    requested_ids = list(normalized_anchor.get("novelty_group_proof_ids") or [])
+    if anchor_id not in requested_ids:
+        requested_ids.append(anchor_id)
+    by_id = {
+        proof.proof_id: proof
+        for proof in all_proofs
+        if str(proof.run_id or f"{proof.source_type}:{proof.source_id}") == run_id
+    }
+    missing = [member_id for member_id in requested_ids if member_id not in by_id]
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "The stored novelty group references unavailable proof occurrences.",
+                "missing_proof_ids": missing,
+            },
+        )
+    members = [
+        ProofNoveltyGroupMember(
+            proof_id=member.proof_id,
+            theorem_name=member.theorem_name,
+            theorem_statement=member.theorem_statement,
+            lean_code=member.lean_code,
+            run_id=run_id,
+            novelty_tier=member.novelty_tier,
+        )
+        for member_id in requested_ids
+        for member in [by_id[member_id]]
+    ]
+    payload = ProofNoveltyGroupResponse(
+        anchor_proof_id=anchor_id,
+        run_id=run_id,
+        novelty_tier=normalized_anchor["novelty_tier"],
+        group_claim=normalized_anchor.get("novelty_group_claim", ""),
+        group_proof_ids=requested_ids,
+        proofs=members,
+    )
+    return JSONResponse(
+        content=payload.model_dump(mode="json"),
+        headers={
+            "Content-Disposition": f'attachment; filename="{anchor_id}_novelty_group.json"'
         },
     )
 

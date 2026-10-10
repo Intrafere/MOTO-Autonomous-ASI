@@ -6,9 +6,11 @@ import {
   classifyProofLiveContext,
   classifyProofNovelty,
   getCanonicalProofIdentity,
+  getNoveltyGroupAnchorIds,
   sanitizeDomId,
 } from '../../utils/proofPresentation';
 import { readBooleanStorage } from '../../utils/safeStorage';
+import SyntheticLibOfferPanel from './SyntheticLibOfferPanel';
 import './FinalAnswerLibrary.css';
 import './ProofLibrary.css';
 
@@ -101,6 +103,7 @@ const PROOF_SEARCH_CORPORA = [
   { id: 'leanoj', label: 'LeanOJ' },
   { id: 'syntheticlib4', label: 'SyntheticLib4' },
 ];
+const SYNTHETICLIB_CORPUS_ID = 'syntheticlib4';
 
 const PROOF_SEARCH_OPTIONS = [
   { id: 'verified_only', label: 'Verified only' },
@@ -120,12 +123,16 @@ export default function ProofLibrary({
   selectedProofId = null,
   selectedSessionId = '',
   selectedRunId = '',
+  syntheticLibIntegrationVisible = false,
+  syntheticLibTradeVisible = false,
+  syntheticLibLaunched = false,
 }) {
   const [proofs, setProofs] = useState([]);
   const [proofCounts, setProofCounts] = useState({});
   const [sessionsResponse, setSessionsResponse] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [actionError, setActionError] = useState('');
   const [expandedId, setExpandedId] = useState(null);
   const [expandedProof, setExpandedProof] = useState(null);
   const activeDetailRequestRef = useRef(null);
@@ -288,6 +295,14 @@ export default function ProofLibrary({
           sessionId: proof.session_id || null,
         });
         if (!fullProof) throw new Error('Canonical proof hydration unavailable');
+        fullProof = {
+          ...proof,
+          ...fullProof,
+          novelty_scope: fullProof.novelty_scope || proof.novelty_scope || 'standalone',
+          novelty_group_claim: fullProof.novelty_group_claim || proof.novelty_group_claim || '',
+          novelty_group_proof_ids: fullProof.novelty_group_proof_ids || proof.novelty_group_proof_ids || [],
+          novelty_group_anchor_proof_ids: proof.novelty_group_anchor_proof_ids || fullProof.novelty_group_anchor_proof_ids || [],
+        };
       } catch {
         fullProof = await autonomousAPI.getLibraryProof(proof.session_id, proof.proof_id, proofScope);
       }
@@ -326,7 +341,14 @@ export default function ProofLibrary({
     })
       .then((fullProof) => {
         if (!fullProof) throw new Error('Canonical proof hydration unavailable');
-        return fullProof;
+        return {
+          ...match,
+          ...fullProof,
+          novelty_scope: fullProof.novelty_scope || match.novelty_scope || 'standalone',
+          novelty_group_claim: fullProof.novelty_group_claim || match.novelty_group_claim || '',
+          novelty_group_proof_ids: fullProof.novelty_group_proof_ids || match.novelty_group_proof_ids || [],
+          novelty_group_anchor_proof_ids: match.novelty_group_anchor_proof_ids || fullProof.novelty_group_anchor_proof_ids || [],
+        };
       })
       .catch(() => autonomousAPI.getLibraryProof(match.session_id, match.proof_id, proofScope))
       .then((fullProof) => {
@@ -379,14 +401,46 @@ export default function ProofLibrary({
     downloadTextFile(leanCode, filename);
   };
 
+  const handleDownloadNoveltyGroup = async (proof, event) => {
+    event?.stopPropagation();
+    setActionError('');
+    try {
+      const anchorId = getNoveltyGroupAnchorIds(proof)[0] || proof.proof_id;
+      const group = await autonomousAPI.getLibraryProofNoveltyGroup(
+        proof.session_id,
+        anchorId,
+        proofScope
+      );
+      downloadTextFile(
+        JSON.stringify(group, null, 2),
+        `${proof.proof_id}_novelty_group.json`,
+        'application/json'
+      );
+    } catch (err) {
+      setActionError(err.message || 'Failed to download the novelty-ranked proof group.');
+    }
+  };
+
+  // SyntheticLib4 stays hidden from standard users until launch (or Shift+Z+X
+  // developer preview); hidden corpora are never rendered or requested.
+  const availableSearchCorpora = syntheticLibIntegrationVisible
+    ? PROOF_SEARCH_CORPORA
+    : PROOF_SEARCH_CORPORA.filter((corpus) => corpus.id !== SYNTHETICLIB_CORPUS_ID);
+  const availableCorpusIds = availableSearchCorpora.map((corpus) => corpus.id);
+  const visibleSelectedCorpora = proofSearchCorpora.filter((id) => availableCorpusIds.includes(id));
+  const effectiveSearchCorpora = visibleSelectedCorpora.length
+    ? visibleSelectedCorpora
+    : availableCorpusIds;
+
   const toggleProofSearchCorpus = (corpusId) => {
-    setProofSearchCorpora((previous) => {
-      if (previous.includes(corpusId)) {
-        const next = previous.filter((id) => id !== corpusId);
-        return next.length > 0 ? next : previous;
-      }
-      return [...previous, corpusId];
-    });
+    if (!availableCorpusIds.includes(corpusId)) return;
+    const current = effectiveSearchCorpora;
+    if (current.includes(corpusId)) {
+      const next = current.filter((id) => id !== corpusId);
+      if (next.length > 0) setProofSearchCorpora(next);
+      return;
+    }
+    setProofSearchCorpora([...current, corpusId]);
   };
 
   const handleUnifiedProofSearch = async (event) => {
@@ -400,7 +454,7 @@ export default function ProofLibrary({
     try {
       const response = await proofSearchAPI.search({
         query: proofSearchQuery,
-        corpora: proofSearchCorpora,
+        corpora: effectiveSearchCorpora,
         verified_only: proofSearchVerifiedOnly,
         include_partial: false,
         include_failed: false,
@@ -511,13 +565,29 @@ export default function ProofLibrary({
           <span className="stat-badge">{proofSearchOverview?.total_records ?? 0} Proofs In All Libraries</span>
         </div>
       </div>
+      {actionError && (
+        <div className="error-message" role="alert">
+          <span>&#x26A0;</span>
+          <p>{actionError}</p>
+          <button type="button" className="retry-button" onClick={() => setActionError('')}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      <SyntheticLibOfferPanel
+        visible={syntheticLibTradeVisible}
+        launched={syntheticLibLaunched}
+      />
 
       <section className="proof-search-panel">
         <div className="proof-search-panel__header">
           <div>
             <h3>Unified Proof Search</h3>
             <p>
-              Search MOTO proof history, LeanOJ artifacts, and SyntheticLib4 snapshot records through the backend index. Results are capped at 7 combined proofs.
+              {syntheticLibIntegrationVisible
+                ? 'Search MOTO proof history, LeanOJ artifacts, and SyntheticLib4 snapshot records through the backend index. Results are capped at 7 combined proofs.'
+                : 'Search MOTO proof history and LeanOJ artifacts through the backend index. Results are capped at 7 combined proofs.'}
             </p>
           </div>
           <div className="proof-search-panel__stats">
@@ -539,11 +609,11 @@ export default function ProofLibrary({
           <fieldset className="proof-search-checklist">
             <legend>Search Checklist</legend>
             <div className="proof-search-checklist__grid">
-              {PROOF_SEARCH_CORPORA.map((corpus) => (
+              {availableSearchCorpora.map((corpus) => (
                 <label key={corpus.id} className="proof-search-checkbox">
                   <input
                     type="checkbox"
-                    checked={proofSearchCorpora.includes(corpus.id)}
+                    checked={effectiveSearchCorpora.includes(corpus.id)}
                     onChange={() => toggleProofSearchCorpus(corpus.id)}
                   />
                   <span>{corpus.label}</span>
@@ -780,6 +850,15 @@ export default function ProofLibrary({
                                 >
                                   Download .lean
                                 </button>
+                                {getNoveltyGroupAnchorIds(proof).length > 0 && (
+                                  <button
+                                    type="button"
+                                    className="proof-header-download"
+                                    onClick={(event) => handleDownloadNoveltyGroup(proof, event)}
+                                  >
+                                    Download Ranked Group
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   className="expand-button"
@@ -871,6 +950,18 @@ export default function ProofLibrary({
                                       <p>{expandedProof.novelty_reasoning}</p>
                                     </div>
                                   )}
+                                  <div className="proof-detail-section">
+                                    <h4>Discovery Ranking Scope</h4>
+                                    <p>
+                                      {expandedProof.novelty_scope === 'group'
+                                        ? 'Finite verified proof group'
+                                        : 'Accepted Lean statement alone'}
+                                    </p>
+                                    {expandedProof.novelty_group_claim && <p>{expandedProof.novelty_group_claim}</p>}
+                                    {expandedProof.novelty_scope === 'group' && expandedProof.novelty_group_proof_ids?.length > 0 && (
+                                      <p>Ranked with: {expandedProof.novelty_group_proof_ids.join(', ')}</p>
+                                    )}
+                                  </div>
 
                                   {expandedProof.verification_notes && (
                                     <div className="proof-detail-section">
@@ -922,6 +1013,14 @@ export default function ProofLibrary({
                                         onClick={() => handleDownloadLean(expandedProof)}
                                       >
                                         Download .lean
+                                      </button>
+                                    )}
+                                    {getNoveltyGroupAnchorIds(expandedProof).length > 0 && (
+                                      <button
+                                        className="quick-download-raw"
+                                        onClick={() => handleDownloadNoveltyGroup(expandedProof)}
+                                      >
+                                        Download Ranked Group (JSON)
                                       </button>
                                     )}
                                   </div>
@@ -1030,6 +1129,18 @@ export default function ProofLibrary({
                             <p>{expandedProof.novelty_reasoning}</p>
                           </div>
                         )}
+                        <div className="proof-detail-section">
+                          <h4>Discovery Ranking Scope</h4>
+                          <p>
+                            {expandedProof.novelty_scope === 'group'
+                              ? 'Finite verified proof group'
+                              : 'Accepted Lean statement alone'}
+                          </p>
+                          {expandedProof.novelty_group_claim && <p>{expandedProof.novelty_group_claim}</p>}
+                          {expandedProof.novelty_scope === 'group' && expandedProof.novelty_group_proof_ids?.length > 0 && (
+                            <p>Ranked with: {expandedProof.novelty_group_proof_ids.join(', ')}</p>
+                          )}
+                        </div>
                         {expandedProof.lean_code && (
                           <div className="proof-detail-section">
                             <h4>Lean 4 Source Code</h4>
@@ -1038,6 +1149,18 @@ export default function ProofLibrary({
                             </pre>
                           </div>
                         )}
+                        <div className="quick-download-buttons">
+                          {expandedProof.lean_code && (
+                            <button className="quick-download-raw" onClick={() => handleDownloadLean(expandedProof)}>
+                              Download .lean
+                            </button>
+                          )}
+                          {getNoveltyGroupAnchorIds(expandedProof).length > 0 && (
+                            <button className="quick-download-raw" onClick={() => handleDownloadNoveltyGroup(expandedProof)}>
+                              Download Ranked Group (JSON)
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ) : null
                   )}

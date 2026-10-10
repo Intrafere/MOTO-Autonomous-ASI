@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { getActivityClass, getActivityIcon } from '../utils/activityStyles';
+import { getActivityIdentity } from '../utils/activityNormalization';
 import './autonomous/AutonomousResearch.css';
 
 const formatActivityTime = (timestamp) => {
@@ -53,7 +54,7 @@ export default function LiveActivityFeed({
 
             return (
               <div
-                key={`${eventName}-${timestamp}-${index}`}
+                key={item?.activityIdentity || getActivityIdentity(item) || `${eventName}-${timestamp}-${index}`}
                 className={`activity-item ${getClassName(eventName, item)}`}
               >
                 <span className="activity-icon">{getIcon(eventName, item)}</span>

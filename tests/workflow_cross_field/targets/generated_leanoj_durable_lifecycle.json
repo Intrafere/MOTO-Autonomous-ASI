@@ -21,6 +21,6 @@
     "generated_leanoj_durable_lifecycle_seed_7",
     "generated_leanoj_durable_lifecycle_seed_29"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "target_id": "generated_leanoj_durable_lifecycle"
 }

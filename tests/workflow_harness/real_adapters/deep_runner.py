@@ -26,11 +26,17 @@ _PASSTHROUGH_ENV = (
     "WINDIR",
 )
 _WORKSPACE_MUTABLE_ROOTS = (
-    "backend/data",
-    "backend/logs",
     ".moto_instances",
     ".moto_launcher_state.json",
     ".moto_last_instance.json",
+)
+_WORKSPACE_SOURCE_ROOTS = (
+    "tests/workflow_harness",
+    "tests/workflow_real_adapters",
+    "tests/workflow_cross_field",
+    "tests/workflow_recombinatory",
+    "tests/workflow_scenarios",
+    "package.json",
 )
 _IGNORED_NAMES = {"__pycache__", ".pytest_cache"}
 
@@ -86,8 +92,14 @@ def minimal_deep_environment(
             "MOTO_SECRET_NAMESPACE": f"build-f-{hash_seed}",
             "PYTHONHASHSEED": hash_seed,
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
             "PLAYWRIGHT_BROWSERS_PATH": str(variant_root / "no-browser-runtime"),
+            "MOTO_DEEP_FAKE_BOUNDARIES": (
+                "network sockets; provider endpoints; keyring; browser runtime; "
+                "Lean/SMT execution; non-Python subprocesses"
+            ),
+            "MOTO_DEEP_ALLOWED_EXECUTABLE": str(Path(sys.executable).resolve()),
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",
             "PYTHONPATH": os.pathsep.join((str(fake_root), str(workspace_root))),
@@ -128,13 +140,48 @@ def snapshot_paths(paths: Iterable[Path], *, max_depth: int | None = None) -> di
 
 
 def workspace_mutable_snapshot(workspace_root: Path) -> dict[str, str]:
-    # Runtime roots can contain very large historical corpora. Two levels catches accidental
-    # fallback writes and root-state mutations without turning every deep case into a full data
-    # integrity scan; individual scenario adapters still assert their concrete artifacts' roots.
-    return snapshot_paths(
-        (workspace_root / relative for relative in _WORKSPACE_MUTABLE_ROOTS),
-        max_depth=2,
-    )
+    # Runtime roots can contain very large historical corpora. Keep their scan shallow while
+    # hashing the bounded production source surface completely. Combining both groups under
+    # one deep scan makes every repeated adapter walk user data and defeats the deep-suite
+    # timeout contract.
+    # Do not hash the default live data/log roots here: a concurrently running desktop
+    # instance legitimately mutates them and would make the child look guilty. The child
+    # bootstrap independently proves every configured mutable path is rebound beneath its
+    # isolated MOTO_DATA_ROOT/MOTO_LOG_ROOT, while this parent snapshot protects source and
+    # launcher-owned state from any child mutation.
+    mutable_roots = [workspace_root / relative for relative in _WORKSPACE_MUTABLE_ROOTS]
+    snapshot = snapshot_paths(dict.fromkeys(mutable_roots), max_depth=2)
+    source_roots = [workspace_root / relative for relative in _WORKSPACE_SOURCE_ROOTS]
+    snapshot.update(snapshot_paths(source_roots))
+    return snapshot
+
+
+def _configured_workspace_paths(workspace_root: Path) -> tuple[Path, ...]:
+    """Discover configured path fields that could fall back into the checkout."""
+    try:
+        from backend.shared.config import system_config
+    except Exception:
+        return ()
+
+    discovered: list[Path] = []
+    for name in type(system_config).model_fields:
+        if not (
+            name.endswith(("_dir", "_file", "_path", "_root"))
+            or name in {"data_dir", "logs_dir"}
+        ):
+            continue
+        value = getattr(system_config, name, None)
+        if not isinstance(value, (str, Path)) or not str(value):
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = workspace_root / candidate
+        try:
+            candidate.resolve().relative_to(workspace_root.resolve())
+        except (OSError, ValueError):
+            continue
+        discovered.append(candidate)
+    return tuple(discovered)
 
 
 def runtime_state_digest(variant_root: Path) -> str:
@@ -218,6 +265,8 @@ def run_deep_variant(
         *descriptor.pytest_args(),
         "-p",
         "no:cacheprovider",
+        "-p",
+        "pytest_asyncio.plugin",
         "-p",
         "tests.workflow_harness.real_adapters.deep_bootstrap",
         "--basetemp",

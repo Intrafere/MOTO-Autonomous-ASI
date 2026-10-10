@@ -1,12 +1,19 @@
 {
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "assistant.no_validator_injection",
+    "assistant.disable_clears_live_pack",
+    "prompt.validator_excludes_assistant_memory"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "assistant_pack",
     "assistant_disable",
     "prompt_context"
   ],
+  "faked_dependencies": [],
   "fields": [
     "assistant_memory",
     "prompt_context"
@@ -16,6 +23,8 @@
     "assistant.disable_clears_live_pack",
     "prompt.validator_excludes_assistant_memory"
   ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
   "replay": [
     "start_autonomous_papers_and_proofs",
     "refresh_assistant_pack",
@@ -23,9 +32,14 @@
     "disable_session_history"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "model_assistant_prompt_validator_exclusion",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "curated",
-  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+  "source_identity": "workflow-source-v1:d11079afbbcf9b8395dc60dd7bc4bb19aabca54d951e7604485c182b0ecfd8e0",
+  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
 }

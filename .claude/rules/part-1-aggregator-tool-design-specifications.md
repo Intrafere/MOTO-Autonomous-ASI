@@ -1,0 +1,150 @@
+---
+description: Aggregator architecture, submitter-validator workflow, RAG behavior, and validation rules
+---
+
+Description of entire rule: Main Architecture layout/design of the aggregator portion of the two-part aggregation-distillation LLM work flow.
+
+# OVERVIEW
+
+## Workflow for Aggregator Note
+Submitters run in parallel; single validator reviews and updates the shared database sequentially. This ensures coherent Markov chain evolution and database alignment with user prompt.
+
+## AI Node Clusters and Validator Structure
+Configurable 1-10 submitters + exactly 1 validator (default 3 submitters). Each submitter has its own model, context window, and max output tokens. First submitter labeled "Main Submitter" in UI.
+
+**Single Validator Constraint**: Only one validator allowed — multiple validators would cause divergent database evolution, breaking coherent Markov chain alignment.
+
+Validator accepts a submission if adding it makes the training database more useful toward finding solutions. Ordinary submissions aggressively pursue the strongest credible and genuinely novel solution to the user's exact objective, using the contribution form and claim-type rigor appropriate to the problem; mathematics, theorem discovery, proof, and formalization remain first-class whenever relevant, but non-mathematical work is not rejected merely for lacking mathematical form. Submissions must first prefer avenues that aggressively attack the user's WHOLE question as stated, no partial solutions. If the true answer is that the user's question is impossible or has no valid solution as stated, that counts as directly answering the whole question. If a whole-question attack is absolutely not possible in one superintelligence brainstorm, they may choose the next best necessary piece whose resolution would visibly advance the original question. Broader exploratory/background-heavy avenues are allowed only when clearly required for that whole-question route, and easy/practical/broad/interesting detours must lose to a more direct rigorous route to the full prompt. On a fresh cleared run the accepted-submissions database starts blank; on normal desktop runs it reloads persisted accepted submissions, stats, and top-level manual run activity from the active data root. Manual read-only results/events views hydrate persisted data without requiring Start; autonomous/mini-aggregators must not write the manual event log. Distributor updates all submitters after each acceptance.
+
+## Queue Submissions and Overflow Behavior
+
+Validator processes up to 3 submissions at once (batch validation). Takes whatever is available (1, 2, or 3) without waiting.
+
+**Queue Overflow Threshold**: ≥10 submissions in queue → submitters cooperatively pause once they observe the coordinator pause state; this is a backpressure threshold, not a strict enqueue cap.
+
+**Per-Submitter Fairness Cap**: When more than one submitter is configured, any individual submitter with >4 of its own submissions already waiting in the queue is paused; other submitters keep running. Skipped when only one submitter is configured. Defaults live in `SystemConfig.queue_overflow_threshold` and `SystemConfig.per_submitter_queue_threshold`.
+
+## Batch Validation
+
+Validator processes 1, 2, or 3 submissions simultaneously using batch-specific prompts.
+
+**Independent Assessment**: Each submission assessed INDEPENDENTLY against existing database — does THIS submission provide unique value?
+
+**Intra-Batch Redundancy Prevention**: After independent assessment, if multiple submissions would be accepted, check for redundancy between them. Keep only strongest; reject others as "Redundant with co-submitted submission X". Goal: maximize UNIQUE value per batch.
+
+- 1 submission: standard validation
+- 2 submissions: independent + pairwise redundancy check
+- 3 submissions: independent + all-pairs check (1-2, 1-3, 2-3)
+
+## Databases
+
+**USER SHARED DATABASE** — User uploaded files + original prompt. Primary source for submitters.
+
+**Validator-Distributed Database** — Accepted submissions (built by validator only; submitters have read-only access). Fresh cleared runs start blank; normal runs reload persisted accepted submissions. Distributed to all submitters on each acceptance.
+
+**Local Submitter Databases** — Per-submitter rejection log: last 5 rejections (validator summary ≤750 chars + submission preview ≤750 chars). Manual Aggregator files use `Summary_Of_Last_5_Validator_Rejections_For_Submitter_{N}.txt` and clear-all must erase them even after restart/no live submitters. Internal child aggregators must use scoped rejection-log files so topic/title/autonomous runs never feed stale feedback into manual runs or each other. Reset when a submitter reaches the configured consecutive-rejection threshold (default 15).
+
+**User-facing validation activity**: Every semantic acceptance/rejection exposes the
+validator outcome and bounded safe reasoning/feedback with stable submission and route
+identity; rejection feedback matches the durable submitter feedback entry. Provider,
+parser, context, and transport failures remain operational activity rather than semantic
+validator decisions. Rejection activity should also make clear that rejections are
+normal and extended streaks can be expected on difficult problems. Batched validators
+retain one ordered decision, reasoning/summary, and stable identity for every item;
+malformed batch contracts are operational and preserve/requeue dequeued work rather
+than silently discarding it or fabricating semantic decisions.
+
+**Submission context injection**: Submitter context direct-injects first and offloads existing context to RAG when needed. Validator submissions under review are mandatory direct context; if a single or batch validation prompt still does not fit after normal allocation, or the provider rejects it as too large, the normal context-overflow lifecycle stops the affected workflow rather than indexing the pending submission as RAG.
+
+**Feedback context fitting**: Durable local rejection history remains intact. Each
+submitter prompt starts with at most the newest five whole rejection entries and
+removes the oldest one at a time only as needed after complete-prompt token counting.
+The newest entry remains mandatory direct feedback; if it still does not fit, the
+normal context-overflow lifecycle stops the affected workflow.
+
+**Upload/path enforcement**: Server-side validation allows `.txt` and `.lean` text uploads only, 5 MB max, UTF-8/non-empty content, filename sanitization, path traversal rejection, and delete-by-logical-filename cleanup. Upload responses return logical filenames, not absolute host paths. Public Aggregator starts resolve `uploaded_files` only under `user_uploads`; internal autonomous reference-paper context may opt into trusted data-root file references via an explicit coordinator flag.
+
+## Context Allocation
+
+User prompt ALWAYS direct injected. Context allocation is direct-first and offloads to RAG only when needed; unused budget does not require extra supplemental RAG retrieval when the direct context already fits.
+
+### CONTEXT DISTRIBUTION RULES
+
+Direct injection first, with the allocator preserving the canonical RAG/evidence reserve documented in `rag-design-for-overall-program.md`. Halt with error if user prompt exceeds the mandatory direct-context budget.
+
+No context carryover between prompts (only system-intended DB/submission transfers).
+
+All Aggregator offload order and source-exclusion rules are centralized in `rag-design-for-overall-program.md`. Validator submissions under review remain mandatory direct context.
+
+## Role Selection
+
+User selects model per role. Multiple roles can share a model. Models load with user-set context sizes. Aggregator settings also expose one shared `aggregator_assistant` memory-search LLM role for optional verified Lean proof-history support; it cannot redirect or mathematically reinterpret an unrelated parent goal, and returning no support is valid. Built-in/default profiles set Assistant equal to the primary Validator, and Session History Memory disabled greys Assistant out. Assistant may provide up to 7 prior verified proofs, reuses useful packs for two eligible receiver reads before refresh, skips true no-external-history targets because it only performs proof-memory retrieval for now, uses run-scoped cooldown for repeated zero-useful or stagnant retrieval, shuts down only for repeated zero-useful retrieval in the current run, hides skip/backoff/shutdown turns while showing Assistant model-output failures in live activity, and never injects into validator prompts.
+
+Per-role Supercharge is optional. When enabled for a submitter or validator, `api_client_manager.generate_completion()` runs 4 parallel full answer attempts for that role call, then a 5th same-model synthesis call and returns only the synthesis result. Supercharge candidate attempts intentionally use temperatures `[0.0, 0.2, 0.4, 0.8]` to diversify parallel outputs; synthesis remains `0.0`. Candidate attempts are sanitized to reusable visible answer text before synthesis; private thought/channel/control transcript text must never be fed back as feedback, brainstorm memory, or synthesis context. The synthesis prompt frames candidates as optional working material: the model may use one, combine several, ignore all, or write a stronger new answer, while preserving the original role output contract. If Boost applies to that role/task, all internal Supercharge calls use the Boost config first. Tool-call requests bypass Supercharge.
+
+Parallel brainstorm submitter lanes intentionally use temperatures `[0.0, 0.1, ..., 0.9]` by submitter index so every parallel set includes a deterministic lane and increasing exploration lanes. This applies only to parallel submitter generation. Validators, compiler roles, JSON retries, and single-model sequential submitters remain `0.0`.
+
+When developer-enabled `creativity_emphasis_boost_enabled` is true, every fifth valid submission slot per Aggregator submitter uses the normal submitter prompt plus a small Creativity Emphasis Boost block. This block may encourage extreme creativity, near-solutions, or adjacent solutions only when apparent, appearing true, and potentially very helpful; validators are unchanged, and accepted/rejected WebSocket payloads mark `creativity_emphasized`. The extra block must be budgeted before prompt assembly; if it would overflow the configured context, skip the block for that slot and run the normal prompt.
+
+## Single-Model Mode
+When ALL submitters AND validator use the same model → single-model mode:
+- Submitters run SEQUENTIALLY (S1 → S2 → ... → Sn)
+- Validator processes all queued submissions after each full submitter round
+- Prevents queue overflow from parallel tasks flooding when LLM completes
+- Exception: if LM Studio reports multiple loaded same-base numeric `:#` instances for that model, submitters may still run in parallel while the LM Studio client routes independent calls to idle sibling instances.
+- Boost does NOT affect single-model detection (routing only, not model config)
+
+## Multi-Submitter Configuration
+
+Per-submitter: provider (LM Studio / OpenRouter / desktop-only cloud providers such as OpenAI Codex OAuth, xAI Grok OAuth, or Sakana Fugu API key in default mode; OpenRouter only in generic mode), model, OpenRouter host provider when applicable, LM Studio fallback for cloud providers (default mode only), context window, max output tokens, and Supercharge checkbox. Assistant has the same provider/context/output setting shape but is not a submitter and is not counted in submitter parallelism. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
+
+OpenRouter auto-fill rule: selecting an OpenRouter model auto-fills context from the model-level `context_length`. Max output tokens use `min(20% of model context_length, endpoint max_completion_tokens)`: auto provider mode filters weak/low-cap endpoints and uses the smallest remaining capable endpoint cap, while an explicit host selection uses that host's largest exposed endpoint cap. Endpoint `context_length` / `max_prompt_tokens` rows are diagnostics, not context shrink limits. If endpoint output caps are incomplete, preserve current values (no guessing).
+
+Embeddings for RAG: Default mode uses LM Studio first, falls back to OpenRouter (`openai/text-embedding-3-small`) if LM Studio unavailable. Generic mode uses in-process FastEmbed (see `rag-design-for-overall-program.md`).
+
+## Database Management
+
+Accepted submissions database: never truncated. Live preview shows exact non-truncated log. Validator reasoning/results NOT included in the database (accepted submissions only).
+
+## Progressive Solution Path
+
+Manual Aggregator owns one durable Progressive Solution Path for the whole manual Aggregator→Compiler run. It is absent from prompts and UI until the fifth accepted brainstorm event; acceptance counting is monotonic across Stop/Start, remains distinct from cleanup-reduced retained database size, and does not include validation, proof, or paper events. Normal Manual Aggregator owns this count; parent-controlled child Aggregators share the manager without count authority. After activation, the current Main Submitter 1-approved canonical revision proposed by the semantic validator is optional advisory direct context.
+
+Only the existing semantic validator may originate an optional update, as a separately parsed addition to its normal JSON, and only for material route/goal/evidence changes or meaningful step status—not routine nuance. Malformed or omitted path data cannot change the primary decision. Proposals are durably queued without blocking validation and are transactionally reviewed by a dedicated role copied exactly from Main Submitter 1. Only completely valid approved revisions become canonical; hard failures enter explicit user-repair state and resume only through the generation-fenced retry action. Stop/crash preserves the plan and pending work; explicit manual Clear removes it and is serialized against same-run reacquisition.
+
+## Database Cleanup Review
+
+Every 7th tracked acceptance (`total_acceptances % 7 == 0`, minimum 7 before first review). Manual Part 1 normally reloads persisted stats, so its cleanup cadence is persisted across restarts; autonomous/mini-aggregator runs can use fresh run-local stats when initialized with stats loading skipped. Autonomous resume offsets used for hard caps/completion reviews do not shift this cleanup modulo.
+
+**Phase 1**: Validator reviews the accepted-submissions database and identifies AT MOST ONE for removal (redundant, contradicted, superseded, or provides no unique value). If the complete database fits, it is direct-injected in full. If it does not fit, cleanup must use the normal direct-first/RAG fallback path instead of skipping or truncating; the review is then evidence-bounded by retrieved context.
+
+**Phase 2** (only if removal proposed): Validator self-validates its removal proposal. Conservative default: if uncertain, reject removal. If validated: execute removal + full RAG rebuild (all shared-training sources are dropped and re-indexed from the post-removal file so deleted content is no longer retrievable).
+
+**Cleanup toggle**: `enable_cleanup_review` (default True) can be set False at `Coordinator.initialize()` to disable cleanup for short-lived mini-brainstorm phases (topic exploration, title exploration).
+
+**Critical selection rule**: When multiple submissions redundant, remove the WEAKEST (least unique value). Never remove a more complete submission.
+
+**Stats tracked**: `cleanup_reviews_performed`, `removals_proposed`, `removals_executed`
+
+**WebSocket events**: Cleanup review should expose user-visible start/proposal/removal/completion/error progress; exact internal event names are not rule-level invariants unless consumed by the hosted wrapper or frontend contract.
+
+## RAG Refresh
+
+New submission acceptance → synchronously persists to accepted memory and asynchronously triggers incremental RAG refresh (no full re-RAG). Submitters see fresh direct memory on the next API call; RAG-only fallback freshness can lag briefly while the background refresh completes.
+
+Proof live-context pruning projects linked inline Lean-proof submissions out of both direct accepted memory and Aggregator RAG for the owning run. Prune/restore replaces stale incremental RAG sources from the same projection; canonical accepted memory remains complete.
+
+## Validation
+
+JSON formatting is used for all submission/validation communication. Ordinary submissions must meet domain- and claim-appropriate standards of correctness and defensibility with no unfounded claims, fabricated support, or logical fallacies. Mathematical claims specifically require sound derivation, proof, or explicit assumptions.
+
+JSON validation failure: reject submission, send reason + content to submitter's local failure feedback memory.
+
+## Optional Lean 4 Proof Submissions
+
+When `lean4_enabled`, submitters may use `submission_type="lean_proof"` only for high-impact prompt-directed proof candidates whose claimed novelty is public/citable and absent from standard references or Mathlib, not merely new to the program. The shared Lean proof gate rejects missing/invalid novelty tiers and missing prompt-relevance/novelty/anti-standard-result rationales before Lean cost. Supporting lemmas, routine helpers, local facts, trivial/easy proofs, and weakened substitutes are not valid targets. Once Lean accepts real proof code, preserve/register the actual artifact for novelty/triviality ranking, but normal brainstorm validation may still reject it from the accepted-submission database when the actual theorem is low-impact, trivial, routine, or redundant. Hard rejection always applies to non-Lean-verified attempts, malformed submissions, or fake proof devices such as new `axiom`/`constant`/`opaque` declarations.
+Accepted inline Lean proof metadata preserves the checker-produced immutable
+receipt and exact checked source through canonical registration; no caller or
+derived index reconstructs proof-time evidence.
+
+Manual Aggregator live results expose "Search For More Mathematical Proofs" over the current accepted-submissions database. It prioritizes direct prompt solutions, then substantial progress. This entry point uses the shared accessible one-round/continuous mode chooser and source-keyed proof-run status/control surface, including browser reload/reconnect recovery while the same process-local run remains active; backend restart never reconstructs a manual run. Assistant retrieval is parallel/non-blocking, capped at 7, refreshed after two receiver reads, and filters the requesting run/session on fresh and reused packs; validators never receive it. Every newly verified current occurrence is stored after independent novelty judgment, while source appendices avoid only same-source exact duplication. Known and cross-run `duplicate_novel` proofs remain visible/searchable for RALPH history but stay outside highest-priority prompt-novel injection. Clear archives the active manual proof run and resets active proof context; it is rejected during verification.

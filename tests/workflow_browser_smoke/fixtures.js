@@ -28,13 +28,25 @@ const json = (route, body, status = 200) => route.fulfill({
   body: JSON.stringify(body),
 });
 
+// Mirrors the backend key-status contract: presence and authenticated validity are distinct.
+const openRouterKeyStatus = (state) => ({
+  success: true,
+  has_key: state.hasOpenRouterKey,
+  enabled: state.hasOpenRouterKey,
+  validation_state: state.hasOpenRouterKey ? 'valid' : 'missing',
+});
+
 function responseFor(method, path, state) {
   if (method === 'GET' && path === '/api/features') return state.features;
   if (method === 'GET' && path === '/api/openrouter/api-key-status') {
-    return { success: true, has_key: state.hasOpenRouterKey, enabled: state.hasOpenRouterKey };
+    return openRouterKeyStatus(state);
   }
   if (method === 'GET' && path === '/api/cloud-access/status') return { providers: {} };
   if (method === 'GET' && path === '/api/cloud-access/provider-notifications') return { notifications: [] };
+  if (method === 'GET' && path === '/api/cloud-access/provider-recovery/events') return { events: [] };
+  if (method === 'POST' && path === '/api/openrouter/validate-current-key') {
+    return openRouterKeyStatus(state);
+  }
   if (method === 'GET' && path === '/api/connectivity/status') {
     return {
       inference: {

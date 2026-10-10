@@ -1,11 +1,16 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
-  "diagnostics": {},
-  "evidence": [
-    "same_run_filtered",
-    "occurrence_status"
+  "asserted_invariants": [],
+  "blocked_dependencies": [
+    "cross-run occurrence retrieval",
+    "Assistant occurrence filtering"
   ],
+  "diagnostics": {
+    "reason": "The focused snapshot test proves same-run review exclusion only, not the full occurrence and owning-run isolation contract."
+  },
+  "evidence": [],
+  "faked_dependencies": [],
   "fields": [
     "proof_pruning",
     "proof_scope_isolation",
@@ -14,11 +19,18 @@
   "invariants": [
     "proof_pruning.occurrence_scope_isolated"
   ],
+  "observed_transition": null,
+  "real_components": [
+    "backend/autonomous/memory/proof_database.py"
+  ],
   "replay": [],
-  "result": "passed",
+  "result": "blocked",
+  "runner": null,
   "scenario_id": "real_pruning_is_occurrence_and_owning_run_scoped",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/unit/test_proof_pruning_snapshot.py"
+  "source_identity": "workflow-source-v1:b78c9a0bd2e5db75fb6b8a09c7bd4a0cbdf3b98e5461038a54f97dcc16742117",
+  "test_file": "tests/workflow_real_adapters/test_build_07_source_mappings.py",
+  "test_selectors": []
 }

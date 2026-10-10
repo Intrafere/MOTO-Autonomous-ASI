@@ -153,7 +153,11 @@ class ValidatorAgent:
         """Assess submission quality using LLM."""
         try:
             # Get context
-            shared_training_content = await shared_training_memory.get_all_content()
+            shared_training_content = (
+                await self.coordinator.get_projected_shared_training_content()
+                if getattr(self, "coordinator", None)
+                else await shared_training_memory.get_all_content()
+            )
             
             # Allocate context
             allocation = await context_allocator.allocate_validator_context(
@@ -284,7 +288,20 @@ class ValidatorAgent:
                             f"Validator: HTTP error (attempt {attempt + 1}/{max_retries}): {error_msg}. "
                             f"Retrying in {backoff_time}s..."
                         )
-                        await asyncio.sleep(backoff_time)
+                        await api_client_manager.emit_and_wait_for_retry(
+                            {
+                                "provider": "configured_role",
+                                "provider_label": "Configured provider",
+                                "role_id": self.role_id,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": max_retries,
+                                "retry_after_seconds": backoff_time,
+                                "reason": "http_or_context_retry",
+                                "error_summary": error_msg,
+                            },
+                            role_id=self.role_id,
+                            error=e,
+                        )
                         continue
                     else:
                         logger.error(f"Validator: Failed to generate validation after {attempt + 1} attempts: {e}")
@@ -653,7 +670,11 @@ class ValidatorAgent:
                 build_prompt = build_validator_triple_prompt
             
             # Get context
-            shared_training_content = await shared_training_memory.get_all_content()
+            shared_training_content = (
+                await self.coordinator.get_projected_shared_training_content()
+                if getattr(self, "coordinator", None)
+                else await shared_training_memory.get_all_content()
+            )
             
             # CRITICAL FIX: Properly account for batch-specific overhead
             # The context allocator expects single submission format, but batch prompts have:

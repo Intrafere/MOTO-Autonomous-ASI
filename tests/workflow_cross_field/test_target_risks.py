@@ -31,17 +31,28 @@ def _record(
     )
 
 
-def test_catalog_has_exactly_twelve_unique_recognized_risks():
+def test_catalog_has_append_only_unique_recognized_risks():
     validate_target_risks()
-    assert len(TARGET_RISKS) == 12
+    assert len(TARGET_RISKS) >= 24
     risk_ids = {risk.risk_id for risk in TARGET_RISKS}
-    assert len(risk_ids) == 12
+    assert len(risk_ids) == len(TARGET_RISKS)
     assert "risk.pruned_paper_context_leak" in risk_ids
     assert "risk.hosted_desktop_boundary" in risk_ids
     assert "risk.context_overflow_activity_loses_identity" in risk_ids
     assert "risk.direct_source_duplicated_by_rag" in risk_ids
     assert "risk.concurrent_workflow_ownership" not in risk_ids
     assert "risk.proof_event_precedes_registration" not in risk_ids
+
+
+def test_every_invariant_has_a_target_risk_owner():
+    from tests.workflow_harness.invariant_catalog import INVARIANTS_BY_ID
+
+    owned = {
+        invariant_id
+        for risk in TARGET_RISKS
+        for invariant_id in risk.supporting_invariants
+    }
+    assert owned == set(INVARIANTS_BY_ID)
 
 
 @pytest.mark.parametrize(

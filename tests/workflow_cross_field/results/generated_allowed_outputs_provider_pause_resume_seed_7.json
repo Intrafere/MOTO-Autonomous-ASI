@@ -1,15 +1,22 @@
 {
   "action_ids": [
     "start_autonomous_proofs_only",
+    "stop",
+    "resume",
     "complete_topic_exploration",
     "simulate_credit_exhaustion",
     "complete_brainstorm",
-    "reset_credit",
-    "stop",
-    "resume"
+    "reset_credit"
   ],
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "outputs.proofs_only_no_paper_phase",
+    "provider.pause_preserves_checkpoint",
+    "provider.stop_resume_preserves_pause",
+    "provider.reset_wakes_without_corrupting_checkpoint"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {
     "final_mode": "autonomous",
     "final_phase": "tier1_aggregation"
@@ -24,6 +31,9 @@
     "provider.pause_preserves_checkpoint",
     "provider.reset_wakes_without_corrupting_checkpoint",
     "provider.stop_resume_preserves_pause"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
   ],
   "fields": [
     "allowed_outputs",
@@ -43,19 +53,26 @@
     "runtime_exclusivity",
     "workflow_filesystem_state"
   ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
   "replay": [
     "start_autonomous(lean_enabled=True, papers=False, proofs=True)",
+    "stop()",
+    "resume()",
     "complete_topic_exploration()",
     "simulate_credit_exhaustion()",
     "complete_brainstorm()",
-    "reset_credit()",
-    "stop()",
-    "resume()"
+    "reset_credit()"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_7",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 7,
+  "source_identity": "workflow-source-v1:5d76ef9215b8bffcdd463db5a25c48ba3b8c3c5b5082398f9cb98aef2593d0f2",
   "target_artifact": "targets/generated_allowed_outputs_provider_pause_resume.json",
-  "target_id": "generated_allowed_outputs_provider_pause_resume"
+  "target_id": "generated_allowed_outputs_provider_pause_resume",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
 }

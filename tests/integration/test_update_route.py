@@ -9,6 +9,28 @@ from moto_updater import BuildManifest, InstallState, UpdateCheckResult
 
 
 class UpdateRouteGitPullTests(IsolatedAsyncioTestCase):
+    async def test_pull_status_diagnostics_pass_through_trade_data_boundary(self) -> None:
+        previous = update_route._pull_state
+        update_route._pull_state = {
+            "status": "error",
+            "output_lines": [
+                r"Exception: cannot write C:\Users\alice\moto\backend\data\x",
+                "fatal: Authorization: Bearer abcdef123",
+            ],
+            "returncode": -1,
+            "install_kind": "git",
+        }
+        try:
+            status = await update_route.get_pull_status()
+        finally:
+            update_route._pull_state = previous
+
+        rendered = "\n".join(status["output_lines"])
+        self.assertNotIn("alice", rendered)
+        self.assertNotIn("abcdef123", rendered)
+        self.assertEqual(status["status"], "error")
+        self.assertEqual(status["returncode"], -1)
+
     def _manifest(self, version: str, commit: str) -> BuildManifest:
         return BuildManifest(
             version=version,

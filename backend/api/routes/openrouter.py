@@ -16,9 +16,12 @@ from typing import Dict, Any, Optional
 import logging
 import json
 import httpx
+import hashlib
+import time
 from pathlib import Path
 
 from backend.shared.config import rag_config, system_config
+from backend.shared.credential_locks import openrouter_credential_mutation
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import OpenRouterClient
 from backend.shared.api_client_manager import api_client_manager
@@ -30,17 +33,72 @@ from backend.shared.runtime_settings import RuntimeSettingsError, save_free_mode
 from backend.shared.secret_store import (
     SecretStoreError,
     clear_openrouter_api_key,
+    load_openrouter_api_key,
     store_openrouter_api_key,
 )
 from backend.shared.models import FreeModelSettings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+_openrouter_validation_state = "unknown"
+_validated_openrouter_key_fingerprint: Optional[str] = None
+_validated_openrouter_key_at: Optional[float] = None
+_OPENROUTER_VALIDATION_TTL_SECONDS = 5 * 60
+
+
+def _key_fingerprint(api_key: Optional[str]) -> Optional[str]:
+    normalized = (api_key or "").strip()
+    if not normalized:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _current_validation_state() -> str:
+    if not rag_config.openrouter_api_key:
+        return "missing"
+    if _validated_openrouter_key_fingerprint != _key_fingerprint(rag_config.openrouter_api_key):
+        return "unknown"
+    if (
+        _openrouter_validation_state == "valid"
+        and (
+            _validated_openrouter_key_at is None
+            or time.monotonic() - _validated_openrouter_key_at > _OPENROUTER_VALIDATION_TTL_SECONDS
+        )
+    ):
+        return "unknown"
+    return _openrouter_validation_state
 
 
 class SetApiKeyRequest(BaseModel):
     """Request body for setting the global OpenRouter API key."""
     api_key: str
+
+
+async def _validate_openrouter_key(api_key: str) -> Dict[str, Any]:
+    client = OpenRouterClient(api_key)
+    try:
+        return await client.get_current_api_key()
+    finally:
+        await client.close()
+
+
+def _raise_openrouter_validation_error(exc: Exception) -> None:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code if exc.response is not None else 0
+        if status_code in (401, 403):
+            raise HTTPException(
+                status_code=400,
+                detail="OpenRouter rejected this API key. Double-check or replace it at https://openrouter.ai/keys.",
+            ) from exc
+    if isinstance(exc, (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException)):
+        raise HTTPException(
+            status_code=502,
+            detail="Could not reach OpenRouter to validate the key. The key was not saved.",
+        ) from exc
+    raise HTTPException(
+        status_code=502,
+        detail="OpenRouter could not validate the API key. The key was not saved.",
+    ) from exc
 
 
 @router.get("/api/openrouter/lm-studio-availability")
@@ -99,6 +157,7 @@ async def check_lm_studio_availability() -> Dict[str, Any]:
 
 
 @router.post("/api/openrouter/set-api-key")
+@openrouter_credential_mutation
 async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
     """
     Set the global OpenRouter API key for per-role model selection.
@@ -113,83 +172,50 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
     Returns:
         Success status and validation result
     """
+    global _openrouter_validation_state, _validated_openrouter_key_fingerprint, _validated_openrouter_key_at
     try:
         api_key = request.api_key.strip()
         if not api_key:
             raise HTTPException(status_code=400, detail="API key is required")
         
-        # Validate API key by testing connection
-        client = OpenRouterClient(api_key)
         try:
-            try:
-                models = await client.list_models(raise_on_error=True)
-            except httpx.HTTPStatusError as http_exc:
-                status_code = http_exc.response.status_code if http_exc.response is not None else 0
-                if status_code in (401, 403):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="OpenRouter rejected this API key (unauthorized). Please double-check the key at https://openrouter.ai/keys."
-                    ) from http_exc
-                logger.warning(
-                    "OpenRouter /models returned HTTP %s during key validation; treating as transient.",
-                    status_code,
-                )
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        f"OpenRouter is temporarily unreachable (HTTP {status_code}). "
-                        "Your key was NOT saved. Please try again in a moment."
-                    ),
-                ) from http_exc
-            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as net_exc:
-                logger.warning(
-                    "Network error during OpenRouter key validation: %s", net_exc
-                )
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "Could not reach OpenRouter to validate the key. "
-                        "Your key was NOT saved. Please check your internet connection and try again."
-                    ),
-                ) from net_exc
+            await _validate_openrouter_key(api_key)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_openrouter_validation_error(exc)
 
-            if not models:
-                raise HTTPException(
-                    status_code=400,
-                    detail="OpenRouter returned no models for this key. Please verify the key has access."
-                )
+        if not system_config.generic_mode:
+            store_openrouter_api_key(api_key)
+            if load_openrouter_api_key() != api_key:
+                raise SecretStoreError("Stored OpenRouter credential could not be verified")
             
-            # Store the API key globally
-            rag_config.openrouter_api_key = api_key
-            rag_config.openrouter_enabled = True
+        rag_config.openrouter_api_key = api_key
+        rag_config.openrouter_enabled = True
+        api_client_manager.set_openrouter_api_key(api_key)
+        _openrouter_validation_state = "valid"
+        _validated_openrouter_key_fingerprint = _key_fingerprint(api_key)
+        _validated_openrouter_key_at = time.monotonic()
             
-            # Also configure the API client manager
-            api_client_manager.set_openrouter_api_key(api_key)
-
-            if system_config.generic_mode:
-                logger.info("Generic mode active - keeping OpenRouter API key in runtime memory only")
-                success_message = "OpenRouter API key validated and loaded into runtime memory"
-            else:
-                # Persist to secure OS-backed storage so the key survives restarts.
-                store_openrouter_api_key(api_key)
-                success_message = "OpenRouter API key validated and saved"
+        if system_config.generic_mode:
+            logger.info("Generic mode active - keeping OpenRouter API key in runtime memory only")
+            success_message = "OpenRouter API key validated and loaded into runtime memory"
+        else:
+            success_message = "OpenRouter API key validated and saved"
             
-            # Reset exhaustion flags so roles can retry OpenRouter
-            free_model_manager.clear_account_exhaustion()
-            reset_roles = await api_client_manager.reset_openrouter_fallbacks()
+        free_model_manager.clear_account_exhaustion()
+        reset_roles = await api_client_manager.reset_openrouter_fallbacks()
             
-            logger.info(f"Global OpenRouter API key set successfully. {len(models)} models available.")
-            if reset_roles:
-                logger.info(f"Auto-reset {len(reset_roles)} role(s) back to OpenRouter after key update")
+        logger.info("Global OpenRouter API key set successfully")
+        if reset_roles:
+            logger.info(f"Auto-reset {len(reset_roles)} role(s) back to OpenRouter after key update")
             
-            return {
-                "success": True,
-                "message": success_message,
-                "model_count": len(models),
-                "roles_reset": list(reset_roles.keys())
-            }
-        finally:
-            await client.close()
+        return {
+            "success": True,
+            "message": success_message,
+            "validation_state": "valid",
+            "roles_reset": list(reset_roles.keys())
+        }
             
     except SecretStoreError as e:
         logger.error(f"Failed to persist OpenRouter API key securely: {e}")
@@ -202,6 +228,7 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
 
 
 @router.delete("/api/openrouter/api-key")
+@openrouter_credential_mutation
 async def clear_api_key() -> Dict[str, Any]:
     """
     Clear the global OpenRouter API key.
@@ -212,17 +239,20 @@ async def clear_api_key() -> Dict[str, Any]:
     Returns:
         Success status
     """
+    global _openrouter_validation_state, _validated_openrouter_key_fingerprint, _validated_openrouter_key_at
     try:
-        rag_config.openrouter_api_key = None
-        rag_config.openrouter_enabled = False
-        api_client_manager.set_openrouter_api_key(None)
-
         if system_config.generic_mode:
-            logger.info("Generic mode active - cleared in-memory OpenRouter API key")
             success_message = "OpenRouter API key cleared from runtime memory"
         else:
             clear_openrouter_api_key()
             success_message = "OpenRouter API key cleared"
+
+        rag_config.openrouter_api_key = None
+        rag_config.openrouter_enabled = False
+        api_client_manager.set_openrouter_api_key(None)
+        _openrouter_validation_state = "unknown"
+        _validated_openrouter_key_fingerprint = None
+        _validated_openrouter_key_at = None
         
         logger.info("Global OpenRouter API key cleared")
         
@@ -251,7 +281,40 @@ async def get_api_key_status() -> Dict[str, Any]:
     return {
         "success": True,
         "has_key": bool(rag_config.openrouter_api_key),
-        "enabled": rag_config.openrouter_enabled
+        "enabled": rag_config.openrouter_enabled,
+        "validation_state": _current_validation_state(),
+    }
+
+
+@router.post("/api/openrouter/validate-current-key")
+@openrouter_credential_mutation
+async def validate_current_api_key() -> Dict[str, Any]:
+    """Validate the restored/runtime key without returning credential material."""
+    global _openrouter_validation_state, _validated_openrouter_key_fingerprint, _validated_openrouter_key_at
+    api_key = (rag_config.openrouter_api_key or "").strip()
+    if not api_key:
+        _openrouter_validation_state = "unknown"
+        _validated_openrouter_key_fingerprint = None
+        _validated_openrouter_key_at = None
+        return {"success": True, "has_key": False, "validation_state": "missing"}
+    try:
+        await _validate_openrouter_key(api_key)
+        _openrouter_validation_state = "valid"
+        _validated_openrouter_key_at = time.monotonic()
+    except httpx.HTTPStatusError as exc:
+        if exc.response is not None and exc.response.status_code in (401, 403):
+            _openrouter_validation_state = "invalid"
+        else:
+            _openrouter_validation_state = "unreachable"
+        _validated_openrouter_key_at = time.monotonic()
+    except Exception:
+        _openrouter_validation_state = "unreachable"
+        _validated_openrouter_key_at = time.monotonic()
+    _validated_openrouter_key_fingerprint = _key_fingerprint(api_key)
+    return {
+        "success": True,
+        "has_key": True,
+        "validation_state": _openrouter_validation_state,
     }
 
 
@@ -450,19 +513,18 @@ async def test_connection(request: SetApiKeyRequest) -> Dict[str, Any]:
         if not request.api_key:
             raise HTTPException(status_code=400, detail="API key is required")
         
-        client = OpenRouterClient(request.api_key)
         try:
-            models = await client.list_models()
-            
+            await _validate_openrouter_key(request.api_key.strip())
             return {
                 "success": True,
                 "connected": True,
-                "model_count": len(models),
-                "message": f"Successfully connected to OpenRouter. {len(models)} models available."
+                "validation_state": "valid",
+                "message": "Successfully authenticated with OpenRouter."
             }
-        finally:
-            await client.close()
-            
+        except Exception as exc:
+            _raise_openrouter_validation_error(exc)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"OpenRouter connection test failed: {e}")
         return {

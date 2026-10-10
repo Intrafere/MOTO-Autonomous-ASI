@@ -7,6 +7,14 @@
   ],
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "prompt.user_prompt_direct_injected",
+    "prompt.proof_source_context_required",
+    "prompt.direct_sources_excluded_from_rag",
+    "prompt.mandatory_source_overflow_fails_visible",
+    "prompt.generated_appendices_stripped"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {
     "final_mode": "autonomous",
     "final_phase": "topic_exploration"
@@ -22,6 +30,9 @@
     "prompt.mandatory_source_overflow_fails_visible",
     "prompt.proof_source_context_required",
     "prompt.user_prompt_direct_injected"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
   ],
   "fields": [
     "prompt_context",
@@ -45,6 +56,8 @@
     "websocket_api_contracts",
     "workflow_filesystem_state"
   ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
   "replay": [
     "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
     "reject_mandatory_source_overflow()",
@@ -52,9 +65,14 @@
     "prepare_prompt_context()"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "generated_rag_prompt_boundaries_seed_7",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 7,
+  "source_identity": "workflow-source-v1:caec09cab6c1af521586d1a5e6ceb2079332b7c5bd184bfb95100f49ad8e758e",
   "target_artifact": "targets/generated_rag_prompt_boundaries.json",
-  "target_id": "generated_rag_prompt_boundaries"
+  "target_id": "generated_rag_prompt_boundaries",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
 }

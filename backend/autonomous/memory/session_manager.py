@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 import unicodedata
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -155,11 +156,11 @@ class SessionManager:
         """
         Generate a unique session ID from prompt + timestamp.
         
-        Format: {sanitized_prompt}_{YYYY-MM-DD_HH-MM}
+        Format: {sanitized_prompt}_{YYYY-MM-DD_HH-MM}_{random}
         """
         sanitized = self.sanitize_prompt_for_folder(prompt)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        return f"{sanitized}_{timestamp}"
+        return f"{sanitized}_{timestamp}_{uuid.uuid4().hex[:8]}"
     
     async def initialize(self, user_prompt: str, base_dir: Optional[str] = None) -> Path:
         """

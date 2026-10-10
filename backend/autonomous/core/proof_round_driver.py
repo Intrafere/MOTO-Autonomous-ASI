@@ -32,6 +32,10 @@ class ProofRoundPolicy(Protocol):
     def holds_source_reservation(self) -> bool:
         """Whether one token-owned source reservation spans all rounds."""
 
+    @property
+    def continues_after_empty_round(self) -> bool:
+        """Whether a valid no-candidate round advances instead of completing."""
+
     def trigger_for_round(self, base_trigger: str, round_index: int) -> str:
         """Return the durable checkpoint trigger for one round."""
 
@@ -42,6 +46,7 @@ class OneRoundPolicy:
 
     max_rounds: Optional[int] = 1
     holds_source_reservation: bool = False
+    continues_after_empty_round: bool = False
 
     def trigger_for_round(self, base_trigger: str, round_index: int) -> str:
         return base_trigger
@@ -49,10 +54,11 @@ class OneRoundPolicy:
 
 @dataclass(frozen=True)
 class AutomaticMultiRoundPolicy:
-    """Bounded automatic rounds with distinct follow-up checkpoint triggers."""
+    """Bounded automatic rounds that always run every configured round."""
 
     max_rounds: Optional[int] = 4
     holds_source_reservation: bool = True
+    continues_after_empty_round: bool = True
 
     def __post_init__(self) -> None:
         if self.max_rounds is None or self.max_rounds < 2:
@@ -70,6 +76,7 @@ class ContinuousPruningPolicy:
 
     max_rounds: Optional[int] = None
     holds_source_reservation: bool = True
+    continues_after_empty_round: bool = False
 
     def trigger_for_round(self, base_trigger: str, round_index: int) -> str:
         if round_index <= 1:
@@ -166,6 +173,9 @@ class ProofRoundDriver:
                 if round_status == "stopped":
                     return "stopped"
                 if round_status == "no_candidates_skipped":
+                    if self.policy.continues_after_empty_round:
+                        round_index += 1
+                        continue
                     return "complete"
                 if round_status == "deferred":
                     return "complete"
@@ -179,7 +189,10 @@ class ProofRoundDriver:
                 prior_round_summaries.append(
                     summarize_round_result(round_index, proof_result)
                 )
-                if getattr(proof_result, "total_candidates", 0) == 0:
+                if (
+                    getattr(proof_result, "total_candidates", 0) == 0
+                    and not self.policy.continues_after_empty_round
+                ):
                     return "complete"
                 round_index += 1
             return "complete"

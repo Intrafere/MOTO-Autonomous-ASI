@@ -1,10 +1,16 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [],
+  "blocked_dependencies": [
+    "semantic proposer-validator-commit lifecycle",
+    "later support-prune attempt"
+  ],
   "diagnostics": {
     "reason": "Focused unit tests cover durable retained-support protection and section arbitration, but no bounded real-coordinator adapter yet observes canonically distinct semantic routes through proposal, validation, commit, and a later support-prune attempt."
   },
   "evidence": [],
+  "faked_dependencies": [],
   "fields": [
     "proof_pruning",
     "prompt_context",
@@ -14,11 +20,19 @@
   "invariants": [
     "proof_pruning.semantic_distinct_review_preserves_unique_routes"
   ],
+  "observed_transition": null,
+  "real_components": [
+    "backend/autonomous/agents/proof_pruning_agent.py",
+    "backend/autonomous/memory/proof_database.py"
+  ],
   "replay": [],
   "result": "blocked",
+  "runner": null,
   "scenario_id": "real_semantic_prune_persists_and_protects_retained_support",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
+  "source_identity": "workflow-source-v1:6b3b8c40970fc044fb9e8f88e92f8c868d844622173e3c122dde02efb1100f54",
+  "test_file": "tests/workflow_real_adapters/test_build_07_source_mappings.py",
+  "test_selectors": []
 }

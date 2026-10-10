@@ -1,11 +1,15 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
-  "diagnostics": {},
-  "evidence": [
-    "independent_validator",
-    "retarget_rejected"
+  "asserted_invariants": [],
+  "blocked_dependencies": [
+    "automatic mutation commit after independent validation"
   ],
+  "diagnostics": {
+    "reason": "The focused contract test rejects Validator retargeting, but does not observe the complete proposal-to-validation-to-mutation gate."
+  },
+  "evidence": [],
+  "faked_dependencies": [],
   "fields": [
     "proof_pruning",
     "provider_pause_resume",
@@ -14,11 +18,19 @@
   "invariants": [
     "proof_pruning.validator_gates_automatic_mutation"
   ],
+  "observed_transition": null,
+  "real_components": [
+    "backend/autonomous/agents/proof_pruning_agent.py",
+    "backend/autonomous/core/proof_pruning_coordinator.py"
+  ],
   "replay": [],
-  "result": "passed",
+  "result": "blocked",
+  "runner": null,
   "scenario_id": "real_automatic_prune_requires_validator_acceptance",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/unit/test_proof_pruning_agents.py"
+  "source_identity": "workflow-source-v1:96defa0393ec0482c12a187367d3a9f37192bda58d1b286843c212271dbd5748",
+  "test_file": "tests/workflow_real_adapters/test_build_07_source_mappings.py",
+  "test_selectors": []
 }

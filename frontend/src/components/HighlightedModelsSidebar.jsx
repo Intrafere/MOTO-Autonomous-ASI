@@ -49,7 +49,10 @@ export default function HighlightedModelsSidebar() {
               <OauthTag stacked />
               <div className="flex-row-center">
                 <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-                <div className="model-item-name">GPT 6 Sol Maximum Thinking</div>
+                <div className="model-item-title">
+                  <div className="model-item-name">GPT 6.1  Sol</div>
+                  <div className="model-item-subtitle">Maximum Thinking</div>
+                </div>
                 <div
                   className="help-tooltip-anchor"
                   style={{ zIndex: 100 }}
@@ -105,13 +108,25 @@ export default function HighlightedModelsSidebar() {
             <div className="model-item model-item--ranked model-item--free model-item--os">
               <OsTag />
               <div className="model-item-name">NVIDIA Nemotron Ultra</div>
-              <div className="model-item-badge">Highly knowledgeable, free on OpenRouter</div>
+              <div className="model-item-badge">Highly knowledgeable, 1000 free model calls per day on OpenRouter including a 1 million token context window</div>
             </div>
           </div>
 
           <div className="model-item">
-            <div className="model-item-name">Arcee AI's Trinity Large</div>
+            <div className="model-item-name">AI21's Jamba</div>
             <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item model-item--os">
+            <OsTag />
+            <div className="model-item-name">Alibaba's Qwen</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item model-item--os">
+            <OsTag />
+            <div className="model-item-name">Alibaba's Qwen Coder</div>
+            <div className="model-item-badge">Computer science</div>
           </div>
 
           <div className="model-item">
@@ -126,28 +141,12 @@ export default function HighlightedModelsSidebar() {
           </div>
 
           <div className="model-item">
+            <div className="model-item-name">Arcee AI's Trinity Large</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item">
             <div className="model-item-name">Cohere's Command A</div>
-            <div className="model-item-badge">Highly knowledgeable</div>
-          </div>
-
-          <div className="model-item">
-            <div className="model-item-name">Mistral AI's Mistral Large</div>
-            <div className="model-item-badge">Highly knowledgeable</div>
-          </div>
-
-          <div className="model-item model-item--os">
-            <OsTag />
-            <div className="model-item-name">Meta's Llama</div>
-            <div className="model-item-badge">Highly knowledgeable</div>
-          </div>
-
-          <div className="model-item">
-            <div className="model-item-name">Moonshot AI's Kimi</div>
-            <div className="model-item-badge">Highly knowledgeable</div>
-          </div>
-
-          <div className="model-item">
-            <div className="model-item-name">AI21's Jamba</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
@@ -168,46 +167,6 @@ export default function HighlightedModelsSidebar() {
             <div className="model-item-badge">Balanced knowledge and speed</div>
           </div>
 
-          <div className="model-item model-item--os">
-            <OsTag />
-            <div className="model-item-name">Z.AI's GLM</div>
-            <div className="model-item-badge">Highly knowledgeable</div>
-          </div>
-
-          <div className="model-item model-item--os">
-            <OsTag />
-            <div className="model-item-name">Z.AI's GLM Turbo</div>
-            <div className="model-item-badge">Fast validator</div>
-          </div>
-
-          <div className="model-item model-item--os">
-            <OsTag />
-            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-            <div className="model-item-name">OpenAI's GPT OSS 120b</div>
-            <div className="model-item-badge">Balanced knowledge and speed</div>
-          </div>
-
-          <div className="model-item model-item--oa">
-            <OauthTag stacked />
-            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-            <div className="model-item-name">xAI's Grok</div>
-            <div className="model-item-badge">Highly knowledgeable</div>
-          </div>
-
-          <div className="model-item model-item--oa">
-            <OauthTag stacked />
-            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-            <div className="model-item-name">OpenAI's ChatGPT</div>
-            <div className="model-item-badge">Highly knowledgeable</div>
-          </div>
-
-          <div className="model-item model-item--oa">
-            <OauthTag stacked />
-            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-            <div className="model-item-name">Sakana AI's Fugu</div>
-            <div className="model-item-badge">Highly knowledgeable model fusion</div>
-          </div>
-
           <div className="model-item">
             <div className="model-item-name">Inception's Mercury</div>
             <div className="model-item-badge">Rapid knowledge</div>
@@ -215,19 +174,8 @@ export default function HighlightedModelsSidebar() {
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">NVIDIA's Nemotron Super</div>
-            <div className="model-item-badge">Balanced knowledge and speed</div>
-          </div>
-
-          <div className="model-item model-item--os">
-            <OsTag />
-            <div className="model-item-name">Nous Research's Hermes</div>
+            <div className="model-item-name">Meta's Llama</div>
             <div className="model-item-badge">Highly knowledgeable</div>
-          </div>
-
-          <div className="model-item">
-            <div className="model-item-name">Perplexity's Sonar</div>
-            <div className="model-item-badge">Native internet search capability</div>
           </div>
 
           <div className="model-item model-item--os">
@@ -241,16 +189,71 @@ export default function HighlightedModelsSidebar() {
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
-          <div className="model-item model-item--os">
-            <OsTag />
-            <div className="model-item-name">Alibaba's Qwen Coder</div>
-            <div className="model-item-badge">Computer science</div>
+          <div className="model-item">
+            <div className="model-item-name">Mistral AI's Mistral Large</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item">
+            <div className="model-item-name">Moonshot AI's Kimi</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">Alibaba's Qwen</div>
+            <div className="model-item-name">Nous Research's Hermes</div>
             <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item model-item--os">
+            <OsTag />
+            <div className="model-item-name">NVIDIA's Nemotron Super</div>
+            <div className="model-item-badge">Balanced knowledge and speed</div>
+          </div>
+
+          <div className="model-item model-item--oa">
+            <OauthTag stacked />
+            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+            <div className="model-item-name">OpenAI's ChatGPT</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item model-item--os">
+            <OsTag />
+            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+            <div className="model-item-name">OpenAI's GPT OSS 120b</div>
+            <div className="model-item-badge">Balanced knowledge and speed</div>
+          </div>
+
+          <div className="model-item">
+            <div className="model-item-name">Perplexity's Sonar</div>
+            <div className="model-item-badge">Native internet search capability</div>
+          </div>
+
+          <div className="model-item model-item--oa">
+            <OauthTag stacked />
+            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+            <div className="model-item-name">Sakana AI's Fugu</div>
+            <div className="model-item-badge">Highly knowledgeable model fusion</div>
+          </div>
+
+          <div className="model-item model-item--oa">
+            <OauthTag stacked />
+            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+            <div className="model-item-name">xAI's Grok</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item model-item--os">
+            <OsTag />
+            <div className="model-item-name">Z.AI's GLM</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item model-item--os">
+            <OsTag />
+            <div className="model-item-name">Z.AI's GLM Turbo</div>
+            <div className="model-item-badge">Fast validator</div>
           </div>
         </div>
       </div>

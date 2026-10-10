@@ -23,6 +23,8 @@ export default function ProofRunStatusControls({
   );
   const pruningStatus = run.pruning_status || run.pruning?.status || 'idle';
   const isContinuous = run.run_mode === 'loop_with_pruning' || run.unbounded === true;
+  const noDiscoveryStreak = Number(run.consecutive_no_discovery_rounds || 0);
+  const noDiscoveryLimit = Number(run.no_discovery_round_limit || 0);
   const isStopping = status === 'stopping';
   const isTerminal = TERMINAL_STATUSES.has(status);
   const canStop = !isTerminal;
@@ -52,9 +54,25 @@ export default function ProofRunStatusControls({
         <span><strong>Status</strong> {proofRunStatusLabel(run)}</span>
         <span><strong>Pruning</strong> {readable(pruningStatus)}</span>
       </div>
-      {isContinuous && status === 'running' && (
+      {isContinuous && !isTerminal && (
         <div className="proof-run-status-controls__progress" role="status" aria-live="polite">
-          Continuous search is active. Every completed round starts the next round automatically until you press Stop.
+          {status === 'provider_paused'
+            ? 'Continuous search is paused for provider credits.'
+            : status === 'stopping'
+              ? 'Continuous search is stopping after its active work drains.'
+              : status === 'queued'
+                ? 'Continuous search is queued.'
+                : 'Continuous search is active.'}
+          {status === 'stopping'
+            ? ''
+            : ` Rounds continue automatically until you press Stop${
+              noDiscoveryLimit > 0
+                ? ` or ${noDiscoveryLimit} consecutive rounds find no candidates.`
+                : '.'
+            }`}
+          {noDiscoveryLimit > 0 && noDiscoveryStreak > 0
+            ? ` Current no-discovery streak: ${noDiscoveryStreak}/${noDiscoveryLimit}.`
+            : ''}
         </div>
       )}
       {status === 'repair_required' && (
@@ -64,7 +82,18 @@ export default function ProofRunStatusControls({
       )}
       {isTerminal && run.terminal_reason && (
         <div className="proof-run-status-controls__progress">
-          <strong>Ended because</strong> {readable(run.terminal_reason, 'Unknown reason')}
+          {run.terminal_reason === 'consecutive_no_discovery_limit'
+            ? (
+              <>
+                <strong>Completed normally</strong> after {noDiscoveryLimit || 10} consecutive
+                rounds found no useful novel proof candidates.
+              </>
+            )
+            : (
+              <>
+                <strong>Ended because</strong> {readable(run.terminal_reason, 'Unknown reason')}
+              </>
+            )}
         </div>
       )}
       {isTerminal && run.last_error_summary && (

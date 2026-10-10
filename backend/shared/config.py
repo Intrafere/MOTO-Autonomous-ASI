@@ -139,6 +139,20 @@ class SystemConfig(BaseSettings):
 
     # Deployment mode
     generic_mode: bool = False
+    syntheticlib_product_state: str = Field(
+        default="coming_soon",
+        validation_alias=AliasChoices(
+            "MOTO_SYNTHETICLIB_PRODUCT_STATE",
+            "SYNTHETICLIB_PRODUCT_STATE",
+        ),
+    )
+    syntheticlib_developer_preview_authorized: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "MOTO_SYNTHETICLIB_DEVELOPER_PREVIEW_AUTHORIZED",
+            "SYNTHETICLIB_DEVELOPER_PREVIEW_AUTHORIZED",
+        ),
+    )
 
     # Instance/runtime identity
     instance_id: str = Field(
@@ -256,6 +270,21 @@ class SystemConfig(BaseSettings):
     lean4_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("MOTO_LEAN4_ENABLED", "LEAN4_ENABLED"),
+    )
+    lean4_runtime_available: Optional[bool] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "MOTO_LEAN4_RUNTIME_AVAILABLE",
+            "LEAN4_RUNTIME_AVAILABLE",
+        ),
+    )
+    lean4_user_enabled: Optional[bool] = None
+    lean4_unavailable_reason: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "MOTO_LEAN4_UNAVAILABLE_REASON",
+            "LEAN4_UNAVAILABLE_REASON",
+        ),
     )
     lean4_lsp_enabled: bool = Field(
         default=False,

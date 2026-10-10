@@ -322,6 +322,9 @@ class CompilerState(BaseModel):
     in_critique_phase: bool = False
     critique_acceptances: int = 0
     paper_version: int = 1
+    fatal_error_type: Optional[str] = None
+    fatal_error_message: Optional[str] = None
+    terminal_event: Optional[Dict[str, Any]] = None
 
 
 class CompilerStartRequest(BaseModel):
@@ -591,15 +594,19 @@ class AutonomousTerminalEvent(BaseModel):
     workflow_mode: Literal["autonomous"] = "autonomous"
     notification_kind: Optional[str] = None
     role_id: Optional[str] = None
+    role_label: Optional[str] = None
     current_tier: Optional[str] = None
     current_topic_id: Optional[str] = None
     current_paper_id: Optional[str] = None
     configured_model: Optional[str] = None
     configured_provider: Optional[str] = None
+    configured_host_provider: Optional[str] = None
     effective_model: Optional[str] = None
     effective_provider: Optional[str] = None
     effective_host_provider: Optional[str] = None
+    host_routing: Optional[str] = None
     route_kind: Optional[str] = None
+    route_identity: Optional[str] = None
     resolution: Optional[str] = None
     terminal_guidance: Optional[str] = None
     error_detail: Optional[str] = None
@@ -856,6 +863,91 @@ class ProofDependency(BaseModel):
     kind: Literal["mathlib", "moto"]
     name: str
     source_ref: str = ""
+
+
+class LeanImportEvidence(BaseModel):
+    """One explicit import parsed from the exact source accepted by Lean."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    module_name: str = Field(min_length=1, max_length=512)
+    parser_version: Literal["moto-lean-imports-v1"] = "moto-lean-imports-v1"
+    ordinal: int = Field(ge=0)
+    present_in_original_source: bool = False
+
+
+class LeanCompileReceipt(BaseModel):
+    """Immutable proof-time evidence emitted by the authoritative Lean checker."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["moto-lean-compile-receipt-v1"] = "moto-lean-compile-receipt-v1"
+    receipt_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    result: Literal["accepted"] = "accepted"
+    checker_mode: Literal["subprocess", "lsp"]
+    verification_profile: Literal[
+        "full_proof",
+        "tactic_script",
+        "partial_scaffold",
+        "leanoj_intermediate_master",
+        "leanoj_final_master",
+        "compiler_rigor",
+        "brainstorm_proof_gate",
+    ] = "full_proof"
+    verification_profile_version: Literal["moto-lean-verification-v1"] = (
+        "moto-lean-verification-v1"
+    )
+    source_transformation_version: Literal["moto-lean-source-v1"] = "moto-lean-source-v1"
+    source_transformations: List[str] = Field(default_factory=list)
+    original_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    original_source_byte_length: int = Field(ge=0)
+    checked_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    checked_source_byte_length: int = Field(ge=0)
+    checked_source_artifact: str = Field(default="", max_length=256)
+    lean_version: str = Field(min_length=1, max_length=512)
+    mathlib_revision: str = Field(min_length=1, max_length=256)
+    moto_version: str = Field(min_length=1, max_length=128)
+    moto_build_commit: str = Field(min_length=1, max_length=128)
+    moto_api_contract_version: str = Field(min_length=1, max_length=128)
+    timeout_seconds: int = Field(gt=0)
+    completed_at: datetime
+    explicit_imports: List[LeanImportEvidence] = Field(default_factory=list)
+    migration_kind: Literal["original_verification"] = "original_verification"
+
+
+class PortableProofDependency(BaseModel):
+    """Path-free dependency evidence suitable for later allowlisted export."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["moto-portable-dependency-v1"] = "moto-portable-dependency-v1"
+    kind: Literal["mathlib", "moto"]
+    declaration_name: str = Field(min_length=1, max_length=1024)
+    module_name: str = Field(default="", max_length=512)
+    mathlib_revision: str = Field(default="", max_length=256)
+    canonical_locator: Optional["CanonicalProofLocator"] = None
+    canonical_locator_digest: str = Field(default="", max_length=64)
+    canonical_theorem_statement_hash: str = Field(default="", max_length=64)
+    canonical_lean_code_hash: str = Field(default="", max_length=64)
+
+    @model_validator(mode="after")
+    def validate_portable_identity(self):
+        if self.kind == "mathlib":
+            if not self.mathlib_revision:
+                raise ValueError("Mathlib dependencies require the proof-time Mathlib revision")
+            if self.canonical_locator is not None:
+                raise ValueError("Mathlib dependencies cannot carry MOTO proof locators")
+            return self
+        if self.canonical_locator is None:
+            raise ValueError("MOTO dependencies require a canonical proof locator")
+        required_hashes = (
+            self.canonical_locator_digest,
+            self.canonical_theorem_statement_hash,
+            self.canonical_lean_code_hash,
+        )
+        if any(len(value) != 64 for value in required_hashes):
+            raise ValueError("MOTO dependencies require canonical 64-character hashes")
+        return self
 
 
 ProofDependencyExtractionStatus = Literal[
@@ -1186,6 +1278,7 @@ class ProofAttemptFeedback(BaseModel):
     strategy: Literal["full_script", "tactic_script"] = "full_script"
     tactic_trace: List[str] = Field(default_factory=list)
     success: bool = False
+    compile_receipt: Optional[LeanCompileReceipt] = None
     configured_model: Optional[str] = None
     configured_provider: Optional[str] = None
     effective_model: Optional[str] = None
@@ -1216,6 +1309,155 @@ ProofArtifactPurpose = Literal[
     "standalone_exact_duplicate_emphasis",
 ]
 
+ProofNoveltyScope = Literal["standalone", "group"]
+
+LocalNoveltyTier = Literal[
+    "not_novel",
+    "novel_formulation",
+    "novel_variant",
+    "mathematical_discovery",
+    "major_mathematical_discovery",
+]
+
+
+class LocalNoveltyAssessmentProvenance(BaseModel):
+    """Event-time local novelty facts awaiting canonical occurrence identity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["moto-local-novelty-provenance-v1"] = (
+        "moto-local-novelty-provenance-v1"
+    )
+    local_rank_schema_version: Literal["moto-local-novelty-ranks-v1"] = (
+        "moto-local-novelty-ranks-v1"
+    )
+    assessment_method_version: Literal["moto-proof-novelty-assessment-v1"] = (
+        "moto-proof-novelty-assessment-v1"
+    )
+    assessment_origin: Literal[
+        "validator_assessed",
+        "conservative_fallback",
+        "caller_supplied",
+        "later_reassessment",
+    ]
+    source_local_rank: LocalNoveltyTier
+    assessment_scope: ProofNoveltyScope = "standalone"
+    group_claim: str = ""
+    group_proof_ids: List[str] = Field(default_factory=list)
+    assessed_at: datetime = Field(default_factory=datetime.now)
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        if self.assessment_scope == "standalone":
+            if self.group_claim or self.group_proof_ids:
+                raise ValueError("Standalone novelty provenance cannot carry group data")
+        elif not self.group_claim or not self.group_proof_ids:
+            raise ValueError("Group novelty provenance requires a claim and member IDs")
+        return self
+
+
+class LocalNoveltyAssessmentReceipt(BaseModel):
+    """Immutable canonical receipt for MOTO's local novelty assessment."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["moto-local-novelty-receipt-v1"] = (
+        "moto-local-novelty-receipt-v1"
+    )
+    receipt_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    local_rank_schema_version: Literal["moto-local-novelty-ranks-v1"] = (
+        "moto-local-novelty-ranks-v1"
+    )
+    assessment_method_version: Literal["moto-proof-novelty-assessment-v1"] = (
+        "moto-proof-novelty-assessment-v1"
+    )
+    assessment_origin: Literal[
+        "validator_assessed",
+        "conservative_fallback",
+        "caller_supplied",
+        "later_reassessment",
+    ]
+    source_local_rank: LocalNoveltyTier
+    assessment_scope: ProofNoveltyScope = "standalone"
+    group_claim_sha256: str = ""
+    group_proof_ids: List[str] = Field(default_factory=list)
+    registration_state: Literal[
+        "ordinary_occurrence",
+        "cross_run_exact_duplicate_overlay",
+    ] = "ordinary_occurrence"
+    effective_display_tier: str = "not_novel"
+    assessed_at: datetime
+    canonical_identity_version: str = Field(min_length=1)
+    canonical_theorem_statement_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_lean_code_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_locator_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    exact_duplicate_proof_id: str = ""
+    exact_duplicate_run_id: str = ""
+
+    @model_validator(mode="after")
+    def validate_scope_and_registration(self):
+        if self.source_local_rank == "duplicate_novel":
+            raise ValueError("duplicate_novel is a registration state, not a local rank")
+        if self.assessment_scope == "standalone":
+            if self.group_claim_sha256 or self.group_proof_ids:
+                raise ValueError("Standalone novelty receipts cannot carry group data")
+        elif not self.group_claim_sha256 or not self.group_proof_ids:
+            raise ValueError("Group novelty receipts require a claim hash and member IDs")
+        has_duplicate = bool(
+            self.exact_duplicate_proof_id and self.exact_duplicate_run_id
+        )
+        if (
+            self.registration_state == "cross_run_exact_duplicate_overlay"
+        ) != has_duplicate:
+            raise ValueError("Duplicate registration state and provenance disagree")
+        return self
+
+
+class LegacyPortReceipt(BaseModel):
+    """Digest-bound marker written only by the explicit legacy-proof migration.
+
+    Proofs stored by released builds before trade evidence existed are ported
+    without a compile or local novelty receipt; this receipt records the
+    identity minted for them and the stored rank, never a fresh assessment.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["moto-legacy-port-receipt-v1"] = "moto-legacy-port-receipt-v1"
+    receipt_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    migrated_at: datetime
+    prior_verification_evidence_status: Literal["legacy_unrecorded"] = "legacy_unrecorded"
+    source_local_rank: LocalNoveltyTier
+    canonical_identity_version: str = Field(min_length=1)
+    canonical_theorem_statement_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_lean_code_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_locator_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+ProofStoreKind = Literal[
+    "manual",
+    "autonomous",
+    "autonomous_legacy",
+    "shared_legacy",
+]
+
+
+class CanonicalProofLocator(BaseModel):
+    """Versioned immutable locator for one canonical local proof occurrence."""
+
+    locator_version: Literal["moto-proof-locator-v1"]
+    installation_id: str = Field(min_length=1)
+    root_binding_id: str = Field(min_length=1)
+    store_kind: ProofStoreKind
+    stable_store_id: str = Field(min_length=1)
+    session_id: str = ""
+    archive_id: str = ""
+    run_id: str = Field(min_length=1)
+    proof_id: str = Field(min_length=1)
+    canonical_identity_version: str = Field(min_length=1)
+    canonical_theorem_statement_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_lean_code_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
 
 class ProofRecord(BaseModel):
     """Stored proof metadata for the proof library and prompt injection."""
@@ -1234,6 +1476,10 @@ class ProofRecord(BaseModel):
     novel: bool = False
     novelty_tier: str = "not_novel"
     novelty_reasoning: str = ""
+    novelty_scope: ProofNoveltyScope = "standalone"
+    novelty_group_claim: str = ""
+    novelty_group_proof_ids: List[str] = Field(default_factory=list)
+    novelty_group_anchor_proof_ids: List[str] = Field(default_factory=list)
     independent_novelty_tier: str = ""
     independent_novelty_reasoning: str = ""
     exact_duplicate_proof_id: str = ""
@@ -1242,6 +1488,25 @@ class ProofRecord(BaseModel):
     canonical_identity_version: str = ""
     canonical_theorem_statement_hash: str = ""
     canonical_lean_code_hash: str = ""
+    client_proof_id: str = ""
+    canonical_locator: Optional[CanonicalProofLocator] = None
+    canonical_locator_digest: str = ""
+    local_novelty_assessment_receipt: Optional[
+        LocalNoveltyAssessmentReceipt
+    ] = None
+    local_novelty_assessment_provenance: Optional[
+        LocalNoveltyAssessmentProvenance
+    ] = Field(default=None, exclude=True)
+    compile_receipt: Optional[LeanCompileReceipt] = None
+    legacy_port_receipt: Optional[LegacyPortReceipt] = None
+    verification_evidence_status: Literal[
+        "complete",
+        "legacy_unrecorded",
+        "incomplete",
+        "corrupt",
+        "unsupported_version",
+    ] = "legacy_unrecorded"
+    portable_dependencies: List[PortableProofDependency] = Field(default_factory=list)
     verification_notes: str = ""
     attempt_count: int = 0
     attempts: List[ProofAttemptFeedback] = Field(default_factory=list)
@@ -1304,6 +1569,10 @@ class ProofLibraryEntry(BaseModel):
     novel: bool = False
     novelty_tier: str = "not_novel"
     novelty_reasoning: str = ""
+    novelty_scope: ProofNoveltyScope = "standalone"
+    novelty_group_claim: str = ""
+    novelty_group_proof_ids: List[str] = Field(default_factory=list)
+    novelty_group_anchor_proof_ids: List[str] = Field(default_factory=list)
     independent_novelty_tier: str = ""
     independent_novelty_reasoning: str = ""
     exact_duplicate_proof_id: str = ""
@@ -1312,6 +1581,18 @@ class ProofLibraryEntry(BaseModel):
     canonical_identity_version: str = ""
     canonical_theorem_statement_hash: str = ""
     canonical_lean_code_hash: str = ""
+    client_proof_id: str = ""
+    canonical_locator: Optional[CanonicalProofLocator] = None
+    canonical_locator_digest: str = ""
+    compile_receipt: Optional[LeanCompileReceipt] = None
+    verification_evidence_status: Literal[
+        "complete",
+        "legacy_unrecorded",
+        "incomplete",
+        "corrupt",
+        "unsupported_version",
+    ] = "legacy_unrecorded"
+    portable_dependencies: List[PortableProofDependency] = Field(default_factory=list)
     verification_notes: str = ""
     attempt_count: int = 0
     created_at: str = ""
@@ -1370,6 +1651,10 @@ class ProofCertificateResponse(BaseModel):
     novel: bool = False
     novelty_tier: str = "not_novel"
     novelty_reasoning: str = ""
+    novelty_scope: ProofNoveltyScope = "standalone"
+    novelty_group_claim: str = ""
+    novelty_group_proof_ids: List[str] = Field(default_factory=list)
+    novelty_group_anchor_proof_ids: List[str] = Field(default_factory=list)
     independent_novelty_tier: str = ""
     independent_novelty_reasoning: str = ""
     exact_duplicate_proof_id: str = ""
@@ -1378,6 +1663,18 @@ class ProofCertificateResponse(BaseModel):
     canonical_identity_version: str = ""
     canonical_theorem_statement_hash: str = ""
     canonical_lean_code_hash: str = ""
+    client_proof_id: str = ""
+    canonical_locator: Optional[CanonicalProofLocator] = None
+    canonical_locator_digest: str = ""
+    compile_receipt: Optional[LeanCompileReceipt] = None
+    verification_evidence_status: Literal[
+        "complete",
+        "legacy_unrecorded",
+        "incomplete",
+        "corrupt",
+        "unsupported_version",
+    ] = "legacy_unrecorded"
+    portable_dependencies: List[PortableProofDependency] = Field(default_factory=list)
     attempt_count: int = 0
     solver_hints: List[str] = Field(default_factory=list)
     dependencies: List[ProofDependency] = Field(default_factory=list)
@@ -1389,6 +1686,25 @@ class ProofCertificateResponse(BaseModel):
     live_context_prune_validator_reasoning: str = ""
     live_context_prune_snapshot_revision: Optional[int] = None
     live_context_prune_trigger_reasons: List[str] = Field(default_factory=list)
+
+
+class ProofNoveltyGroupMember(BaseModel):
+    proof_id: str
+    theorem_name: str = ""
+    theorem_statement: str
+    lean_code: str
+    run_id: str = ""
+    novelty_tier: str = "not_novel"
+
+
+class ProofNoveltyGroupResponse(BaseModel):
+    anchor_proof_id: str
+    run_id: str = ""
+    novelty_tier: str = "not_novel"
+    novelty_scope: ProofNoveltyScope = "group"
+    group_claim: str
+    group_proof_ids: List[str] = Field(default_factory=list)
+    proofs: List[ProofNoveltyGroupMember] = Field(default_factory=list)
 
 
 class ProofAttemptResult(BaseModel):
@@ -1476,6 +1792,8 @@ class ProofRunSnapshot(BaseModel):
     unbounded: bool = False
     current_round: int = Field(default=0, ge=0)
     last_completed_round: int = Field(default=0, ge=0)
+    consecutive_no_discovery_rounds: int = Field(default=0, ge=0)
+    no_discovery_round_limit: Optional[int] = Field(default=None, ge=1)
     last_round_summary: str = Field(default="", max_length=4000)
     last_round_reference: str = Field(default="", max_length=512)
     source_content_fingerprint: str = ""
@@ -1520,6 +1838,8 @@ class ProofRunCollectionItem(BaseModel):
     status: ProofRunStatus
     current_round: int = Field(default=0, ge=0)
     last_completed_round: int = Field(default=0, ge=0)
+    consecutive_no_discovery_rounds: int = Field(default=0, ge=0)
+    no_discovery_round_limit: Optional[int] = Field(default=None, ge=1)
     proof_set_revision: int = Field(default=0, ge=0)
     updated_at: datetime
     terminal_reason: str = ""
@@ -1640,6 +1960,41 @@ class ProofSettingsUpdateRequest(BaseModel):
     smt_timeout: Optional[int] = Field(default=None, ge=1, le=600)
 
 
+class ProofStatusResponse(BaseModel):
+    """Effective proof capability, preference, and cached toolchain status."""
+    lean4_enabled: bool
+    lean4_runtime_available: bool
+    lean4_user_enabled: bool
+    lean4_unavailable_reason: str = ""
+    lean4_lsp_enabled: bool
+    lean4_path: str
+    lean4_path_configured: bool
+    lean4_workspace_dir: str
+    lean4_workspace_configured: bool
+    runtime_paths_redacted: bool
+    lean_version: str
+    lean4_version: str
+    lean4_proof_timeout: int
+    lean4_lsp_idle_timeout: int
+    proof_max_parallel_candidates: int
+    lsp_available: bool
+    lsp_active: bool
+    workspace_ready: bool
+    workspace_state: str
+    workspace_error: str
+    mathlib_commit: str
+    smt_enabled: bool
+    smt_available: bool
+    z3_path: str
+    z3_path_configured: bool
+    smt_timeout: int
+    z3_version: str
+    manual_check_ready: bool
+    manual_check_message: str
+    proof_counts: Dict[str, int]
+    manual_proof_counts: Dict[str, int]
+
+
 # ============================================================================
 # LEANOJ PROOF SOLVER MODELS
 # ============================================================================
@@ -1701,6 +2056,9 @@ class LeanOJSubproofRecord(BaseModel):
     novel: bool = False
     novelty_tier: str = "not_novel"
     novelty_reasoning: str = ""
+    novelty_scope: ProofNoveltyScope = "standalone"
+    novelty_group_claim: str = ""
+    novelty_group_proof_ids: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)
 
 
@@ -1741,6 +2099,9 @@ class LeanOJState(BaseModel):
     final_novel: bool = False
     final_novelty_tier: str = "not_novel"
     final_novelty_reasoning: str = ""
+    final_novelty_scope: ProofNoveltyScope = "standalone"
+    final_novelty_group_claim: str = ""
+    final_novelty_group_proof_ids: List[str] = Field(default_factory=list)
     master_proof_initialized: bool = False
     master_proof_version: int = 0
     master_proof_hash: str = ""

@@ -1,0 +1,277 @@
+---
+description: Hybrid deployment contract — generic_mode, hosted sandbox, proxy auth, web-team boundary, updater policy
+---
+
+# Hybrid Deployment Contract (intrafere.ai / Hosted Web Product)
+
+MOTO is ONE codebase serving TWO deployment targets. A single `generic_mode` boolean switches between them. All features, fixes, and improvements ship to both targets simultaneously.
+
+## Two Deployment Targets
+
+- **Default mode (`generic_mode=False`)**: GitHub open-source release. Desktop app with `.bat` / PowerShell launchers. LM Studio + OpenRouter + desktop provider add-ons such as OpenAI Codex OAuth, xAI Grok OAuth, and Sakana Fugu API key. User runs locally.
+- **Generic mode (`generic_mode=True`)**: Hosted web backend. API-only sandbox on Blaxel, fronted by the Intrafere website/control plane on AWS. FastEmbed embeddings and OpenRouter-only LLM inference; hosted clients should not use LM Studio diagnostics even if legacy endpoints still exist for the shared route surface.
+
+## Two-Team Boundary (Strict)
+
+| Team | Repo | Owns |
+|------|------|------|
+| **Upgrade Team** | MOTO repo | `generic_mode` conditional branches, FastEmbed provider, hosted runtime contract, proxy auth plumbing, `/api/features`, `/api/health`, build metadata, desktop launchers + updater contract |
+| **Web Team** | Separate repo | Website frontend, Clerk auth, Stripe billing, AWS control plane, Blaxel sandbox lifecycle, same-domain proxy, dashboard update UX, CI/CD image pipeline |
+
+The Web Team consumes MOTO as a pre-built image. They never commit into the MOTO repo. Their website wraps private MOTO sandboxes — handles auth, billing, proxying, and instance lifecycle while MOTO handles all research orchestration.
+
+## Hosted Container Artifacts
+
+- The MOTO repo provides the canonical hosted container files: `Dockerfile`, `.dockerignore`, and `docker/entrypoint.sh`.
+- Those files define the API-only `python:3.12-slim` generic-mode runtime contract. Image publish, rollout, and redeploy automation still belong to the separate Web Team repo.
+
+## The `generic_mode` Flag
+
+`SystemConfig` field in `backend/shared/config.py`:
+```python
+generic_mode: bool = False
+```
+
+Canonical hosted launches toggle this with `MOTO_GENERIC_MODE=true`, read explicitly in `main.py` lifespan. `SystemConfig` may still receive direct pydantic-settings env values for its plain fields; launcher/control-plane configuration should use the `MOTO_*` contract names.
+
+When `False`: program behaves as the existing open-source desktop release. When `True`: activates conditional code paths. No existing default-mode behavior is modified.
+
+## Decision Points
+
+1. **`api_client_manager.get_embeddings()`** — generic mode early-returns to in-process `FastEmbedProvider` before the LM Studio → OpenRouter fallback chain
+2. **`rag_manager.py`** — generic mode skips global RAG lock for embedding calls (FastEmbed is in-process/thread-safe); ChromaDB write locking remains in both modes; synchronous ChromaDB calls and CPU-heavy RAG scoring must run off the FastAPI event loop
+3. **`main.py` lifespan** — generic mode skips LM Studio connection test; auto-loads `OPENROUTER_API_KEY` from env if present
+4. **`openrouter.py` LM Studio availability** — generic mode returns `{available: false, generic_mode: true}` without pinging LM Studio; workflow inference paths are OpenRouter-only even if hidden legacy diagnostics still exist. Compiler model diagnostics (`POST /api/compiler/test-models`) return unavailable in generic mode instead of touching LM Studio.
+4b. **`cloud_access.py` desktop OAuth providers** — desktop/default mode only; generic mode returns unavailable for OAuth login/model routes until hosted callback/proxy login is explicitly designed. Hosted/generic settings should not poll desktop OAuth status/model endpoints when `/api/features` reports OAuth unavailable. Default-mode OAuth model listings normalize provider catalog context/output fields for UI auto-fill; Codex product limits are distinct from regular OpenAI API limits, while xAI Grok/SuperGrok uses xAI subscription model metadata, filters catalog entries not accepted by the OAuth chat-completions route, and keeps loopback-only callback binding.
+5. **`download.py` PDF** — generic mode returns `501` (hosted Chromium browser runtime is not installed)
+6. **Frontend** — calls `GET /api/features` on mount; when `generic_mode=True`, hosted clients hide LM Studio UI and default everything to OpenRouter. The bundled desktop frontend may still surface backend capability errors for desktop-only features.
+7. **`middleware.py` + `websocket.py`** — generic mode validates internal proxy auth (`X-Moto-*` signed headers) on all non-allowlisted routes
+8. **Long-running workflow isolation** — research/proof/RAG/Lean jobs may run in background tasks, but must not block the FastAPI event loop that serves GUI/status/health/API-key routes
+9. **SyntheticLib4 / unified proof search** — generic mode keeps Lean execution gated as today, but authorized corpus search may still work through local snapshots or hosted SyntheticLib4 APIs when configured. SyntheticLib4 secrets follow generic-mode in-memory/env handling and must not be written to desktop keyring, runtime settings, prompts, API logs, or snapshot files.
+
+## Instance-Scoped Runtime Contract (Both Modes)
+
+One process pair = one MOTO instance (local or sandbox). Canonical env inputs/families:
+- Instance/runtime: `MOTO_INSTANCE_ID` / `INSTANCE_ID`, `MOTO_BACKEND_HOST` / `HOST`, `MOTO_BACKEND_PORT` / `PORT`, `MOTO_FRONTEND_PORT` / `FRONTEND_PORT`
+- Runtime roots/secrets/UI scope: `MOTO_DATA_ROOT` / `DATA_DIR`, optional `MOTO_LOG_ROOT` / `LOGS_DIR`, optional `MOTO_SECRET_NAMESPACE` / `SECRET_NAMESPACE`, optional `MOTO_FRONTEND_STORAGE_PREFIX` / `FRONTEND_STORAGE_PREFIX` for launch/control-plane config (browser code consumes the projected `VITE_MOTO_STORAGE_PREFIX`), optional `MOTO_CORS_ORIGINS` / `CORS_ORIGINS`, optional `MOTO_LM_STUDIO_BASE_URL`
+- Hosted auth/body caps: `MOTO_INTERNAL_PROXY_SECRET` / `INTERNAL_PROXY_SECRET`, optional `MOTO_GENERIC_MAX_REQUEST_BYTES` / `GENERIC_MAX_REQUEST_BYTES`
+- Desktop/debug caps: optional PDF request caps and `MOTO_API_LOG_STORE_FULL_PAYLOADS` / `API_LOG_STORE_FULL_PAYLOADS`
+- Default desktop launches bind backend and bundled Vite frontend to loopback and require `MOTO_DESKTOP_API_TOKEN` / `VITE_MOTO_DESKTOP_API_TOKEN` on protected HTTP routes, except read-only proof certificate exports (`/api/proofs/{id}/certificate[.lean]`) which may be direct local browser downloads. Desktop WebSockets use one-time tickets minted by authenticated `POST /api/ws-ticket`; hosted generic mode continues to use proxy HMAC auth instead.
+
+Hosted sandboxes reuse this exact contract (`MOTO_DATA_ROOT=/app/backend/data`). No separate hosted-only env model.
+
+## Proxy Auth Contract (Generic Mode Only)
+
+Browser reaches sandboxes only through the authenticated control-plane proxy, never via direct sandbox URLs.
+
+- **Proxy path**: `https://app.intrafere.com/instances/{instance_id}/moto/api/...` and `wss://.../moto/ws`
+- Proxy strips `/instances/{instance_id}/moto` prefix before forwarding
+- Control plane injects signed headers: `X-Moto-Instance-Id`, `X-Moto-Proxy-Timestamp`, `X-Moto-Proxy-Signature`, and `X-Moto-Body-SHA256` for body-capable protected requests
+- Signature payload binds `{instance_id}`, `{timestamp}`, uppercase method, stripped path, raw query string, and the `X-Moto-Body-SHA256` value (empty hash for WebSockets/bodyless requests)
+- Sandbox validates instance ID match, timestamp skew ≤60s, HMAC digest, query string, that the signed body hash matches the actual received request body, and rejects replayed signatures inside the accepted skew window
+- Protected hosted HTTP requests with `Content-Length` above `MOTO_GENERIC_MAX_REQUEST_BYTES` / `GENERIC_MAX_REQUEST_BYTES` (default 16 MiB) are rejected before route handling; the control-plane proxy should enforce the same or stricter body-size cap before forwarding
+- If `generic_mode=True` and neither `MOTO_INSTANCE_ID` nor `INSTANCE_ID`, or neither `MOTO_INTERNAL_PROXY_SECRET` nor `INTERNAL_PROXY_SECRET`, is present: fail closed at startup
+- Allowlisted without proxy auth: `GET /health`, `GET /api/health`, `GET /api/features`, `OPTIONS` preflight
+- `Authorization` header is NOT reused for sandbox auth (existing MOTO routes use it for OpenRouter key passthrough)
+
+Implementation: centralized in `middleware.py` (HTTP) and `websocket.py` (before `accept()`). No per-route auth changes.
+
+## `/api/features` Endpoint (Both Modes)
+
+Returns a typed capability-only response:
+```python
+{
+    "version": str,
+    "build_commit": str,  # authoritative update key
+    "update_channel": str,  # defaults to "main" unless manifest/env overrides it
+    "api_contract_version": str,  # concrete value from build_info/manifest
+    "generic_mode": bool,
+    "lm_studio_enabled": bool,
+    "pdf_download_available": bool,
+    "openai_codex_oauth_available": bool,
+    "xai_grok_oauth_available": bool,
+    "sakana_fugu_available": bool,
+ "syntheticlib_product_state": "coming_soon" | "developer_preview" | "launched",
+}
+```
+
+The current contract includes typed durable Autonomous terminal/provider-repair state with provider route identity, bounded proof-truncation recovery, run-scoped candidate-list review activity, provider usage-limit cooldown/resume activity, nonfatal proof versus fatal workflow context-overflow activity, and process-local manual proof-run discovery/Stop/live-context controls. Manual proof-run terminal events and reconnect records expose bounded secret-redacted error summaries when available; clients use generic terminal reasons only as fallback. Mandatory proof Validator/formalization overflow durably stops Autonomous after sibling proof tasks are canceled and drained. Manual proof runs have no Resume or Next Round REST authority and are not reconstructed after backend restart. Exact release chronology belongs in release notes, tests, and git history rather than this always-injected rule.
+
+Provider recovery is provider-neutral: timed usage windows use stop-aware waiting with success-confirmed recovery, while untimed spending/entitlement remains repair-required. HTTP Retry-After is a 429 throttle window, not a spending reset. `/api/cloud-access/provider-recovery/events` is the typed durable alias for provider notifications; the legacy provider-notifications route remains compatible.
+
+Must remain capability-only. Must NOT expose per-user or per-instance state (e.g. whether an OpenRouter key or OAuth login is set).
+
+SyntheticLib lifecycle values are normalized fail-closed. Prelaunch backend
+execution requires separate explicit local preview authority and remains unavailable
+in generic/hosted mode; browser developer mode is presentation state only. The
+SyntheticLib4 search corpus is backend-gated the same way before launch and is a
+product capability in both modes after launch. Developer tooling (ledger status/
+controls other than snapshot create and batch prepare, archive deletion,
+authorization readiness) always needs local preview authority, even after launch.
+The product-authority `POST /api/syntheticlib4/developer/legacy-port/migrate`
+explicitly ports released-build proofs (desktop only, refused during active runs). Every route is covered by a route-inventory denial
+test. The product-authority `GET /api/syntheticlib4/developer/trade-evidence` audit is read-only,
+path-free, and metadata-only, and always reports `eligible_to_offer=false`. The
+equally gated `GET /api/syntheticlib4/developer/trade-ledger` status is read-only,
+reports fail-closed ledger states by reason code, and always reports
+`upload_enabled=false`. Its equally gated developer controls under
+`/api/syntheticlib4/developer/trade-ledger/*` (entries, snapshot select/reconcile/
+cancel, batch prepare/cancel, confirmed archive/reset or archive deletion) mutate only local metadata,
+are denied in generic mode, never upload, and never claim server-side deletion.
+The equally gated `GET /api/syntheticlib4/developer/trade-authorization` readiness
+is read-only and metadata-only, never creates identity or credentials, and always
+reports `authorization_enabled=false` and `upload_enabled=false`.
+Unhandled route errors return a generic 500 detail.
+
+Desktop canonical proof records may expose additive versioned local locator and
+opaque client-proof identity fields. These derive only from canonical persistence:
+the installation identity is independent of runtime instance/keyring namespaces,
+stores own stable random IDs, manual archival preserves identity, and legacy records
+without complete persisted identity remain unqualified until the explicit legacy-port migration. Root-copy/move mismatch
+fails closed pending explicit desktop recovery. Hosted/generic mode must not create
+proof-trade installation authority, and proof-search indexes remain derived consumers.
+Proof and certificate records may expose persisted versioned compile receipts,
+checked-source hashes, explicit imports, portable dependencies, and evidence
+status. These derive from the actual successful Lean check; certificate reads
+must never inspect the current workspace to invent historical toolchain evidence.
+Legacy records remain readable; records stored by released builds (no client identity, compile receipt, or novelty receipt) gain identity only through the explicit, product-authority legacy-port migration, refused while any workflow or manual proof run is active. It mints a client proof ID/locator and a digest-bound legacy-port receipt (stored rank) without changing Lean source or inventing proof-time evidence; legacy ports need no compile or novelty receipt or complete portable dependencies, while new records still do. Hosted read/export remains Lean-free.
+
+Codex role reasoning uses existing `openrouter_reasoning_effort` request/snapshot fields with provider-aware validation: literal `max` is Codex-only, while OpenRouter and Boost preserve their existing enums. Desktop Codex model metadata supplies supported reasoning levels; hosted OAuth unavailability remains unchanged.
+
+Paper summary/detail responses expose canonical paper-only, proof-only, and combined
+word/character metrics plus proof count. Existing `word_count` remains the combined
+compatibility total. Rendered clients may collapse embedded proofs without changing raw
+paper or export content.
+
+## `/api/health` Endpoint
+
+Richer readiness endpoint available in both modes. `/health` remains a minimal health check, while `/api/health` returns readiness plus slim instance/build metadata (`instance_id`, `generic_mode`, `version`, `build_commit`). `/api/features` is the full public build identity/capability contract.
+
+## FastAPI Responsiveness Contract
+
+GUI loads, hosted control-plane probes, and desktop status polling share the same FastAPI app as long-running MOTO workflows. Any code reachable from background research/proof tasks must preserve event-loop responsiveness:
+
+- Do not run synchronous ChromaDB operations, large in-memory RAG scoring, Lean temp-file writes/deletes, workspace repair deletes, subprocess waits, or `time.sleep()` on the event loop.
+- Use async subprocess APIs for external tools and `asyncio.to_thread()` for unavoidable synchronous filesystem, ChromaDB, or CPU-heavy scoring work.
+- Status/health/capability/key-status endpoints must be fast-lane routes: return cached/in-memory state only and must not trigger ChromaDB scans, OpenRouter model-list fetches, large session-directory walks, or Lean workspace bootstrap. Cached build-identity resolution may perform a short git HEAD lookup; `/api/proofs/status` reports cached Lean bootstrap state and may retain the existing short timeout-bounded Z3 check.
+- Do not paper over event-loop starvation with multiple Uvicorn workers unless coordinator state, WebSockets, and runtime memory have first been externalized; current singleton coordinators assume one backend process per instance.
+
+## Embedding Strategy (Generic Mode)
+
+FastEmbed by Qdrant — in-process ONNX Runtime using `nomic-ai/nomic-embed-text-v1.5` for hosted embeddings. The hosted image currently installs `requirements.txt` through `requirements-generic.txt`, so PyTorch-adjacent transitive dependencies from default-mode packages may still be present even though FastEmbed itself uses ONNX Runtime.
+
+- Dependency in `requirements-generic.txt` (additive, not in main `requirements.txt`)
+- `fastembed_provider.py` wraps the library; lazy-imported so default installs are unaffected
+- If `generic_mode=True` and `fastembed` is missing: fail fast with clear error
+- Batch query variant optimization: `_vector_search()` batches all query embeddings into one `get_embeddings()` call (benefits both modes)
+
+## Dependency Handling
+
+`requirements-generic.txt`:
+```
+-r requirements.txt
+fastembed>=0.3.6
+onnxruntime>=1.18.0,<2.0
+```
+Hosted image installs both files but does NOT run `playwright install chromium`; the Python Playwright package may be installed, but the hosted Chromium browser runtime is not.
+
+## Frontend Serving (Generic Mode)
+
+Sandbox is API-only. The MOTO React frontend is NOT served from the hosted sandbox. The Web Team builds their own frontend (website + dashboard + embedded MOTO UI). In default mode, the bundled frontend is served by Vite / static build as today.
+
+## PDF Download
+
+- Default mode: `POST /api/download/pdf` works via Playwright, but submitted HTML is untrusted; server-side rendering must sanitize/allowlist content, enforce PDF-specific size caps, disable JavaScript, and block external browser network requests
+- Generic mode: backend returns `501` ("PDF generation unavailable in web mode. Use raw text download."); clients should prefer raw export or handle the backend unavailability response. `/api/features.pdf_download_available` reflects this backend capability, but the bundled desktop frontend may simply surface the `501` instead of hiding every PDF control.
+- Web Team may implement client-side PDF in their frontend independently
+
+## Secret Handling (Generic Mode)
+
+- Desktop default: `secret_store.py` uses OS keyring, restored on startup
+- Hosted generic mode: provider keys are env-injected at sandbox launch and/or set via proxied MOTO API routes. `secret_store` persistence is bypassed; keys live in sandbox memory only. Re-injection required after sandbox recreation.
+- Generic-mode OpenRouter and Wolfram routes update runtime memory only; they do not write to or clear the desktop keyring.
+- Provider credential candidates are authenticated without mutating active state. OpenRouter uses its authenticated key endpoint rather than the public model catalog; status distinguishes presence from validity. Desktop keyring replacement/deletion and OAuth token-bundle publication are transactional, while hosted credentials remain runtime-only.
+- Generic mode persists API-call observability as bounded secret-redacted previews/metadata, never full prompt/response payloads, even if a full-payload environment flag is supplied. Previews may contain ordinary user or research text; redaction is pattern-based rather than a general PII/confidential-data filter.
+- Control plane NEVER stores, logs, or persists user provider keys in its own database
+
+## Data Persistence
+
+- `backend/data/` is the default desktop working set
+- ChromaDB is derived cache state, not authoritative research state. Windows desktop replaces prior-process Chroma state before the first native open and lazily rebuilds sources; hosted Linux retains persistent-cache behavior. One backend process holds an OS-backed lease for each active data root for its full lifespan.
+- Hosted: `MOTO_DATA_ROOT=/app/backend/data` so Blaxel storage mounts to one unambiguous path
+- Non-secret `runtime_settings.json` also lives under the active data root; it may persist runtime knobs, never provider keys or prompt/response payloads
+- ChromaDB SQLite files stay on Blaxel sandbox storage (local file semantics required)
+- SyntheticLib4 snapshots and unified proof-search indexes are data-root artifacts when implemented. They must be activated only after manifest/hash/index checks pass, and a failed refresh must leave the previous active snapshot usable.
+- Sandbox recall/resume returns the same filesystem state; redeploy/recreate advances to the newest image
+- Uploads: server-side enforcement of `.txt` and `.lean` UTF-8 text files only, 5 MB max, filename sanitization, path traversal rejection, and logical-filename deletion for user-cleared uploads
+
+## Updater Policy
+
+- **Authoritative update source**: GitHub `main` branch (not GitHub Releases)
+- **Desktop**: launcher compares local build metadata against GitHub `main`. Remote update identity resolves from GitHub branch HEAD via the GitHub REST API, metadata uses the REST contents API instead of raw GitHub files, ZIP overlays write the resolved manifest after apply to avoid stale committed-manifest loops, and update notices are exposed via `GET /api/update-notice`; if no launcher notice exists, the running desktop backend may refresh the same notice at most every 4 hours while excluding only the current instance from active-instance auto-apply checks. Launcher auto-apply is only for clean `origin/main` git checkouts or ZIP/extracted installs with no launcher-managed instances still running. The backend `POST /api/update/pull` route has its own lighter git/ZIP update checks and should not be described as enforcing the full launcher preflight. ZIP updates preserve active data/log roots, instance storage, launcher state, env files, and keyring-related namespaces.
+- Desktop launcher/updater HTTPS must preserve hostname and certificate verification, honor explicit operator CA configuration, and use native Windows certificate-chain validation before the first update request with a verified standard-library fallback. Desktop launchers install frontend dependencies from the committed `frontend/package-lock.json`, using `npm ci` for fresh installs and non-destructive locked reconciliation for existing `node_modules`. User-machine launches use only read-only high/critical `npm audit` warnings and must not run `npm audit fix` / `--force`. Dependency remediation belongs in the tested maintainer/CI release flow with an updated lockfile. Windows Node.js bootstrap uses bounded `winget` source/package/scope fallbacks before manual-install guidance. Before enabling Lean/Mathlib, the launcher verifies Git and may install `Git.Git` through bounded winget scope fallbacks; successful execution, not installer status alone, is authoritative, and unavailable Git disables optional Lean proof support without blocking MOTO startup. After Python dependency installation, Windows must verify ChromaDB's native binding before service startup and may repair a missing architecture-matched Microsoft Visual C++ runtime through winget; successful re-import, not installer status alone, authorizes startup.
+- **Hosted**: sandboxes do NOT self-mutate. Redeploy/recreate uses the latest approved `main`-derived image. Recall/resume keeps the existing image. Hosted `POST /api/update/pull` must return unavailable instead of attempting in-place update; `GET /api/update/pull-status` may remain the generic pull-task status surface and does not need a separate hosted-unavailable marker.
+- **Build metadata**: `version`, `build_commit`, `update_channel`, and `api_contract_version` exposed via `/api/features`; git checkouts resolve `build_commit` from HEAD, GitHub-generated ZIP installs prefer `.git_archival.txt` export-subst commit metadata before the stamped local manifest, and the committed `main`-branch manifest lives at `moto-update-manifest.json`
+
+## Canonical Runtime Baselines
+
+- **Desktop release**: Windows (release-blocking); Ubuntu 24.04 LTS (validation target, separate launcher effort)
+- **Hosted sandbox**: Debian/glibc via `python:3.12-slim`
+- **Unsupported**: Alpine/musl (Python + ONNX + Chroma stack needs glibc)
+
+## What Stays the Same (Both Modes)
+
+All RAG pipeline logic, coordinator logic, prompt engineering, WebSocket routing, paper/brainstorm/outline memory management, ChromaDB usage, and REST route surface remain shared. Generic mode adds proxy auth and hides LM Studio options; proof execution routes may exist but must report disabled/unavailable capability unless the required runtime flags and toolchains are present.
+
+## Integration Contract Rule
+
+Any REST shape, auth contract, or WebSocket event change that affects the website must update **code, this rule, the live `/openapi.json` schema, and `api_contract_version` in `/api/features`** in the same approved `main` merge. The live backend's `GET /openapi.json` is the machine-readable REST schema contract.
+
+User-facing Live Activity events retain their established event names and outer
+`type`/`data`/`timestamp` WebSocket shape while carrying additive normalized activity
+metadata. Model failures, retry waits, validator outcomes, and terminal lifecycle
+events include stable event-instance identity across repeated attempts/rounds/subjects,
+owning workflow/run/lifecycle scope, explicit classification, rendered bounded validator
+feedback, and bounded secret-redacted normalized and legacy detail. Provider/API-error
+events also carry structured route identity (workflow mode, role, model, provider, route
+kind, OpenRouter configured/upstream host) plus a composed `route_identity` that the
+rendered line shows once; legacy records without it render unchanged. Infrastructure
+failures are not semantic validator rejections. Durable status/recovery hydration uses
+the same normalized identity and must not duplicate an already observed terminal or
+recovery item.
+Fixed-duration retry events are emitted and durably recorded atomically with their
+stop-aware wait; repeated chunks within one API-call retry episode keep one correlation
+and distinct attempt identities, while separate calls receive separate correlations.
+If retry-notification persistence fails, live delivery continues with an explicit
+degraded-durability marker instead of claiming reconnect recovery.
+
+## Autonomous Proof Competition
+
+Autonomous proof competition is default-off, scoped to its session/run snapshots and Autonomous-owned checkpoints, user/history checks, and child compiler rigor; Manual and LeanOJ behavior is unchanged. Ordered secondary formalizers receive isolated five-attempt budgets only after predecessor exhaustion, with per-model pipelining and serialized Lean/registration. Secondary route failures remain visible but do not stop the parent; cancellation, shared infrastructure, and post-Lean failures retain their existing authority. Durable session-scoped benchmark reports are independent of API logs and compare only shared actually-attempted candidates, separating interrupted outcomes and conditional rescue rates with evolving-context caveats. Authenticated report routes and the fourth Completed Works Benchmarks tab expose these reports without adding work to health/status polling.
+
+## Proof Integration Contract (Builds 1-6, optional, gated off by default)
+
+Lean 4 and SMT behavior is gated by runtime flags. Effective `lean4_enabled` is the conjunction of immutable process toolchain availability and the durable user preference; persisted settings and runtime APIs cannot override unavailable Git/Lean/Lake capability. Proof status exposes availability, preference, effective state, and a bounded unavailable reason. `lean4_lsp_enabled` gates only the optional persistent LSP optimization, and `smt_enabled` gates Z3/SMT hint generation. All three default false; when disabled they must not invoke their corresponding proof toolchains, spend proof-model calls, or block workflows. Hosted sandboxes ship with them disabled.
+
+- **Hosted image stays Lean-free and Z3-free.** No Lean toolchain, no `z3` binary, and no Python wheel for either is permitted in `Dockerfile`, `docker/entrypoint.sh`, or `requirements-generic.txt`. Proof features are desktop-opt-in only for the current contract.
+- **Lean 4 remains authoritative** for every stored proof. The `Lean4Result` contract is unchanged by SMT; SMT (when enabled) produces tactic hints consumed by the formalization agent, never a standalone proof artifact.
+- **Lean workspace startup is lazy and single-flight.** Backend startup, settings changes, and proof-status reads never bootstrap Lean. A committed proof-capable workflow/check may start preparation without awaiting it; only actual Mathlib/Lean-dependent work waits on the shared bootstrap, while workflow Start and proof-run queue responses remain immediate.
+- **Subprocess fallback must keep working** when `lean4_lsp_enabled=False`. LSP is a latency optimization, not a replacement.
+- **Proof routes under `/api/proofs/*`** are additive to the hosted REST contract. Stored proof list/detail/library/certificate records expose stable run/prompt provenance, display novelty, independent novelty tier/reasoning, exact-duplicate proof/run provenance, and versioned canonical theorem/Lean hashes. Legacy records receive safe response-time defaults without mutation. Read routes remain available without Lean; current versus archived manual scope and Lean-gated dependency/check routes retain their existing behavior.
+- **LeanOJ routes** are additive to the hosted REST contract: start (which resumes matching saved progress when available), stop, status, clear, skip-brainstorm, force-brainstorm, master-proof draft/edit summaries, current-run proofs, historical completed-run proof-library endpoints, and current/archive novelty-group JSON exports live under `/api/leanoj/*`. `GET /api/leanoj/library` excludes the currently loaded run; that run is exposed only by `GET /api/leanoj/proofs`. Group exports resolve a complete finite same-run member set or fail without mixing runs.
+- **Creativity Emphasis Boost** is an optional developer-gated start-request field (`creativity_emphasis_boost_enabled`) for Aggregator, Autonomous Research, and LeanOJ; accepted/rejected brainstorm WebSocket payloads may include `creativity_emphasized`, and prompt-budget overflow falls back to the normal prompt for that slot.
+- **Pruned Stage 2 paper routes** are additive: pruned papers are removed from model context/RAG but remain downloadable under `/api/auto-research/paper-history/pruned*`; hard deletion is limited to explicit delete-all-pruned endpoints.
+- **Bulk paper/proof pruning routes** provide checkbox-driven all-or-none mutation. Paper identities remain session-qualified. Proof batches use one authoritative proof-set revision plus per-occurrence run/artifact fences; user reasons are optional and automatic semantic-prune reasons remain required.
+- Bulk mutation publication is cancellation-safe and storage-scope serialized. Paper rollback touches only selected transaction paths, and process-current RAG eviction is fenced to the same active session generation.
+- **WebSocket progress events** for LeanOJ, compiler critique, provider/OAuth failures, and proof workflows are part of the web-surface contract only when consumed by the hosted wrapper or frontend. Keep them descriptive and stable enough for UI state, but avoid treating every internal progress notification as a permanent rule-level invariant. Actual provider/API retry waits and provider/API-error events emit additive scoped live activity with route identity (workflow mode, role, model, provider, route kind, OpenRouter configured/upstream host, composed `route_identity`), attempt, cooldown duration, and bounded secret-redacted provider error detail when available, while preserving existing provider, proof, usage-limit, and free-model events. OAuth provider failures tell desktop users to reconnect the provider in OpenRouter/OAuth after unrecoverable auth/model-call failure; provider max-output truncation before usable Lean code should appear as a failed proof attempt, not as an unrecoverable provider failure. Autonomous proof checkpoint progress events may include `proof_round_index` and `proof_max_rounds`; post-Lean novelty review exposes safe start activity before classification; `proof_verified` must only emit after proof registration/reuse and include `proof_id`; proof novelty and duplicate-registration result events include `novelty_tier` and `novelty_reasoning` for live activity display. Manual proof events must remain isolated from autonomous proof activity/notifications/graphs unless event payloads become explicitly scoped; `POST /api/proofs/check` provider activity uses workflow mode `manual_proof_check` (not the concurrently active workflow), and its provider retry events carry run-scoped `source_type`/`source_id`/`proof_run_id` so clients route them to the source's owning feed.
+- **Proof exports stay text-based**: each proof retains its individual `.lean` source and JSON certificate; a group-scoped novelty rank additionally exposes a separate JSON bundle containing the finite cited same-run proof occurrences and combined claim in Autonomous, Manual, and LeanOJ current/history views. Every member exposes its group-anchor backlink without replacing its independent standalone rank, so the same bundle is downloadable from any member. Group-ranked prompt context is atomic and never presents one member as owning the group tier. No binary-only proof artifacts.
+- **Proof runtime config snapshot** (`ProofRuntimeConfigSnapshot`) is persisted via `research_metadata` and may also be supplied directly on manual `POST /api/proofs/check`; required state is `lean4_enabled=True` AND either a stored or request-provided snapshot.
+- **SyntheticLib4 / MOTO proof search** is additive proof-history/corpus navigation. The shared `search_lean_proofs` tool adapter returns bounded retrieved proof context and provenance; it must not bypass MOTO's proof registration, Lean/integrity gates for MOTO-generated artifacts, or existing proof-runtime disablement in hosted generic mode.
+- **Proof-search navigation routes** include `POST /api/proof-search/reindex`, metadata-only latest Assistant pack retrieval, and bounded paginated Assistant support lineage. Detail hydration remains corpus-toggle-aware and may use canonical `search_id` plus optional `session_id`/`run_id`.
+- **Assistant memory-support role** is an additive workflow/settings surface. It is one shared non-blocking LLM role per workflow surface, not a per-lane submitter clone; validators never receive Assistant context and parent workflows never wait for it. Assistant may provide up to 7 verified proof supports, reuse useful packs for two eligible receiver reads before refresh, and skip true no-external-history targets with `assistant_proof_memory_unavailable` because it only performs proof-memory retrieval for now. Durable cooldown is keyed to stable run scope, grouping transient task IDs/roles while keeping real source/session IDs separate; it emits internal `assistant_proof_memory_cooldown` during zero-useful or stagnant backoff and internal `assistant_proof_memory_shutdown` only when repeated zero-useful retrieval disables retrieval for the run scope. Stagnant same-pack retrieval must not shut down. User live activity should not show skip/backoff/shutdown turns; show normal Assistant retrieval summaries and explicit Assistant model-output failures. Session History Memory disabled disables Assistant and prevents stale pack injection. REST/WebSocket/profile schema additions for Assistant require this contract, `/openapi.json`, and `api_contract_version` to update in the same merge.
+- **Progressive Solution Path** is one run-scoped advisory artifact for Manual Aggregator→Compiler, Autonomous, or LeanOJ. It remains absent before five monotonic parent-owned accepted brainstorm events. Only semantic validators originate optional material proposals; Main Submitter 1 review is exact-role-routed, serial, transactional, and non-blocking. `GET /api/workflow/solution-path` exposes fast typed ownership/lifecycle/queue/repair state; authenticated `POST /api/workflow/solution-path/resume` explicitly retries one repair-required proposal using run ID, proposal ID, and lifecycle generation. Compact path events carry run/generation identity and no raw model output. Stop/crash preserves state; generation-serialized Clear/new-run is the only reset.
+- **`api_contract_version` bumps** apply the same way to proof additions as to the base contract: any proof REST shape or web-consumed event added or changed after the currently stamped contract revision must bump `api_contract_version` in code and the committed manifest in the same merge.
+
+## Hosting Ownership
+
+Intrafere operates the service providing back-end with Blaxel.

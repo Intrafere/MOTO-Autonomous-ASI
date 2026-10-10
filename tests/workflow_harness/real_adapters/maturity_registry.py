@@ -38,6 +38,7 @@ class RealAdapterDescriptor:
     fields: tuple[str, ...]
     invariants: tuple[str, ...]
     cleanup: CleanupContract
+    runner: str
     test_selectors: tuple[str, ...]
     repeat_contract: RepeatContract | None
     repeat_contract_reason: str | None
@@ -47,10 +48,30 @@ class RealAdapterDescriptor:
     def executable(self) -> bool:
         return bool(self.test_selectors)
 
-    def pytest_args(self) -> tuple[str, ...]:
+    def execution_args(self) -> tuple[str, ...]:
         if not self.test_selectors:
             raise ValueError(f"{self.scenario_id} is metadata-only")
-        return ("-q", *self.test_selectors)
+        if self.runner == "pytest":
+            return ("-q", *self.test_selectors)
+        if self.runner == "vitest":
+            selector = self.test_selectors[0]
+            test_file, suite_name, test_name = selector.split("::")
+            return (
+                "--prefix",
+                "frontend",
+                "run",
+                "test",
+                "--",
+                test_file.removeprefix("frontend/"),
+                "-t",
+                f"^{suite_name} {test_name}$",
+            )
+        raise ValueError(f"{self.scenario_id} has unsupported runner {self.runner!r}")
+
+    def pytest_args(self) -> tuple[str, ...]:
+        if self.runner != "pytest":
+            raise ValueError(f"{self.scenario_id} is not a pytest scenario")
+        return self.execution_args()
 
 
 _DEEP_IDS = {
@@ -68,13 +89,16 @@ _RUNTIME_STATE_REPEAT_IDS = {
 }
 
 _BLOCKED_IDS = {
-    "real_candidate_list_validator_gate_and_scope",
+    "real_automatic_prune_requires_validator_acceptance",
     "real_parent_action_fencing_unavailable_without_production_seam",
     "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
     "real_leanoj_full_final_loop_not_safely_bounded",
     "real_pruning_overflow_commit_interleaving_unobservable",
-    "real_continuous_loop_stop_terminal_zero_policy",
+    "real_owning_run_context_and_cached_assistant_exclude_pruned",
+    "real_prune_commit_rechecks_lifecycle_and_revision",
+    "real_pruning_is_occurrence_and_owning_run_scoped",
     "real_semantic_prune_persists_and_protects_retained_support",
+    "real_live_openrouter_upstream_host_reported",
 }
 
 _DEEP_CLEANUP = CleanupContract(
@@ -132,6 +156,7 @@ def _build_registry() -> tuple[RealAdapterDescriptor, ...]:
                     if deep
                     else _NORMAL_CLEANUP
                 ),
+                runner=str(record.runner or ""),
                 test_selectors=tuple(record.test_selectors),
                 repeat_contract=(
                     (
@@ -199,7 +224,7 @@ def validate_maturity_registry(
             coverage.result == "blocked"
         )
         assert coverage.result in {"passed", "blocked"}
-        assert record.adapter in {"real_route", "real_coordinator"}
+        assert record.adapter in {"focused_production", "real_route", "real_coordinator"}
         assert record.fields and record.invariants
         assert record.timeout_seconds >= 0
         assert record.cleanup.forbids_workspace_escape
@@ -211,6 +236,7 @@ def validate_maturity_registry(
             assert record.repeat_contract_reason is None
             continue
         assert record.executable and record.repeat_safe
+        assert record.runner in {"pytest", "vitest"}
         assert record.timeout_seconds > 0
         if record.maturity is AdapterMaturity.DEEP:
             assert record.repeat_contract is not None
@@ -219,8 +245,13 @@ def validate_maturity_registry(
         assert len(record.test_selectors) == len(set(record.test_selectors))
         for selector in record.test_selectors:
             parts = selector.split("::")
-            assert len(parts) in {2, 3}, selector
-            assert parts[-1].startswith("test_"), selector
+            if record.runner == "pytest":
+                assert len(parts) in {2, 3}, selector
+                assert parts[-1].startswith("test_"), selector
+            else:
+                assert record.runner == "vitest"
+                assert len(parts) == 3, selector
+                assert parts[0].endswith((".test.js", ".test.jsx")), selector
         if workspace_root is not None:
             for selector in record.test_selectors:
                 selector_path = selector.split("::", 1)[0]

@@ -147,7 +147,7 @@ class ProofCandidateListStageTests(unittest.IsolatedAsyncioTestCase):
                 proof_run_context=proof_run_context,
             )
 
-    async def test_exact_threshold_forwards_only_approved_subset_before_phase_a(self):
+    async def test_any_approved_forwards_only_approved_subset_before_phase_a(self):
         candidates = [_candidate(f"thm-{index}") for index in range(4)]
         events = []
         stopped = False
@@ -158,10 +158,19 @@ class ProofCandidateListStageTests(unittest.IsolatedAsyncioTestCase):
             if event == "proof_check_candidates_found":
                 stopped = True
 
+        identify = AsyncMock(
+            side_effect=AssertionError(
+                "A list with an approved novel candidate must not regenerate."
+            )
+        )
         with patch(
             "backend.autonomous.core.proof_verification_stage."
             "ProofCandidateListValidator.validate",
-            new=AsyncMock(return_value=_validation(candidates, approved_count=3)),
+            new=AsyncMock(return_value=_validation(candidates, approved_count=1)),
+        ), patch(
+            "backend.autonomous.core.proof_verification_stage."
+            "ProofIdentificationAgent.identify_candidates",
+            new=identify,
         ), patch.object(
             ProofVerificationStage,
             "_run_lean_pipeline_for_candidate",
@@ -173,14 +182,18 @@ class ProofCandidateListStageTests(unittest.IsolatedAsyncioTestCase):
                 broadcast_fn=broadcast,
             )
 
+        event_names = [event for event, _payload in events]
+        self.assertNotIn("proof_candidate_list_review_rejected", event_names)
+        self.assertNotIn("proof_candidate_list_regeneration_started", event_names)
+        identify.assert_not_awaited()
         accepted = next(payload for event, payload in events if event == "proof_candidate_list_review_accepted")
         found = next(payload for event, payload in events if event == "proof_check_candidates_found")
         self.assertEqual(accepted["proposed_count"], 4)
-        self.assertEqual(accepted["approved_count"], 3)
-        self.assertEqual(accepted["candidate_ids"], ["thm-0", "thm-1", "thm-2"])
+        self.assertEqual(accepted["approved_count"], 1)
+        self.assertEqual(accepted["candidate_ids"], ["thm-0"])
         self.assertEqual(found["proposed_count"], 4)
-        self.assertEqual(found["approved_count"], 3)
-        self.assertEqual(len(found["theorems_preview"]), 3)
+        self.assertEqual(found["approved_count"], 1)
+        self.assertEqual(len(found["theorems_preview"]), 1)
 
     async def test_validator_receives_canonical_prompt_without_private_history(self):
         candidate = _candidate("thm-0")
@@ -263,6 +276,121 @@ class ProofCandidateListStageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [item["generation_attempt"] for item in state["semantic_rejections"]],
             [2, 3, 4, 5, 6],
+        )
+
+    async def test_rejected_list_empty_regeneration_completes_as_no_candidates(self):
+        candidate = _candidate("thm-0")
+        events = []
+        checkpoints = []
+
+        async def broadcast(event, payload):
+            events.append((event, payload))
+
+        async def save_checkpoint(payload):
+            checkpoints.append(payload)
+
+        identify = AsyncMock(return_value=(False, []))
+        validate = AsyncMock(
+            return_value=_validation(
+                [candidate],
+                approved_count=0,
+                feedback="No current target satisfies the novelty gate.",
+            )
+        )
+        phase_a = AsyncMock(
+            side_effect=AssertionError(
+                "Lean work must not start after a valid no-candidates decision."
+            )
+        )
+        with patch(
+            "backend.autonomous.core.proof_verification_stage."
+            "ProofCandidateListValidator.validate",
+            new=validate,
+        ), patch(
+            "backend.autonomous.core.proof_verification_stage."
+            "ProofIdentificationAgent.identify_candidates",
+            new=identify,
+        ), patch.object(
+            ProofVerificationStage,
+            "_run_lean_pipeline_for_candidate",
+            new=phase_a,
+        ):
+            result = await self._run_stage(
+                candidates=[candidate],
+                should_stop=lambda: False,
+                broadcast_fn=broadcast,
+                checkpoint_callback=save_checkpoint,
+            )
+
+        identify.assert_awaited_once()
+        validate.assert_awaited_once()
+        phase_a.assert_not_awaited()
+        self.assertEqual(result.total_candidates, 0)
+        self.assertFalse(result.had_error)
+        relevant_events = [
+            event
+            for event, _payload in events
+            if event
+            in {
+                "proof_candidate_list_review_started",
+                "proof_candidate_list_review_rejected",
+                "proof_candidate_list_regeneration_started",
+                "proof_check_no_candidates",
+                "proof_check_complete",
+            }
+        ]
+        self.assertEqual(
+            relevant_events,
+            [
+                "proof_candidate_list_review_started",
+                "proof_candidate_list_review_rejected",
+                "proof_candidate_list_regeneration_started",
+                "proof_check_no_candidates",
+                "proof_check_complete",
+            ],
+        )
+        self.assertEqual(checkpoints[-1]["status"], "no_candidates")
+
+    async def test_stop_during_empty_regeneration_preserves_stopped_boundary(self):
+        candidate = _candidate("thm-0")
+        events = []
+        checkpoints = []
+        stopped = False
+
+        async def broadcast(event, payload):
+            events.append((event, payload))
+
+        async def save_checkpoint(payload):
+            checkpoints.append(payload)
+
+        async def identify(*_args, **_kwargs):
+            nonlocal stopped
+            stopped = True
+            return False, []
+
+        with patch(
+            "backend.autonomous.core.proof_verification_stage."
+            "ProofCandidateListValidator.validate",
+            new=AsyncMock(
+                return_value=_validation([candidate], approved_count=0)
+            ),
+        ), patch(
+            "backend.autonomous.core.proof_verification_stage."
+            "ProofIdentificationAgent.identify_candidates",
+            new=identify,
+        ):
+            result = await self._run_stage(
+                candidates=[candidate],
+                should_stop=lambda: stopped,
+                broadcast_fn=broadcast,
+                checkpoint_callback=save_checkpoint,
+            )
+
+        self.assertEqual(result.total_candidates, 0)
+        self.assertEqual(checkpoints[-1]["status"], "stopped")
+        self.assertNotIn(
+            "proof_check_no_candidates",
+            [event for event, _payload in events],
         )
 
     async def test_validator_failure_is_not_recorded_as_semantic_rejection(self):
@@ -392,6 +520,96 @@ class ProofCandidateListStageTests(unittest.IsolatedAsyncioTestCase):
             if event == "proof_candidate_list_review_started"
         ]
         self.assertEqual([payload["candidate_ids"] for payload in started], [["replacement"]])
+
+    async def test_rejected_checkpoint_empty_regeneration_completes_round(self):
+        rejected = _candidate("rejected")
+        scope = _candidate_list_review_scope(
+            source_type="paper",
+            source_id="paper-1",
+            run_id="run-1",
+            trigger="manual",
+            proof_round_index=1,
+            proof_run_context={
+                "proof_run_id": "proof-run",
+                "lifecycle_generation": 1,
+            },
+        )
+        rejected_state = {
+            "status": "rejected",
+            "review_scope": scope,
+            "generation_attempt": 1,
+            "list_fingerprint": "",
+            "proposed_candidates": [],
+            "approved_candidate_ids": [],
+            "semantic_rejections": [
+                {
+                    "list_fingerprint": "old-list",
+                    "generation_attempt": 1,
+                    "proposed_count": 1,
+                    "approved_count": 0,
+                    "rejected_candidate_ids": ["rejected"],
+                    "feedback": "Find a genuinely novel replacement.",
+                }
+            ],
+        }
+        events = []
+        checkpoints = []
+
+        async def broadcast(event, payload):
+            events.append((event, payload))
+
+        async def save_checkpoint(payload):
+            checkpoints.append(payload)
+
+        identify = AsyncMock(return_value=(False, []))
+        validate = AsyncMock(
+            side_effect=AssertionError(
+                "A valid empty regeneration must not be sent back to the Validator."
+            )
+        )
+        with patch(
+            "backend.autonomous.core.proof_verification_stage."
+            "ProofIdentificationAgent.identify_candidates",
+            new=identify,
+        ), patch(
+            "backend.autonomous.core.proof_verification_stage."
+            "ProofCandidateListValidator.validate",
+            new=validate,
+        ):
+            result = await self._run_stage(
+                candidates=[rejected],
+                should_stop=lambda: False,
+                broadcast_fn=broadcast,
+                checkpoint_callback=save_checkpoint,
+                checkpoint_candidate_list_state=rejected_state,
+                proof_run_context={
+                    "proof_run_id": "proof-run",
+                    "lifecycle_generation": 1,
+                },
+            )
+
+        identify.assert_awaited_once()
+        validate.assert_not_awaited()
+        self.assertEqual(result.total_candidates, 0)
+        self.assertFalse(result.had_error)
+        self.assertEqual(
+            [
+                event
+                for event, _payload in events
+                if event
+                in {
+                    "proof_candidate_list_regeneration_started",
+                    "proof_check_no_candidates",
+                    "proof_check_complete",
+                }
+            ],
+            [
+                "proof_candidate_list_regeneration_started",
+                "proof_check_no_candidates",
+                "proof_check_complete",
+            ],
+        )
+        self.assertEqual(checkpoints[-1]["status"], "no_candidates")
 
     async def test_empty_rejected_checkpoint_regenerates_with_feedback_first(self):
         rejected = _candidate("rejected")

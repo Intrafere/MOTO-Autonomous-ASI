@@ -1,0 +1,70 @@
+{
+  "adapter": "model",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "solution_path.activation_review_fenced",
+    "proof_competition.secondary_after_primary_exhaustion",
+    "provider.exact_role_and_cooldown_scope",
+    "feedback_projection.newest_five_whole",
+    "bulk_mutation.atomic_revision_fenced",
+    "runtime_root.single_owner_bound_paths",
+    "proof_run.identity_generation_fenced",
+    "proof_framing.allowed_outputs_gate",
+    "sleep.unique_owner_released",
+    "supercharge_creativity.routing_separation",
+    "proof_novelty.group_atomic_same_run",
+    "leanoj.parent_control_generation_fences_children"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "current_product_laws"
+  ],
+  "faked_dependencies": [],
+  "fields": [
+    "solution_path",
+    "proof_competition",
+    "provider_routing",
+    "feedback_projection",
+    "bulk_mutation",
+    "runtime_root_ownership",
+    "proof_run_identity",
+    "proof_framing",
+    "sleep_ownership",
+    "answer_wrappers",
+    "group_novelty",
+    "leanoj_parent_control",
+    "runtime_exclusivity",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "solution_path.activation_review_fenced",
+    "proof_competition.secondary_after_primary_exhaustion",
+    "provider.exact_role_and_cooldown_scope",
+    "feedback_projection.newest_five_whole",
+    "bulk_mutation.atomic_revision_fenced",
+    "runtime_root.single_owner_bound_paths",
+    "proof_run.identity_generation_fenced",
+    "proof_framing.allowed_outputs_gate",
+    "sleep.unique_owner_released",
+    "supercharge_creativity.routing_separation",
+    "proof_novelty.group_atomic_same_run",
+    "leanoj.parent_control_generation_fences_children"
+  ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
+  "replay": [
+    "exercise_current_product_laws"
+  ],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "model_current_product_law_families",
+  "schema_version": 2,
+  "seed": null,
+  "source": "curated",
+  "source_identity": "workflow-source-v1:7da72d567769d2cccad992c6a15007b2023f6bd658502555b139547e473ba958",
+  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
+}

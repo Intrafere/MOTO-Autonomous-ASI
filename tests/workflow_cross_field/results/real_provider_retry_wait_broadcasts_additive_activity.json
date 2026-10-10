@@ -1,0 +1,43 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "live_activity.provider_retry_each_wait_visible"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "wait_callback",
+    "provider_retry_cooldown",
+    "attempt_and_duration"
+  ],
+  "faked_dependencies": [
+    "provider transport",
+    "stop-aware sleep",
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "provider_pause_resume",
+    "provider_routing"
+  ],
+  "invariants": [
+    "live_activity.provider_retry_each_wait_visible"
+  ],
+  "observed_transition": "a retryable provider failure schedules one wait and emits additive scoped retry activity with attempt and duration",
+  "real_components": [
+    "backend/shared/api_client_manager.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "real_provider_retry_wait_broadcasts_additive_activity",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:fd49b301a7d620aa2294a99c6f7f7b8bb0f5c5014258de2b0b5429e064b8a94a",
+  "test_file": "tests/integration/test_oauth_provider_cooldown.py",
+  "test_selectors": [
+    "tests/integration/test_oauth_provider_cooldown.py::APIClientManagerOAuthCooldownTests::test_retryable_provider_error_reports_wait_and_resume_activity"
+  ]
+}

@@ -24,13 +24,16 @@ EXPECTED_DEEP_IDS = {
     "real_rigor_mandatory_source_overflow_fails_before_model_or_rag",
 }
 EXPECTED_BLOCKED_IDS = {
-    "real_candidate_list_validator_gate_and_scope",
+    "real_automatic_prune_requires_validator_acceptance",
     "real_parent_action_fencing_unavailable_without_production_seam",
     "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
     "real_leanoj_full_final_loop_not_safely_bounded",
     "real_pruning_overflow_commit_interleaving_unobservable",
-    "real_continuous_loop_stop_terminal_zero_policy",
+    "real_owning_run_context_and_cached_assistant_exclude_pruned",
+    "real_prune_commit_rechecks_lifecycle_and_revision",
+    "real_pruning_is_occurrence_and_owning_run_scoped",
     "real_semantic_prune_persists_and_protects_retained_support",
+    "real_live_openrouter_upstream_host_reported",
 }
 
 
@@ -91,21 +94,25 @@ def test_build_f_deep_promotions_are_repeat_safe_bounded_and_cleanup_guarded():
         assert descriptor.repeat_contract_reason
 
 
-def test_build_f_all_executable_selectors_are_exact_collectable_node_ids(tmp_path):
+def test_build_f_all_executable_selectors_are_exact_collectable_runner_ids(tmp_path):
     executable = [
         descriptor
         for descriptor in REAL_ADAPTER_MATURITY_REGISTRY
         if descriptor.executable
     ]
-    selectors = [
+    pytest_selectors = [
         selector
         for descriptor in executable
+        if descriptor.runner == "pytest"
         for selector in descriptor.test_selectors
     ]
+    vitest_descriptors = [
+        descriptor for descriptor in executable if descriptor.runner == "vitest"
+    ]
 
-    assert selectors
-    assert len(selectors) == len(set(selectors))
-    assert all(selector.count("::") >= 1 for selector in selectors)
+    assert pytest_selectors
+    assert vitest_descriptors
+    assert all(descriptor.test_selectors for descriptor in executable)
     completed = subprocess.run(
         [
             sys.executable,
@@ -117,7 +124,7 @@ def test_build_f_all_executable_selectors_are_exact_collectable_node_ids(tmp_pat
             "no:cacheprovider",
             "--basetemp",
             str(tmp_path / "collect"),
-            *selectors,
+            *pytest_selectors,
         ],
         cwd=WORKSPACE_ROOT,
         capture_output=True,
@@ -135,4 +142,19 @@ def test_build_f_all_executable_selectors_are_exact_collectable_node_ids(tmp_pat
         for line in completed.stdout.splitlines()
         if "::test_" in line
     }
-    assert collected == set(selectors)
+    assert collected == set(pytest_selectors)
+
+    for descriptor in vitest_descriptors:
+        completed = subprocess.run(
+            ["npm", *descriptor.execution_args()],
+            cwd=WORKSPACE_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=descriptor.timeout_seconds,
+            check=False,
+            shell=sys.platform == "win32",
+        )
+        assert completed.returncode == 0, (
+            f"Vitest selector execution failed for {descriptor.scenario_id}\n"
+            f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+        )

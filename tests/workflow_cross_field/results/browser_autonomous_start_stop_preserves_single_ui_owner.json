@@ -1,12 +1,18 @@
 {
   "adapter": "browser_smoke",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "runtime.single_active_workflow",
+    "outputs.at_least_one_output_enabled"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "papers_only_start_payload",
     "running_owner_controls",
     "stop_restores_controls"
   ],
+  "faked_dependencies": [],
   "fields": [
     "runtime_exclusivity",
     "allowed_outputs",
@@ -16,11 +22,18 @@
     "runtime.single_active_workflow",
     "outputs.at_least_one_output_enabled"
   ],
+  "observed_transition": null,
+  "real_components": [],
   "replay": [],
   "result": "passed",
+  "runner": "playwright",
   "scenario_id": "browser_autonomous_start_stop_preserves_single_ui_owner",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "browser_smoke",
-  "test_file": "tests/workflow_browser_smoke/autonomous-controls.spec.js"
+  "source_identity": "workflow-source-v1:7949c22c9711bdaed13746cb5810ccc9b59dd685c9100c1a2b2e9eb363113562",
+  "test_file": "tests/workflow_browser_smoke/autonomous-controls.spec.js",
+  "test_selectors": [
+    "tests/workflow_browser_smoke/autonomous-controls.spec.js::autonomous start sends hosted payload, locks controls, and stops cleanly"
+  ]
 }

@@ -59,6 +59,8 @@ backend/data/compiler_last_10_rejections.txt
 backend/data/compiler_last_10_acceptances.txt
 backend/data/compiler_last_10_declines.txt
 backend/data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_*.txt
+**/.moto_installation_binding.json
+backend/data/syntheticlib_trade/
 
 backend/data/auto_brainstorms/*
 !backend/data/auto_brainstorms/.gitkeep
@@ -156,6 +158,31 @@ backend/data/.moto_runtime.lock
 moto-zap-quickscan-report.html
 
 # Private/local planning notes that should not be published
+SYNTHETICLIB_MOTO_INTEGRATION_REMAINING.md
+PLANS/
+!PLANS/
+PLANS/*
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN.md
+!PLANS/handoff-manifest.json
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/
+PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/*
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/README.md
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/contracts/
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/contracts/README.md
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/fixtures/
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/fixtures/README.md
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/client-profile/
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/client-profile/README.md
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/README.md
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/compatibility-matrix.json
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-contract-test-result.json
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-compatibility-receipt.json
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-compatibility-receipt.sha256
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/frozen-asset-manifest.json
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/compatibility-bundle-manifest.json
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-preflight-attestation.json
+!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/MOTO_COMPATIBILITY_RECEIPT.md
 PENDING_TESTS
 BUILD_PLAN_*.md
 (old) SyntheticLib Upgrade Plans/

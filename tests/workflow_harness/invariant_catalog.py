@@ -6,9 +6,16 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from .model import FakeAssistantMemory, FakeLean, FakeProvider, FakeSmt, WorkflowEvent, WorkflowMode, WorkflowPhase
+from .provider_error_activity_inventory import PROVIDER_ERROR_ACTIVITY_EVENTS
 
 
-AdapterType = Literal["model", "real_route", "real_coordinator", "browser_smoke"]
+AdapterType = Literal[
+    "model",
+    "focused_production",
+    "real_route",
+    "real_coordinator",
+    "browser_smoke",
+]
 
 
 class InvariantState(Protocol):
@@ -76,6 +83,9 @@ class InvariantState(Protocol):
     pruning_success_from_context_overflow: int
     continuous_loop_active: bool
     continuous_loop_hidden_cap: int | None
+    continuous_no_discovery_limit: int | None
+    continuous_no_discovery_resets_on_candidate: bool
+    continuous_no_discovery_activity_visible: bool
     continuous_source_reservations: int
     continuous_stop_available: bool
     continuous_restart_resumable: bool
@@ -87,10 +97,26 @@ class InvariantState(Protocol):
     automatic_round_stops_on_first_zero: bool
     candidate_list_contract_exercised: bool
     candidate_list_gate_before_proof_cost: bool
-    candidate_list_exact_threshold_accepts: bool
+    candidate_list_any_novel_accepts: bool
     candidate_list_semantic_history_count: int
     candidate_list_scope_isolated: bool
     candidate_list_activity_complete: bool
+    provider_retry_waits: int
+    provider_retry_attempts: list[int]
+    provider_retry_event_ids: set[str]
+    provider_retry_correlation_ids: set[str]
+    provider_retry_secret_leaks: int
+    provider_retry_visible_after_reload: bool
+    retry_wait_inventory_complete: bool
+    retry_wait_inventory_assured: bool
+    provider_error_inventory_complete: bool
+    provider_error_inventory_route_attributed: bool
+    law_observations: set[str]
+    law_violations: set[str]
+    adverse_order_attempts: int
+    fenced_adverse_order_attempts: int
+    mutation_attempts: int
+    atomic_mutations: int
     checkpoint: dict[str, object]
     events: list[WorkflowEvent]
     replay: list[str]
@@ -158,12 +184,107 @@ def _assert_hosted_proof_settings_unavailable(model: InvariantState) -> None:
         _fail(model, "Hosted mode attempted to run a desktop-only proof settings route.")
 
 
-def _assert_truncation_is_attempt_failure(model: WorkflowModel) -> None:
+def _assert_provider_retry_waits_visible(model: InvariantState) -> None:
+    if model.provider_retry_waits and model.provider_retry_waits != len(model.provider_retry_attempts):
+        _fail(model, "A provider retry wait did not produce its own Live Activity record.")
+
+
+def _assert_all_retry_wait_sources_accounted(model: InvariantState) -> None:
+    _assert_provider_retry_waits_visible(model)
+    if not model.retry_wait_inventory_complete:
+        _fail(model, "The production-wide retry-wait inventory is incomplete.")
+    if not model.retry_wait_inventory_assured:
+        _fail(model, "At least one classified retry wait does not use the assured Live Activity path.")
+
+
+def _assert_provider_retry_identity_stable(model: InvariantState) -> None:
+    if model.provider_retry_waits:
+        if len(model.provider_retry_event_ids) != model.provider_retry_waits:
+            _fail(model, "Provider retry attempts do not have distinct event identities.")
+        if len(model.provider_retry_correlation_ids) != 1:
+            _fail(model, "Provider retry attempts lost their stable correlation identity.")
+
+
+def _assert_provider_retry_activity_secret_safe(model: InvariantState) -> None:
+    if model.provider_retry_secret_leaks:
+        _fail(model, "Provider retry Live Activity exposed secret-bearing error detail.")
+
+
+def _assert_provider_retry_activity_persists(model: InvariantState) -> None:
+    if model.provider_retry_waits and not model.provider_retry_visible_after_reload:
+        _fail(model, "Provider retry Live Activity disappeared after reload.")
+
+
+ROUTE_IDENTITY_WORKFLOW_MODES = frozenset({"autonomous", "aggregator", "compiler", "leanoj", "manual_proof_check"})
+_PLACEHOLDER_ROUTE_PROVIDERS = frozenset({"", "unknown", "configured_role", "provider"})
+_OPENROUTER_FAMILY_PROVIDERS = frozenset({"openrouter"})
+_OPENROUTER_HOST_ROUTING = frozenset({"pinned", "auto", "auto_fallback"})
+# Provider- or account-wide events name the model only when the failing route carries one.
+_ROUTE_LEVEL_PROVIDER_EVENTS = frozenset({"account_credits_exhausted", "free_models_exhausted"})
+
+
+def provider_error_activity_events(events: list[WorkflowEvent]) -> list[WorkflowEvent]:
+    """Return provider/API-error activity; overflow and lifecycle-only stops have their own laws."""
+    return [
+        event
+        for event in events
+        if event.event_type in PROVIDER_ERROR_ACTIVITY_EVENTS
+        and (
+            event.event_type != "auto_research_stopped"
+            or (
+                event.payload.get("notification_kind") == "model_error"
+                and event.payload.get("reason") != "context_overflow"
+            )
+        )
+    ]
+
+
+def provider_error_route_identity_problem(event: WorkflowEvent) -> str | None:
+    """Return why one provider-error activity item lacks full route identity, if it does."""
+    payload = event.payload
+    if str(payload.get("workflow_mode") or "") not in ROUTE_IDENTITY_WORKFLOW_MODES:
+        return "names no valid workflow mode"
+    if not payload.get("role_id"):
+        return "names no role"
+    provider = str(payload.get("provider") or "").strip().lower()
+    if provider in _PLACEHOLDER_ROUTE_PROVIDERS:
+        return "names a placeholder provider"
+    if event.event_type not in _ROUTE_LEVEL_PROVIDER_EVENTS and not payload.get("model"):
+        return "names no model"
+    host_routing = payload.get("host_routing")
+    if provider in _OPENROUTER_FAMILY_PROVIDERS:
+        if host_routing not in _OPENROUTER_HOST_ROUTING:
+            return "names no OpenRouter host routing"
+        if host_routing in {"pinned", "auto_fallback"} and not payload.get("configured_host_provider"):
+            return "names no configured host for a pinned route"
+    elif host_routing != "direct":
+        return "does not mark its non-OpenRouter route direct"
+    identity = str(payload.get("route_identity") or "")
+    if not identity or identity not in str(payload.get("message") or ""):
+        return "does not render its route identity in the message"
+    return None
+
+
+def _assert_provider_error_route_identity(model: InvariantState) -> None:
+    for event in provider_error_activity_events(model.events):
+        problem = provider_error_route_identity_problem(event)
+        if problem:
+            _fail(model, f"Provider-error activity {event.event_type!r} {problem}.")
+
+
+def _assert_provider_error_sources_route_attributed(model: InvariantState) -> None:
+    if not model.provider_error_inventory_complete:
+        _fail(model, "The production provider-error activity inventory is incomplete.")
+    if not model.provider_error_inventory_route_attributed:
+        _fail(model, "A provider-error activity source is neither route-attributed nor explicitly exempt.")
+
+
+def _assert_truncation_is_attempt_failure(model: InvariantState) -> None:
     if model.truncation_failures and model.provider_pause_from_truncation:
         _fail(model, "Provider max-output truncation was treated as a provider pause.")
 
 
-def _assert_at_least_one_output_enabled(model: WorkflowModel) -> None:
+def _assert_at_least_one_output_enabled(model: InvariantState) -> None:
     rejected = any(
         event.event_type == "start_rejected" and event.payload.get("reason") == "no_allowed_outputs"
         for event in model.events
@@ -317,7 +438,12 @@ def _assert_context_overflow_route_identity(model: WorkflowModel) -> None:
 
 
 def _assert_context_overflow_persists_across_reload(model: WorkflowModel) -> None:
-    live = [event for event in model.events if event.event_type == "context_overflow_error"]
+    live = [
+        event for event in model.events
+        if event.event_type == "context_overflow_error"
+        and event.payload.get("workflow_mode") == "autonomous"
+        and event.payload.get("scope") != "continuous_manual"
+    ]
     persisted = [
         event for event in model.persisted_events if event.event_type == "context_overflow_error"
     ]
@@ -337,12 +463,74 @@ def _assert_context_overflow_terminal_stop_once(model: WorkflowModel) -> None:
         _fail(model, "Fatal context overflow did not produce exactly one terminal stop activity.")
 
 
-def _assert_proof_context_overflow_nonfatal(model: WorkflowModel) -> None:
+def _assert_proof_context_overflow_nonfatal(model: InvariantState) -> None:
     proof_overflows = [
         event for event in model.events if event.event_type == "proof_context_overflow"
     ]
-    if any(event.payload.get("fatal") is not False for event in proof_overflows):
-        _fail(model, "Per-proof context overflow was treated as fatal.")
+    candidate_local = [
+        event for event in proof_overflows if event.payload.get("scope") == "candidate"
+    ]
+    if not proof_overflows:
+        return
+    if not candidate_local:
+        _fail(model, "Proof overflow was emitted without candidate-local scope.")
+    if any(
+        event.payload.get("fatal") is not False or not event.payload.get("candidate_id")
+        for event in candidate_local
+    ):
+        _fail(model, "Candidate-local proof overflow lost nonfatal candidate scope.")
+
+
+def _assert_autonomous_mandatory_overflow_preserves_checkpoint(model: InvariantState) -> None:
+    events = [
+        event for event in model.events
+        if event.event_type == "context_overflow_error"
+        and event.payload.get("workflow_mode") == "autonomous"
+        and event.payload.get("scope") == "checkpoint"
+    ]
+    if not events:
+        return
+    if any(
+        event.payload.get("fatal") is not True
+        or event.payload.get("checkpoint_preserved") is not True
+        or event.payload.get("siblings_drained") is not True
+        for event in events
+    ):
+        _fail(model, "Mandatory Autonomous overflow did not stop after preserving its checkpoint.")
+
+
+def _assert_continuous_manual_overflow_terminal_after_drain(model: InvariantState) -> None:
+    events = [
+        event for event in model.events
+        if event.event_type == "context_overflow_error"
+        and event.payload.get("scope") == "continuous_manual"
+    ]
+    if not events:
+        return
+    if any(
+        event.payload.get("fatal") is not True
+        or event.payload.get("siblings_drained") is not True
+        or event.payload.get("terminal_after_drain") is not True
+        for event in events
+    ):
+        _fail(model, "Continuous-manual overflow became terminal before sibling drain.")
+
+
+def _product_law_checker(observation: str) -> InvariantChecker:
+    def check(model: InvariantState) -> None:
+        if observation not in model.law_observations:
+            if observation in model.law_violations:
+                _fail(model, f"Product law {observation!r} was violated without observation.")
+            return
+        if observation in model.law_violations:
+            _fail(model, f"Product law {observation!r} was violated.")
+        if model.adverse_order_attempts and (
+            model.fenced_adverse_order_attempts != model.adverse_order_attempts
+        ):
+            _fail(model, "An adverse-order action escaped its generation/lifecycle fence.")
+        if model.mutation_attempts and model.atomic_mutations != model.mutation_attempts:
+            _fail(model, "A product-law mutation was not atomic.")
+    return check
 
 
 def _assert_proof_verified_after_registration(model: WorkflowModel) -> None:
@@ -472,6 +660,12 @@ def _assert_continuous_loop_explicit_ownership(model: InvariantState) -> None:
         return
     if model.continuous_loop_hidden_cap is not None:
         _fail(model, "Continuous proof loop has a hidden automatic cap.")
+    if model.continuous_no_discovery_limit != 10:
+        _fail(model, "Continuous proof loop lacks the documented ten-round no-discovery limit.")
+    if not model.continuous_no_discovery_resets_on_candidate:
+        _fail(model, "Continuous proof loop does not reset its no-discovery streak after discovery.")
+    if not model.continuous_no_discovery_activity_visible:
+        _fail(model, "Continuous proof loop does not expose its no-discovery streak.")
     if model.continuous_source_reservations != 1:
         _fail(model, "Continuous proof loop does not own exactly one source reservation.")
     if not model.continuous_stop_available:
@@ -479,7 +673,7 @@ def _assert_continuous_loop_explicit_ownership(model: InvariantState) -> None:
     if model.continuous_restart_resumable:
         _fail(model, "Manual continuous proof loop exposes removed restart-resume state.")
     if model.continuous_stops_on_no_candidates:
-        _fail(model, "Continuous proof loop stops automatically when rounds find no candidates.")
+        _fail(model, "Continuous proof loop stops on an empty round before the documented streak limit.")
     if not model.continuous_round_activity_detailed:
         _fail(model, "Continuous proof loop does not expose detailed per-round live activity.")
     if model.continuous_cleanup_leaks:
@@ -498,8 +692,8 @@ def _assert_candidate_list_validator_gate(model: InvariantState) -> None:
         return
     if not model.candidate_list_gate_before_proof_cost:
         _fail(model, "Proof candidates reached proof cost before whole-list validation.")
-    if not model.candidate_list_exact_threshold_accepts:
-        _fail(model, "The exact 75% candidate-list novelty threshold was not accepted.")
+    if not model.candidate_list_any_novel_accepts:
+        _fail(model, "A candidate list with at least one approved novel entry was not accepted.")
     if model.candidate_list_semantic_history_count > 5:
         _fail(model, "Candidate-list semantic rejection memory exceeded five entries.")
     if not model.candidate_list_scope_isolated:
@@ -546,7 +740,7 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         invariant_id="proof_runtime.no_lean_when_disabled",
         field="proof_runtime_gating",
         crossed_fields=("allowed_outputs", "provider_pause_resume", "prompt_context"),
-        adapters=("model", "real_coordinator"),
+        adapters=("model", "focused_production", "real_coordinator"),
         checker=_assert_lean_disabled_means_no_invocations,
         description="Lean proof work must not run when Lean is disabled.",
     ),
@@ -582,9 +776,25 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
             "workflow_filesystem_state",
             "websocket_api_contracts",
         ),
-        adapters=("model", "real_coordinator"),
+        adapters=("model", "focused_production", "real_coordinator"),
         checker=_assert_candidate_list_validator_gate,
-        description="Every proof round validates the whole candidate list before proof cost with exact-threshold, scoped-memory, and visible-activity guarantees.",
+        description="Every proof round validates the whole candidate list before proof cost, accepts any list with at least one approved novel entry, and forwards only approved candidates.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_runtime.candidate_list_autonomous_restart_owned",
+        field="proof_runtime_gating",
+        crossed_fields=("provider_pause_resume", "workflow_filesystem_state"),
+        adapters=("model", "focused_production"),
+        checker=_assert_candidate_list_validator_gate,
+        description="Autonomous candidate-list approval state durably resumes only for the same run, source, trigger, and round.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_runtime.candidate_list_manual_process_local",
+        field="proof_runtime_gating",
+        crossed_fields=("runtime_exclusivity", "workflow_filesystem_state"),
+        adapters=("model", "focused_production"),
+        checker=_assert_candidate_list_validator_gate,
+        description="Manual candidate-list approval state is process-local, source-scoped, and cleared at round or terminal cleanup.",
     ),
     InvariantSpec(
         invariant_id="outputs.at_least_one_output_enabled",
@@ -768,7 +978,23 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         crossed_fields=("proof_runtime_gating", "provider_pause_resume"),
         adapters=("model", "real_coordinator", "browser_smoke"),
         checker=_assert_proof_context_overflow_nonfatal,
-        description="Per-proof context overflow is scoped and nonfatal to its parent workflow.",
+        description="Candidate-local proof context overflow is scoped, identified, and nonfatal.",
+    ),
+    InvariantSpec(
+        invariant_id="events.autonomous_mandatory_overflow_checkpoint_preserved",
+        field="websocket_api_contracts",
+        crossed_fields=("proof_runtime_gating", "workflow_filesystem_state", "runtime_exclusivity"),
+        adapters=("model",),
+        checker=_assert_autonomous_mandatory_overflow_preserves_checkpoint,
+        description="Mandatory Autonomous proof overflow drains siblings, preserves its checkpoint, and terminates.",
+    ),
+    InvariantSpec(
+        invariant_id="events.continuous_manual_overflow_terminal_after_drain",
+        field="websocket_api_contracts",
+        crossed_fields=("continuous_proof_loop", "runtime_exclusivity"),
+        adapters=("model",),
+        checker=_assert_continuous_manual_overflow_terminal_after_drain,
+        description="Continuous-manual mandatory overflow becomes terminal only after sibling drain.",
     ),
     InvariantSpec(
         invariant_id="events.proof_verified_after_registration",
@@ -838,7 +1064,7 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         invariant_id="proof_pruning.artifacts_and_future_memory_preserved",
         field="proof_pruning",
         crossed_fields=("proof_scope_isolation", "workflow_filesystem_state", "assistant_memory"),
-        adapters=("model", "real_coordinator"),
+        adapters=("model", "focused_production", "real_coordinator"),
         checker=_assert_pruned_proof_artifacts_preserved,
         description="Pruning preserves proof artifacts, visibility, exports, graph links, future memory, and SyntheticLib eligibility.",
     ),
@@ -870,7 +1096,7 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         invariant_id="proof_pruning.no_prune_is_valid",
         field="proof_pruning",
         crossed_fields=("provider_pause_resume",),
-        adapters=("model", "real_coordinator"),
+        adapters=("model", "focused_production", "real_coordinator"),
         checker=_assert_no_prune_is_valid,
         description="A valid no-prune result causes no mutation and is not an error.",
     ),
@@ -878,7 +1104,7 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         invariant_id="proof_pruning.review_non_blocking",
         field="proof_pruning",
         crossed_fields=("proof_runtime_gating", "provider_pause_resume"),
-        adapters=("model", "real_coordinator"),
+        adapters=("model", "focused_production", "real_coordinator"),
         checker=_assert_pruning_non_blocking,
         description="Proof solving and later rounds continue while pruning model review is pending.",
     ),
@@ -904,7 +1130,7 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         crossed_fields=("runtime_exclusivity", "workflow_filesystem_state", "provider_pause_resume"),
         adapters=("model", "real_route", "real_coordinator"),
         checker=_assert_continuous_loop_explicit_ownership,
-        description="Continuous manual proof loops run without a no-candidate limit, are explicitly stoppable, expose detailed per-round activity and no restart-resume state, and clean up one reservation.",
+        description="Continuous manual proof loops use a visible ten-consecutive-round no-discovery limit that resets on discovery, remain explicitly stoppable with no restart-resume state, and clean up one reservation.",
     ),
     InvariantSpec(
         invariant_id="proof_loop.automatic_round_policy_preserved",
@@ -912,7 +1138,7 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         crossed_fields=("proof_runtime_gating", "workflow_filesystem_state"),
         adapters=("model", "real_coordinator"),
         checker=_assert_automatic_round_policy_preserved,
-        description="Pruning preserves x3/current-up-to-four automatic rounds and first-zero exit.",
+        description="Autonomous proof rounds use proofs-only max 4, combined brainstorm max 2, completed-paper max 1, and first-valid-zero exit.",
     ),
     InvariantSpec(
         invariant_id="proof_pruning.occurrence_scope_isolated",
@@ -922,6 +1148,26 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         checker=_assert_pruning_occurrence_scoped,
         description="Pruning one occurrence does not affect canonical matches in other runs or sources.",
     ),
+    InvariantSpec("solution_path.activation_review_fenced", "solution_path", ("workflow_filesystem_state", "runtime_exclusivity"), ("model",), _product_law_checker("solution_path.activation_review_fenced"), "Solution paths activate at the parent-owned threshold and apply only reviewed generation-fenced revisions."),
+    InvariantSpec("proof_competition.secondary_after_primary_exhaustion", "proof_competition", ("proof_runtime_gating", "provider_pause_resume"), ("model",), _product_law_checker("proof_competition.secondary_after_primary_exhaustion"), "Autonomous secondary formalizers start only after predecessor exhaustion and never after Lean success."),
+    InvariantSpec("provider.exact_role_and_cooldown_scope", "provider_routing", ("provider_pause_resume", "runtime_exclusivity"), ("model",), _product_law_checker("provider.exact_role_and_cooldown_scope"), "Provider calls require exact configured role identity and provider-wide cooldown remains correctly scoped."),
+    InvariantSpec("feedback_projection.newest_five_whole", "feedback_projection", ("prompt_context", "provider_pause_resume"), ("model",), _product_law_checker("feedback_projection.newest_five_whole"), "Model feedback retains at most the newest five whole entries and never drops the newest."),
+    InvariantSpec("bulk_mutation.atomic_revision_fenced", "bulk_mutation", ("workflow_filesystem_state", "proof_scope_isolation"), ("model",), _product_law_checker("bulk_mutation.atomic_revision_fenced"), "Bulk proof and paper mutations publish all-or-none under revision and occurrence fences."),
+    InvariantSpec("runtime_root.single_owner_bound_paths", "runtime_root_ownership", ("runtime_exclusivity", "workflow_filesystem_state"), ("model",), _product_law_checker("runtime_root.single_owner_bound_paths"), "One backend owns each active runtime root and all mutable paths rebind atomically."),
+    InvariantSpec("proof_run.identity_generation_fenced", "proof_run_identity", ("websocket_api_contracts", "workflow_filesystem_state"), ("model",), _product_law_checker("proof_run.identity_generation_fenced"), "Proof-run discovery and controls reconcile by run identity and lifecycle generation."),
+    InvariantSpec("proof_framing.allowed_outputs_gate", "proof_framing", ("allowed_outputs", "proof_runtime_gating"), ("model",), _product_law_checker("proof_framing.allowed_outputs_gate"), "Autonomous proof framing runs when proofs are allowed and is absent when proofs are disabled."),
+    InvariantSpec("sleep.unique_owner_released", "sleep_ownership", ("runtime_exclusivity", "workflow_filesystem_state"), ("model",), _product_law_checker("sleep.unique_owner_released"), "Top-level and manual-proof sleep owners are unique and released by terminal cleanup."),
+    InvariantSpec("supercharge_creativity.routing_separation", "answer_wrappers", ("prompt_context", "provider_pause_resume"), ("model",), _product_law_checker("supercharge_creativity.routing_separation"), "Supercharge wraps answers while creativity only steers eligible brainstorm prompts."),
+    InvariantSpec("proof_novelty.group_atomic_same_run", "group_novelty", ("proof_scope_isolation", "prompt_context"), ("model",), _product_law_checker("proof_novelty.group_atomic_same_run"), "Group novelty uses a complete finite same-run member set and injects it atomically."),
+    InvariantSpec("leanoj.parent_control_generation_fences_children", "leanoj_parent_control", ("runtime_exclusivity", "workflow_filesystem_state"), ("model",), _product_law_checker("leanoj.parent_control_generation_fences_children"), "LeanOJ Skip and Force advance control generation before stale child commits."),
+    # Append-only Live Activity Assurance laws.
+    InvariantSpec("live_activity.provider_retry_each_wait_visible", "websocket_api_contracts", ("provider_pause_resume", "provider_routing"), ("model", "focused_production", "browser_smoke"), _assert_provider_retry_waits_visible, "Every actual provider retry wait emits additive Live Activity with provider, role/model, attempt, and wait duration."),
+    InvariantSpec("live_activity.provider_retry_identity_stable", "websocket_api_contracts", ("provider_pause_resume", "workflow_filesystem_state"), ("model", "focused_production"), _assert_provider_retry_identity_stable, "Retry attempts have distinct event identities while retaining one stable correlation identity."),
+    InvariantSpec("live_activity.provider_retry_secret_safe", "websocket_api_contracts", ("provider_routing", "workflow_filesystem_state"), ("model", "focused_production"), _assert_provider_retry_activity_secret_safe, "Provider retry activity exposes only bounded secret-redacted error detail."),
+    InvariantSpec("live_activity.provider_retry_persists_reload", "websocket_api_contracts", ("workflow_filesystem_state", "provider_pause_resume"), ("model", "focused_production", "browser_smoke"), _assert_provider_retry_activity_persists, "Provider retry Live Activity remains available after browser reload without collapsing distinct attempts."),
+    InvariantSpec("live_activity.all_retry_wait_sources_accounted", "websocket_api_contracts", ("provider_routing", "provider_pause_resume"), ("model", "focused_production", "real_coordinator"), _assert_all_retry_wait_sources_accounted, "Provider-adapter, manager, workflow, timed-cooldown, and free-model retry waits all use the assured Live Activity path."),
+    InvariantSpec("live_activity.provider_error_route_identity", "websocket_api_contracts", ("provider_routing", "provider_pause_resume"), ("model", "focused_production", "browser_smoke"), _assert_provider_error_route_identity, "Every provider/API-error activity line names workflow mode, role, model, provider, and OpenRouter host routing in fields and its rendered message."),
+    InvariantSpec("live_activity.provider_error_sources_route_attributed", "websocket_api_contracts", ("provider_routing", "provider_pause_resume"), ("model", "real_coordinator"), _assert_provider_error_sources_route_attributed, "Every production provider-error activity source is syntactically route-attributed or explicitly exempt."),
 )
 
 

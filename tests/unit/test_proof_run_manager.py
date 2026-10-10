@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 
 from backend.autonomous.core.proof_run_manager import (
+    NO_DISCOVERY_LIMIT_TERMINAL_REASON,
     ProofRunControl,
     ProofRunManager,
     ProofRunSourceInvalidError,
@@ -171,6 +172,77 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         self.assertEqual(payload["candidate_count"], 0)
         self.assertTrue(payload["next_round_automatic"])
         self.assertIn("0/0 candidates", payload["round_summary"])
+
+    async def test_continuous_no_discovery_streak_completes_on_tenth_round(self):
+        events = []
+
+        async def event_callback(event_type, payload):
+            events.append((event_type, payload))
+
+        self.control.event_callback = event_callback
+        self.control.snapshot = self.control.snapshot.model_copy(
+            update={
+                "run_mode": "loop_with_pruning",
+                "no_discovery_round_limit": 10,
+            }
+        )
+
+        for round_number in range(1, 10):
+            snapshot = await self.manager.complete_round(
+                self.control,
+                round_number=round_number,
+                valid_candidate_count=0,
+            )
+            self.assertEqual(snapshot.consecutive_no_discovery_rounds, round_number)
+            self.assertFalse(snapshot.terminal_reason)
+            self.assertTrue(events[-1][1]["next_round_automatic"])
+
+        snapshot = await self.manager.complete_round(
+            self.control,
+            round_number=10,
+            valid_candidate_count=0,
+        )
+        self.assertEqual(snapshot.consecutive_no_discovery_rounds, 10)
+        self.assertEqual(
+            snapshot.terminal_reason,
+            NO_DISCOVERY_LIMIT_TERMINAL_REASON,
+        )
+        self.assertFalse(events[-1][1]["next_round_automatic"])
+
+    async def test_continuous_discovery_resets_no_discovery_streak(self):
+        self.control.snapshot = self.control.snapshot.model_copy(
+            update={
+                "run_mode": "loop_with_pruning",
+                "no_discovery_round_limit": 10,
+                "consecutive_no_discovery_rounds": 9,
+            }
+        )
+
+        snapshot = await self.manager.complete_round(
+            self.control,
+            round_number=10,
+            valid_candidate_count=1,
+        )
+        self.assertEqual(snapshot.consecutive_no_discovery_rounds, 0)
+        self.assertFalse(snapshot.terminal_reason)
+
+    async def test_failure_without_valid_candidate_count_does_not_advance_streak(self):
+        self.control.snapshot = self.control.snapshot.model_copy(
+            update={
+                "run_mode": "loop_with_pruning",
+                "no_discovery_round_limit": 10,
+                "consecutive_no_discovery_rounds": 4,
+            }
+        )
+
+        snapshot = await self.manager.complete_round(
+            self.control,
+            round_number=5,
+            valid_candidate_count=None,
+            summary="Provider failure",
+        )
+        self.assertEqual(snapshot.consecutive_no_discovery_rounds, 4)
+        self.assertFalse(snapshot.terminal_reason)
 
     async def test_round_completion_does_not_announce_continuation_after_fatal_reason(self):
         events = []
@@ -389,6 +461,57 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.control.snapshot.status, "error")
         self.assertEqual(self.control.snapshot.terminal_reason, "source_invalid")
         self.assertIn("Paper content not found", self.control.snapshot.last_error_summary)
+
+    async def test_provider_error_events_carry_route_identity_text(self):
+        events = []
+
+        async def event_callback(event_type, payload):
+            events.append((event_type, payload))
+
+        identity = "[Manual proof check · Proof Brainstorm · vendor/test-free:free via OpenRouter]"
+        route_identity = {
+            "workflow_mode": "manual_proof_check",
+            "role_id": "manual_proof_brainstorm",
+            "model": "vendor/test-free:free",
+            "provider": "openrouter",
+            "configured_host_provider": "",
+            "host_routing": "auto",
+            "route_identity": identity,
+        }
+        self.control.event_callback = event_callback
+        await self.manager.provider_paused(self.control, route_identity=route_identity)
+        snapshot = await self.manager.repair_required(
+            self.control,
+            reason="Repair the configured proof provider.",
+            route_identity=route_identity,
+        )
+
+        paused = dict(events)["proof_run_provider_paused"]
+        self.assertEqual(paused["message"], f"{identity} Proof run paused for provider credits.")
+        self.assertEqual(paused["model"], "vendor/test-free:free")
+        self.assertEqual(paused["configured_host_provider"], "")
+        terminal = dict(events)["proof_run_terminal"]
+        self.assertEqual(
+            snapshot.last_error_summary,
+            f"{identity} Repair the configured proof provider.",
+        )
+        self.assertEqual(terminal["last_error_summary"], snapshot.last_error_summary)
+        self.assertEqual(terminal["route_identity"], identity)
+        self.assertEqual(terminal["proof_run_id"], "proof-run-1")
+        self.assertNotIn("route_identity", ProofRunSnapshot.model_fields)
+
+    async def test_provider_pause_without_identity_keeps_legacy_payload(self):
+        events = []
+
+        async def event_callback(event_type, payload):
+            events.append((event_type, payload))
+
+        self.control.event_callback = event_callback
+        await self.manager.provider_paused(self.control)
+
+        paused = dict(events)["proof_run_provider_paused"]
+        self.assertNotIn("message", paused)
+        self.assertNotIn("route_identity", paused)
 
     async def test_hard_repair_is_terminal_and_not_resumable(self):
         snapshot = await self.manager.repair_required(

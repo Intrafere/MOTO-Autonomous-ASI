@@ -1,10 +1,17 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_scope.generated_appendices_stripped_from_prompts"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "brainstorm_appendix_stripped",
     "paper_appendix_stripped"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "prompt_context",
@@ -13,11 +20,22 @@
   "invariants": [
     "proof_scope.generated_appendices_stripped_from_prompts"
   ],
+  "observed_transition": "brainstorm_appendix_stripped; paper_appendix_stripped",
+  "real_components": [
+    "backend/api/routes/aggregator.py",
+    "backend/api/routes/compiler.py",
+    "backend/api/routes/leanoj.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_generated_proof_appendix_stripping",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+  "source_identity": "workflow-source-v1:fdf701ff7b122f8151b5ad05d2e682be4f346c7b2170138c2683e9a987107054",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_generated_proof_appendices_are_stripped_without_truncating_body"
+  ]
 }

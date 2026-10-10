@@ -14,10 +14,24 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
+from backend.shared.build_info import get_build_info
 from backend.shared.config import system_config
+from backend.shared.lean_source_evidence import (
+    LEAN_COMPILE_RECEIPT_VERSION,
+    LEAN_IMPORT_PARSER_VERSION,
+    LEAN_SOURCE_TRANSFORMATION_VERSION,
+    LEAN_VERIFICATION_PROFILE_VERSION,
+    parse_explicit_import_modules,
+    receipt_digest,
+    source_bytes,
+    source_sha256,
+    transformations_between,
+)
+from backend.shared.models import LeanCompileReceipt, LeanImportEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +71,8 @@ class Lean4Result:
     raw_stderr: str = ""
     tactic_error_slice: str = ""
     failing_tactic_index: int = -1
+    checked_source: str = ""
+    compile_receipt: Optional[LeanCompileReceipt] = None
 
 
 def _strip_lean_comments_and_strings(code: str) -> str:
@@ -366,7 +382,7 @@ class Lean4Client:
         return self.workspace_dir / ".moto_mathlib_index.json"
 
     def get_mathlib_commit(self) -> str:
-        """Best-effort lookup of the pinned Mathlib revision for certificate export."""
+        """Best-effort lookup of the pinned Mathlib source revision."""
         manifest_path = self.workspace_dir / "lake-manifest.json"
         if manifest_path.exists():
             try:
@@ -395,13 +411,6 @@ class Lean4Client:
                     return head_value
             except Exception as exc:
                 logger.debug("Failed to read Mathlib git HEAD: %s", exc)
-
-        toolchain_path = package_dir / "lean-toolchain"
-        if toolchain_path.exists():
-            try:
-                return toolchain_path.read_text(encoding="utf-8").strip()
-            except Exception as exc:
-                logger.debug("Failed to read Mathlib lean-toolchain: %s", exc)
 
         return ""
 
@@ -572,13 +581,88 @@ class Lean4Client:
         """Return the Lean 4 version string when available."""
         lean_cmd = self.lean_path or self._resolve_executable("lean")
         returncode, stdout, stderr = await self._run_process(
-            [lean_cmd, "--version"],
+            [self.lake_path, "env", lean_cmd, "--version"],
             cwd=self.workspace_dir if self.workspace_dir.exists() else Path.cwd(),
             timeout=15,
         )
         if returncode != 0:
             return (stderr or stdout).strip()
         return (stdout or stderr).strip()
+
+    async def _build_compile_receipt(
+        self,
+        *,
+        original_source: str,
+        checked_source: str,
+        checker_mode: Literal["subprocess", "lsp"],
+        timeout: int,
+        verification_profile: str,
+    ) -> LeanCompileReceipt:
+        """Capture immutable evidence only after Lean accepted exact checked bytes."""
+        lean_version = (await self.get_version()).strip()
+        mathlib_revision = self.get_mathlib_commit().strip()
+        if not lean_version or not mathlib_revision:
+            raise RuntimeError(
+                "Lean accepted the proof, but immutable toolchain evidence could not be captured."
+            )
+        build = get_build_info()
+        original_imports = set(parse_explicit_import_modules(original_source))
+        imports = [
+            LeanImportEvidence(
+                module_name=module,
+                parser_version=LEAN_IMPORT_PARSER_VERSION,
+                ordinal=index,
+                present_in_original_source=module in original_imports,
+            )
+            for index, module in enumerate(parse_explicit_import_modules(checked_source))
+        ]
+        payload = {
+            "schema_version": LEAN_COMPILE_RECEIPT_VERSION,
+            "result": "accepted",
+            "checker_mode": checker_mode,
+            "verification_profile": verification_profile,
+            "verification_profile_version": LEAN_VERIFICATION_PROFILE_VERSION,
+            "source_transformation_version": LEAN_SOURCE_TRANSFORMATION_VERSION,
+            "source_transformations": transformations_between(original_source, checked_source),
+            "original_source_sha256": source_sha256(original_source),
+            "original_source_byte_length": len(source_bytes(original_source)),
+            "checked_source_sha256": source_sha256(checked_source),
+            "checked_source_byte_length": len(source_bytes(checked_source)),
+            "checked_source_artifact": "",
+            "lean_version": lean_version,
+            "mathlib_revision": mathlib_revision,
+            "moto_version": build.version,
+            "moto_build_commit": build.build_commit,
+            "moto_api_contract_version": build.api_contract_version,
+            "timeout_seconds": int(timeout),
+            "completed_at": datetime.now(timezone.utc),
+            "explicit_imports": [item.model_dump(mode="json") for item in imports],
+            "migration_kind": "original_verification",
+        }
+        payload["receipt_digest"] = receipt_digest(payload)
+        return LeanCompileReceipt.model_validate(payload)
+
+    async def _attach_success_evidence(
+        self,
+        result: Lean4Result,
+        *,
+        original_source: str,
+        checked_source: str,
+        checker_mode: Literal["subprocess", "lsp"],
+        timeout: int,
+        verification_profile: str,
+    ) -> Lean4Result:
+        if not result.success:
+            return result
+        result.checked_source = checked_source
+        result.compile_receipt = await self._build_compile_receipt(
+            original_source=original_source,
+            checked_source=checked_source,
+            checker_mode=checker_mode,
+            timeout=timeout,
+            verification_profile=verification_profile,
+        )
+        return result
 
     def get_cached_version(self) -> str:
         """Return the version observed by bootstrap without invoking Lean."""
@@ -991,6 +1075,22 @@ class Lean4Client:
         return code, adjusted_ranges
 
     @staticmethod
+    def _compose_tactic_source_for_evidence(
+        theorem_header: str,
+        tactic_list: list[str],
+    ) -> str:
+        """Serialize caller tactic input before checker normalization."""
+        header = (theorem_header or "").strip()
+        if header and ":= by" not in header and not header.rstrip().endswith("by"):
+            header = f"{header} := by"
+        lines = [header] if header else []
+        for tactic in tactic_list:
+            stripped = str(tactic or "").rstrip()
+            if stripped:
+                lines.extend(f"  {line.rstrip()}" for line in stripped.splitlines())
+        return "\n".join(lines)
+
+    @staticmethod
     def _extract_tactic_error_slice(
         combined_output: str,
         temp_filename: str,
@@ -1093,13 +1193,33 @@ class Lean4Client:
         positive_pass = lean_exited_cleanly and not has_error_diagnostic and (allow_placeholders or not has_sorry_warning)
 
         if positive_pass:
-            return Lean4Result(
+            result = Lean4Result(
                 success=True,
                 error_output="",
                 diagnostic_output=combined_output,
                 goal_states=goal_states,
                 raw_stderr=stderr.strip(),
             )
+            try:
+                return await self._attach_success_evidence(
+                    result,
+                    original_source=lean_code,
+                    checked_source=prepared_code,
+                    checker_mode="subprocess",
+                    timeout=timeout,
+                    verification_profile=(
+                        "partial_scaffold" if allow_placeholders else "full_proof"
+                    ),
+                )
+            except Exception as exc:
+                logger.error("Lean proof evidence capture failed after acceptance: %s", exc)
+                return Lean4Result(
+                    success=False,
+                    error_output=(
+                        "LEAN 4 EVIDENCE ERROR: Lean accepted the source, but immutable "
+                        "proof-time evidence could not be captured. The proof was not registered."
+                    ),
+                )
 
         if has_sorry_warning and not has_error_diagnostic and lean_exited_cleanly:
             rejection = _format_placeholder_rejection("sorry", from_lean_diagnostic=True)
@@ -1255,7 +1375,7 @@ class Lean4Client:
         )
 
         if positive_pass:
-            return Lean4Result(
+            result = Lean4Result(
                 success=True,
                 error_output="",
                 diagnostic_output=combined_output,
@@ -1264,6 +1384,27 @@ class Lean4Client:
                 tactic_error_slice="",
                 failing_tactic_index=-1,
             )
+            try:
+                return await self._attach_success_evidence(
+                    result,
+                    original_source=self._compose_tactic_source_for_evidence(
+                        theorem_header, tactic_list
+                    ),
+                    checked_source=prepared_code,
+                    checker_mode="subprocess",
+                    timeout=timeout,
+                    verification_profile="tactic_script",
+                )
+            except Exception as exc:
+                logger.error("Lean tactic evidence capture failed after acceptance: %s", exc)
+                return Lean4Result(
+                    success=False,
+                    error_output=(
+                        "LEAN 4 EVIDENCE ERROR: Lean accepted the tactic script, but immutable "
+                        "proof-time evidence could not be captured. The proof was not registered."
+                    ),
+                    tactic_error_slice="Immutable proof-time evidence capture failed.",
+                )
 
         if has_sorry_warning and not has_error_diagnostic and lean_exited_cleanly:
             rejection = _format_placeholder_rejection("sorry", from_lean_diagnostic=True)
@@ -1828,6 +1969,25 @@ class Lean4LspClient(Lean4Client):
                 if self._is_workspace_infrastructure_error(result.error_output):
                     await self._mark_unhealthy(result.error_output)
                     return await self._subprocess_fallback.check_proof(lean_code, timeout=timeout)
+                if result.success:
+                    try:
+                        return await self._attach_success_evidence(
+                            result,
+                            original_source=lean_code,
+                            checked_source=prepared_code,
+                            checker_mode="lsp",
+                            timeout=timeout,
+                            verification_profile="full_proof",
+                        )
+                    except Exception as exc:
+                        logger.error("Lean LSP evidence capture failed after acceptance: %s", exc)
+                        return Lean4Result(
+                            success=False,
+                            error_output=(
+                                "LEAN 4 EVIDENCE ERROR: Lean accepted the source, but immutable "
+                                "proof-time evidence could not be captured. The proof was not registered."
+                            ),
+                        )
                 return result
             except Exception as exc:
                 await self._mark_unhealthy(str(exc))
@@ -1943,6 +2103,28 @@ class Lean4LspClient(Lean4Client):
                         tactic_list=tactic_list,
                         timeout=timeout,
                     )
+                if result.success:
+                    try:
+                        return await self._attach_success_evidence(
+                            result,
+                            original_source=self._compose_tactic_source_for_evidence(
+                                theorem_header, tactic_list
+                            ),
+                            checked_source=prepared_code,
+                            checker_mode="lsp",
+                            timeout=timeout,
+                            verification_profile="tactic_script",
+                        )
+                    except Exception as exc:
+                        logger.error("Lean LSP tactic evidence capture failed after acceptance: %s", exc)
+                        return Lean4Result(
+                            success=False,
+                            error_output=(
+                                "LEAN 4 EVIDENCE ERROR: Lean accepted the tactic script, but "
+                                "immutable proof-time evidence could not be captured."
+                            ),
+                            tactic_error_slice="Immutable proof-time evidence capture failed.",
+                        )
                 return result
             except Exception as exc:
                 await self._mark_unhealthy(str(exc))

@@ -15,10 +15,67 @@ from backend.shared.config import system_config
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import BrainstormMetadata
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
-from backend.autonomous.memory.proof_database import is_duplicate_novel_tier
+from backend.autonomous.memory.proof_database import (
+    is_duplicate_novel_tier,
+    is_live_context_active,
+)
 from backend.autonomous.memory.session_write_authority import autonomous_session_write
 
 logger = logging.getLogger(__name__)
+
+_FORMATTED_SUBMISSION_PATTERN = re.compile(
+    r"(?ms)^={80}\s*\n"
+    r"SUBMISSION #(\d+)\s*\|\s*Accepted:[^\n]*\n"
+    r"={80}\s*\n"
+    r".*?(?=^={80}\s*\nSUBMISSION #\d+\s*\||\Z)"
+)
+
+
+def project_brainstorm_content_for_model(
+    content: str,
+    *,
+    proofs,
+    requesting_run_id: str,
+    source_id: str,
+) -> str:
+    """Remove owning-run-pruned inline proof submissions from model context."""
+    normalized_source_id = str(source_id or "").strip()
+    linked_proofs = {}
+    for proof in proofs or []:
+        proof_source_type = str(
+            proof.get("source_type", "") if isinstance(proof, dict)
+            else getattr(proof, "source_type", "")
+        ).strip()
+        proof_source_id = str(
+            proof.get("source_id", "") if isinstance(proof, dict)
+            else getattr(proof, "source_id", "")
+        ).strip()
+        theorem_id = str(
+            proof.get("theorem_id", "") if isinstance(proof, dict)
+            else getattr(proof, "theorem_id", "")
+        ).strip()
+        match = re.fullmatch(r"brainstorm_submission_(\d+)", theorem_id)
+        if (
+            proof_source_type == "brainstorm"
+            and proof_source_id == normalized_source_id
+            and match
+        ):
+            linked_proofs[int(match.group(1))] = proof
+
+    if not linked_proofs:
+        return content
+
+    pieces = []
+    cursor = 0
+    for match in _FORMATTED_SUBMISSION_PATTERN.finditer(content):
+        pieces.append(content[cursor:match.start()])
+        submission_number = int(match.group(1))
+        proof = linked_proofs.get(submission_number)
+        if proof is None or is_live_context_active(proof, requesting_run_id):
+            pieces.append(match.group(0))
+        cursor = match.end()
+    pieces.append(content[cursor:])
+    return "".join(pieces).strip()
 
 
 class BrainstormMemory:
@@ -322,6 +379,41 @@ class BrainstormMemory:
             )
             return ""
 
+    async def get_model_context_content(
+        self,
+        topic_id: str,
+        *,
+        proof_database=None,
+        requesting_run_id: str = "",
+    ) -> str:
+        """Return the run-scoped brainstorm projection used by model calls.
+
+        Canonical brainstorm files remain complete.  An accepted inline Lean
+        proof is omitted only when its linked ProofRecord occurrence is pruned
+        for the requesting run.
+        """
+        content = await self.get_database_content(topic_id, strip_proofs=True)
+        if proof_database is None and self._session_manager is not None:
+            from backend.autonomous.memory.proof_database import proof_database as active_db
+            proof_database = active_db
+        if not requesting_run_id and self._session_manager is not None:
+            requesting_run_id = str(
+                getattr(self._session_manager, "session_id", "") or ""
+            )
+        if (
+            not content
+            or proof_database is None
+            or not hasattr(proof_database, "get_all_proofs")
+        ):
+            return content
+        proofs = await proof_database.get_all_proofs()
+        return project_brainstorm_content_for_model(
+            content,
+            proofs=proofs,
+            requesting_run_id=requesting_run_id,
+            source_id=topic_id,
+        )
+
     async def append_proofs_section(self, topic_id: str, proofs_data: Any) -> bool:
         """Append verified proofs to the bottom of a brainstorm database."""
         async with autonomous_session_write(self._base_dir), self._lock:
@@ -387,9 +479,24 @@ class BrainstormMemory:
                 logger.error(f"Failed to append proofs to brainstorm {topic_id}: {exc}")
                 return False
     
-    async def get_submissions_list(self, topic_id: str) -> List[Dict[str, Any]]:
+    async def get_submissions_list(
+        self,
+        topic_id: str,
+        *,
+        model_context: bool = False,
+        proof_database=None,
+        requesting_run_id: str = "",
+    ) -> List[Dict[str, Any]]:
         """Get list of submissions from a brainstorm database."""
-        content = await self.get_database_content(topic_id, strip_proofs=True)
+        content = (
+            await self.get_model_context_content(
+                topic_id,
+                proof_database=proof_database,
+                requesting_run_id=requesting_run_id,
+            )
+            if model_context
+            else await self.get_database_content(topic_id, strip_proofs=True)
+        )
         
         if not content:
             return []

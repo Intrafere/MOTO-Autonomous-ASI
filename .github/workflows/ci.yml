@@ -33,6 +33,22 @@ jobs:
       - name: Check Python dependency consistency
         run: python -m pip check
 
+      - name: Check workflow artifact projection
+        run: python -m tests.workflow_cross_field.artifacts --check
+
+      - name: Check SyntheticLib trade compatibility artifacts
+        run: |
+          git ls-files --error-unmatch \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/compatibility-matrix.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-contract-test-result.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-compatibility-receipt.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-compatibility-receipt.sha256 \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/frozen-asset-manifest.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/compatibility-bundle-manifest.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-preflight-attestation.json \
+            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/MOTO_COMPATIBILITY_RECEIPT.md
+          python -m scripts.check_syntheticlib_trade_contract --check
+
       - name: Run Python tests
         run: python -m pytest
 
@@ -55,6 +71,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install pytest pytest-asyncio
+
+      - name: Check SyntheticLib trade compatibility artifacts
+        run: python -m scripts.check_syntheticlib_trade_contract --check
+
+      - name: Run SyntheticLib compatibility regressions
+        run: >-
+          python -m pytest
+          tests/unit/test_syntheticlib_trade_compatibility.py
+          tests/integration/test_syntheticlib_trade_contract_command.py
+          tests/unit/test_local_syntheticlib_compatibility_ci.py
 
       - name: Run native and lifecycle race regressions
         run: >-

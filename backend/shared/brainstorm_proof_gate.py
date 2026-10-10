@@ -13,7 +13,7 @@ from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import get_lean4_client
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import is_non_retryable_model_error
-from backend.shared.models import ProofAttemptFeedback
+from backend.shared.models import LeanCompileReceipt, ProofAttemptFeedback
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class BrainstormProofGateResult:
     reasoning: str = ""
     lean_feedback: str = ""
     attempts: list[ProofAttemptFeedback] | None = None
+    compile_receipt: Optional[LeanCompileReceipt] = None
     failure_feedback: str = ""
 
 
@@ -371,6 +372,7 @@ async def verify_brainstorm_proof_candidate(
             raw_stderr=str(getattr(lean_result, "raw_stderr", "") or ""),
             strategy="full_script",
             success=lean_result.success,
+            compile_receipt=getattr(lean_result, "compile_receipt", None),
         )
 
         if lean_result.success:
@@ -424,7 +426,7 @@ async def verify_brainstorm_proof_candidate(
                         prompt_relevance_rationale=prompt_relevance_rationale,
                         novelty_rationale=novelty_rationale,
                         why_not_standard_known_result=why_not_standard_known_result,
-                        lean_code=lean_code,
+                        lean_code=getattr(lean_result, "checked_source", "") or lean_code,
                         reasoning=reasoning,
                         lean_feedback=lean_feedback,
                         attempts=attempts,
@@ -436,10 +438,11 @@ async def verify_brainstorm_proof_candidate(
                     prompt_relevance_rationale=prompt_relevance_rationale,
                     novelty_rationale=novelty_rationale,
                     why_not_standard_known_result=why_not_standard_known_result,
-                    lean_code=lean_code,
+                    lean_code=getattr(lean_result, "checked_source", "") or lean_code,
                     reasoning=reasoning,
                     lean_feedback=lean_feedback,
                     attempts=attempts,
+                    compile_receipt=getattr(lean_result, "compile_receipt", None),
                 )
 
             feedback.success = False

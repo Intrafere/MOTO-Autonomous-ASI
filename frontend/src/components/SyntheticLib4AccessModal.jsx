@@ -1,11 +1,21 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import HelpTooltip from './HelpTooltip';
+import useModalDialogFocus from '../hooks/useModalDialogFocus';
 import './settings-common.css';
 
 export default function SyntheticLib4AccessModal({
   isOpen,
   onClose,
 }) {
+  const dialogRef = useRef(null);
+  const closeRef = useRef(null);
+  useModalDialogFocus({
+    active: Boolean(isOpen),
+    dialogRef,
+    initialFocusRef: closeRef,
+    onEscape: onClose,
+  });
+
   if (!isOpen) return null;
 
   const bodyTextStyle = {
@@ -70,7 +80,11 @@ export default function SyntheticLib4AccessModal({
   return (
     <div className="inline-modal-overlay" style={{ zIndex: 10000 }} onClick={(event) => event.target === event.currentTarget && onClose()}>
       <div
-        className="inline-modal-content"
+        ref={dialogRef}
+        className="inline-modal-content inline-modal-content--fluid"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="syntheticlib4-access-title"
         style={{
           width: '1408px',
           maxWidth: '96vw',
@@ -95,6 +109,7 @@ export default function SyntheticLib4AccessModal({
         >
           <div>
             <h2
+              id="syntheticlib4-access-title"
               style={{
                 margin: 0,
                 color: '#fff',
@@ -140,6 +155,8 @@ export default function SyntheticLib4AccessModal({
             </div>
           </div>
           <button
+            ref={closeRef}
+            type="button"
             onClick={onClose}
             className="modal-close-btn"
             aria-label="Close SyntheticLib4 access"
