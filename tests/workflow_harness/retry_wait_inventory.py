@@ -157,6 +157,13 @@ WAIT_POLICIES: tuple[WaitPolicy, ...] = (
         "Hung-call observation timer; it neither retries nor blocks the provider call.",
     ),
     _policy(
+        "backend/shared/openai_codex_client.py",
+        "OpenAICodexClient._monitor_event_loop_stalls",
+        1,
+        WaitClassification.NON_RETRY,
+        "Event-loop stall sampling cadence for websocket diagnostics; it neither retries nor blocks the provider call.",
+    ),
+    _policy(
         "backend/shared/provider_recovery/runtime.py",
         "ProviderRecoveryRuntime.sleep_stop_aware",
         1,
