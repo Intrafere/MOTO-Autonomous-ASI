@@ -18,9 +18,11 @@ jobs:
     name: Clean-source compatibility attestation
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      RELEASE_ROOT: ${{ runner.temp }}/moto-syntheticlib-release
     steps:
+      - name: Set release root
+        shell: bash
+        run: echo "RELEASE_ROOT=${RUNNER_TEMP}/moto-syntheticlib-release" >> "$GITHUB_ENV"
+
       - name: Check out immutable source commit
         uses: actions/checkout@v4
         with:

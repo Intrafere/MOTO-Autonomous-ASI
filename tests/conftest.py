@@ -128,6 +128,37 @@ def _block_real_codex_websocket_transport():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_installation_identity_store(monkeypatch):
+    """Keep the installation-global identity out of the developer's OS keyring.
+
+    Production stores this registry in the OS keyring outside every configurable
+    namespace, so unisolated proof-storage tests would add temporary-root bindings
+    to a real installation, and would fail on CI runners that have no keyring.
+    Each test gets a fresh in-memory registry; tests that need custom storage
+    behavior still patch these names themselves.
+    """
+    from backend.shared import installation_identity
+
+    stored: dict[str, str | None] = {"value": None}
+    monkeypatch.setattr(
+        installation_identity,
+        "load_moto_installation_identity_state",
+        lambda: stored["value"],
+    )
+    monkeypatch.setattr(
+        installation_identity,
+        "store_moto_installation_identity_state",
+        lambda value: stored.__setitem__("value", value),
+    )
+    monkeypatch.setattr(
+        installation_identity,
+        "clear_moto_installation_identity_state",
+        lambda: stored.__setitem__("value", None),
+    )
+    yield
+
+
 def _test_timeout_seconds() -> int:
     raw = os.environ.get("MOTO_TEST_TIMEOUT_SECONDS", "").strip()
     try:

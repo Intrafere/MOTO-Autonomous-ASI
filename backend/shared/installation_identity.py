@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 from backend.shared.atomic_json import atomic_write_json
 from backend.shared.config import system_config
 from backend.shared.secret_store import (
+    SecretStoreError,
     clear_moto_installation_identity_state,
     load_moto_installation_identity_state,
     store_moto_installation_identity_state,
@@ -80,7 +81,12 @@ def _load_marker(data_root: Path) -> Optional[Dict[str, str]]:
 
 
 def _load_state() -> Optional[Dict[str, Any]]:
-    raw = load_moto_installation_identity_state()
+    try:
+        raw = load_moto_installation_identity_state()
+    except SecretStoreError as exc:
+        raise InstallationIdentityError(
+            "Secure installation identity storage is unavailable."
+        ) from exc
     if not raw:
         return None
     try:
@@ -98,9 +104,14 @@ def _load_state() -> Optional[Dict[str, Any]]:
 
 
 def _store_state(state: Dict[str, Any]) -> None:
-    store_moto_installation_identity_state(
-        json.dumps(state, sort_keys=True, separators=(",", ":"))
-    )
+    try:
+        store_moto_installation_identity_state(
+            json.dumps(state, sort_keys=True, separators=(",", ":"))
+        )
+    except SecretStoreError as exc:
+        raise InstallationIdentityError(
+            "Secure installation identity storage is unavailable."
+        ) from exc
 
 
 def ensure_installation_binding(data_root: Optional[Path] = None) -> InstallationBinding:
@@ -284,7 +295,12 @@ def reset_installation_identity(data_root: Optional[Path] = None) -> Installatio
             "Installation reset is blocked while proof-trade ledger state is linked, "
             "queued, or unreadable."
         )
-    clear_moto_installation_identity_state()
+    try:
+        clear_moto_installation_identity_state()
+    except SecretStoreError as exc:
+        raise InstallationIdentityError(
+            "Secure installation identity storage is unavailable."
+        ) from exc
     marker = _marker_path(root)
     if marker.exists():
         marker.unlink()

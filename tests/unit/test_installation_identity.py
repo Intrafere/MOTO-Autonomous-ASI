@@ -100,3 +100,27 @@ def test_generic_mode_has_no_installation_identity_authority(
     monkeypatch.setattr(identity.system_config, "generic_mode", True)
     with pytest.raises(identity.InstallationIdentityError):
         identity.ensure_installation_binding(tmp_path / "generic")
+
+
+def test_unavailable_os_keyring_fails_closed_as_identity_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from backend.shared.secret_store import SecretStoreError
+
+    def _unavailable(*_args):
+        raise SecretStoreError("Secure installation identity storage is unavailable.")
+
+    monkeypatch.setattr(identity.system_config, "generic_mode", False)
+    monkeypatch.setattr(identity, "load_moto_installation_identity_state", _unavailable)
+    monkeypatch.setattr(identity, "store_moto_installation_identity_state", _unavailable)
+    monkeypatch.setattr(identity, "clear_moto_installation_identity_state", _unavailable)
+
+    root = tmp_path / "data"
+    with pytest.raises(identity.InstallationIdentityError):
+        identity.ensure_installation_binding(root)
+    with pytest.raises(identity.InstallationIdentityError):
+        identity.read_installation_binding(root)
+    with pytest.raises(identity.InstallationIdentityError):
+        identity.reset_installation_identity(root)
+    assert not (root / identity.ROOT_BINDING_MARKER).exists()

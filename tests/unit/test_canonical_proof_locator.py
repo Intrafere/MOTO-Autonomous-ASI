@@ -62,6 +62,30 @@ class CanonicalProofLocatorTests(IsolatedAsyncioTestCase):
         assert first.canonical_locator.stable_store_id != second.canonical_locator.stable_store_id
         assert first.canonical_locator.proof_id == second.canonical_locator.proof_id == "proof_001"
 
+    async def test_unavailable_os_keyring_stores_proof_without_trade_locator(self) -> None:
+        import tempfile
+
+        from backend.shared import installation_identity
+        from backend.shared.secret_store import SecretStoreError
+
+        def _unavailable(*_args):
+            raise SecretStoreError("Secure installation identity storage is unavailable.")
+
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
+            installation_identity,
+            "load_moto_installation_identity_state",
+            _unavailable,
+        ), mock.patch.object(installation_identity.system_config, "generic_mode", False):
+            database = ProofDatabase()
+            database.set_base_dir(Path(tmpdir))
+            await database.initialize()
+            stored = await database.add_proof_occurrence(self._record())
+
+            assert not stored.client_proof_id
+            assert not stored.canonical_locator
+            assert stored.canonical_theorem_statement_hash
+            assert (Path(tmpdir) / "proof_proof_001.json").exists()
+
     async def test_duplicate_local_id_is_rejected_instead_of_replaced(self) -> None:
         import tempfile
 

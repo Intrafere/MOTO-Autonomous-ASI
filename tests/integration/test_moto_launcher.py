@@ -940,9 +940,9 @@ class LauncherDependencyVersionTests(TestCase):
                     with mock.patch.object(moto_launcher, "_prepend_path_entry") as prepend:
                         git_cmd = moto_launcher.ensure_git_for_lean(env)
 
-        self.assertEqual(git_cmd, str(Path(installed_git).resolve()))
+        self.assertEqual(git_cmd, installed_git)
         installer.assert_called_once_with()
-        prepend.assert_called_once_with(str(Path(git_cmd).parent), env)
+        prepend.assert_called_once_with(str(Path(installed_git).parent), env)
 
     def test_ensure_git_for_lean_does_not_trust_successful_winget_without_probe(self) -> None:
         env = {"PATH": ""}

@@ -49,6 +49,16 @@ jobs:
             PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/MOTO_COMPATIBILITY_RECEIPT.md
           python -m scripts.check_syntheticlib_trade_contract --check
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies for Vitest selector evidence
+        run: npm ci --prefix frontend
+
       - name: Run Python tests
         run: python -m pytest
 
