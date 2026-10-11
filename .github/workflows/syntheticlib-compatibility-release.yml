@@ -55,14 +55,14 @@ jobs:
             tests/unit/test_syntheticlib_trade_compatibility.py \
             tests/integration/test_syntheticlib_trade_contract_command.py \
             tests/unit/test_local_syntheticlib_compatibility_ci.py \
-            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/compatibility-matrix.json \
-            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-contract-test-result.json \
-            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-compatibility-receipt.json \
-            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-compatibility-receipt.sha256 \
-            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/frozen-asset-manifest.json \
-            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/compatibility-bundle-manifest.json \
-            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/moto-preflight-attestation.json \
-            PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/MOTO_COMPATIBILITY_RECEIPT.md
+            syntheticlib-trade/compatibility/compatibility-matrix.json \
+            syntheticlib-trade/compatibility/moto-contract-test-result.json \
+            syntheticlib-trade/compatibility/moto-compatibility-receipt.json \
+            syntheticlib-trade/compatibility/moto-compatibility-receipt.sha256 \
+            syntheticlib-trade/compatibility/frozen-asset-manifest.json \
+            syntheticlib-trade/compatibility/compatibility-bundle-manifest.json \
+            syntheticlib-trade/compatibility/moto-preflight-attestation.json \
+            syntheticlib-trade/compatibility/MOTO_COMPATIBILITY_RECEIPT.md
           python -m scripts.check_syntheticlib_trade_contract --check
 
       - name: Run focused compatibility tests

@@ -16,7 +16,7 @@ from backend.shared import build_info
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_JSON_PATH = REPO_ROOT / "package.json"
 BUILD_MANIFEST_PATH = REPO_ROOT / "moto-update-manifest.json"
-PLAN_ROOT = REPO_ROOT / "PLANS" / "MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN"
+PLAN_ROOT = REPO_ROOT / "syntheticlib-trade"
 COMPATIBILITY_DIR = PLAN_ROOT / "compatibility"
 
 MATRIX_SCHEMA_VERSION = "moto-syntheticlib-compatibility-matrix.v1"
@@ -566,8 +566,8 @@ def render_markdown(
 
 ## Scope
 
-This is the MOTO-side compatibility receipt required by
-`PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN.md`. It records the supported
+This is the MOTO-side compatibility receipt required by the MOTO and
+SyntheticLib proof-trade integration contract. It records the supported
 MOTO package/build identity, MOTO API contract version, compatibility decision,
 scoped contract-preflight result, and normalized receipt digest.
 

@@ -247,9 +247,7 @@ def test_retain_release_artifacts_cleans_partial_copy_and_restores_empty_destina
 def test_gitignore_allowlists_only_public_compatibility_members() -> None:
     root = Path(__file__).resolve().parents[2]
     gitignore = (root / ".gitignore").read_text(encoding="utf-8")
-    compatibility_prefix = (
-        "!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/"
-    )
+    compatibility_prefix = "!syntheticlib-trade/compatibility/"
     allowlisted = {
         line.removeprefix(compatibility_prefix)
         for line in gitignore.splitlines()
@@ -267,10 +265,9 @@ def test_gitignore_allowlists_only_public_compatibility_members() -> None:
         "moto-preflight-attestation.json",
         "MOTO_COMPATIBILITY_RECEIPT.md",
     }
-    assert (
-        "!PLANS/MOTO_SYNTHETICLIB_TRADE_INTEGRATION_PLAN/compatibility/*"
-        not in gitignore.splitlines()
-    )
+    assert "!syntheticlib-trade/compatibility/*" not in gitignore.splitlines()
+    assert "PLANS/" in gitignore.splitlines()
+    assert not any(line.startswith("!PLANS") for line in gitignore.splitlines())
 
 
 def test_run_reports_child_command_failure(tmp_path: Path) -> None:
