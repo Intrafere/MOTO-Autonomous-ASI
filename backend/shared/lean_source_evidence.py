@@ -118,6 +118,18 @@ def receipt_digest(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_receipt_payload(payload)).hexdigest()
 
 
+def seal_receipt(receipt: Any) -> Any:
+    """Return a receipt model whose digest covers its own JSON serialization."""
+    payload = receipt.model_dump(mode="json")
+    payload["receipt_digest"] = receipt_digest(payload)
+    return type(receipt).model_validate(payload)
+
+
+def has_v1_1_08_receipt_digest(receipt: Any) -> bool:
+    """Match receipts sealed by v1.1.08, which digested ``str(datetime)`` values."""
+    return receipt.receipt_digest == receipt_digest(receipt.model_dump(mode="python"))
+
+
 def transformations_between(original_source: str, checked_source: str) -> list[str]:
     """Return stable coarse transformation labels without leaking source text."""
     if original_source == checked_source:

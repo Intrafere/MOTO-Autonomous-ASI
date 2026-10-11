@@ -4,14 +4,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
-from backend.shared.activity import fill_missing_activity_metadata
+from backend.shared.activity import (
+    fill_missing_activity_metadata,
+    normalize_activity_payload,
+)
 from backend.shared.models import (
+    ProofRunActivityEvent,
+    ProofRunActivityResponse,
     ProofRunCollectionItem,
     ProofRunCollectionResponse,
     ProofRunQueueResponse,
@@ -30,6 +36,12 @@ logger = logging.getLogger(__name__)
 ProofRunWorker = Callable[["ProofRunControl"], Awaitable[None]]
 ProofRunTerminalCallback = Callable[[ProofRunSnapshot], Awaitable[None]]
 ProofRunEventCallback = Callable[[str, dict], Awaitable[None]]
+# Published-activity replay lets a reloaded or resumed browser tab recover
+# events it never processed. It is process-local like the runs themselves.
+ACTIVITY_SEQUENCE_FIELD = "proof_run_activity_sequence"
+ACTIVITY_JOURNAL_LIMIT = 300
+ACTIVITY_JOURNAL_TERMINAL_RUN_LIMIT = 5
+ACTIVITY_REPLAY_PAGE_LIMIT = 200
 TERMINAL_STATUSES = {"completed", "stopped", "error"}
 DEDICATED_TERMINAL_REASONS = {
     "context_overflow",
@@ -60,6 +72,11 @@ class ProofRunControl:
     terminal_callback: Optional[ProofRunTerminalCallback] = None
     event_callback: Optional[ProofRunEventCallback] = None
     candidate_checkpoint: Optional[dict] = None
+    activity_journal_enabled: bool = True
+    activity_sequence: int = 0
+    activity_journal: deque = field(
+        default_factory=lambda: deque(maxlen=ACTIVITY_JOURNAL_LIMIT)
+    )
 
 
 class ProofRunManager:
@@ -204,6 +221,7 @@ class ProofRunManager:
         candidate_checkpoint_reference: str = "",
         terminal_callback: Optional[ProofRunTerminalCallback] = None,
         event_callback: Optional[ProofRunEventCallback] = None,
+        journal_activity: bool = True,
     ) -> ProofRunQueueResponse:
         if run_mode not in {"one_round", "loop_with_pruning"}:
             raise ValueError(f"Unsupported proof run mode: {run_mode}")
@@ -252,6 +270,7 @@ class ProofRunManager:
                 sleep_owner=sleep_owner,
                 terminal_callback=terminal_callback,
                 event_callback=event_callback,
+                activity_journal_enabled=journal_activity,
             )
             async with self._lock:
                 self._runs[proof_run_id] = control
@@ -377,7 +396,9 @@ class ProofRunManager:
             "error",
             "stopped",
         }
-        await control.event_callback(
+        await self.publish_activity(
+            control,
+            control.event_callback,
             event_type,
             fill_missing_activity_metadata(
                 payload,
@@ -400,6 +421,93 @@ class ProofRunManager:
                 detail=control.snapshot.last_error_summary,
             ),
         )
+
+    @staticmethod
+    async def publish_activity(
+        control: ProofRunControl,
+        send: ProofRunEventCallback,
+        event_type: str,
+        data: Mapping[str, Any],
+    ) -> None:
+        """Number, retain, then publish one activity event for this run."""
+        payload = dict(data or {})
+        if control.activity_journal_enabled:
+            payload.setdefault("proof_run_id", control.snapshot.proof_run_id)
+            control.activity_sequence += 1
+            payload[ACTIVITY_SEQUENCE_FIELD] = control.activity_sequence
+            control.activity_journal.append(
+                (
+                    control.activity_sequence,
+                    event_type,
+                    datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    payload,
+                )
+            )
+        await send(event_type, payload)
+
+    def activity_broadcaster(
+        self,
+        control: ProofRunControl,
+        send: ProofRunEventCallback,
+    ) -> ProofRunEventCallback:
+        """Wrap a broadcaster so every event it publishes joins the run journal."""
+
+        async def _broadcast(event_type: str, data: dict) -> None:
+            await self.publish_activity(control, send, event_type, data)
+
+        return _broadcast
+
+    async def get_activity(
+        self,
+        proof_run_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = ACTIVITY_REPLAY_PAGE_LIMIT,
+    ) -> Optional[ProofRunActivityResponse]:
+        safe_run_id = validate_single_path_component(proof_run_id, "proof run ID")
+        async with self._lock:
+            control = self._runs.get(safe_run_id)
+        if control is None:
+            return None
+        retained = list(control.activity_journal)
+        latest = control.activity_sequence
+        oldest = retained[0][0] if retained else 0
+        after = max(0, min(int(after_sequence), latest))
+        pending = [entry for entry in retained if entry[0] > after]
+        page = pending[: max(0, int(limit))]
+        return ProofRunActivityResponse(
+            proof_run_id=safe_run_id,
+            lifecycle_generation=control.snapshot.lifecycle_generation,
+            latest_sequence=latest,
+            oldest_retained_sequence=oldest,
+            after_sequence=after,
+            events=[
+                ProofRunActivityEvent(
+                    sequence=sequence,
+                    type=event_type,
+                    timestamp=timestamp,
+                    data=normalize_activity_payload(event_type, payload),
+                )
+                for sequence, event_type, timestamp, payload in page
+            ],
+            gap=after < latest and (not retained or oldest > after + 1),
+            truncated=len(pending) > len(page),
+        )
+
+    async def _trim_terminal_activity_journals(self) -> None:
+        """Keep replay history only for the most recent finished runs."""
+        async with self._lock:
+            finished = sorted(
+                (
+                    control
+                    for control in self._runs.values()
+                    if control.cleaned_up and control.activity_journal
+                ),
+                key=lambda control: control.snapshot.updated_at,
+                reverse=True,
+            )
+        for control in finished[ACTIVITY_JOURNAL_TERMINAL_RUN_LIMIT:]:
+            control.activity_journal.clear()
 
     async def update(
         self,
@@ -767,6 +875,7 @@ class ProofRunManager:
             finally:
                 sleep_inhibitor.release(control.sleep_owner)
                 await self.update(control, cleanup_completed=True)
+        await self._trim_terminal_activity_journals()
 
     async def get(self, proof_run_id: str) -> Optional[ProofRunSnapshot]:
         safe_run_id = validate_single_path_component(proof_run_id, "proof run ID")

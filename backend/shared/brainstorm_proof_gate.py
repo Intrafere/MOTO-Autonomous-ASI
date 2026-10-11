@@ -109,14 +109,14 @@ def _candidate_metadata_rejection(
     if normalized_tier == "not_novel":
         return (
             "Lean proof candidate rejected before Lean cost: `expected_novelty_tier` was "
-            "`not_novel`. Supporting, routine, trivial, local, or known results must not "
-            "be submitted as proof targets."
+            "`not_novel`. Routine, trivial, local, known, or otherwise non-novel results "
+            "must not be submitted as proof targets."
         )
     if normalized_tier not in NOVEL_PROOF_TIERS:
         return (
             "Lean proof candidate rejected before Lean cost: missing or invalid "
-            "`expected_novelty_tier`. The proof route is only for high-impact "
-            "prompt-solving theorem targets."
+            "`expected_novelty_tier`. The proof route is only for novel "
+            "prompt-relevant theorem targets."
         )
     missing = [
         field_name

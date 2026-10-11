@@ -11,9 +11,10 @@ from backend.shared.models import MathlibLemmaHint, ProofAttemptFeedback, SmtHin
 PROOF_FRAMING_CONTEXT = """[PROOF FRAMING CONTEXT -- This research prompt targets formal mathematical proof.
 All proof work must serve the user's research prompt. Submissions should pursue
 theorems, lemmas, and formalizations that directly help answer, support, or advance
-that prompt. Seek the most impactful new or novel proof targets possible: direct
-solutions to the user's prompt first, then proof targets that materially advance
-a solution path.
+that prompt, or that advance it indirectly as genuinely novel steps. Seek the most
+impactful new or novel proof targets possible: direct solutions to the user's
+prompt first, then novel proof targets, including incremental or indirect steps,
+that plausibly advance a solution path.
 The Lean 4 proof assistant is available for formal verification. Do not build
 a general known-knowledge base. Standard identities, routine helper lemmas,
 irrelevant curiosities, and well-known Mathlib/textbook results are NOT valuable
@@ -230,7 +231,7 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
 
     lines = [
         "=== OPEN PROOF TARGETS LEAN 4 COULD NOT YET CLOSE ===",
-        "[These are recent high-impact proof attempts that failed. Use them only to repair or retry the same prompt-solving target with stronger assumptions, clearer theorem statements, or corrected formalization strategy. Do NOT downshift to supporting lemmas, routine helpers, or easy local facts.]",
+        "[These are recent proof attempts that failed. Use them to repair or retry the same target with stronger assumptions, clearer theorem statements, or corrected formalization strategy, or to contribute a genuinely novel intermediate result that resolves the blocker. Do NOT downshift to routine helpers, standard facts, or easy local facts.]",
         "",
     ]
     for index, hint in enumerate(hints, start=1):
@@ -265,8 +266,9 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
                 "Note: the previous formalization attempt was rejected because "
                 "it used `sorry`/`admit` or axiomatized the theorem's concepts "
                 "to make the goal trivial. Prefer brainstorms that repair the "
-                "real blocker for the same high-impact target. Do NOT downshift "
-                "to a narrower, easier, routine, or merely supporting lemma."
+                "real blocker for the same target, including a genuinely novel "
+                "intermediate result. Do NOT downshift to a routine, trivial, or "
+                "non-novel easier lemma."
             )
         lines.extend(
             [
@@ -335,7 +337,7 @@ def _format_proof_round_context(
     if safe_round <= 1:
         return f"""
 PROOF ROUND CONTEXT:
-This is {round_position}. Prioritize candidates that directly solve the user's prompt or substantially advance a solution path. Later rounds may ask again after newly verified proofs are available.
+This is {round_position}. Prioritize candidates that directly solve the user's prompt or substantially advance a solution path; after those, genuinely novel incremental or indirect steps toward it also qualify. Later rounds may ask again after newly verified proofs are available.
 """
 
     prior_summary = (prior_round_results or "").strip()
@@ -349,9 +351,9 @@ PROOF FOLLOW-UP ROUND CONTEXT:
 This is {round_position}. You are re-checking the same source after the previous proof round completed and newly verified proofs may now appear in VERIFIED PROOF LIBRARY CONTEXT.
 
 Strictly ask and answer this question before extracting candidates:
-Are there any proofs here to solve that directly solve the users prompt, or get us substantially closer to solving the users prompt.
+Are there any novel proofs here to solve that directly solve the users prompt, get us substantially closer to solving it, or plausibly advance toward solving it, directly or indirectly?
 
-Return TRUE only if the answer is yes. Return FALSE if the remaining possible proof targets are merely background, routine, standard, loosely adjacent, or do not directly solve the user's prompt or substantially advance a solution path.
+Return TRUE only if the answer is yes. Return FALSE if the remaining possible proof targets are merely background, routine, standard, already verified, or have no plausible path, direct or indirect, toward solving the user's prompt.
 {prior_block}"""
 
 
@@ -396,11 +398,11 @@ def build_proof_identification_prompt(
     }
   ]
 }"""
-    return f"""You are a theorem-discovery agent for MOTO. Your mission is to find NEW OR NOVEL mathematical claims in the source below that directly help answer, support, or advance the USER RESEARCH PROMPT and deserve formal verification in Lean 4.
+    return f"""You are a theorem-discovery agent for MOTO. Your mission is to find NEW OR NOVEL mathematical claims in the source below that directly or indirectly help answer, support, or advance the USER RESEARCH PROMPT and deserve formal verification in Lean 4.
 
 This is NOT a known-knowledge-base construction task. Do not collect standard facts just because they are true, useful, formalizable, or prompt-adjacent. Lean 4 verification cost is reserved for candidates that could become public, citable prompt-relevant knowledge rather than run-local firsts.
 
-Above all, list first any claims that aggressively attempt to solve the USER RESEARCH PROMPT itself. A BRAINSTORM TOPIC, when present, is source metadata that helps interpret context; it must never broaden eligibility to proofs that are merely brainstorm-related. Do not extract supporting subgoals as proof targets; a candidate must itself be a high-impact prompt-solving theorem.
+Above all, list first any claims that aggressively attempt to solve the USER RESEARCH PROMPT itself. A BRAINSTORM TOPIC, when present, is source metadata that helps interpret context; it must never broaden eligibility to proofs that are merely brainstorm-related. After those, also list genuinely novel intermediate, incremental, or indirect results that plausibly advance toward solving the USER RESEARCH PROMPT; every candidate must itself carry new mathematical content, not routine supporting glue.
 {proof_round_context}
 {list_feedback_block}
 
@@ -409,12 +411,12 @@ MOTO's goal is to push the frontier of mathematical knowledge in service of the 
 TARGET SELECTION:
 - Seek the most impactful new or novel proof targets possible for the USER RESEARCH PROMPT.
 - Prefer proof targets that directly solve the prompt, rule out an impossible prompt, establish a decisive reduction, prove a new obstruction, or otherwise make major progress on the requested problem.
-- Supporting lemmas, routine helper lemmas, local facts, and trivial/easy proofs are NEVER valid proof targets, even as a fallback or last resort.
+- Routine helper lemmas, local facts, trivial/easy proofs, and supporting lemmas without new mathematical content are NEVER valid proof targets, even as a fallback or last resort.
 - Do not settle for a minor reformulation, local formalization, or easy-to-prove fact.
 - If a target is selected, the downstream formalization agent will receive multiple Lean 4 attempts with compiler feedback. Choose ambitious high-impact targets instead of tiny safe targets selected only because they are easy.
 
 WHAT TO REJECT (never extract these):
-- Mathematically interesting claims that do not materially help the USER RESEARCH PROMPT
+- Mathematically interesting claims with no plausible path, direct or indirect, toward the USER RESEARCH PROMPT
 - Results whose main mathematical content is already standard, textbook, or likely present in Mathlib
 - Routine helper lemmas, local bookkeeping facts, coercion facts, monotonicity facts, algebra cleanup, definitional rewrites, or proof-engineering glue with no new mathematical content
 - Direct restatements of known lemmas or standard results, even if prompt-relevant
@@ -425,9 +427,9 @@ WHAT TO REJECT (never extract these):
 
 Rules:
 - Return TRUE only when at least one prompt-relevant theorem candidate is expected to be new or novel enough to be worth Lean 4 verification.
-- Return FALSE if the source contains no theorem that would materially help answer, support, or advance the USER RESEARCH PROMPT.
-- Order candidates by impact on the USER RESEARCH PROMPT: direct solutions or decisive impossibility results first, then the strongest reductions, obstructions, or structural theorems that themselves make major progress on the requested problem. This ordering is not a cap.
-- Return every prompt-relevant theorem that is impactful enough to be worth attempting.
+- Return FALSE if the source contains no novel theorem that would directly or indirectly help answer, support, or advance the USER RESEARCH PROMPT.
+- Order candidates by impact on the USER RESEARCH PROMPT: direct solutions or decisive impossibility results first, then the strongest reductions, obstructions, or structural theorems, then novel intermediate or indirect results that plausibly advance the requested problem. This ordering is not a cap.
+- Return every novel prompt-relevant theorem worth attempting, including incremental or indirect steps.
 - For each candidate, set expected_novelty_tier to one of: major_mathematical_discovery, mathematical_discovery, novel_variant, novel_formulation.
 - For each candidate, include prompt_relevance_rationale, novelty_rationale, and why_not_standard_known_result. The prompt_relevance_rationale must explicitly say whether the candidate directly solves the USER RESEARCH PROMPT or how it builds toward solving it. If you cannot explain that, or cannot explain why it is not merely standard known mathematics, reject it.
 - Welcome bold or speculative claims only when they are prompt-relevant -- if the source proposes something ambitious that might be provable with the right formalization, extract it. The downstream formalization agent will handle narrowing if needed.
@@ -472,7 +474,7 @@ def build_proof_candidate_list_validation_prompt(
 }"""
     return f"""You are the independent Validator for a proposed list of Lean 4 proof targets.
 
-Review novelty without using private MOTO proof history or treating program-local firsts as novel. Assess every proposed theorem independently against public, standard, textbook, and Mathlib knowledge. A theorem is approvable only when its mathematical content is plausibly new or novel and it directly solves or substantially advances the user's objective. Reject standard results, routine helpers, minor reformulations, local formalizations, and proof-engineering glue.
+Review novelty without using private MOTO proof history or treating program-local firsts as novel. Assess every proposed theorem independently against public, standard, textbook, and Mathlib knowledge. A theorem is approvable when its mathematical content is plausibly new or novel and it may eventually lead, directly or indirectly, to a solution of the user's objective. Novel intermediate or stepping-stone results qualify; do not reject a novel theorem merely because it does not solve the objective by itself. Reject standard results, routine helpers, minor reformulations, local formalizations, proof-engineering glue, and results with no plausible path toward the user's objective.
 
 Return exactly one result for every theorem_id below, in the same order, with no duplicate, missing, or extra IDs. Use decision "approve_novel" or "reject_not_novel". Give a specific novelty reason for each result. The feedback must concisely explain what a regenerated complete list should fix; if all entries are approved, state why the list is suitable for proof attempts. Do not decide the aggregate list outcome in prose; deterministic code owns that decision.
 
@@ -888,7 +890,7 @@ NOVELTY TIERS (choose exactly one):
 "novel_formulation"
 - The surrounding mathematical area or proof technique may be historically known.
 - However, this exact theorem statement, formulation, or Lean 4 mechanization is not present in standard references or Mathlib.
-- The formulation/formalization itself is non-routine, prompt-critical, and independently publishable or citable as a public contribution.
+- The formulation/formalization itself is non-routine, prompt-relevant (directly or indirectly), and independently publishable or citable as a public contribution.
 - Assign this tier when the contribution is a novel public formulation or formal verification artifact, not merely absent from the stored proof database.
 
 "novel_variant"

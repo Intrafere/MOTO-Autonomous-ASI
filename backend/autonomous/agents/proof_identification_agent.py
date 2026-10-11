@@ -197,7 +197,7 @@ class ProofIdentificationAgent:
             '      "statement": "the theorem statement",\n'
             '      "formal_sketch": "Lean-relevant proof sketch",\n'
             '      "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation | not_novel",\n'
-            '      "prompt_relevance_rationale": "why this directly answers or substantially advances the user prompt",\n'
+            '      "prompt_relevance_rationale": "how this solves or plausibly advances the user prompt, directly or indirectly",\n'
             '      "novelty_rationale": "why this is not merely standard or routine",\n'
             '      "why_not_standard_known_result": "why this is not a standard Mathlib/textbook result"\n'
             "    }\n"

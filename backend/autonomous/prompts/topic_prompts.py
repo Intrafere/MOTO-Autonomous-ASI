@@ -34,10 +34,10 @@ YOUR TASK:
 Aggressively pursue the strongest credible and genuinely novel solution to the user's exact objective. Select the optimal problem-solving avenue, mechanism, design space, theorem route, experiment, algorithm, or research direction that most directly advances that objective.
 
 DIRECT-SOLUTION PREFERENCE:
-- First prefer avenues that aggressively attack the user's WHOLE question as stated, no partial solutions
+- First prefer avenues that aggressively attack the user's WHOLE question as stated
 - If the true answer is that the user's question is impossible or has no valid solution as stated, that counts as directly answering the whole question
-- If a whole-question attack is absolutely not possible in one superintelligence brainstorm, choose the next best necessary piece whose resolution would visibly advance the original question
-- Use broader exploratory or background-heavy avenues only when they are clearly required to make progress on that whole-question route
+- If a whole-question attack is absolutely not possible in one superintelligence brainstorm, choose the next best necessary piece, or another genuinely novel incremental or indirect route, whose resolution would plausibly advance the original question
+- Use broader exploratory or background-heavy avenues only when they open a genuinely novel route toward that whole question
 - Do not choose an avenue merely because it is easier, practical, broad, or interesting if a more direct rigorous route to the user's full prompt exists
 
 DECISION OPTIONS:
@@ -57,7 +57,7 @@ When to choose CONTINUE_EXISTING:
 - An incomplete brainstorm has significant untapped solution value
 - The brainstorm has few submissions relative to the richness of its mechanisms, constraints, evidence needs, designs, algorithms, proofs, or other relevant routes
 - Continuing would yield more valuable direct progress than starting fresh
-- The unfinished topic still contains a realistic path to a stronger direct answer to the whole prompt or a necessary piece of it
+- The unfinished topic still contains a realistic path to a stronger direct answer to the whole prompt or to novel incremental or indirect progress toward it
 
 CRITICAL REQUIREMENTS:
 - Apply domain- and claim-appropriate rigor, logical soundness, provenance, and honest uncertainty
@@ -68,7 +68,7 @@ CRITICAL REQUIREMENTS:
 - Ensure topic selection serves the user's research goal
 - Consider the existing paper library to avoid redundant explorations
 - Prefer the avenue with the strongest justified direct-answer potential for the user's whole prompt
-- Treat piecewise topics as acceptable only when they target a necessary piece on the route to solving the full user question
+- Treat piecewise, incremental, or indirect topics as acceptable when they are genuinely novel and plausibly advance the route to solving the full user question
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -152,8 +152,8 @@ ACCEPT the topic selection if:
 4. The reasoning is domain-grounded, evidence-aware, logically sound, and honest about uncertainty
 5. The topic doesn't duplicate existing completed work
 6. The choice aggressively addresses the user's whole question where possible
-7. If it is piecewise, the piece is clearly necessary for progress on the full question
-8. The choice is at least as direct a route to answering the user's question as the available alternatives
+7. If it is piecewise, incremental, or indirect, it is genuinely novel and plausibly advances the full question
+8. It prefers a direct route when one is credible; otherwise it pursues a genuinely novel incremental or indirect route with a plausible path toward the answer
 
 REJECT the topic selection if:
 1. NEW_TOPIC: The topic duplicates an existing brainstorm or completed paper
@@ -161,9 +161,9 @@ REJECT the topic selection if:
 3. The choice ignores more valuable research avenues
 4. The reasoning is flawed, lacks claim-appropriate rigor, fabricates evidence/artifacts/sources, or omits relevant constraints and failure modes
 5. The selection would lead to redundant work
-6. It retreats to an easier adjacent/practical/background route while a direct whole-question attack is available
-7. It proposes a piecewise topic without showing why that piece is necessary for solving the full user question
-8. A clearly more direct rigorous avenue was available and unjustifiably ignored
+6. It retreats to an easier adjacent/practical/background route that adds no genuine novelty toward the user's question
+7. It proposes a piecewise topic without showing a plausible path from that piece toward solving the full user question
+8. It has no plausible path, direct or indirect, toward answering the user's question
 
 REJECTION FEEDBACK FORMAT:
 If rejecting, provide CONCRETE, ACTIONABLE guidance:

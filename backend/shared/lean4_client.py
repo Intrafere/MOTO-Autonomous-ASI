@@ -26,7 +26,7 @@ from backend.shared.lean_source_evidence import (
     LEAN_SOURCE_TRANSFORMATION_VERSION,
     LEAN_VERIFICATION_PROFILE_VERSION,
     parse_explicit_import_modules,
-    receipt_digest,
+    seal_receipt,
     source_bytes,
     source_sha256,
     transformations_between,
@@ -638,9 +638,9 @@ class Lean4Client:
             "completed_at": datetime.now(timezone.utc),
             "explicit_imports": [item.model_dump(mode="json") for item in imports],
             "migration_kind": "original_verification",
+            "receipt_digest": "0" * 64,
         }
-        payload["receipt_digest"] = receipt_digest(payload)
-        return LeanCompileReceipt.model_validate(payload)
+        return seal_receipt(LeanCompileReceipt.model_validate(payload))
 
     async def _attach_success_evidence(
         self,

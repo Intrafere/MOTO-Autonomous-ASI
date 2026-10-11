@@ -303,7 +303,7 @@ ACTIVITY_POLICIES: tuple[ActivityPolicy, ...] = (
     _policy(_PRUNING, "ProofPruningCoordinator._handle_failure", "_broadcast", "proof_prune_provider_paused", ATTRIBUTED, "Pause payload spreads _failure_route_identity for the failing pruning role."),
     _policy(_PRUNING, "ProofPruningCoordinator._handle_failure", _EMIT, _RETRY, ATTRIBUTED, "Pruning retry merges _failure_route_identity and passes the error."),
     _policy(_PRUNING, "ProofPruningCoordinator._handle_failure", "_broadcast", "proof_prune_repair_required", ATTRIBUTED, "Repair payload spreads _failure_route_identity for the failing pruning role."),
-    _policy(_PROOF_RUNS, "ProofRunManager._emit", "control.event_callback", DYNAMIC_EVENT, EXEMPT, _PASS_THROUGH),
+    _policy(_PROOF_RUNS, "ProofRunManager.publish_activity", "send", DYNAMIC_EVENT, EXEMPT, _PASS_THROUGH),
     _policy(_PROOF_RUNS, "ProofRunManager.provider_paused", "_emit", "proof_run_provider_paused", ATTRIBUTED, "Pause event carries the caller's route identity and a with_route_identity message."),
     _policy(_PROOF_RUNS, "ProofRunManager.resumed", "_emit", "proof_run_provider_resumed", ATTRIBUTED, "Resume after a manual proof credit pause must name the paused route like provider_paused."),
     _policy(_PROOF_STAGE, "ProofVerificationStage._broadcast", "broadcast_fn", DYNAMIC_EVENT, EXEMPT, _PASS_THROUGH),

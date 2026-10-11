@@ -6,6 +6,9 @@ from backend.autonomous.agents.proof_candidate_list_validator import (
     ProofCandidateListContractError,
     ProofCandidateListValidator,
 )
+from backend.autonomous.prompts.proof_prompts import (
+    build_proof_candidate_list_validation_prompt,
+)
 from backend.shared.models import ProofCandidate
 
 
@@ -15,6 +18,20 @@ class ProofCandidateListValidatorContractTests(unittest.TestCase):
             ProofCandidate(theorem_id=f"thm_{index}", statement=f"Statement {index}")
             for index in range(1, 5)
         ]
+
+    def test_prompt_approves_novel_indirect_steps_and_rejects_known_results(self):
+        prompt = build_proof_candidate_list_validation_prompt(
+            user_prompt="Solve the problem.",
+            source_type="brainstorm",
+            source_id="topic_001",
+            source_title="Topic",
+            candidates_json="[]",
+        )
+
+        self.assertIn("may eventually lead, directly or indirectly", prompt)
+        self.assertIn("Novel intermediate or stepping-stone results qualify", prompt)
+        self.assertIn("Reject standard results, routine helpers", prompt)
+        self.assertNotIn("directly solves or substantially advances", prompt)
 
     def test_single_approved_candidate_accepts_the_list(self):
         self.assertTrue(ProofCandidateListValidator.list_accepted(approved_count=1))

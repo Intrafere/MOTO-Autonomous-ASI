@@ -19,6 +19,7 @@ from backend.autonomous.core.proof_verification_stage import (
 from backend.autonomous.prompts.proof_prompts import (
     PROOF_FRAMING_CONTEXT,
     build_proof_identification_prompt,
+    format_failure_hints_for_injection,
 )
 from backend.autonomous.prompts.topic_exploration_prompts import (
     build_exploration_user_prompt,
@@ -842,12 +843,52 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn(
-            "Are there any proofs here to solve that directly solve the users prompt, "
-            "or get us substantially closer to solving the users prompt.",
+            "Are there any novel proofs here to solve that directly solve the users prompt, "
+            "get us substantially closer to solving it, or plausibly advance toward "
+            "solving it, directly or indirectly?",
             prompt,
         )
         self.assertIn("Return TRUE only if the answer is yes.", prompt)
+        self.assertIn("already verified", prompt)
+        self.assertNotIn("loosely adjacent", prompt)
         self.assertIn("Round 1: 1/1 candidates verified, 1 novel.", prompt)
+
+    def test_identification_allows_novel_incremental_and_indirect_candidates(self):
+        prompt = build_proof_identification_prompt(
+            user_prompt="Solve the problem.",
+            source_type="brainstorm",
+            source_id="topic_001",
+            source_content="Source content.",
+        )
+
+        self.assertNotIn("Do not extract supporting subgoals", prompt)
+        self.assertNotIn("high-impact prompt-solving theorem", prompt)
+        self.assertIn(
+            "genuinely novel intermediate, incremental, or indirect results",
+            prompt,
+        )
+        self.assertIn("including incremental or indirect steps", prompt)
+        self.assertIn("NEVER valid proof targets", prompt)
+        self.assertIn("NOT a known-knowledge-base construction task", prompt)
+        self.assertIn("supporting lemmas without new mathematical content", prompt)
+
+    def test_failure_hints_allow_novel_intermediate_blocker_results(self):
+        hints = format_failure_hints_for_injection(
+            [
+                {
+                    "theorem_statement": "Target theorem.",
+                    "error_summary": "PROOF REJECTED: PLACEHOLDER USED in the attempt.",
+                    "expected_novelty_tier": "mathematical_discovery",
+                    "novelty_rationale": "New bound.",
+                }
+            ]
+        )
+
+        self.assertNotIn("Use them only to repair", hints)
+        self.assertNotIn("merely supporting lemma", hints)
+        self.assertNotIn("high-impact", hints)
+        self.assertIn("genuinely novel intermediate result", hints)
+        self.assertIn("Do NOT downshift to routine helpers", hints)
 
     def test_follow_up_prompt_describes_unbounded_continuous_round(self):
         prompt = build_proof_identification_prompt(

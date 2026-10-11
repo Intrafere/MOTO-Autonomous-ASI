@@ -59,6 +59,7 @@ import useWhatsNew from './hooks/useWhatsNew';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import intrafereLogoMark from './assets/brand/intrafere-logo-no-text.png';
 import { websocket } from './services/websocket';
+import { installProofRunActivityRecovery } from './utils/proofRunActivityRecovery';
 import {
   API_ERROR_KINDS,
   api,
@@ -1496,6 +1497,9 @@ function App() {
       websocket.disconnect();
     };
   }, []);
+
+  // Replay proof-run activity a frozen, discarded, or reloaded tab never processed.
+  useEffect(() => installProofRunActivityRecovery({ websocket, api: autonomousAPI }), []);
 
   useEffect(() => {
     let cancelled = false;

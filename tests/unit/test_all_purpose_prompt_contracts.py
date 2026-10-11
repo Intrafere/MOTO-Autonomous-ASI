@@ -270,6 +270,7 @@ def test_mixed_and_mathematical_paths_keep_proof_boundaries_available() -> None:
     assert mixed in framed
     assert "PROOF_FRAMING_CONTEXT" not in framed
     assert "directly help answer, support, or advance" in framed
+    assert "advance it indirectly as genuinely novel steps" in framed
     assert "mathematical rigor" in rigor
     assert "proof" in rigor
 

@@ -841,6 +841,16 @@ export const autonomousAPI = {
     return normalizeProofRunSnapshot(data);
   },
 
+  async getProofRunActivity(proofRunId, { afterSequence = 0, limit = null } = {}) {
+    const params = new URLSearchParams({ after_sequence: String(afterSequence) });
+    if (limit !== null) params.set('limit', String(limit));
+    return requestProofRunJson(
+      `/proofs/runs/${encodeURIComponent(proofRunId)}/activity?${params.toString()}`,
+      { cache: 'no-store' },
+      'Failed to load proof run activity',
+    );
+  },
+
   async stopProofRun(proofRunId, lifecycleGeneration) {
     const data = await requestProofRunJson(
       `/proofs/runs/${encodeURIComponent(proofRunId)}/stop`,

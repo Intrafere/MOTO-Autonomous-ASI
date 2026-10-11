@@ -3,7 +3,10 @@ from unittest.mock import AsyncMock
 
 from backend.aggregator.agents import submitter as submitter_module
 from backend.aggregator.agents.submitter import SubmitterAgent, _requires_lean_retry_schema
-from backend.shared.brainstorm_proof_gate import BrainstormProofGateResult
+from backend.shared.brainstorm_proof_gate import (
+    BrainstormProofGateResult,
+    _candidate_metadata_rejection,
+)
 from backend.shared.provider_errors import (
     ProviderContextLengthError,
     ProviderRouteIdentity,
@@ -144,6 +147,76 @@ def test_all_validator_batch_sizes_share_the_same_policy(prompt_builder) -> None
         "invalid proof structure",
     ):
         assert forbidden_universal not in prompt
+
+
+@pytest.mark.parametrize(
+    "prompt_builder",
+    [
+        get_validator_system_prompt,
+        get_validator_dual_system_prompt,
+        get_validator_triple_system_prompt,
+    ],
+)
+def test_validators_accept_novel_incremental_and_indirect_progress(prompt_builder) -> None:
+    prompt = prompt_builder()
+
+    for counterfactual_gate in (
+        "no stronger direct or necessary-piece step",
+        "over a stronger direct result",
+        "more novel side ideas",
+        "when a more direct, rigorous contribution was available",
+        "strongest justified kind of progress",
+        "merely supporting lemmas",
+        "itself a high-impact prompt-solving theorem",
+    ):
+        assert counterfactual_gate not in prompt
+    assert "genuinely novel" in prompt
+    assert "including incremental progress" in prompt
+    assert "no plausible path, direct or indirect" in prompt
+    assert "Contains only trivial or common knowledge" in prompt
+
+
+def test_cleanup_keeps_novel_indirect_contributions() -> None:
+    cleanup = get_cleanup_review_system_prompt()
+
+    assert "necessary for direct prompt progress" not in cleanup
+    assert "plausibly strengthens a direct or indirect route" in cleanup
+
+
+def test_submitter_allows_novel_partial_progress_and_novel_lean_steps() -> None:
+    prompt = get_submitter_system_prompt(lean4_enabled=True)
+    schema = get_submitter_json_schema(lean4_enabled=True)
+
+    assert "no partial solutions" not in prompt
+    assert "ONLY when they are clearly required" not in prompt
+    assert "high-impact" not in prompt
+    assert "high-impact" not in schema
+    assert "genuinely novel incremental or indirect step" in prompt
+    assert (
+        "Piecewise, incremental, or indirect submissions are acceptable when they "
+        "are genuinely novel"
+    ) in prompt
+
+
+def test_proof_gate_messages_require_novelty_not_high_impact() -> None:
+    not_novel = _candidate_metadata_rejection(
+        expected_novelty_tier="not_novel",
+        prompt_relevance_rationale="advances the prompt",
+        novelty_rationale="new",
+        why_not_standard_known_result="not textbook",
+    )
+    invalid_tier = _candidate_metadata_rejection(
+        expected_novelty_tier="",
+        prompt_relevance_rationale="advances the prompt",
+        novelty_rationale="new",
+        why_not_standard_known_result="not textbook",
+    )
+
+    for message in (not_novel, invalid_tier):
+        assert "high-impact" not in message
+        assert "Supporting," not in message
+    assert "non-novel results" in not_novel
+    assert "novel prompt-relevant theorem targets" in invalid_tier
 
 
 def test_batch_validators_preserve_independent_redundancy_resolution() -> None:

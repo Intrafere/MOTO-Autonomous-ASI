@@ -860,7 +860,12 @@ class ProofDatabase:
         serialized: Dict[str, Any],
     ) -> None:
         """Persist canonical and exact checked source before publishing metadata."""
-        from backend.shared.lean_source_evidence import receipt_digest, source_sha256
+        from backend.shared.lean_source_evidence import (
+            has_v1_1_08_receipt_digest,
+            receipt_digest,
+            seal_receipt,
+            source_sha256,
+        )
 
         record_path = self._get_record_path(stored_record.proof_id)
         lean_path = self._get_lean_path(stored_record.proof_id)
@@ -871,14 +876,16 @@ class ProofDatabase:
                 raise ValueError("Complete proof evidence requires a compile receipt")
             if receipt.checked_source_sha256 != source_sha256(stored_record.lean_code):
                 raise ValueError("Compile receipt checked hash does not match canonical Lean source")
-            if receipt.receipt_digest != receipt_digest(receipt.model_dump(mode="json")):
+            digest_is_canonical = (
+                receipt.receipt_digest == receipt_digest(receipt.model_dump(mode="json"))
+            )
+            if not digest_is_canonical and not has_v1_1_08_receipt_digest(receipt):
                 raise ValueError("Compile receipt digest is invalid")
             artifact_name = checked_path.name
-            if receipt.checked_source_artifact != artifact_name:
-                receipt = receipt.model_copy(update={"checked_source_artifact": artifact_name})
-                payload = receipt.model_dump(mode="json")
-                payload["receipt_digest"] = receipt_digest(payload)
-                receipt = type(receipt).model_validate(payload)
+            if receipt.checked_source_artifact != artifact_name or not digest_is_canonical:
+                receipt = seal_receipt(
+                    receipt.model_copy(update={"checked_source_artifact": artifact_name})
+                )
                 stored_record.compile_receipt = receipt
                 serialized["compile_receipt"] = receipt.model_dump(mode="json")
         lean_existed = await asyncio.to_thread(lean_path.exists)

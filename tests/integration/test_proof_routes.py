@@ -675,6 +675,60 @@ class ManualProofScopeRouteTests(TestCase):
         self.assertEqual(lookup_response.status_code, 200)
         self.assertEqual(lookup_response.headers["cache-control"], "no-store")
 
+    def test_proof_run_activity_replay_is_no_store_and_schema_typed(self) -> None:
+        schema = self.client.get("/openapi.json").json()
+        self.assertEqual(
+            schema["paths"]["/api/proofs/runs/{proof_run_id}/activity"]["get"]["responses"][
+                "200"
+            ]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ProofRunActivityResponse",
+        )
+        manager = proofs_route.proof_run_manager
+        control = proofs_route.ProofRunControl(
+            snapshot=ProofRunSnapshot(
+                proof_run_id="proof-run-activity",
+                run_mode="loop_with_pruning",
+                scope="autonomous",
+                source_type="brainstorm",
+                source_id="topic_001",
+                proof_store_id="autonomous:session",
+                run_id="session",
+                lifecycle_generation=1,
+                status="running",
+            )
+        )
+
+        async def send(event_type, data):
+            return None
+
+        async def publish():
+            for attempt in (1, 2):
+                await manager.publish_activity(
+                    control,
+                    send,
+                    "proof_candidate_list_review_rejected",
+                    {"list_attempt": attempt, "feedback": "Regenerate."},
+                )
+
+        asyncio.run(publish())
+        with mock.patch.dict(manager._runs, {"proof-run-activity": control}):
+            response = self.client.get(
+                "/api/proofs/runs/proof-run-activity/activity",
+                params={"after_sequence": 1},
+            )
+            missing = self.client.get("/api/proofs/runs/proof-run-missing/activity")
+        bad = self.client.get("/api/proofs/runs/bad%5Cid/activity")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        body = response.json()
+        self.assertEqual(body["latest_sequence"], 2)
+        self.assertEqual([event["sequence"] for event in body["events"]], [2])
+        self.assertEqual(body["events"][0]["data"]["list_attempt"], 2)
+        self.assertEqual(body["events"][0]["data"]["proof_run_activity_sequence"], 2)
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(bad.status_code, 400)
+
     def test_proof_run_source_lookup_rejects_path_components(self) -> None:
         response = self.client.get(
             "/api/proofs/runs/by-source",

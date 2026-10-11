@@ -736,6 +736,8 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("proof_prior", prompt)
         self.assertIn("identify the concrete result established by the Lean code", prompt)
+        self.assertNotIn("prompt-critical", prompt)
+        self.assertIn("prompt-relevant (directly or indirectly)", prompt)
 
     async def test_novelty_assessment_start_precedes_result_and_preserves_result_payload(self):
         prior_record = ProofRecord(

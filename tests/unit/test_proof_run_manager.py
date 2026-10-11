@@ -653,3 +653,124 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.count, 1)
         self.assertEqual(result.preferred_proof_run_id, "proof-run-active")
         self.assertEqual(result.runs[0].proof_run_id, "proof-run-active")
+
+    async def test_published_activity_is_numbered_retained_and_replayable(self):
+        sent = []
+
+        async def send(event_type, data):
+            sent.append((event_type, data))
+
+        self.manager._runs = {self.control.snapshot.proof_run_id: self.control}
+        broadcast = self.manager.activity_broadcaster(self.control, send)
+        await broadcast("proof_candidate_list_review_started", {"list_attempt": 1})
+        await broadcast("proof_candidate_list_review_rejected", {"list_attempt": 1})
+        await broadcast("proof_candidate_list_regeneration_started", {"list_attempt": 2})
+
+        self.assertEqual(
+            [data["proof_run_activity_sequence"] for _, data in sent],
+            [1, 2, 3],
+        )
+        self.assertTrue(all(data["proof_run_id"] == "proof-run-1" for _, data in sent))
+
+        replay = await self.manager.get_activity("proof-run-1", after_sequence=1)
+        self.assertEqual(replay.latest_sequence, 3)
+        self.assertEqual([event.sequence for event in replay.events], [2, 3])
+        self.assertEqual(
+            [event.type for event in replay.events],
+            [
+                "proof_candidate_list_review_rejected",
+                "proof_candidate_list_regeneration_started",
+            ],
+        )
+        self.assertEqual(replay.events[1].data["list_attempt"], 2)
+        self.assertFalse(replay.gap)
+        self.assertFalse(replay.truncated)
+
+        baseline = await self.manager.get_activity("proof-run-1", limit=0)
+        self.assertEqual(baseline.events, [])
+        self.assertTrue(baseline.truncated)
+        self.assertEqual(baseline.latest_sequence, 3)
+
+    async def test_activity_replay_reports_evicted_events_as_a_gap(self):
+        async def send(event_type, data):
+            return None
+
+        self.manager._runs = {self.control.snapshot.proof_run_id: self.control}
+        for attempt in range(1, 306):
+            await self.manager.publish_activity(
+                self.control,
+                send,
+                "proof_candidate_list_review_started",
+                {"list_attempt": attempt},
+            )
+
+        replay = await self.manager.get_activity("proof-run-1", after_sequence=2)
+        self.assertTrue(replay.gap)
+        self.assertEqual(replay.oldest_retained_sequence, 6)
+        self.assertEqual(replay.events[0].sequence, 6)
+        self.assertTrue(replay.truncated)
+
+    async def test_disabled_journal_publishes_without_sequence(self):
+        sent = []
+
+        async def send(event_type, data):
+            sent.append(data)
+
+        self.control.activity_journal_enabled = False
+        self.manager._runs = {self.control.snapshot.proof_run_id: self.control}
+        await self.manager.publish_activity(self.control, send, "proof_check_started", {})
+
+        self.assertNotIn("proof_run_activity_sequence", sent[0])
+        replay = await self.manager.get_activity("proof-run-1")
+        self.assertEqual(replay.latest_sequence, 0)
+        self.assertEqual(replay.events, [])
+
+    async def test_lifecycle_events_join_the_activity_journal(self):
+        sent = []
+
+        async def send(event_type, data):
+            sent.append(event_type)
+
+        self.control.event_callback = send
+        self.manager._runs = {self.control.snapshot.proof_run_id: self.control}
+        await self.manager.begin_round(self.control, round_number=2)
+
+        replay = await self.manager.get_activity("proof-run-1")
+        self.assertEqual(sent, ["proof_run_round_started"])
+        self.assertEqual([event.type for event in replay.events], ["proof_run_round_started"])
+        self.assertEqual(replay.events[0].data["round_index"], 2)
+
+    async def test_only_recent_finished_runs_keep_activity_journals(self):
+        async def send(event_type, data):
+            return None
+
+        controls = []
+        for index in range(7):
+            control = ProofRunControl(
+                snapshot=self.control.snapshot.model_copy(
+                    update={
+                        "proof_run_id": f"proof-run-{index}",
+                        "status": "completed",
+                        "updated_at": datetime(2026, 1, 1 + index),
+                    }
+                ),
+                cleaned_up=True,
+            )
+            await self.manager.publish_activity(control, send, "proof_check_started", {})
+            controls.append(control)
+        self.manager._runs = {
+            control.snapshot.proof_run_id: control for control in controls
+        }
+
+        await self.manager._trim_terminal_activity_journals()
+
+        self.assertEqual(
+            [bool(control.activity_journal) for control in controls],
+            [False, False, True, True, True, True, True],
+        )
+        cleared = await self.manager.get_activity("proof-run-0")
+        self.assertTrue(cleared.gap)
+        self.assertEqual(cleared.latest_sequence, 1)
+
+    async def test_unknown_run_activity_is_none(self):
+        self.assertIsNone(await self.manager.get_activity("proof-run-missing"))

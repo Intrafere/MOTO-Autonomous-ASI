@@ -1864,6 +1864,32 @@ class ProofRunSourceLookupResponse(ProofRunCollectionResponse):
     preferred_proof_run_id: Optional[str] = None
 
 
+class ProofRunActivityEvent(BaseModel):
+    """One retained Live Activity event published for a proof run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sequence: int = Field(ge=1)
+    type: str = Field(min_length=1, max_length=128)
+    timestamp: str
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ProofRunActivityResponse(BaseModel):
+    """Bounded process-local replay of a proof run's published activity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proof_run_id: str
+    lifecycle_generation: int = Field(ge=1)
+    latest_sequence: int = Field(default=0, ge=0)
+    oldest_retained_sequence: int = Field(default=0, ge=0)
+    after_sequence: int = Field(default=0, ge=0)
+    events: List[ProofRunActivityEvent] = Field(default_factory=list)
+    gap: bool = False
+    truncated: bool = False
+
+
 class ProofRunStopRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

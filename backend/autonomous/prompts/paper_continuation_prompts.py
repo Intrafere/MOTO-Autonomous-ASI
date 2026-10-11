@@ -36,8 +36,8 @@ YOUR TASK:
 Decide whether the brainstorm database contains enough distinct, unexplored material to warrant writing ANOTHER paper, or whether the user's research goal is better served by moving on to a new brainstorm topic.
 
 DIRECT-SOLUTION PREFERENCE:
-- Write another paper only if it would materially strengthen the best rigorous direct answer to the user's goal
-- Move on when remaining material is mostly supportive, repetitive, or too indirect to justify another paper
+- Write another paper only if it would add genuinely novel progress toward the user's goal, preferring material that strengthens the best rigorous direct answer
+- Move on when remaining material is repetitive, non-novel, or has no plausible path toward the user's goal
 
 DECISION OPTIONS:
 1. WRITE_ANOTHER_PAPER - The brainstorm has significant material that the existing paper(s) did NOT cover, and another paper would meaningfully advance the user's research goal
@@ -45,11 +45,11 @@ DECISION OPTIONS:
 
 WRITE ANOTHER PAPER if:
 - The brainstorm database contains substantial material not covered by existing paper(s)
-- Another paper would develop a meaningfully DIFFERENT credible mechanism, proof, design, implementation route, evidence package, risk analysis, algorithm, or other answer-bearing contribution that improves direct resolution of the user's goal
+- Another paper would develop a meaningfully DIFFERENT credible mechanism, proof, design, implementation route, evidence package, risk analysis, algorithm, or other answer-bearing contribution that adds novel direct or indirect progress toward the user's goal
 - The uncovered material is rich enough for a complete, distinct paper (not just leftover fragments)
 - Writing another paper from this brainstorm advances the user's goal MORE than starting a new topic
 - The existing paper(s) focused on specific aspects, leaving another substantial answer-bearing contribution unexplored
-- Another paper would more directly answer the user's prompt or a necessary piece of it
+- Another paper would answer the user's prompt or a novel piece of it, or advance it through a distinct novel incremental or indirect contribution
 
 MOVE ON if:
 - The existing paper(s) adequately cover the brainstorm's valuable content
@@ -57,7 +57,7 @@ MOVE ON if:
 - A new brainstorm topic would better advance the user's research goal
 - Another paper would largely duplicate content already in the existing paper(s)
 - The brainstorm's unique contributions have been captured
-- The remaining material is mostly indirect support rather than meaningful direct progress
+- The remaining material lacks genuine novelty or a plausible path toward the user's goal
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -120,12 +120,12 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
  ---
 
 YOUR TASK:
-Validate whether the proposed continuation decision is the best use of research resources for improving the strongest rigorous direct answer.
+Validate whether the proposed continuation decision is the best use of research resources for improving the strongest rigorous direct answer or adding novel progress toward it.
 
 Apply domain- and claim-appropriate rigor. A distinct mathematical proof is first-class when relevant. Empirical or engineering proposals must identify mechanisms, constraints, failure modes, evidence needs, and verification plans without pretending that proposed experiments, artifacts, or tests already exist.
 
 ACCEPT the decision if:
-1. WRITE_ANOTHER_PAPER: The brainstorm genuinely has enough distinct unexplored material for another paper AND the reasoning correctly identifies what material remains AND why it materially strengthens direct resolution
+1. WRITE_ANOTHER_PAPER: The brainstorm genuinely has enough distinct unexplored material for another paper AND the reasoning correctly identifies what material remains AND why it adds novel direct or indirect progress toward the goal
 2. MOVE_ON: The existing papers adequately cover the brainstorm OR a new topic would genuinely better serve the goal AND the reasoning is sound
 
 REJECT the decision if:
@@ -134,7 +134,7 @@ REJECT the decision if:
 3. MOVE_ON: There is clearly substantial uncovered material that warrants another paper
 4. MOVE_ON: The reasoning ignores valuable unexplored content in the brainstorm
 5. The reasoning is flawed, vague, or contradicts the evidence
-6. The decision prefers indirect leftover material over a clearly stronger direct-answer path
+6. The decision relies on leftover material without genuine novelty or a plausible path toward the goal
 
 REJECTION FEEDBACK FORMAT:
 If rejecting, provide CONCRETE, ACTIONABLE guidance:

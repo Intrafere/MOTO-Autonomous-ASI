@@ -33,6 +33,7 @@ from backend.autonomous.core.proof_round_driver import (
     summarize_round_result,
 )
 from backend.autonomous.core.proof_run_manager import (
+    ACTIVITY_REPLAY_PAGE_LIMIT,
     NO_DISCOVERY_LIMIT_TERMINAL_REASON,
     ProofRunControl,
     ProofRunSourceInvalidError,
@@ -84,6 +85,7 @@ from backend.shared.models import (
     ProofNoveltyGroupMember,
     ProofNoveltyGroupResponse,
     ProofStageResult,
+    ProofRunActivityResponse,
     ProofRunQueueResponse,
     ProofRunCollectionResponse,
     ProofRunSnapshot,
@@ -1533,6 +1535,8 @@ async def _run_manual_proof_check(
                 status="running",
             ),
             sleep_owner=legacy_sleep_owner,
+            # Unregistered legacy runs have no replay endpoint.
+            activity_journal_enabled=False,
         )
     try:
         source = await _resolve_proof_source_adapter(request)
@@ -1566,10 +1570,11 @@ async def _run_manual_proof_check(
                 proof_run_id=run_control.snapshot.proof_run_id,
             )
         stage = autonomous_coordinator._proof_verification_stage
-        broadcast_fn = (
+        broadcast_fn = proof_run_manager.activity_broadcaster(
+            run_control,
             _broadcast_manual_aggregator_proof_event
             if _is_manual_aggregator_request(request)
-            else websocket.broadcast_event
+            else websocket.broadcast_event,
         )
         scoped_proof_database = source.proof_database
         active_run_id = await scoped_proof_database.get_live_context_run_id()
@@ -2098,10 +2103,11 @@ async def _run_manual_proof_check(
             return
     except Exception as exc:
         logger.exception("Manual proof check failed for %s %s", request.source_type, request.source_id)
-        broadcast_fn = (
+        broadcast_fn = proof_run_manager.activity_broadcaster(
+            run_control,
             _broadcast_manual_aggregator_proof_event
             if _is_manual_aggregator_request(request)
-            else websocket.broadcast_event
+            else websocket.broadcast_event,
         )
         if api_client_manager.is_provider_failure(exc):
             logger.warning(
@@ -2526,6 +2532,9 @@ async def run_manual_proof_check(request: ProofCheckRequest):
                     if _is_manual_aggregator_request(request)
                     else websocket.broadcast_event
                 ),
+                # Manual Aggregator proof activity is already durable in the
+                # Aggregator event log, which its feed re-reads directly.
+                journal_activity=not _is_manual_aggregator_request(request),
             )
             get_lean4_client().start_workspace_bootstrap()
             return response
@@ -2583,6 +2592,32 @@ async def get_proof_run(proof_run_id: str, response: Response):
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Proof run not found")
     return snapshot
+
+
+@router.get("/runs/{proof_run_id}/activity", response_model=ProofRunActivityResponse)
+async def get_proof_run_activity(
+    proof_run_id: str,
+    response: Response,
+    after_sequence: int = Query(default=0, ge=0),
+    limit: int = Query(default=ACTIVITY_REPLAY_PAGE_LIMIT, ge=0, le=ACTIVITY_REPLAY_PAGE_LIMIT),
+):
+    """Replay retained Live Activity a reloaded or resumed tab did not process."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        safe_proof_run_id = validate_single_path_component(
+            proof_run_id,
+            "proof run ID",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    activity = await proof_run_manager.get_activity(
+        safe_proof_run_id,
+        after_sequence=after_sequence,
+        limit=limit,
+    )
+    if activity is None:
+        raise HTTPException(status_code=404, detail="Proof run not found")
+    return activity
 
 
 @router.post("/runs/{proof_run_id}/stop", response_model=ProofRunSnapshot)

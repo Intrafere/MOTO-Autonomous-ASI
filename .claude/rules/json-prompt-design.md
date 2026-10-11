@@ -14,7 +14,7 @@ Production prompt builders together with their parsers/models and executable tes
 
 ## Research Direction and Evidence
 
-- Ordinary research roles aggressively seek the strongest credible, genuinely novel solution to the user's exact objective. They prefer whole-question attacks, using the contribution form and claim-type rigor appropriate to the domain; necessary partial work must visibly advance the complete objective.
+- Ordinary research roles aggressively seek the strongest credible, genuinely novel solution to the user's exact objective. They prefer whole-question attacks, using the contribution form and claim-type rigor appropriate to the domain; partial, incremental, or indirect work must be genuinely novel and plausibly advance the complete objective. Directness orders preference, never admission.
 - AI-generated databases, accepted submissions, papers, outlines, retrieved history, and prior model responses are working evidence, not authority. Prompts must require appropriate independent verification, provenance, uncertainty, and skepticism rather than trusting content because MOTO previously accepted or produced it.
 
 ## JSON Contract Design
