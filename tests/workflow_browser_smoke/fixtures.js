@@ -80,6 +80,10 @@ function responseFor(method, path, state) {
   if (method === 'GET' && path === '/api/proofs/status') {
     return { lean4_enabled: false, smt_enabled: false, manual_check_ready: false };
   }
+  // App-level proof-run activity recovery lists runs on every WebSocket connect.
+  if (method === 'GET' && path === '/api/proofs/runs') {
+    return { runs: [], count: 0, limit: 20, truncated: false };
+  }
   if (method === 'GET' && path === '/api/proof-search/assistant/latest-pack') {
     return { available: false, supports: [] };
   }
