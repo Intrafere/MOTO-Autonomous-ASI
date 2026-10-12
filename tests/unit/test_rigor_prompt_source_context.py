@@ -51,6 +51,8 @@ class RigorPromptSourceContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("directly or indirectly helps answer", prompt)
         self.assertIn("supporting lemmas without new mathematical content are NEVER", prompt)
         self.assertIn("Prefer declining over a non-novel, easy, or off-prompt proposal", prompt)
+        self.assertIn("must prove the selected statement in full without narrowing it", prompt)
+        self.assertIn("a direct solution takes priority when it has that chance", prompt)
 
     async def test_rigor_context_strips_generated_theorem_appendix_entries(self):
         paper = (

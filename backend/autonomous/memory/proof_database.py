@@ -995,7 +995,7 @@ class ProofDatabase:
         error_summary: str,
         suggested_lemma_targets: Optional[List[str]] = None,
     ) -> FailedProofCandidate:
-        """Persist a failed brainstorm theorem so later papers can retry it."""
+        """Persist a failed brainstorm theorem as an open target for later discovery."""
         async with self._lock:
             failed_candidates = await self._load_failed_candidates(source_brainstorm_id)
             existing = None
@@ -1043,45 +1043,6 @@ class ProofDatabase:
 
             await self._save_failed_candidates(source_brainstorm_id, failed_candidates)
             return stored_candidate
-
-    async def get_pending_retries(
-        self,
-        source_brainstorm_id: str,
-        retry_source_id: str = "",
-    ) -> List[FailedProofCandidate]:
-        """Return unresolved failed candidates eligible for retry."""
-        async with self._lock:
-            failed_candidates = await self._load_failed_candidates(source_brainstorm_id)
-            pending = [
-                candidate
-                for candidate in failed_candidates
-                if not candidate.resolved_proof_id
-                and (not retry_source_id or candidate.last_retry_source_id != retry_source_id)
-            ]
-            pending.sort(key=lambda candidate: candidate.updated_at, reverse=True)
-            return pending
-
-    async def mark_retried(
-        self,
-        source_brainstorm_id: str,
-        theorem_id: str,
-        retry_source_id: str,
-    ) -> None:
-        """Mark a failed candidate as having been retried for a specific paper/source."""
-        async with self._lock:
-            failed_candidates = await self._load_failed_candidates(source_brainstorm_id)
-            updated = False
-            for candidate in failed_candidates:
-                if candidate.theorem_id != theorem_id:
-                    continue
-                candidate.retry_count += 1
-                candidate.last_retry_source_id = retry_source_id
-                candidate.updated_at = datetime.now()
-                updated = True
-                break
-
-            if updated:
-                await self._save_failed_candidates(source_brainstorm_id, failed_candidates)
 
     async def mark_resolved_retry(
         self,

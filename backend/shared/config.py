@@ -299,7 +299,7 @@ class SystemConfig(BaseSettings):
         validation_alias=AliasChoices("MOTO_LEAN4_WORKSPACE_DIR", "LEAN4_WORKSPACE_DIR"),
     )
     lean4_proof_timeout: int = Field(
-        default=900,
+        default=2000,
         validation_alias=AliasChoices("MOTO_LEAN4_PROOF_TIMEOUT", "LEAN4_PROOF_TIMEOUT"),
     )
     lean4_lsp_idle_timeout: int = Field(

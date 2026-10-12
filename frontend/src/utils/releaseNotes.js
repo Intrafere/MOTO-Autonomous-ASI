@@ -8,6 +8,13 @@ export const releaseNotes = {
     closing: "Stay tuned for SyntheticLib's imminent launch!",
     sections: [
       {
+        title: 'Known issue: OpenAI Codex',
+        tone: 'warning',
+        items: [
+          '**OpenAI Codex may be experiencing issues with requests that run longer than 900 seconds (15 minutes).** Long-thinking Codex calls can be dropped and retried before they finish. The Codex team has been alerted; follow [the Codex GitHub issue](https://github.com/openai/codex/issues/51886) for updates.',
+        ],
+      },
+      {
         title: 'Model leaderboard',
         items: [
           '**GPT 6.1 Sol** (Maximum Thinking) is the new King of the Hill, with **Grok 4.7** second and **MiniMax M3** third.',
@@ -31,12 +38,14 @@ export const releaseNotes = {
           'Each newly verified proof keeps a permanent record of exactly what Lean checked, including its source, toolchain, and imports.',
           'Continuous proof checks now finish on their own after ten consecutive rounds find no new candidates.',
           'Proofs-only Autonomous runs now complete all four proof rounds for each brainstorm instead of stopping at the first empty round.',
+          'Proof discovery still aims for **direct solutions first** whenever they have a reasonable chance of being fully proved within the 5 Lean attempts. When a target is out of reach, it picks the strongest **novel piece** that can be proved, and novel indirect steps still count.',
+          'Failed proof targets are **no longer retried unchanged**. Discovery sees them as open targets and decides whether to retry with a new formalization, prove a novel piece, or move on, including after each completed Autonomous paper.',
         ],
       },
       {
         title: 'Providers, credentials, and setup',
         items: [
-          '**OpenAI Codex OAuth** bug fix: long-thinking calls are no longer cut off at about 15 minutes. MOTO now streams them over the same WebSocket connection the Codex CLI uses and automatically falls back if that connection is unavailable.',
+          '**OpenAI Codex OAuth** calls now stream over the same WebSocket connection the Codex CLI uses and automatically fall back if that connection is unavailable. See the known issue above for requests longer than 15 minutes.',
           'Grok roles now offer a **reasoning effort** selector.',
           'OpenRouter keys are now checked against your account, so settings show whether a saved key actually works.',
           'Free-model looping now moves past a failing model instead of stopping, and the still-thinking notice for long model calls now appears after 25 minutes.',

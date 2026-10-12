@@ -12,6 +12,7 @@ class LeanRuntimeCapabilityTests(TestCase):
             "lean4_enabled": system_config.lean4_enabled,
             "lean4_runtime_available": system_config.lean4_runtime_available,
             "lean4_user_enabled": system_config.lean4_user_enabled,
+            "lean4_proof_timeout": system_config.lean4_proof_timeout,
         }
 
     def tearDown(self) -> None:
@@ -63,3 +64,23 @@ class LeanRuntimeCapabilityTests(TestCase):
         payload = write.call_args.args[0]["proof_settings"]
         self.assertTrue(payload["lean4_user_enabled"])
         self.assertNotIn("lean4_enabled", payload)
+
+    def test_persisted_legacy_default_proof_timeouts_follow_current_default(self) -> None:
+        system_config.generic_mode = False
+        for legacy in (600, 900, "900"):
+            with self.subTest(legacy=legacy):
+                system_config.lean4_proof_timeout = 2000
+                payload = {"proof_settings": {"lean4_proof_timeout": legacy}}
+                with mock.patch.object(runtime_settings, "_read_settings", return_value=payload):
+                    runtime_settings.apply_persisted_runtime_settings()
+
+                self.assertEqual(system_config.lean4_proof_timeout, 2000)
+
+    def test_persisted_user_chosen_proof_timeout_is_preserved(self) -> None:
+        system_config.generic_mode = False
+        system_config.lean4_proof_timeout = 2000
+        payload = {"proof_settings": {"lean4_proof_timeout": 1200}}
+        with mock.patch.object(runtime_settings, "_read_settings", return_value=payload):
+            runtime_settings.apply_persisted_runtime_settings()
+
+        self.assertEqual(system_config.lean4_proof_timeout, 1200)

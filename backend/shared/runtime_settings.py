@@ -36,7 +36,9 @@ _PROOF_INT_FIELDS = {
     "smt_timeout": (1, 600),
 }
 
-_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT = 600
+# Previously shipped defaults; a persisted value equal to one of these was never
+# user-chosen, so it follows the current default instead.
+_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUTS = frozenset({"600", "900"})
 _LEGACY_DEFAULT_SMT_TIMEOUT = 30
 
 _CONNECTIVITY_BOOL_FIELDS = {
@@ -215,8 +217,7 @@ def apply_persisted_runtime_settings() -> None:
                     default = int(getattr(system_config, field))
                     if (
                         field == "lean4_proof_timeout"
-                        and default != _LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT
-                        and str(proof_settings[field]).strip() == str(_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT)
+                        and str(proof_settings[field]).strip() in _LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUTS
                     ):
                         proof_settings[field] = default
                     if (

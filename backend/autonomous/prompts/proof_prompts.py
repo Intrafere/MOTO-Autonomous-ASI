@@ -224,14 +224,31 @@ LEAN4_COMMON_PITFALLS = """COMMON LEAN 4 PITFALLS TO AVOID:
   is needed. When uncertain, fall back to `import Mathlib`."""
 
 
-def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
+def open_proof_target_id(hint: Any) -> str:
+    """Return the stable ID discovery uses to link a retry to a failed target."""
+    if isinstance(hint, dict):
+        source_brainstorm_id = str(hint.get("source_brainstorm_id", "")).strip()
+        theorem_id = str(hint.get("theorem_id", "")).strip()
+    else:
+        source_brainstorm_id = str(getattr(hint, "source_brainstorm_id", "")).strip()
+        theorem_id = str(getattr(hint, "theorem_id", "")).strip()
+    if not source_brainstorm_id or not theorem_id:
+        return ""
+    return f"{source_brainstorm_id}:{theorem_id}"
+
+
+def format_failure_hints_for_injection(
+    failure_hints: Iterable[Any],
+    *,
+    include_target_ids: bool = False,
+) -> str:
     hints = list(failure_hints or [])
     if not hints:
         return ""
 
     lines = [
         "=== OPEN PROOF TARGETS LEAN 4 COULD NOT YET CLOSE ===",
-        "[These are recent proof attempts that failed. Use them to repair or retry the same target with stronger assumptions, clearer theorem statements, or corrected formalization strategy, or to contribute a genuinely novel intermediate result that resolves the blocker. Do NOT downshift to routine helpers, standard facts, or easy local facts.]",
+        "[These are recent proof targets Lean 4 could not close within their attempt budget. Retry the same target only with stronger assumptions, a clearer theorem statement, or a corrected formalization strategy that gives it a reasonable chance of success; otherwise contribute a genuinely novel intermediate result that resolves the blocker and can realistically be proved. Do NOT downshift to routine helpers, standard facts, or easy local facts.]",
         "",
     ]
     for index, hint in enumerate(hints, start=1):
@@ -270,9 +287,14 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
                 "intermediate result. Do NOT downshift to a routine, trivial, or "
                 "non-novel easier lemma."
             )
+        lines.append(
+            f"OPEN TARGET {index}: {_truncate_text(theorem_statement or '[unnamed theorem]', 180)}"
+        )
+        target_id = open_proof_target_id(hint) if include_target_ids else ""
+        if target_id:
+            lines.append(f"Target ID: {target_id}")
         lines.extend(
             [
-                f"OPEN TARGET {index}: {_truncate_text(theorem_statement or '[unnamed theorem]', 180)}",
                 f"Expected novelty tier: {expected_novelty_tier or '[unknown]'}",
                 f"Novelty rationale: {_truncate_text(novelty_rationale or '[not recorded]', 200)}",
                 f"Lean 4 failure summary: {_truncate_text(error_summary or '[no summary available]', 200)}",
@@ -337,7 +359,7 @@ def _format_proof_round_context(
     if safe_round <= 1:
         return f"""
 PROOF ROUND CONTEXT:
-This is {round_position}. Prioritize candidates that directly solve the user's prompt or substantially advance a solution path; after those, genuinely novel incremental or indirect steps toward it also qualify. Later rounds may ask again after newly verified proofs are available.
+This is {round_position}. Prioritize candidates that directly solve the user's prompt or substantially advance a solution path when they have a reasonable chance of being fully proved within the Lean 4 attempt budget; after those, genuinely novel incremental or indirect steps toward it also qualify. Later rounds may ask again after newly verified proofs are available.
 """
 
     prior_summary = (prior_round_results or "").strip()
@@ -354,6 +376,8 @@ Strictly ask and answer this question before extracting candidates:
 Are there any novel proofs here to solve that directly solve the users prompt, get us substantially closer to solving it, or plausibly advance toward solving it, directly or indirectly?
 
 Return TRUE only if the answer is yes. Return FALSE if the remaining possible proof targets are merely background, routine, standard, already verified, or have no plausible path, direct or indirect, toward solving the user's prompt.
+
+A target listed as failed in PRIOR PROOF ROUND SUMMARY could not be proved within its Lean 4 attempt budget. Do not propose it again unchanged. Prefer a genuinely novel piece of it that has a reasonable chance of being fully proved within the budget, or a different novel target; propose the whole target again only with a materially different formalization that gives it a reasonable chance of success.
 {prior_block}"""
 
 
@@ -367,9 +391,13 @@ def build_proof_identification_prompt(
     proof_max_rounds: int = 1,
     prior_round_results: str = "",
     candidate_list_rejection_feedback: str = "",
+    open_proof_targets: str = "",
 ) -> str:
     """Identify prompt-relevant theorem candidates from a brainstorm or paper."""
     source_title_block = _format_source_title_block(source_type, source_title)
+    open_proof_targets_block = (
+        f"\n{open_proof_targets.strip()}\n" if open_proof_targets.strip() else ""
+    )
     proof_round_context = _format_proof_round_context(
         proof_round_index=proof_round_index,
         proof_max_rounds=proof_max_rounds,
@@ -394,7 +422,8 @@ def build_proof_identification_prompt(
       "expected_novelty_tier": "mathematical_discovery",
       "prompt_relevance_rationale": "why proving this would directly solve, solve toward, or plausibly help solve the user prompt",
       "novelty_rationale": "why this is new knowledge rather than a known-knowledge base entry",
-      "why_not_standard_known_result": "why this is not merely a textbook/Mathlib/routine helper result"
+      "why_not_standard_known_result": "why this is not merely a textbook/Mathlib/routine helper result",
+      "retry_open_target_id": ""
     }
   ]
 }"""
@@ -402,7 +431,7 @@ def build_proof_identification_prompt(
 
 This is NOT a known-knowledge-base construction task. Do not collect standard facts just because they are true, useful, formalizable, or prompt-adjacent. Lean 4 verification cost is reserved for candidates that could become public, citable prompt-relevant knowledge rather than run-local firsts.
 
-Above all, list first any claims that aggressively attempt to solve the USER RESEARCH PROMPT itself. A BRAINSTORM TOPIC, when present, is source metadata that helps interpret context; it must never broaden eligibility to proofs that are merely brainstorm-related. After those, also list genuinely novel intermediate, incremental, or indirect results that plausibly advance toward solving the USER RESEARCH PROMPT; every candidate must itself carry new mathematical content, not routine supporting glue.
+Above all, list first any claims that aggressively attempt to solve the USER RESEARCH PROMPT itself and have a reasonable chance of being fully proved within the Lean 4 attempt budget described below. A BRAINSTORM TOPIC, when present, is source metadata that helps interpret context; it must never broaden eligibility to proofs that are merely brainstorm-related. After those, also list genuinely novel intermediate, incremental, or indirect results that plausibly advance toward solving the USER RESEARCH PROMPT; every candidate must itself carry new mathematical content, not routine supporting glue.
 {proof_round_context}
 {list_feedback_block}
 
@@ -413,7 +442,9 @@ TARGET SELECTION:
 - Prefer proof targets that directly solve the prompt, rule out an impossible prompt, establish a decisive reduction, prove a new obstruction, or otherwise make major progress on the requested problem.
 - Routine helper lemmas, local facts, trivial/easy proofs, and supporting lemmas without new mathematical content are NEVER valid proof targets, even as a fallback or last resort.
 - Do not settle for a minor reformulation, local formalization, or easy-to-prove fact.
-- If a target is selected, the downstream formalization agent will receive multiple Lean 4 attempts with compiler feedback. Choose ambitious high-impact targets instead of tiny safe targets selected only because they are easy.
+- LEAN 4 ATTEMPT BUDGET: each selected target receives 5 Lean 4 attempts (3 complete-proof attempts, then 2 tactic-script attempts). Each attempt is compile-checked against Mathlib and the compiler feedback is returned for the next attempt. Every attempt must prove the selected statement in full within a single Lean file, building any theory Mathlib lacks inside that file; the formalization agent will not narrow or weaken the statement.
+- Direct solutions take priority whenever they have a reasonable chance of being fully proved within that budget. When a direct target would need substantial theory that Mathlib lacks, or is too large to prove in full within the budget, select its strongest genuinely novel piece that can be fully proved within the budget instead: a decisive step, reduction, obstruction, or indirect result that moves toward the full solution.
+- Provability never lowers the novelty bar. Aggressively pursue the most novel and consequential targets that are realistically provable, and still reject routine, standard, or easy results. Do not choose tiny safe targets merely because they are easy.
 
 WHAT TO REJECT (never extract these):
 - Mathematically interesting claims with no plausible path, direct or indirect, toward the USER RESEARCH PROMPT
@@ -429,11 +460,12 @@ Rules:
 - Return TRUE only when at least one prompt-relevant theorem candidate is expected to be new or novel enough to be worth Lean 4 verification.
 - Return FALSE if the source contains no novel theorem that would directly or indirectly help answer, support, or advance the USER RESEARCH PROMPT.
 - Order candidates by impact on the USER RESEARCH PROMPT: direct solutions or decisive impossibility results first, then the strongest reductions, obstructions, or structural theorems, then novel intermediate or indirect results that plausibly advance the requested problem. This ordering is not a cap.
-- Return every novel prompt-relevant theorem worth attempting, including incremental or indirect steps.
+- Return every novel prompt-relevant theorem worth attempting, including incremental or indirect steps. A theorem is worth attempting only when it has a reasonable chance of being fully proved within the Lean 4 attempt budget.
 - For each candidate, set expected_novelty_tier to one of: major_mathematical_discovery, mathematical_discovery, novel_variant, novel_formulation.
 - For each candidate, include prompt_relevance_rationale, novelty_rationale, and why_not_standard_known_result. The prompt_relevance_rationale must explicitly say whether the candidate directly solves the USER RESEARCH PROMPT or how it builds toward solving it. If you cannot explain that, or cannot explain why it is not merely standard known mathematics, reject it.
-- Welcome bold or speculative claims only when they are prompt-relevant -- if the source proposes something ambitious that might be provable with the right formalization, extract it. The downstream formalization agent will handle narrowing if needed.
+- Welcome bold or speculative claims only when they are prompt-relevant -- if the source proposes something ambitious that has a reasonable chance of being fully proved within the budget with the right formalization, extract it. The downstream formalization agent will not narrow a selected statement, so state each candidate at the strength you expect Lean 4 to accept. When only part of an ambitious claim is realistically provable, extract that genuinely novel part as its own candidate.
 - Use theorem IDs that are stable strings such as "thm_1", "thm_2", etc.
+- If a candidate retries an OPEN PROOF TARGET -- the same target with a materially different formalization -- set retry_open_target_id to that target's Target ID. Otherwise set it to an empty string. A genuinely novel piece of an open target is a new candidate, not a retry.
 
 USER RESEARCH PROMPT:
 {user_prompt}
@@ -441,7 +473,7 @@ USER RESEARCH PROMPT:
 
 VERIFIED PROOF LIBRARY CONTEXT (context only; do not treat this as the user prompt):
 {verified_proof_context_block}
-
+{open_proof_targets_block}
 SOURCE TYPE: {source_type}
 SOURCE ID: {source_id}
 

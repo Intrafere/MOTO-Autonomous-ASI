@@ -27,6 +27,7 @@ from backend.autonomous.memory.paper_library import PaperLibrary
 from backend.autonomous.memory.proof_database import ProofDatabase
 from backend.autonomous.prompts.proof_prompts import (
     build_proof_formalization_prompt,
+    build_proof_identification_prompt,
     build_proof_novelty_prompt,
     build_proof_tactic_script_prompt,
 )
@@ -1309,6 +1310,18 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("do NOT replace it with a narrower", prompt)
             self.assertIn("faithful attempt at the selected target", prompt)
 
+    def test_identification_prompt_does_not_promise_downstream_narrowing(self):
+        prompt = build_proof_identification_prompt(
+            user_prompt="Solve the actual user prompt.",
+            source_type="brainstorm",
+            source_id="topic_001",
+            source_content="Brainstorm body.",
+        )
+
+        self.assertNotIn("handle narrowing", prompt)
+        self.assertIn("will not narrow a selected statement", prompt)
+        self.assertIn("will not narrow or weaken the statement", prompt)
+
     async def test_manual_aggregator_prompt_falls_back_to_persisted_prompt(self):
         old_data_dir = system_config.data_dir
         old_validator = proofs_route.coordinator.validator
@@ -2415,6 +2428,7 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
                         "prompt_relevance_rationale": "This directly solves the user prompt.",
                         "novelty_rationale": "Novel.",
                         "why_not_standard_known_result": "Not standard.",
+                        "retry_open_target_id": " manual_aggregator:thm_1 ",
                     },
                 ]
                 if self.calls > 1:
@@ -2456,6 +2470,7 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(has_candidates)
         self.assertEqual(fake_api_client_manager.calls, 2)
         self.assertEqual([candidate.theorem_id for candidate in candidates], ["valid"])
+        self.assertEqual(candidates[0].retry_open_target_id, "manual_aggregator:thm_1")
 
     async def test_proof_identification_retries_codex_max_output_truncation(self):
         class FakeApiClientManager:

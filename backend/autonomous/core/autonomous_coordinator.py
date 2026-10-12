@@ -989,6 +989,7 @@ class AutonomousCoordinator:
         theorem_candidates: Optional[List[ProofCandidate]] = None,
         trigger: str = "automatic",
         role_suffix_override: Optional[str] = None,
+        open_target_source_ids: Optional[List[str]] = None,
     ) -> str:
         """Run the Lean 4 proof verification stage for a completed brainstorm or paper."""
         if not self._proof_outputs_enabled():
@@ -1240,6 +1241,7 @@ class AutonomousCoordinator:
                         proof_round_index=proof_round_index,
                         proof_max_rounds=proof_max_rounds,
                         prior_round_results=prior_round_results,
+                        open_target_source_ids=open_target_source_ids,
                         competition_config=self._proof_competition,
                         checkpoint_competition_state=(
                             checkpoint.get("competition_state")
@@ -7677,7 +7679,7 @@ class AutonomousCoordinator:
         content: str,
         source_brainstorm_ids: List[str],
     ) -> str:
-        """Run proof checks for a completed paper and any deferred brainstorm retries."""
+        """Run proof checks for a completed paper, offering its brainstorms' open targets."""
         proof_source_content = paper_library.strip_verified_proofs_from_content(content or "")
         self._state.current_tier = "tier2_paper_writing"
         await self._save_workflow_state(
@@ -7691,72 +7693,16 @@ class AutonomousCoordinator:
             paper_id,
             source_title=title,
             trigger="automatic",
+            open_target_source_ids=(
+                source_brainstorm_ids
+                or ([self._current_topic_id] if self._current_topic_id else [])
+            ),
         )
 
         if self._stop_event.is_set() or proof_status != "complete":
             if proof_status == "error_preserved" and not self._stop_event.is_set():
                 self._stop_event.set()
             return "stopped" if self._stop_event.is_set() else proof_status
-
-        pending_retry_candidates: List[ProofCandidate] = []
-        retry_source_ids = source_brainstorm_ids or ([self._current_topic_id] if self._current_topic_id else [])
-        for brainstorm_id in retry_source_ids:
-            pending_retries = await proof_database.get_pending_retries(
-                brainstorm_id,
-                retry_source_id=paper_id,
-            )
-            for pending_retry in pending_retries:
-                combined_excerpt_parts = []
-                if pending_retry.source_excerpt:
-                    combined_excerpt_parts.append(
-                        "ORIGINAL BRAINSTORM EXCERPT:\n" + pending_retry.source_excerpt
-                    )
-                if proof_source_content:
-                    combined_excerpt_parts.append(
-                        "REFINED PAPER CONTEXT:\n" + proof_source_content[:6000]
-                    )
-
-                retry_formal_sketch = pending_retry.formal_sketch
-                if pending_retry.error_summary:
-                    retry_formal_sketch = (
-                        f"{retry_formal_sketch}\n\nPrior Lean 4 failure summary: {pending_retry.error_summary}"
-                    ).strip()
-
-                pending_retry_candidates.append(
-                    ProofCandidate(
-                        theorem_id=pending_retry.theorem_id,
-                        statement=pending_retry.theorem_statement,
-                        formal_sketch=retry_formal_sketch,
-                        expected_novelty_tier=pending_retry.expected_novelty_tier,
-                        prompt_relevance_rationale=pending_retry.prompt_relevance_rationale,
-                        novelty_rationale=pending_retry.novelty_rationale,
-                        why_not_standard_known_result=pending_retry.why_not_standard_known_result,
-                        source_excerpt="\n\n".join(part for part in combined_excerpt_parts if part).strip(),
-                        origin_source_id=brainstorm_id,
-                    )
-                )
-
-        retry_checkpoint = await research_metadata.get_proof_checkpoint("paper", paper_id, "retry")
-        if (pending_retry_candidates or retry_checkpoint) and not self._stop_event.is_set():
-            await self._broadcast("proof_retry_scheduled", {
-                "source_type": "paper",
-                "source_id": paper_id,
-                "source_title": title,
-                "count": len(pending_retry_candidates) if pending_retry_candidates else len(retry_checkpoint.get("candidates", [])),
-                "brainstorm_ids": retry_source_ids,
-            })
-            retry_status = await self._run_proof_verification(
-                proof_source_content,
-                "paper",
-                paper_id,
-                source_title=title,
-                theorem_candidates=pending_retry_candidates or None,
-                trigger="retry",
-            )
-            if self._stop_event.is_set() or retry_status != "complete":
-                if retry_status == "error_preserved" and not self._stop_event.is_set():
-                    self._stop_event.set()
-                return "stopped" if self._stop_event.is_set() else retry_status
 
         proof_checkpoint = await research_metadata.get_proof_checkpoint("paper", paper_id)
         if not proof_checkpoint or proof_checkpoint.get("status") != "deferred":

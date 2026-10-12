@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 from backend.autonomous.agents.lemma_search_agent import MathlibLemmaSearchAgent
@@ -29,6 +30,10 @@ from backend.autonomous.agents.proof_pruning_agent import proof_run_role_suffix
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
 from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.memory.proof_database import is_prompt_injection_novel_tier
+from backend.autonomous.prompts.proof_prompts import (
+    format_failure_hints_for_injection,
+    open_proof_target_id,
+)
 from backend.autonomous.core.proof_registration import register_verified_lean_proof
 from backend.shared.config import system_config
 from backend.shared.context_overflow import (
@@ -743,6 +748,8 @@ class ProofVerificationStage:
         proof_round_index: int = 1,
         proof_max_rounds: int = 1,
         prior_round_results: str = "",
+        open_proof_targets: str = "",
+        open_target_sources: Optional[dict[str, str]] = None,
     ) -> list[ProofCandidate]:
         if theorem_candidates is not None:
             return theorem_candidates
@@ -756,8 +763,110 @@ class ProofVerificationStage:
             proof_round_index=proof_round_index,
             proof_max_rounds=proof_max_rounds,
             prior_round_results=prior_round_results,
+            open_proof_targets=open_proof_targets,
         )
-        return resolved_candidates if has_candidates else []
+        if not has_candidates:
+            return []
+        return self._bind_open_target_links(
+            resolved_candidates,
+            open_target_sources or {},
+        )
+
+    @staticmethod
+    async def _load_open_proof_targets(
+        novel_proofs_db: Any,
+        brainstorm_ids: list[str],
+    ) -> tuple[str, dict[str, str]]:
+        """Format unresolved failed targets for discovery and map IDs to brainstorms."""
+        get_hints = getattr(novel_proofs_db, "get_recent_failure_hints", None)
+        if not callable(get_hints):
+            return "", {}
+        hints: list[tuple[str, Any]] = []
+        for brainstorm_id in dict.fromkeys(item for item in brainstorm_ids if item):
+            try:
+                hints.extend(
+                    (brainstorm_id, hint)
+                    for hint in await get_hints(brainstorm_id, limit=5)
+                )
+            except Exception as exc:
+                logger.debug("proof_database.get_recent_failure_hints failed: %s", exc)
+        hints.sort(
+            key=lambda item: getattr(item[1], "updated_at", None) or datetime.min,
+            reverse=True,
+        )
+        hints = hints[:5]
+        target_sources = {
+            target_id: brainstorm_id
+            for brainstorm_id, hint in hints
+            if (target_id := open_proof_target_id(hint))
+        }
+        return (
+            format_failure_hints_for_injection(
+                [hint for _brainstorm_id, hint in hints],
+                include_target_ids=True,
+            ),
+            target_sources,
+        )
+
+    @staticmethod
+    def _bind_open_target_links(
+        candidates: list[ProofCandidate],
+        open_target_sources: dict[str, str],
+    ) -> list[ProofCandidate]:
+        """Keep only retry links that name an offered open target."""
+        bound: list[ProofCandidate] = []
+        for candidate in candidates:
+            target_id = candidate.retry_open_target_id
+            if not target_id:
+                bound.append(candidate)
+            elif target_id in open_target_sources:
+                bound.append(
+                    candidate.model_copy(
+                        update={"origin_source_id": open_target_sources[target_id]}
+                    )
+                )
+            else:
+                bound.append(
+                    candidate.model_copy(
+                        update={"retry_open_target_id": "", "origin_source_id": ""}
+                    )
+                )
+        return bound
+
+    @staticmethod
+    def _linked_failed_theorem_id(candidate: ProofCandidate) -> str:
+        """Return the failed theorem a bound retry candidate targets."""
+        prefix = f"{candidate.origin_source_id}:"
+        if candidate.origin_source_id and candidate.retry_open_target_id.startswith(prefix):
+            return candidate.retry_open_target_id[len(prefix):]
+        return ""
+
+    async def _record_failed_target(
+        self,
+        novel_proofs_db: Any,
+        *,
+        source_type: str,
+        source_id: str,
+        candidate: ProofCandidate,
+        error_summary: str,
+        suggested_lemma_targets: list[str],
+    ) -> None:
+        """Record a failed target, updating the original record for linked retries."""
+        failed_theorem_id = self._linked_failed_theorem_id(candidate)
+        if failed_theorem_id:
+            target_source_id = candidate.origin_source_id
+            recorded = candidate.model_copy(update={"theorem_id": failed_theorem_id})
+        elif source_type == "brainstorm":
+            target_source_id = source_id
+            recorded = candidate
+        else:
+            return
+        await novel_proofs_db.record_failed_candidate(
+            target_source_id,
+            recorded,
+            error_summary,
+            suggested_lemma_targets=suggested_lemma_targets,
+        )
 
     async def _prepare_candidate(
         self,
@@ -820,6 +929,7 @@ class ProofVerificationStage:
         proof_round_index: int = 1,
         proof_max_rounds: int = 1,
         prior_round_results: str = "",
+        open_target_source_ids: Optional[list[str]] = None,
         canonical_user_prompt: str = "",
         run_id: str = "",
         terminal_truncation_stop_enabled: bool = True,
@@ -1135,6 +1245,14 @@ class ProofVerificationStage:
                 solution_path_manager=self.solution_path_manager,
             )
             identification_user_prompt = await refresh_user_prompt()
+            open_proof_targets, open_target_sources = await self._load_open_proof_targets(
+                novel_proofs_db,
+                (
+                    list(open_target_source_ids)
+                    if open_target_source_ids is not None
+                    else ([source_id] if source_type == "brainstorm" else [])
+                ),
+            )
 
             resume_requires_regeneration = (
                 candidate_list_state.get("status") == "rejected"
@@ -1154,6 +1272,8 @@ class ProofVerificationStage:
                     proof_round_index=proof_round_index,
                     proof_max_rounds=proof_max_rounds,
                     prior_round_results=prior_round_results,
+                    open_proof_targets=open_proof_targets,
+                    open_target_sources=open_target_sources,
                 )
             )
             generation_attempt = max(
@@ -1198,10 +1318,14 @@ class ProofVerificationStage:
                         prior_round_results=prior_round_results,
                         candidate_list_rejection_feedback="\n\n".join(feedback_entries),
                         candidate_list_rejection_feedback_entries=feedback_entries,
+                        open_proof_targets=open_proof_targets,
                     )
                 )
                 candidate_list_state["generation_attempt"] = generation_attempt
-                return has_candidates, regenerated
+                return has_candidates, self._bind_open_target_links(
+                    regenerated,
+                    open_target_sources,
+                )
 
             if (
                 candidate_list_state.get("status") == "rejected"
@@ -1455,16 +1579,6 @@ class ProofVerificationStage:
                     },
                 )
                 return result
-
-            if trigger == "retry":
-                await self._broadcast(
-                    broadcast_fn,
-                    "proof_retry_started",
-                    {
-                        **base_event,
-                        "count": len(resolved_candidates),
-                    },
-                )
 
             result.total_candidates = max(result.total_candidates, len(resolved_candidates))
             await save_checkpoint("running")
@@ -1896,11 +2010,13 @@ class ProofVerificationStage:
                                     partial_stop = True
                                     break
                                 continue
-                            if source_type == "brainstorm" and trigger != "retry" and not context_overflow:
-                                await novel_proofs_db.record_failed_candidate(
-                                    source_id,
-                                    candidate,
-                                    error_summary,
+                            if not context_overflow:
+                                await self._record_failed_target(
+                                    novel_proofs_db,
+                                    source_type=source_type,
+                                    source_id=source_id,
+                                    candidate=candidate,
+                                    error_summary=error_summary,
                                     suggested_lemma_targets=suggested_targets,
                                 )
                             fingerprint = _candidate_fingerprint(candidate, source_type, source_id)
@@ -1990,13 +2106,14 @@ class ProofVerificationStage:
                             attempts_by_candidate[candidate.theorem_id] = list(attempts)
                             error_summary = self._summarize_error(integrity.reason)
                             suggested_targets = self._extract_suggested_lemma_targets(integrity.reason)
-                            if source_type == "brainstorm" and trigger != "retry":
-                                await novel_proofs_db.record_failed_candidate(
-                                    source_id,
-                                    candidate,
-                                    error_summary,
-                                    suggested_lemma_targets=suggested_targets,
-                                )
+                            await self._record_failed_target(
+                                novel_proofs_db,
+                                source_type=source_type,
+                                source_id=source_id,
+                                candidate=candidate,
+                                error_summary=error_summary,
+                                suggested_lemma_targets=suggested_targets,
+                            )
                             await self._broadcast(
                                 broadcast_fn,
                                 "proof_integrity_rejected",
@@ -2249,10 +2366,11 @@ class ProofVerificationStage:
                                 },
                             )
 
-                        if candidate.origin_source_id:
+                        failed_theorem_id = self._linked_failed_theorem_id(candidate)
+                        if failed_theorem_id:
                             await novel_proofs_db.mark_resolved_retry(
                                 candidate.origin_source_id,
-                                candidate.theorem_id,
+                                failed_theorem_id,
                                 stored_record.proof_id,
                             )
 
@@ -2601,12 +2719,6 @@ class ProofVerificationStage:
             raise asyncio.CancelledError()
         if smt_hint:
             candidate = candidate.model_copy(update={"smt_hint": smt_hint})
-        if not formalization_only and trigger == "retry" and candidate.origin_source_id:
-            await novel_proofs_db.mark_retried(
-                candidate.origin_source_id,
-                candidate.theorem_id,
-                source_id,
-            )
 
         active_attempts: list[ProofAttemptFeedback] = list(prior_attempts or [])
         context_overflow_payload: dict[str, Any] = {}

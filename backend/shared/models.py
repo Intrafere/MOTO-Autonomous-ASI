@@ -779,6 +779,7 @@ class ProofCandidate(BaseModel):
     why_not_standard_known_result: str = ""
     source_excerpt: str = ""
     origin_source_id: str = ""
+    retry_open_target_id: str = ""
     relevant_lemmas: List[MathlibLemmaHint] = Field(default_factory=list)
     smt_hint: Optional[SmtHint] = None
 
@@ -825,8 +826,6 @@ class FailedProofCandidate(BaseModel):
     source_excerpt: str = ""
     error_summary: str = ""
     suggested_lemma_targets: List[str] = Field(default_factory=list)
-    retry_count: int = 0
-    last_retry_source_id: str = ""
     resolved_proof_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
@@ -1978,7 +1977,7 @@ class ProofSettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool
-    timeout: int = Field(default=600, ge=10, le=3600)
+    timeout: int = Field(default=2000, ge=10, le=3600)
     lean4_lsp_enabled: Optional[bool] = None
     lean4_lsp_idle_timeout: Optional[int] = Field(default=None, ge=60, le=7200)
     max_parallel_candidates: Optional[int] = Field(default=None, ge=0, le=1000)

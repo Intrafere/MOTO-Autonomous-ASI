@@ -96,7 +96,7 @@ RULES FOR PROPOSING A THEOREM:
 - Set `expected_novelty_tier` to one of: "major_mathematical_discovery", "mathematical_discovery", "novel_variant", "novel_formulation". If the best honest tier is "not_novel", decline.
 - Include `prompt_relevance_rationale`, `novelty_rationale`, and `why_not_standard_known_result`. If you cannot explain why the target is not merely standard known mathematics, decline.
 
-If Stage 1 selects a target, Stage 2 receives up to 5 Lean 4 attempts with error feedback. Use that retry budget for ambitious but plausibly Lean-addressable novel targets that solve or advance the prompt, not meager routine progress. Prefer declining over a non-novel, easy, or off-prompt proposal.
+If Stage 1 selects a target, Stage 2 receives up to 5 Lean 4 attempts with error feedback and must prove the selected statement in full without narrowing it. Use that retry budget for ambitious novel targets that solve or advance the prompt and have a reasonable chance of being fully proved: a direct solution takes priority when it has that chance; otherwise choose the strongest genuinely novel piece or indirect step that does, not meager routine progress. Prefer declining over a non-novel, easy, or off-prompt proposal.
 
 Output your response ONLY as JSON in this exact format:
 {{{{
