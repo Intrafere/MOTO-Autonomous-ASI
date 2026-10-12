@@ -868,6 +868,8 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn("including incremental or indirect steps", prompt)
+        self.assertIn("Seek the most impactful new or novel proof targets possible", prompt)
+        self.assertIn("Choose ambitious high-impact targets", prompt)
         self.assertIn("NEVER valid proof targets", prompt)
         self.assertIn("NOT a known-knowledge-base construction task", prompt)
         self.assertIn("supporting lemmas without new mathematical content", prompt)

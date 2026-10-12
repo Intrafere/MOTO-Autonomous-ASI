@@ -90,7 +90,7 @@ def _format_attempt_history(prior_attempts: Iterable[ProofAttemptFeedback]) -> s
                 "because it used `sorry` / `admit` (or an equivalent placeholder). "
                 "Do NOT submit another placeholder proof, and do NOT replace "
                 "the target with a narrower, easier, routine, or merely "
-                "supporting lemma. Attempt the same high-impact target faithfully."
+                "supporting lemma. Attempt the same selected target faithfully."
             )
         block = [
             f"ATTEMPT {attempt.attempt}:",
@@ -185,7 +185,7 @@ LEAN4_COMMON_PITFALLS = """COMMON LEAN 4 PITFALLS TO AVOID:
   that contains `sorry` or `admit` anywhere, even though Lean would only
   emit a warning. A proof with `sorry` is not a proof. If you cannot close
   every goal, do NOT replace the target with a narrower, easier, routine, or
-  merely supporting lemma. Attempt the same high-impact target faithfully and
+  merely supporting lemma. Attempt the same selected target faithfully and
   let Lean feedback expose the real blocker.
 - NEVER introduce new `axiom` declarations that exist only to make the
   target theorem trivial. Axiomatizing the concepts in the statement
@@ -392,7 +392,7 @@ def build_proof_identification_prompt(
       "statement": "natural-language theorem statement",
       "formal_sketch": "optional note about assumptions, notation, or likely Lean formalization strategy",
       "expected_novelty_tier": "mathematical_discovery",
-      "prompt_relevance_rationale": "why proving this would directly solve, solve toward, or materially help solve the user prompt",
+      "prompt_relevance_rationale": "why proving this would directly solve, solve toward, or plausibly help solve the user prompt",
       "novelty_rationale": "why this is new knowledge rather than a known-knowledge base entry",
       "why_not_standard_known_result": "why this is not merely a textbook/Mathlib/routine helper result"
     }
@@ -639,9 +639,10 @@ Requirements:
 - Include needed imports.
 - State assumptions explicitly.
 - Prefer correct, minimal, compilable code over stylistic elegance.
-- Keep the USER RESEARCH PROMPT as the relevance boundary. If you narrow an
-  underspecified theorem, the narrowed lemma must still help answer, support,
-  or advance the user's prompt, or the combined USER RESEARCH PROMPT +
+- Keep the USER RESEARCH PROMPT as the relevance boundary. If the theorem is
+  underspecified, choose the precise formal reading that best preserves the
+  source claim; that reading must still help answer, support, or advance the
+  user's prompt, directly or indirectly, or the combined USER RESEARCH PROMPT +
   BRAINSTORM TOPIC when a brainstorm topic is present.
 - PRESERVE the theorem's non-trivial content. Do not simplify or weaken the
   statement into a trivial identity just to make it compile. The goal is to
@@ -653,7 +654,7 @@ Requirements:
   proofs (e.g. axiomatizing the theorem's own concepts and then closing
   with `sorry`) will be rejected even if Lean compiles them with only a
   warning.
-- If the theorem seems invalid or underspecified, still make the strongest faithful formalization attempt you can from the provided source. If the full theorem cannot be proved, do NOT replace it with a narrower, easier, routine, trivial, local, or merely supporting lemma. Submit only a faithful attempt at the selected high-impact target and let Lean feedback expose the real blocker.
+- If the theorem seems invalid or underspecified, still make the strongest faithful formalization attempt you can from the provided source. If the full theorem cannot be proved, do NOT replace it with a narrower, easier, routine, trivial, local, or merely supporting lemma. Submit only a faithful attempt at the selected target and let Lean feedback expose the real blocker.
 - The full source content is mandatory authoritative context. Use the focused
   excerpt only as a navigation aid for the selected theorem, not as a
   replacement for the full brainstorm or paper.
@@ -775,9 +776,10 @@ Requirements:
 - Return a short, ordered list of tactics that can be appended under a `by` block.
 - Each tactic entry must include the Lean tactic string and one short reasoning note.
 - Prefer small, composable tactics over a single opaque script.
-- Keep the USER RESEARCH PROMPT as the relevance boundary. If you narrow an
-  underspecified theorem, the narrowed lemma must still help answer, support,
-  or advance the user's prompt, or the combined USER RESEARCH PROMPT +
+- Keep the USER RESEARCH PROMPT as the relevance boundary. If the theorem is
+  underspecified, choose the precise formal reading that best preserves the
+  source claim; that reading must still help answer, support, or advance the
+  user's prompt, directly or indirectly, or the combined USER RESEARCH PROMPT +
   BRAINSTORM TOPIC when a brainstorm topic is present.
 - PRESERVE the theorem's non-trivial content. Do not simplify or weaken the
   statement into a trivial identity just to make it compile.
@@ -788,7 +790,7 @@ Requirements:
   `sorry`/`admit` will be rejected even if Lean compiles it.
 - Include needed assumptions in the theorem header. Do NOT axiomatize the
   concepts inside the theorem statement just to make the goal trivial.
-- If the theorem is underspecified, make the strongest faithful formalization attempt you can from the source. If you cannot close every goal, do NOT replace it with a narrower, easier, routine, trivial, local, or merely supporting lemma. Submit only a faithful attempt at the selected high-impact target and let Lean feedback expose the real blocker.
+- If the theorem is underspecified, make the strongest faithful formalization attempt you can from the source. If you cannot close every goal, do NOT replace it with a narrower, easier, routine, trivial, local, or merely supporting lemma. Submit only a faithful attempt at the selected target and let Lean feedback expose the real blocker.
 - The full source content is mandatory authoritative context. Use the focused
   excerpt only as a navigation aid for the selected theorem, not as a
   replacement for the full brainstorm or paper.

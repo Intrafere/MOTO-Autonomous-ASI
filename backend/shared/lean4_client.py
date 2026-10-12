@@ -236,7 +236,7 @@ def _format_placeholder_rejection(token_name: str, *, from_lean_diagnostic: bool
         "trivialize the target theorem, or any other placeholder. If the target "
         "cannot be proved yet, do not replace it with a narrower, easier, "
         "routine, trivial, local, or merely supporting lemma; keep attacking "
-        "the same high-impact target so Lean feedback exposes the real blocker."
+        "the same selected target so Lean feedback exposes the real blocker."
     )
 
 

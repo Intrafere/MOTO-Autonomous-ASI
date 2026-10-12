@@ -187,12 +187,12 @@ Respond with ONLY valid JSON:
 {{
   "theorem_name": "Lean declaration name, if named",
   "lean_code": "complete Lean 4 code",
-  "reasoning": "brief explanation of how this repairs the SAME intended high-impact theorem target without narrowing, weakening, or substituting a supporting lemma"
+  "reasoning": "brief explanation of how this repairs the SAME intended theorem target without narrowing, weakening, or substituting a supporting lemma"
 }}
 
 Do not change the intended theorem statement, novelty tier, prompt relevance rationale,
 novelty rationale, or anti-standard-result rationale. The repair budget is for
-fixing the Lean proof of the same high-impact target, not for replacing it with a
+fixing the Lean proof of the same intended target, not for replacing it with a
 narrower, easier, routine, trivial, local, or merely supporting lemma.
 """
 

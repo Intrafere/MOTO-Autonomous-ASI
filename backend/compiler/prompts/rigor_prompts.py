@@ -107,7 +107,7 @@ Output your response ONLY as JSON in this exact format:
   "theorem_origin": "existing_paper_claim | extension_from_partial_work | extension_from_user_prompt (empty if needs_theorem_work=false)",
   "placement_preference": "inline | appendix_only (empty if needs_theorem_work=false)",
   "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation (empty if needs_theorem_work=false)",
-  "prompt_relevance_rationale": "why proving this directly solves, solves toward, or materially helps solve the user prompt (empty if needs_theorem_work=false)",
+  "prompt_relevance_rationale": "why proving this directly solves, solves toward, or plausibly helps solve the user prompt (empty if needs_theorem_work=false)",
   "novelty_rationale": "why this is absent from standard references or Mathlib and public/citable rather than known background or program-local novelty (empty if needs_theorem_work=false)",
   "why_not_standard_known_result": "why this is not merely textbook/Mathlib/routine helper knowledge (empty if needs_theorem_work=false)",
   "retry_existing_failure_id": "theorem_id from OPEN PROOF TARGETS if retrying a prior failure, empty string otherwise",

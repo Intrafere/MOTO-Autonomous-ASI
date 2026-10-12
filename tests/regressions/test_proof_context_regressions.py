@@ -28,6 +28,7 @@ from backend.autonomous.memory.proof_database import ProofDatabase
 from backend.autonomous.prompts.proof_prompts import (
     build_proof_formalization_prompt,
     build_proof_novelty_prompt,
+    build_proof_tactic_script_prompt,
 )
 from backend.aggregator.memory.shared_training import (
     clear_manual_aggregator_prompt,
@@ -1286,6 +1287,27 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("retrieved_pattern", retrieved_section)
         self.assertIn("Use retrieved proofs only as optional proof-pattern", retrieved_section)
+
+    def test_formalization_prompts_keep_faithful_selected_target_without_contradiction(self):
+        kwargs = {
+            "user_prompt": "Solve the actual user prompt.",
+            "source_type": "brainstorm",
+            "theorem_statement": "Target theorem.",
+            "formal_sketch": "Use the source.",
+            "full_source_content": "Brainstorm body.",
+            "source_excerpt": "Local target excerpt.",
+            "prior_attempts": [],
+        }
+
+        for prompt in (
+            build_proof_formalization_prompt(**kwargs),
+            build_proof_tactic_script_prompt(**kwargs),
+        ):
+            self.assertNotIn("If you narrow an", prompt)
+            self.assertNotIn("high-impact target", prompt)
+            self.assertIn("choose the precise formal reading", prompt)
+            self.assertIn("do NOT replace it with a narrower", prompt)
+            self.assertIn("faithful attempt at the selected target", prompt)
 
     async def test_manual_aggregator_prompt_falls_back_to_persisted_prompt(self):
         old_data_dir = system_config.data_dir

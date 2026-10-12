@@ -192,6 +192,7 @@ def test_submitter_allows_novel_partial_progress_and_novel_lean_steps() -> None:
     assert "high-impact" not in prompt
     assert "high-impact" not in schema
     assert "genuinely novel incremental or indirect step" in prompt
+    assert "Prefer the highest-impact such theorem you can completely prove" in prompt
     assert (
         "Piecewise, incremental, or indirect submissions are acceptable when they "
         "are genuinely novel"
