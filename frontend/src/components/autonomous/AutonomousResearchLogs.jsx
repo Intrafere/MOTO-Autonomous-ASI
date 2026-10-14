@@ -14,6 +14,7 @@ import {
   formatProofRunEventMessage,
   withRouteIdentity,
 } from '../../utils/activityStyles';
+import { DEFAULT_EMPTY_PROOF_FEEDBACK, formatProofLeanResponse } from '../../utils/proofLeanResponse';
 import './AutonomousResearch.css';
 
 const AutonomousResearchLogs = ({ stats, events }) => {
@@ -104,23 +105,9 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       if (maxRounds <= 1) return '';
       return `Proof round ${round}/${maxRounds}`;
     };
-    const proofLeanResponse = () => {
-      if (data.lean_response) {
-        let response = data.lean_response;
-        if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
-          response = `${response} You can change this timeout in Advanced Settings.`;
-        }
-        return response;
-      }
-      if (data.proof_verified === true) return 'Lean 4 response: proof verified.';
-      let error = data.error_summary || data.error_output || data.reason || '';
-      if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
-        error = `${error} You can change this timeout in Advanced Settings.`;
-      }
-      return error
-        ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
-        : 'Lean 4 proof-attempt feedback (not a MOTO system error): proof not verified. The model uses these diagnostics if another attempt follows.';
-    };
+    const proofLeanResponse = () => formatProofLeanResponse(data, {
+      emptyFallback: DEFAULT_EMPTY_PROOF_FEEDBACK,
+    });
     const formatProofNoveltyTier = (tier) => {
       switch (tier) {
         case 'major_mathematical_discovery':

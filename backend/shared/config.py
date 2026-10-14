@@ -8,6 +8,8 @@ from typing import List, Optional
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from backend.shared.lean_workspace_paths import lean_workspace_dir_for
+
 
 class RAGConfig(BaseSettings):
     """RAG system configuration."""
@@ -460,10 +462,16 @@ class SystemConfig(BaseSettings):
             field_name: str(data_path.joinpath(*parts))
             for field_name, parts in self._DERIVED_DATA_PATHS.items()
         }
-        lean_workspace = str(data_path / "lean4_workspace")
+        # The Lean workspace is a derived Mathlib cache. On Windows it moves to a
+        # per-data-root folder under %LOCALAPPDATA% when the in-root path is too
+        # long for Lean's tools; that is the only path allowed outside the root.
+        lean_workspace = str(lean_workspace_dir_for(data_path))
+        relocated_lean_workspace = lean_workspace != str(data_path / "lean4_workspace")
 
         # Validate the complete graph before mutating any field.
         for field_name, candidate in {**derived, "lean4_workspace_dir": lean_workspace}.items():
+            if field_name == "lean4_workspace_dir" and relocated_lean_workspace:
+                continue
             candidate_path = Path(candidate).resolve(strict=False)
             try:
                 candidate_path.relative_to(data_path)
@@ -528,7 +536,7 @@ class SystemConfig(BaseSettings):
         if not self.auto_sessions_base_dir:
             self.auto_sessions_base_dir = _join_data_path("auto_sessions")
         if not self.lean4_workspace_dir:
-            self.lean4_workspace_dir = _join_data_path("lean4_workspace")
+            self.lean4_workspace_dir = str(lean_workspace_dir_for(current_data_dir))
 
         if self.secret_namespace is not None:
             self.secret_namespace = self.secret_namespace.strip() or None

@@ -29,6 +29,7 @@ import {
   shouldIncludeCompilerSolutionPathEvent,
 } from '../../utils/manualLogRouting';
 import { getNamespacedStorageKey } from '../../utils/runtimeConfig';
+import { formatProofLeanResponse } from '../../utils/proofLeanResponse';
 import '../autonomous/AutonomousResearch.css';
 
 const MAX_COMPILER_ACTIVITY_EVENTS = 2000;
@@ -95,25 +96,10 @@ const proofTargetLabel = (data = {}, fallback = 'candidate') => (
   data.theorem_name || data.proof_label || data.theorem_id || data.proof_id || fallback
 );
 
-const leanProofResponse = (data = {}) => {
-  if (data.lean_response) {
-    let response = compactProofText(data.lean_response);
-    if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
-      response = `${response} You can change this timeout in Advanced Settings.`;
-    }
-    return response;
-  }
-  if (data.proof_verified === true) {
-    return 'Lean 4 response: proof verified.';
-  }
-  let error = compactProofText(data.error_summary || data.error_output || data.reason, 1800);
-  if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
-    error = `${error} You can change this timeout in Advanced Settings.`;
-  }
-  return error
-    ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
-    : '';
-};
+const leanProofResponse = (data = {}) => formatProofLeanResponse(data, {
+  formatResponse: (text) => compactProofText(text),
+  formatError: (text) => compactProofText(text, 1800),
+});
 
 const formatLeanProofAttempt = (prefix, data = {}) => {
   const attempt = data.attempt ? `, attempt ${data.attempt}` : '';

@@ -1,7 +1,7 @@
 """Real formalizer contract handling and route-local checkpoint regressions."""
 import asyncio
 from copy import deepcopy
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -29,6 +29,7 @@ async def test_strict_real_agent_recovers_invalid_lean_contract(content, recover
     valid = response('{"lean_code":"import Mathlib\\ntheorem t : True := by trivial"}')
     generate = AsyncMock(side_effect=[response(content), valid] if recover else [response(content)] * 3)
     lean = AsyncMock()
+    lean.require_workspace = Mock()  # the real workspace guard is synchronous
     lean.check_proof.return_value = Lean4Result(success=True)
     callback = AsyncMock()
     with (patch(f"{MODULE}.api_client_manager.generate_completion", generate),

@@ -104,6 +104,7 @@ Lean 4 proof verification is optional. The launcher prepares it when available, 
 - **Lean 4 / elan / lake**: Required only when `lean4_enabled` is turned on. The launcher attempts a one-time `elan` install and expects both `lean` and `lake` to be available afterward.
 - **Git and internet access**: Required for the first Lean 4 workspace setup because Mathlib is fetched through Lake.
 - **Mathlib storage**: Plan on several additional GB for the repo-local Lean workspace, Mathlib sources, and prebuilt `.olean` cache. First setup can take a while.
+- **Long folder paths on Windows**: Mathlib's compiled files are nested deep inside the Lean workspace, and Lean can't read files past 260 characters even with Windows long paths turned on. When MOTO's folder is too deep, the launcher keeps the Lean workspace in `%LOCALAPPDATA%\MOTO\lean` instead and removes the unusable copy inside the MOTO folder. If that isn't possible, it disables proof verification and asks you to move MOTO to a short path such as `C:\MOTO`.
 - **Z3 / SMT**: Optional. When `smt_enabled` is turned on, MOTO uses Z3 only for conservative hints; Lean 4 remains authoritative. The launcher attempts to find or download Z3, and advanced users can provide a path through the proof settings or `MOTO_Z3_PATH`.
 - **Linux note**: On Ubuntu 24.04, make sure `python3`, `python3-venv`, `bash`, `curl`, `git`, Node.js, and npm are available. A desktop keyring backend is recommended if you want provider keys saved securely.
 

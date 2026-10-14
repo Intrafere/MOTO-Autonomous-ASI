@@ -41,6 +41,12 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
 )
+from backend.shared.lean4_client import (
+    LeanWorkspaceRepairRequiredError,
+    is_lean_workspace_error_text,
+    recover_lean_workspace,
+    require_lean_workspace,
+)
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
@@ -82,7 +88,10 @@ ProofPruningRegisteredCallback = Optional[
 ProofPruningPressureCallback = Optional[
     Callable[..., Awaitable[None]]
 ]
-LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
+# Checkpoint status for a round interrupted because Lean could not run. It is
+# neither complete nor fatal, so the next Start resumes the unprocessed
+# candidates once the workspace is repaired.
+LEAN_WORKSPACE_BLOCKED_STATUS = "lean_workspace_blocked"
 PROOF_TRUNCATION_STOP_REASON = "proof_output_truncation_recovery_exhausted"
 PROOF_TRUNCATION_POLICY_VERSION = "proof-truncation-v1"
 
@@ -241,6 +250,15 @@ def _normalize_candidate_list_checkpoint(
             return {}
         normalized["validation"] = validation.model_dump(mode="json")
     return normalized
+
+
+def _without_workspace_failures(attempts) -> list[ProofAttemptFeedback]:
+    """Drop stored Lean workspace failures: Lean never judged those proofs."""
+    return [
+        attempt
+        for attempt in list(attempts or [])
+        if not is_lean_workspace_error_text(attempt.error_output)
+    ]
 
 
 def _truncation_chain_exhausted(attempts: list[ProofAttemptFeedback]) -> bool:
@@ -955,7 +973,7 @@ class ProofVerificationStage:
             if candidate_id
         }
         attempts_by_candidate: dict[str, list[ProofAttemptFeedback]] = {
-            theorem_id: list(attempts or [])
+            theorem_id: _without_workspace_failures(attempts)
             for theorem_id, attempts in (checkpoint_attempts_by_candidate or {}).items()
         }
         theorem_names_by_candidate: dict[str, str] = {
@@ -1203,6 +1221,10 @@ class ProofVerificationStage:
                 "proof_max_rounds": proof_max_rounds,
                 **dict(proof_run_context or {}),
             }
+            if system_config.lean4_enabled:
+                # Known-broken Lean stops the round before identification or
+                # list validation spends model calls on unverifiable proofs.
+                await recover_lean_workspace()
             await self._broadcast(
                 broadcast_fn,
                 "proof_check_started",
@@ -1699,7 +1721,8 @@ class ProofVerificationStage:
                     novel_proofs_db=novel_proofs_db,
                     broadcast_fn=broadcast_fn,
                     should_stop=_stop_requested,
-                    prior_attempts=([ProofAttemptFeedback.model_validate(a) for a in local_state.get("attempts", [])]
+                    prior_attempts=(_without_workspace_failures(
+                                        ProofAttemptFeedback.model_validate(a) for a in local_state.get("attempts", []))
                                     if local_state is not None else attempts_by_candidate.get(theorem_candidate.theorem_id, [])),
                     prior_theorem_name=("" if competitor_index else theorem_names_by_candidate.get(theorem_candidate.theorem_id, "")),
                     formalization_only=bool(competitor_index),
@@ -1737,8 +1760,6 @@ class ProofVerificationStage:
                 def classify(outcome, index):
                     if outcome.success:
                         return "success"
-                    if outcome.attempts and (outcome.attempts[-1].error_output or "").startswith(LEAN_WORKSPACE_ERROR_PREFIX):
-                        return "blocked"
                     if outcome.attempts and ProofFormalizationAgent.is_context_overflow_feedback(outcome.attempts[-1]):
                         return "unavailable" if index else "blocked"
                     if not index and _truncation_chain_exhausted(outcome.attempts):
@@ -1913,6 +1934,12 @@ class ProofVerificationStage:
                         except RetryableProviderError:
                             await cancel_and_drain(set(done_tasks) - {future})
                             await save_checkpoint("provider_paused")
+                            raise
+                        except LeanWorkspaceRepairRequiredError:
+                            # Lean cannot run, so siblings would only spend model
+                            # calls on proofs that cannot be checked. The outer
+                            # handler saves the resumable checkpoint.
+                            await cancel_and_drain(set(done_tasks) - {future})
                             raise
                         except asyncio.CancelledError:
                             continue
@@ -2465,6 +2492,13 @@ class ProofVerificationStage:
             )
             await save_checkpoint("provider_paused")
             raise
+        except LeanWorkspaceRepairRequiredError as exc:
+            await broadcast_candidate_list_interrupted(
+                error_kind="lean_workspace_repair_required",
+                error_message=str(exc),
+            )
+            await save_checkpoint(LEAN_WORKSPACE_BLOCKED_STATUS)
+            raise
         except (
             ProofCandidateListContextError,
             ProofIdentificationContextError,
@@ -2703,6 +2737,9 @@ class ProofVerificationStage:
         )
         if should_stop and should_stop():
             raise asyncio.CancelledError()
+        # Lemma search waits for Lean setup; if that setup just failed, stop
+        # before the SMT hint spends a model call.
+        require_lean_workspace()
         smt_hint = None if formalization_only else await self._run_smt_check(
             user_prompt=user_prompt,
             source_type=source_type,
@@ -3018,17 +3055,12 @@ class ProofVerificationStage:
                 source_title=source_title,
                 should_stop=should_stop,
             )
-        workspace_error = bool(
-            attempts
-            and (attempts[-1].error_output or "").startswith(LEAN_WORKSPACE_ERROR_PREFIX)
-        )
         context_overflow = bool(
             attempts
             and ProofFormalizationAgent.is_context_overflow_feedback(attempts[-1])
         )
         if (
             not success
-            and not workspace_error
             and not context_overflow
             and tactic_remaining > 0
             and not (should_stop and should_stop())
@@ -3057,7 +3089,6 @@ class ProofVerificationStage:
 
         if (
             not success
-            and not workspace_error
             and not context_overflow
             and not _truncation_chain_exhausted(attempts)
             and not suppress_exhausted_event

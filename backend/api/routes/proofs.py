@@ -63,6 +63,8 @@ from backend.shared.context_overflow import (
     context_overflow_model_payload,
 )
 from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_REPAIR_TITLE,
+    LeanWorkspaceRepairRequiredError,
     clear_lean4_client,
     close_lean4_client,
     get_lean4_client,
@@ -1808,6 +1810,15 @@ async def _run_manual_proof_check(
                 if result is None:
                     return "completed", None
             except Exception as exc:
+                if isinstance(exc, LeanWorkspaceRepairRequiredError):
+                    await proof_run_manager.repair_required(
+                        run_control,
+                        reason=(
+                            f"{LEAN_WORKSPACE_REPAIR_TITLE}: {exc.message} "
+                            f"{exc.terminal_guidance}"
+                        ),
+                    )
+                    return "stopped", None
                 if is_provider_credit_pause_error(exc):
                     pause_route_identity = _manual_proof_route_identity(
                         error=exc,

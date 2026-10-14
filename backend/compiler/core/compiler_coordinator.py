@@ -30,6 +30,10 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
 )
+from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+    LeanWorkspaceRepairRequiredError,
+)
 from backend.shared.provider_errors import ProviderContextLengthError, ProviderRepairRequiredError
 from backend.shared.provider_route_identity import merge_route_identity
 from backend.compiler.agents.writer_submitter import WritingSubmitter
@@ -1052,6 +1056,35 @@ class CompilerCoordinator:
             )
             await self._broadcast(
                 "provider_repair_required",
+                dict(self.fatal_error_payload),
+            )
+        except LeanWorkspaceRepairRequiredError as e:
+            logger.error("Compiler stopped because Lean 4 needs repair: %s", e)
+            self.is_running = False
+            self.fatal_error_type = LEAN_WORKSPACE_REPAIR_REQUIRED_REASON
+            self.fatal_error_message = str(e)
+            payload = fill_missing_activity_metadata(
+                e.to_repair_event(
+                    workflow_mode=self._workflow_mode(),
+                    stopped_subject="Compiler",
+                ),
+                workflow="compiler",
+                source_type="paper",
+                role_id="compiler_rigor",
+                phase=self.current_mode or "",
+                classification="operational",
+                category="workflow",
+                severity="error",
+                outcome="error",
+                detail=e.detail,
+                guidance=e.terminal_guidance,
+            )
+            self.fatal_error_payload = normalize_activity_payload(
+                LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+                payload,
+            )
+            await self._broadcast(
+                LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
                 dict(self.fatal_error_payload),
             )
         except ValueError as e:
@@ -2806,7 +2839,7 @@ INVALID:
             )
             return False
         except Exception as exc:
-            if _is_rigor_model_call_failure(exc):
+            if isinstance(exc, LeanWorkspaceRepairRequiredError) or _is_rigor_model_call_failure(exc):
                 raise
             logger.error(f"Rigor lean flow raised: {exc}", exc_info=True)
             self.rigor_declines += 1

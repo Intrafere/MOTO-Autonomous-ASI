@@ -18,6 +18,10 @@ from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+    LeanWorkspaceRepairRequiredError,
+)
 from backend.shared.provider_errors import ProviderRepairRequiredError
 from backend.shared.provider_route_identity import merge_route_identity, with_route_identity
 from backend.shared.context_overflow import (
@@ -1518,6 +1522,36 @@ class Coordinator:
         await self._broadcast("provider_role_disabled", payload)
         await self._add_persisted_event(
             "provider_role_disabled",
+            payload["message"],
+            payload,
+        )
+
+    async def _handle_lean_workspace_repair_required(
+        self,
+        error: LeanWorkspaceRepairRequiredError,
+    ) -> None:
+        """Stop every lane: Lean cannot check the proof submissions they produce."""
+        logger.error("Aggregator stopped because Lean 4 needs repair: %s", error)
+        self.fatal_error_type = LEAN_WORKSPACE_REPAIR_REQUIRED_REASON
+        self.fatal_error_message = str(error)
+        self.is_running = False
+        self._notify_top_level_terminal()
+        current_task = asyncio.current_task()
+        for submitter in self.submitters:
+            if submitter._task is current_task:
+                submitter.is_running = False
+                submitter.state.is_active = False
+                continue
+            await submitter.stop()
+        await queue_manager.clear()
+        payload = error.to_repair_event(
+            workflow_mode=self._activity_workflow_mode(),
+            stopped_subject="Aggregator",
+        )
+        self.fatal_error_payload = dict(payload)
+        await self._broadcast(LEAN_WORKSPACE_REPAIR_REQUIRED_REASON, payload)
+        await self._add_persisted_event(
+            LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
             payload["message"],
             payload,
         )

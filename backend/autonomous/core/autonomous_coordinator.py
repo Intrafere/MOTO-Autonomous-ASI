@@ -48,6 +48,11 @@ from backend.shared.provider_pause import (
     mark_provider_paused,
     wait_for_provider_resume,
 )
+from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+    LEAN_WORKSPACE_REPAIR_TITLE,
+    LeanWorkspaceRepairRequiredError,
+)
 from backend.shared.provider_errors import ProviderRepairRequiredError
 from backend.shared.provider_route_identity import (
     is_model_provider,
@@ -446,6 +451,25 @@ class AutonomousCoordinator:
         self._mark_terminal_stop(
             reason=CONTEXT_OVERFLOW_STOP_REASON,
             message=CONTEXT_OVERFLOW_STOP_MESSAGE,
+            payload=details,
+        )
+
+    def _mark_lean_workspace_repair_stop(self, payload: Optional[Dict[str, Any]] = None) -> None:
+        """Explain that Lean must be repaired; Start resumes the saved proof checkpoint."""
+        details = dict(payload or {})
+        details["fatal"] = True
+        details["recoverable"] = True
+        details.setdefault("notification_kind", "model_error")
+        details.setdefault("resolution", details.get("terminal_guidance"))
+        # Child Aggregator/Compiler payloads compose their own "stopped" message;
+        # the terminal event names the underlying problem once.
+        problem = str(details.get("problem") or details.get("message") or "").strip()
+        self._mark_terminal_stop(
+            reason=LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+            message=(
+                "Autonomous research stopped because Lean 4 cannot check proofs. "
+                f"{problem}"
+            ).strip(),
             payload=details,
         )
 
@@ -1315,6 +1339,17 @@ class AutonomousCoordinator:
                         )
                         return "deferred", proof_result
                     return "completed", proof_result
+                except LeanWorkspaceRepairRequiredError as exc:
+                    logger.error(
+                        "Autonomous proof verification stopped because Lean 4 needs repair (%s %s): %s",
+                        source_type,
+                        source_id,
+                        exc,
+                    )
+                    self._mark_lean_workspace_repair_stop(exc.to_payload())
+                    self._stop_event.set()
+                    await self._save_workflow_state(phase=f"{source_type}_proof_verification")
+                    return "fatal_stop", None
                 except ProofVerificationProviderPause as exc:
                     retry_candidates = exc.remaining_candidates or retry_candidates
                     checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
@@ -3185,33 +3220,56 @@ class AutonomousCoordinator:
             is_context_overflow = (
                 self._terminal_event.reason == CONTEXT_OVERFLOW_STOP_REASON
             )
+            is_lean_workspace = (
+                self._terminal_event.reason == LEAN_WORKSPACE_REPAIR_REQUIRED_REASON
+            )
             is_provider_repair = (
                 self._terminal_event.notification_kind == "model_error"
                 and self._terminal_event.reason not in {
                     "proof_output_truncation_recovery_exhausted",
                     CONTEXT_OVERFLOW_STOP_REASON,
+                    LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
                 }
             )
             if (
                 self._terminal_event.reason == "proof_output_truncation_recovery_exhausted"
                 or is_context_overflow
                 or is_provider_repair
+                or is_lean_workspace
             ):
                 from backend.shared.provider_notification_store import record_provider_notification
 
                 run_id = self._terminal_event.run_id or "current"
-                notification_key = (
-                    f"{self._terminal_event.effective_provider or self._terminal_event.configured_provider or 'model_provider'}:"
-                    f"{self._terminal_event.role_id or 'autonomous'}:"
-                    f"{self._terminal_event.reason}:"
-                    f"{self._terminal_event.effective_model or self._terminal_event.configured_model or '*'}"
-                    if is_provider_repair
-                    else (
-                        f"proof-context-overflow:{run_id}"
-                        if is_context_overflow
-                        else f"proof-truncation:{run_id}"
-                    )
+                configured_route_provider = (
+                    self._terminal_event.effective_provider
+                    or self._terminal_event.configured_provider
+                    or "model_provider"
                 )
+                if is_provider_repair:
+                    notification_key = (
+                        f"{configured_route_provider}:"
+                        f"{self._terminal_event.role_id or 'autonomous'}:"
+                        f"{self._terminal_event.reason}:"
+                        f"{self._terminal_event.effective_model or self._terminal_event.configured_model or '*'}"
+                    )
+                    provider = configured_route_provider
+                    role_id = self._terminal_event.role_id
+                    title = "Model configuration requires repair"
+                elif is_context_overflow:
+                    notification_key = f"proof-context-overflow:{run_id}"
+                    provider = configured_route_provider
+                    role_id = self._terminal_event.role_id
+                    title = "Proof context limit reached"
+                elif is_lean_workspace:
+                    notification_key = f"lean-workspace:{run_id}"
+                    provider = "lean4"
+                    role_id = "autonomous_proof_formalization"
+                    title = LEAN_WORKSPACE_REPAIR_TITLE
+                else:
+                    notification_key = f"proof-truncation:{run_id}"
+                    provider = "proof_model"
+                    role_id = "autonomous_proof_formalization"
+                    title = "Proof model output repeatedly truncated"
                 stored = await asyncio.to_thread(
                     record_provider_notification,
                     "auto_research_stopped",
@@ -3220,33 +3278,15 @@ class AutonomousCoordinator:
                         "notification_key": notification_key,
                         "notification_kind": "model_error",
                         "run_id": run_id,
-                        "provider": (
-                            self._terminal_event.effective_provider
-                            or self._terminal_event.configured_provider
-                            or "model_provider"
-                            if is_provider_repair or is_context_overflow
-                            else "proof_model"
-                        ),
-                        "role_id": (
-                            self._terminal_event.role_id
-                            if is_provider_repair or is_context_overflow
-                            else "autonomous_proof_formalization"
-                        ),
+                        "provider": provider,
+                        "role_id": role_id,
                         "model": (
                             self._terminal_event.effective_model
                             or self._terminal_event.configured_model
                             or ""
                         ),
                         "reason": self._terminal_event.reason,
-                        "title": (
-                            "Proof context limit reached"
-                            if is_context_overflow
-                            else (
-                                "Model configuration requires repair"
-                                if is_provider_repair
-                                else "Proof model output repeatedly truncated"
-                            )
-                        ),
+                        "title": title,
                         "recoverable": True,
                         "terminal_guidance": self._terminal_event.terminal_guidance or "",
                     },
@@ -4191,6 +4231,11 @@ class AutonomousCoordinator:
             self._mark_provider_repair_stop(e)
             await self._save_workflow_state()
             raise
+        except LeanWorkspaceRepairRequiredError as e:
+            logger.error("AutonomousCoordinator stopped because Lean 4 needs repair: %s", e)
+            self._mark_lean_workspace_repair_stop(e.to_payload())
+            await self._save_workflow_state()
+            raise
         except Exception as e:
             logger.error(f"AutonomousCoordinator error: {e}")
             await self._save_workflow_state()
@@ -4801,6 +4846,10 @@ class AutonomousCoordinator:
             logger.error("Resumed Autonomous research stopped for provider repair: %s", e)
             self._mark_provider_repair_stop(e)
             await self._save_workflow_state()
+        except LeanWorkspaceRepairRequiredError as e:
+            logger.error("Resumed Autonomous research stopped because Lean 4 needs repair: %s", e)
+            self._mark_lean_workspace_repair_stop(e.to_payload())
+            await self._save_workflow_state()
         except Exception as e:
             logger.error(f"Error in resumed research loop: {e}")
             await self._save_workflow_state()
@@ -4960,6 +5009,12 @@ class AutonomousCoordinator:
             while self._running and not self._stop_event.is_set():
                 status = await exploration_aggregator.get_status()
                 child_fatal_type = getattr(exploration_aggregator, "fatal_error_type", None)
+                if child_fatal_type == LEAN_WORKSPACE_REPAIR_REQUIRED_REASON:
+                    self._mark_lean_workspace_repair_stop(
+                        getattr(exploration_aggregator, "fatal_error_payload", None)
+                    )
+                    self._stop_event.set()
+                    return ""
                 if child_fatal_type == "provider_repair_required":
                     payload = getattr(exploration_aggregator, "fatal_error_payload", None) or {}
                     self._mark_terminal_stop(
@@ -5927,6 +5982,12 @@ class AutonomousCoordinator:
                 # Get current aggregator stats
                 status = await self._brainstorm_aggregator.get_status()
                 child_fatal_type = getattr(self._brainstorm_aggregator, "fatal_error_type", None)
+                if child_fatal_type == LEAN_WORKSPACE_REPAIR_REQUIRED_REASON:
+                    self._mark_lean_workspace_repair_stop(
+                        getattr(self._brainstorm_aggregator, "fatal_error_payload", None)
+                    )
+                    self._stop_event.set()
+                    return False
                 if child_fatal_type == "provider_repair_required":
                     payload = getattr(self._brainstorm_aggregator, "fatal_error_payload", None) or {}
                     self._mark_terminal_stop(
@@ -6953,6 +7014,12 @@ class AutonomousCoordinator:
                 while self._running and not self._stop_event.is_set():
                     status = await exploration_aggregator.get_status()
                     child_fatal_type = getattr(exploration_aggregator, "fatal_error_type", None)
+                    if child_fatal_type == LEAN_WORKSPACE_REPAIR_REQUIRED_REASON:
+                        self._mark_lean_workspace_repair_stop(
+                            getattr(exploration_aggregator, "fatal_error_payload", None)
+                        )
+                        self._stop_event.set()
+                        return ""
                     if child_fatal_type == "provider_repair_required":
                         payload = getattr(exploration_aggregator, "fatal_error_payload", None) or {}
                         self._mark_terminal_stop(
@@ -7351,6 +7418,9 @@ class AutonomousCoordinator:
                             ),
                             payload=child_payload,
                         )
+                        self._stop_event.set()
+                    elif child_fatal_type == LEAN_WORKSPACE_REPAIR_REQUIRED_REASON:
+                        self._mark_lean_workspace_repair_stop(child_payload)
                         self._stop_event.set()
                     elif child_fatal_type == CONTEXT_OVERFLOW_STOP_REASON:
                         logger.error(
@@ -8911,6 +8981,9 @@ class AutonomousCoordinator:
                             ),
                             payload=child_payload,
                         )
+                        self._stop_event.set()
+                    elif child_fatal_type == LEAN_WORKSPACE_REPAIR_REQUIRED_REASON:
+                        self._mark_lean_workspace_repair_stop(child_payload)
                         self._stop_event.set()
                     elif child_fatal_type == CONTEXT_OVERFLOW_STOP_REASON:
                         logger.error(

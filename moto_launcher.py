@@ -20,6 +20,7 @@ import secrets
 import socket
 import shlex
 from shutil import copyfileobj, rmtree, which
+import stat
 import struct
 import subprocess
 import sys
@@ -32,6 +33,13 @@ from urllib.request import Request, urlopen
 import webbrowser
 import zipfile
 
+from backend.shared.lean_workspace_paths import (
+    WORKSPACE_PATH_GUIDANCE,
+    describe_workspace_path_problem,
+    is_moto_lean_workspace,
+    lean_workspace_dir_for,
+    windows_workspace_path_problem,
+)
 from launcher_https import verified_urlopen
 from moto_updater import (
     apply_update,
@@ -1728,6 +1736,46 @@ def _write_lean_workspace_files(workspace_dir: Path) -> None:
         root_file_path.write_text("import Mathlib\n", encoding="utf-8")
 
 
+def _remove_unusable_lean_workspace(workspace_dir: Path) -> None:
+    """Delete a MOTO Lean workspace that sits too deep for Lean's tools on Windows."""
+    if not workspace_dir.is_dir() or not is_moto_lean_workspace(workspace_dir):
+        return
+    target = str(workspace_dir.resolve())
+    if os.name == "nt" and not target.startswith("\\\\?\\"):
+        # Extended-length form: Python only gets long paths natively when the
+        # system long-path setting is on, and Mathlib's files are past MAX_PATH.
+        if target.startswith("\\\\"):
+            target = "\\\\?\\UNC\\" + target[2:]
+        else:
+            target = "\\\\?\\" + target
+    freed_bytes = 0
+    for dirpath, _dirnames, filenames in os.walk(target):
+        for filename in filenames:
+            with contextlib.suppress(OSError):
+                freed_bytes += os.path.getsize(os.path.join(dirpath, filename))
+
+    def clear_read_only(func, path, _error) -> None:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    handler = {"onexc": clear_read_only} if sys.version_info >= (3, 12) else {"onerror": clear_read_only}
+    try:
+        rmtree(target, **handler)
+    except OSError as exc:
+        cprint(f"WARNING: Could not remove the old Lean workspace at {workspace_dir}: {exc}", YELLOW)
+        return
+    freed = (
+        f"{freed_bytes / 1024 ** 3:.1f} GB"
+        if freed_bytes >= 1024 ** 3
+        else f"{freed_bytes / 1024 ** 2:.0f} MB"
+    )
+    cprint(
+        f"Removed the old Lean workspace inside the MOTO folder ({freed} freed); "
+        "Lean can't read files that deep.",
+        GREEN,
+    )
+
+
 def _probe_git_command(git_cmd: str | None) -> tuple[bool, str]:
     if not git_cmd:
         return False, "Git executable was not found."
@@ -2175,7 +2223,30 @@ def install_lean4(
         except OSError as exc:
             cprint(f"WARNING: Could not enable Git long paths automatically: {exc}", YELLOW)
 
-    workspace_dir = Path(runtime.data_root) / "lean4_workspace"
+    in_root_workspace = Path(runtime.data_root) / "lean4_workspace"
+    workspace_dir = lean_workspace_dir_for(runtime.data_root, is_windows=sys.platform == "win32")
+    if workspace_dir != in_root_workspace:
+        cprint(
+            "MOTO's folder path is too long for Mathlib on Windows, so Lean's workspace "
+            f"lives in {workspace_dir}.",
+            GREEN,
+        )
+        _remove_unusable_lean_workspace(in_root_workspace)
+    path_problem = windows_workspace_path_problem(
+        str(workspace_dir),
+        is_windows=sys.platform == "win32",
+    )
+    if path_problem is not None:
+        cprint(
+            "WARNING: MOTO's folder path is too long for Lean on Windows; "
+            "proof verification will be skipped.",
+            YELLOW,
+        )
+        cprint(describe_workspace_path_problem(path_problem), YELLOW)
+        cprint(WORKSPACE_PATH_GUIDANCE, YELLOW)
+        _set_lean_env_flags(env, enabled=False, unavailable_reason="lean_workspace_path_too_long")
+        print()
+        return
     try:
         _write_lean_workspace_files(workspace_dir)
     except Exception as exc:

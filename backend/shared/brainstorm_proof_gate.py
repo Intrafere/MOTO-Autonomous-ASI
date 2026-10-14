@@ -10,7 +10,7 @@ from backend.shared.api_client_manager import RetryableProviderError, api_client
 from backend.shared.config import system_config
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
-from backend.shared.lean4_client import get_lean4_client
+from backend.shared.lean4_client import get_lean4_client, raise_for_lean_workspace_failure
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.models import LeanCompileReceipt, ProofAttemptFeedback
@@ -361,6 +361,9 @@ async def verify_brainstorm_proof_candidate(
             lean_code,
             timeout=system_config.lean4_proof_timeout,
         )
+        # Lean never ran: stop the workflow instead of spending repair calls or
+        # recording a rejection for a proof nobody checked.
+        raise_for_lean_workspace_failure(lean_result)
         feedback = ProofAttemptFeedback(
             attempt=attempt_number,
             theorem_id="brainstorm_inline_proof",

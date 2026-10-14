@@ -58,7 +58,14 @@ from backend.shared.context_overflow import (
 )
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
-from backend.shared.lean4_client import Lean4Result, get_lean4_client
+from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+    Lean4Result,
+    LeanWorkspaceRepairRequiredError,
+    get_lean4_client,
+    raise_for_lean_workspace_failure,
+    recover_lean_workspace,
+)
 from backend.shared.lean_proof_integrity import strip_lean_comments_and_strings, validate_lean_proof_integrity
 from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.models import (
@@ -461,6 +468,22 @@ class LeanOJCoordinator:
             overflow_payload,
         )
 
+    async def _handle_lean_workspace_stop(self, exc: LeanWorkspaceRepairRequiredError) -> None:
+        """Stop without counting an attempt: Lean never checked the proof."""
+        if self._fatal_stop_reason == LEAN_WORKSPACE_REPAIR_REQUIRED_REASON:
+            return
+        payload = {
+            **exc.to_repair_event(workflow_mode="leanoj", stopped_subject="Proof Solver"),
+            "phase": self._state.phase,
+        }
+        self._fatal_stop_reason = LEAN_WORKSPACE_REPAIR_REQUIRED_REASON
+        self._fatal_stop_message = payload["message"]
+        self._fatal_stop_payload = payload
+        self._state.phase = "stopped"
+        self._state.last_error = f"{payload['message']} {exc.terminal_guidance}"
+        self._stop_event.set()
+        await self._persist_and_broadcast(LEAN_WORKSPACE_REPAIR_REQUIRED_REASON, payload)
+
     def get_state(self) -> LeanOJState:
         return self._state
 
@@ -777,6 +800,9 @@ class LeanOJCoordinator:
             await self._run_workflow(self._request)
         except asyncio.CancelledError:
             raise
+        except LeanWorkspaceRepairRequiredError as exc:
+            logger.error("LeanOJ stopped because Lean 4 needs repair: %s", exc)
+            await self._handle_lean_workspace_stop(exc)
         except LeanOJConfigurationError as exc:
             if self._is_context_overflow_exception(exc):
                 logger.error("LeanOJ stopped for context overflow: %s", exc)
@@ -2057,6 +2083,9 @@ class LeanOJCoordinator:
                     )
             except asyncio.CancelledError:
                 raise
+            except LeanWorkspaceRepairRequiredError as exc:
+                await self._handle_lean_workspace_stop(exc)
+                return
             except LeanOJConfigurationError as exc:
                 if self._is_context_overflow_exception(exc):
                     await self._handle_context_overflow_stop(exc, role_id=role_id)
@@ -2909,13 +2938,19 @@ class LeanOJCoordinator:
     ) -> Lean4Result:
         placeholder_tokens = self._placeholder_tokens(lean_code)
         if not placeholder_tokens:
-            return await get_lean4_client().check_proof(lean_code, timeout=system_config.lean4_proof_timeout)
+            lean_result = await get_lean4_client().check_proof(
+                lean_code,
+                timeout=system_config.lean4_proof_timeout,
+            )
+            raise_for_lean_workspace_failure(lean_result)
+            return lean_result
 
         lean_result = await get_lean4_client().check_proof(
             lean_code,
             timeout=system_config.lean4_proof_timeout,
             allow_placeholders=True,
         )
+        raise_for_lean_workspace_failure(lean_result)
         if not lean_result.success:
             return lean_result
 
@@ -4122,6 +4157,7 @@ class LeanOJCoordinator:
                 timeout=system_config.lean4_proof_timeout,
                 allow_placeholders=True,
             )
+            raise_for_lean_workspace_failure(lean_result)
             if not self._owns_control_generation(control_generation):
                 return lean_result, ""
             lean_pass_feedback = self._format_lean_success_feedback(lean_result) if lean_result.success else ""
@@ -4259,6 +4295,9 @@ class LeanOJCoordinator:
             if not self._owns_control_generation(attempt_generation):
                 return
             self._set_master_proof_metadata(current_master_proof)
+            # A known-broken Lean workspace stops the run before the final
+            # solver spends a model call on an edit nobody can check.
+            await recover_lean_workspace(get_lean4_client())
             final_prompt_feedback = self._final_prompt_feedback_entries()
             await self._broadcast(
                 "leanoj_master_proof_edit_started",

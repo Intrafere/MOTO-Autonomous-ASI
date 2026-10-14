@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Iterable, Any
 
+from backend.shared.lean4_client import is_lean_workspace_error_text
 from backend.shared.models import MathlibLemmaHint, ProofAttemptFeedback, SmtHint
 
 
@@ -77,6 +78,9 @@ def _format_attempt_history(prior_attempts: Iterable[ProofAttemptFeedback]) -> s
             and not attempt.error_output
             and "malformed output" in (attempt.reasoning or "").lower()
         ):
+            continue
+        if is_lean_workspace_error_text(attempt.error_output):
+            # Lean never ran; a setup failure is not feedback on the proof.
             continue
         tactic_trace = "\n".join(
             f"  - {step}"

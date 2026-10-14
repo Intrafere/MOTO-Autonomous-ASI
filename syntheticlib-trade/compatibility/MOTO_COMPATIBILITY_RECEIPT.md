@@ -27,7 +27,7 @@ release receipt.
 
 ## Contract versions
 
-- MOTO API contract version: `build6-v120`
+- MOTO API contract version: `build6-v121`
 - Compatibility matrix: `moto-syntheticlib-compatibility-matrix.v1`
 - Contract-test result: `moto-syntheticlib-contract-test-result.v1`
 - Compatibility receipt: `moto-syntheticlib-compatibility-receipt.v1`
@@ -88,12 +88,12 @@ Normalization rules:
    has no trailing newline.
 
 ```json
-{"canonicalization":"moto-canonical-json-v1","compatibility":{"reasonCode":"frozen_syntheticlib_contract_unpublished","status":"blocked","supportedForLiveProofTrade":false},"moto":{"apiContractVersion":"build6-v120","buildCommit":"40be14c63aee7027f02d36479416e1341385b6e3","manifestVersion":1,"updateChannel":"main","version":"1.1.08"},"receiptId":"moto-1.1.08-build6-v120-40be14c63aee7027f02d36479416e1341385b6e3","schemaVersion":"moto-syntheticlib-compatibility-receipt.v1","syntheticLib":{"fixtureVersion":null,"nativeClientProfileVersion":null,"proofTradeContractVersion":null,"serverRelease":null}}
+{"canonicalization":"moto-canonical-json-v1","compatibility":{"reasonCode":"frozen_syntheticlib_contract_unpublished","status":"blocked","supportedForLiveProofTrade":false},"moto":{"apiContractVersion":"build6-v121","buildCommit":"40be14c63aee7027f02d36479416e1341385b6e3","manifestVersion":1,"updateChannel":"main","version":"1.1.08"},"receiptId":"moto-1.1.08-build6-v121-40be14c63aee7027f02d36479416e1341385b6e3","schemaVersion":"moto-syntheticlib-compatibility-receipt.v1","syntheticLib":{"fixtureVersion":null,"nativeClientProfileVersion":null,"proofTradeContractVersion":null,"serverRelease":null}}
 ```
 
 Normalized receipt SHA-256:
 
-`6de913d8c919d2e8cab4ce047063b306b7d7635b9829500fa2deea0e31853646`
+`f8f52065c89fa8ef4866c3700526d4cc8a0c5fdf2129c00427e925f08baba71b`
 
 The detached digest is `moto-compatibility-receipt.sha256`.
 

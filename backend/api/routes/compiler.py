@@ -14,6 +14,10 @@ from backend.shared.models import CompilerStartRequest, CompilerState, CritiqueR
 from backend.shared.config import system_config
 from backend.shared.credential_locks import wolfram_credential_mutation
 from backend.shared.embedding_readiness import require_embedding_provider_ready
+from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+    LeanWorkspaceRepairRequiredError,
+)
 from backend.shared.token_tracker import token_tracker
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.log_redaction import redact_log_text
@@ -173,6 +177,18 @@ async def _append_proof_to_saved_compiler_paper(output_path: Path, proof_record)
         return False
 
 
+async def _broadcast_lean_workspace_repair(
+    error: LeanWorkspaceRepairRequiredError,
+    stopped_subject: str,
+) -> None:
+    """Tell the user a background proof check stopped because Lean cannot run."""
+    logger.error("%s stopped because Lean 4 needs repair: %s", stopped_subject, error)
+    await websocket.broadcast_event(
+        LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+        error.to_repair_event(workflow_mode="compiler", stopped_subject=stopped_subject),
+    )
+
+
 async def _run_saved_compiler_paper_proof_check(
     full_content: str,
     source_title: str,
@@ -237,31 +253,34 @@ async def _run_saved_compiler_paper_proof_check(
         )
 
         stage = ProofVerificationStage()
-        await stage.run(
-            content=proof_content,
-            source_type="paper",
-            source_id=source_id,
-            user_prompt=manual_proof_database.inject_into_prompt(
-                str(proof_config.get("user_prompt") or ""),
-                requesting_run_id=await manual_proof_database.get_or_create_active_run_id(),
-            ),
-            submitter_model=submitter_model,
-            submitter_context=submitter_config.context_window,
-            submitter_max_tokens=submitter_config.max_output_tokens,
-            validator_model=validator_model,
-            validator_context=validator_config.context_window,
-            validator_max_tokens=validator_config.max_output_tokens,
-            broadcast_fn=websocket.broadcast_event,
-            novel_proofs_db=manual_proof_database,
-            source_title=source_title,
-            role_suffix_override=role_suffix,
-            trigger="manual_compiler_save",
-            source_reserved=source_reserved,
-            source_reservation_token=source_reservation_token,
-            release_source_on_exit=False,
-            append_to_source=False,
-            append_proof_callback=lambda proof: _append_proof_to_saved_compiler_paper(output_path, proof),
-        )
+        try:
+            await stage.run(
+                content=proof_content,
+                source_type="paper",
+                source_id=source_id,
+                user_prompt=manual_proof_database.inject_into_prompt(
+                    str(proof_config.get("user_prompt") or ""),
+                    requesting_run_id=await manual_proof_database.get_or_create_active_run_id(),
+                ),
+                submitter_model=submitter_model,
+                submitter_context=submitter_config.context_window,
+                submitter_max_tokens=submitter_config.max_output_tokens,
+                validator_model=validator_model,
+                validator_context=validator_config.context_window,
+                validator_max_tokens=validator_config.max_output_tokens,
+                broadcast_fn=websocket.broadcast_event,
+                novel_proofs_db=manual_proof_database,
+                source_title=source_title,
+                role_suffix_override=role_suffix,
+                trigger="manual_compiler_save",
+                source_reserved=source_reserved,
+                source_reservation_token=source_reservation_token,
+                release_source_on_exit=False,
+                append_to_source=False,
+                append_proof_callback=lambda proof: _append_proof_to_saved_compiler_paper(output_path, proof),
+            )
+        except LeanWorkspaceRepairRequiredError as exc:
+            await _broadcast_lean_workspace_repair(exc, "Saved-paper proof check")
     finally:
         await _release_pre_reserved_source(
             "paper",
@@ -405,27 +424,30 @@ async def _run_compiler_aggregator_proof_check(
             if requesting_run_id
             else manual_proof_database.inject_into_prompt(request.compiler_prompt)
         )
-        await stage.run(
-            content=f"PART 1 AGGREGATOR DATABASE:\n{content}",
-            source_type="brainstorm",
-            source_id=source_id,
-            user_prompt=proof_user_prompt,
-            submitter_model=request.high_param_model,
-            submitter_context=request.high_param_context_size,
-            submitter_max_tokens=request.high_param_max_output_tokens,
-            validator_model=request.validator_model,
-            validator_context=request.validator_context_size,
-            validator_max_tokens=request.validator_max_output_tokens,
-            broadcast_fn=websocket.broadcast_event,
-            novel_proofs_db=manual_proof_database,
-            source_title=request.compiler_prompt or "Compiler Aggregator Database",
-            role_suffix_override=role_suffix,
-            trigger="manual_compiler_aggregator",
-            source_reserved=source_reserved,
-            source_reservation_token=source_reservation_token,
-            append_to_source=False,
-            append_proof_callback=append_proof_to_manual_shared_training,
-        )
+        try:
+            await stage.run(
+                content=f"PART 1 AGGREGATOR DATABASE:\n{content}",
+                source_type="brainstorm",
+                source_id=source_id,
+                user_prompt=proof_user_prompt,
+                submitter_model=request.high_param_model,
+                submitter_context=request.high_param_context_size,
+                submitter_max_tokens=request.high_param_max_output_tokens,
+                validator_model=request.validator_model,
+                validator_context=request.validator_context_size,
+                validator_max_tokens=request.validator_max_output_tokens,
+                broadcast_fn=websocket.broadcast_event,
+                novel_proofs_db=manual_proof_database,
+                source_title=request.compiler_prompt or "Compiler Aggregator Database",
+                role_suffix_override=role_suffix,
+                trigger="manual_compiler_aggregator",
+                source_reserved=source_reserved,
+                source_reservation_token=source_reservation_token,
+                append_to_source=False,
+                append_proof_callback=append_proof_to_manual_shared_training,
+            )
+        except LeanWorkspaceRepairRequiredError as exc:
+            await _broadcast_lean_workspace_repair(exc, "Compiler proof verification")
         await websocket.broadcast_event(
             "compiler_proof_check_complete",
             {"source_type": "brainstorm", "source_id": source_id},

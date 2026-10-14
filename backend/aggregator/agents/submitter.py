@@ -19,6 +19,7 @@ from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
 from backend.aggregator.core.context_allocator import ContextAllocationError, context_allocator
+from backend.shared.lean4_client import LeanWorkspaceRepairRequiredError
 from backend.shared.provider_errors import (
     ProviderContextLengthError,
     ProviderRepairRequiredError,
@@ -310,6 +311,17 @@ class SubmitterAgent:
                         self,
                         e,
                     )
+                else:
+                    self.is_running = False
+                    self.state.is_active = False
+                break
+            except LeanWorkspaceRepairRequiredError as e:
+                # Lean is shared by every lane, so the whole Aggregator stops.
+                if self.coordinator and hasattr(
+                    self.coordinator,
+                    "_handle_lean_workspace_repair_required",
+                ):
+                    await self.coordinator._handle_lean_workspace_repair_required(e)
                 else:
                     self.is_running = False
                     self.state.is_active = False
@@ -965,9 +977,14 @@ class SubmitterAgent:
             
         except ContextAllocationError:
             raise
-        except (FreeModelExhaustedError, RetryableProviderError, ProviderRepairRequiredError):
-            # Provider lifecycle errors belong to the outer run loop, which owns
-            # cooldown waiting, retry backoff, lane disablement, and terminal repair.
+        except (
+            FreeModelExhaustedError,
+            RetryableProviderError,
+            ProviderRepairRequiredError,
+            LeanWorkspaceRepairRequiredError,
+        ):
+            # Provider and Lean lifecycle errors belong to the outer run loop, which
+            # owns cooldown waiting, retry backoff, lane disablement, and terminal repair.
             raise
         except Exception as e:
             logger.error(f"Submitter {self.submitter_id} failed to generate submission: {e}")

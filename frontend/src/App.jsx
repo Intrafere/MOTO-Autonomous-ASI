@@ -127,6 +127,13 @@ import {
   removePromptDraft,
   savePromptDraft,
 } from './utils/promptDraftStorage';
+import {
+  DEFAULT_EMPTY_PROOF_FEEDBACK,
+  LEAN_WORKSPACE_REPAIR_REASON,
+  buildLeanWorkspaceRepairNotification,
+  formatLeanWorkspaceRepairActivity,
+  formatProofLeanResponse,
+} from './utils/proofLeanResponse';
 import { readBooleanStorage } from './utils/safeStorage';
 import {
   getSyntheticLibPresentation,
@@ -314,6 +321,9 @@ export function buildTerminalModelErrorNotification(data = {}) {
       && ['manual_proof_check', 'autonomous'].includes(data.workflow_mode)
     );
   if (!isModelError) return null;
+  if (data.reason === LEAN_WORKSPACE_REPAIR_REASON) {
+    return buildLeanWorkspaceRepairNotification(data);
+  }
   return {
     ...data,
     notification_kind: 'model_error',
@@ -1703,23 +1713,10 @@ function App() {
       const prefix = roundLabel ? `${roundLabel} discovery` : 'Proof discovery';
       return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
     };
-    const proofLeanResponse = (data = {}) => {
-      if (data.lean_response) {
-        let response = data.lean_response;
-        if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
-          response = `${response} You can change this timeout in Advanced Settings.`;
-        }
-        return response;
-      }
-      if (data.proof_verified === true) return 'Lean 4 response: proof verified.';
-      let error = formatReason(data.error_summary || data.error_output || data.reason || '', 960);
-      if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
-        error = `${error} You can change this timeout in Advanced Settings.`;
-      }
-      return error
-        ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
-        : 'Lean 4 proof-attempt feedback (not a MOTO system error): proof not verified. The model uses these diagnostics if another attempt follows.';
-    };
+    const proofLeanResponse = (data = {}) => formatProofLeanResponse(data, {
+      formatError: (text) => formatReason(text, 960),
+      emptyFallback: DEFAULT_EMPTY_PROOF_FEEDBACK,
+    });
     const formatProofNoveltyTier = (tier) => {
       switch (tier) {
         case 'major_mathematical_discovery':
@@ -2770,6 +2767,38 @@ function App() {
       if (modelErrorNotification) {
         void addModelErrorNotification(setModelErrorNotifications, modelErrorNotification);
       }
+    }));
+
+    unsubscribers.push(websocket.on(LEAN_WORKSPACE_REPAIR_REASON, (data = {}) => {
+      const event = {
+        event: LEAN_WORKSPACE_REPAIR_REASON,
+        timestamp: getTimestamp(data),
+        message: formatLeanWorkspaceRepairActivity(data),
+        data,
+      };
+      const workflowMode = String(data.workflow_mode || '').toLowerCase();
+      if (workflowMode === 'leanoj') {
+        addLeanOJActivityFromGlobalAlert(event);
+      } else if (workflowMode === 'autonomous') {
+        // A child Aggregator/Compiler stop; the Autonomous terminal stop that
+        // follows carries the durable repair popup.
+        addActivity(event);
+        return;
+      } else if (workflowMode === 'aggregator' || workflowMode === 'compiler') {
+        const setFeed = workflowMode === 'aggregator'
+          ? setAggregatorProviderActivity
+          : setCompilerProviderActivity;
+        const feedEvent = normalizeActivityEvent({ ...event, type: LEAN_WORKSPACE_REPAIR_REASON });
+        setFeed(previous => (
+          hasRecentActivityDuplicate(previous, feedEvent)
+            ? previous
+            : [...previous, feedEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS)
+        ));
+      }
+      void addModelErrorNotification(
+        setModelErrorNotifications,
+        buildLeanWorkspaceRepairNotification(data),
+      );
     }));
 
     unsubscribers.push(websocket.on('account_credits_exhausted', (data) => {

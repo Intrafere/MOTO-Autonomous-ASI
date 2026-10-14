@@ -31,6 +31,15 @@ from backend.shared.lean_source_evidence import (
     source_sha256,
     transformations_between,
 )
+from backend.shared.lean_workspace_paths import (
+    WORKSPACE_PATH_FIX,
+    WORKSPACE_PATH_GUIDANCE,
+    WorkspacePathProblem,
+    describe_workspace_path_problem,
+    measured_workspace_path_problem,
+    windows_workspace_path_problem,
+)
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import LeanCompileReceipt, LeanImportEvidence
 
 logger = logging.getLogger(__name__)
@@ -129,6 +138,92 @@ _LEAN_WORKSPACE_ERROR_MARKERS: tuple[str, ...] = (
 _LEAN_WORKSPACE_COMBINED_MARKERS: tuple[tuple[str, ...], ...] = (
     ("no such file or directory", ".lake"),
 )
+
+# Windows reports over-long paths as "path not found" (os error 3) or
+# "filename too long" (os error 206) when Mathlib's cache unpacks.
+_WINDOWS_PATH_ERROR_RE = re.compile(
+    r"\(os error (?:3|206)\)|cannot find the path specified|filename or extension is too long",
+    re.IGNORECASE,
+)
+
+LEAN_WORKSPACE_REPAIR_REQUIRED_REASON = "lean_workspace_repair_required"
+LEAN_WORKSPACE_REPAIR_TITLE = "Lean 4 setup needs repair"
+LEAN_WORKSPACE_PATH_TOO_LONG = "lean_workspace_path_too_long"
+LEAN_WORKSPACE_SETUP_FAILED = "lean_workspace_setup_failed"
+_LEAN_WORKSPACE_DETAIL_LIMIT = 1800
+_LEAN_WORKSPACE_SETUP_MESSAGE = (
+    "Lean 4 could not prepare its Mathlib workspace, so proofs cannot be checked."
+)
+_LEAN_WORKSPACE_SETUP_GUIDANCE = (
+    "Check your internet connection and free disk space (Mathlib needs several GB), then "
+    "press Start again to retry Lean setup. Saved proof progress is kept."
+)
+_LEAN_WORKSPACE_PATH_RESUME_GUIDANCE = (
+    f"{WORKSPACE_PATH_FIX}, then relaunch MOTO and press Start again. "
+    "Saved proof progress is kept."
+)
+
+
+class LeanWorkspaceRepairRequiredError(RuntimeError):
+    """Lean cannot check proofs until the operator repairs its Mathlib workspace.
+
+    Workflows stop instead of treating this as a proof failure, rejection, or
+    model feedback.
+    """
+
+    def __init__(
+        self,
+        *,
+        failure_kind: str,
+        message: str,
+        terminal_guidance: str,
+        detail: str = "",
+        workspace_path_length: Optional[int] = None,
+        max_supported_length: Optional[int] = None,
+    ) -> None:
+        super().__init__(f"{_LEAN_WORKSPACE_ERROR_PREFIX}: {message}")
+        self.reason = LEAN_WORKSPACE_REPAIR_REQUIRED_REASON
+        self.failure_kind = failure_kind
+        self.message = message
+        self.terminal_guidance = terminal_guidance
+        self.detail = redact_log_text(detail, _LEAN_WORKSPACE_DETAIL_LIMIT)
+        self.workspace_path_length = workspace_path_length
+        self.max_supported_length = max_supported_length
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the non-secret user-facing repair payload."""
+        payload: dict[str, Any] = {
+            "reason": self.reason,
+            "lean_workspace_failure": self.failure_kind,
+            "message": self.message,
+            "problem": self.message,
+            "terminal_guidance": self.terminal_guidance,
+            "error_detail": self.detail,
+            "recoverable": True,
+            "workflow_continues": False,
+        }
+        if self.workspace_path_length is not None:
+            payload["workspace_path_length"] = self.workspace_path_length
+        if self.max_supported_length is not None:
+            payload["max_supported_length"] = self.max_supported_length
+        return payload
+
+    def to_repair_event(self, *, workflow_mode: str, stopped_subject: str) -> dict[str, Any]:
+        """Return the ``lean_workspace_repair_required`` WebSocket event payload."""
+        return {
+            **self.to_payload(),
+            "workflow_mode": workflow_mode,
+            "notification_kind": "model_error",
+            "title": LEAN_WORKSPACE_REPAIR_TITLE,
+            "message": (
+                f"{stopped_subject} stopped because Lean 4 cannot check proofs. {self.message}"
+            ),
+        }
+
+
+def is_lean_workspace_error_text(text: Any) -> bool:
+    """True when stored Lean output is a workspace failure, not a proof result."""
+    return str(text or "").lstrip().upper().startswith(_LEAN_WORKSPACE_ERROR_PREFIX)
 
 # Lean emits "bad import" when an `import` statement references a module whose
 # .lean source doesn't exist. This is NOT an infrastructure error — it means the
@@ -254,6 +349,10 @@ class Lean4Client:
         self._workspace_bootstrap_task: Optional[asyncio.Task[bool]] = None
         self._workspace_bootstrap_state = "not_started"
         self._workspace_bootstrap_error = ""
+        self._workspace_failure_detail = ""
+        # A too-long workspace path cannot change without moving MOTO and
+        # relaunching, so it latches for the life of this process.
+        self._workspace_path_problem: Optional[WorkspacePathProblem] = None
         self._lean_version = ""
 
     @classmethod
@@ -318,6 +417,13 @@ class Lean4Client:
         task = self._workspace_bootstrap_task
         if task is not None and not task.done():
             return task
+        if self._latched_path_problem() is not None:
+            async def _path_blocked() -> bool:
+                return False
+
+            task = asyncio.create_task(_path_blocked())
+            self._workspace_bootstrap_task = task
+            return task
         if self._workspace_ready and self._workspace_bootstrap_state == "ready":
             async def _already_ready() -> bool:
                 return True
@@ -336,6 +442,60 @@ class Lean4Client:
         """Wait for the shared bootstrap without letting one cancelled waiter stop it."""
         task = self.start_workspace_bootstrap()
         return await asyncio.shield(task)
+
+    def require_workspace(self) -> None:
+        """Raise ``LeanWorkspaceRepairRequiredError`` when Lean is known to be unusable.
+
+        Called before model calls whose output only matters if Lean later runs.
+        It never starts or waits for setup: a first-time setup keeps running in
+        the background and Lean checks wait for it. Workflow Start routes kick a
+        fresh setup attempt, so pressing Start retries a failed workspace.
+        """
+        if self._latched_path_problem() is not None:
+            raise self.workspace_repair_required_error()
+        if self._workspace_bootstrap_state == "failed":
+            raise self.workspace_repair_required_error()
+
+    async def retry_failed_workspace(self) -> None:
+        """Give a failed setup one fresh attempt; a too-long path is never retried."""
+        if self._workspace_bootstrap_state == "failed" and self._latched_path_problem() is None:
+            await self.await_workspace_ready()
+
+    def workspace_repair_required_error(
+        self,
+        error_output: str = "",
+    ) -> LeanWorkspaceRepairRequiredError:
+        """Build the typed repair error for the current workspace failure."""
+        problem = self._workspace_path_problem or windows_workspace_path_problem(self.workspace_dir)
+        detail = (
+            error_output
+            or self._workspace_failure_detail
+            or self._workspace_unhealthy_error
+            or self._workspace_bootstrap_error
+        )
+        if problem is not None:
+            return LeanWorkspaceRepairRequiredError(
+                failure_kind=LEAN_WORKSPACE_PATH_TOO_LONG,
+                message=describe_workspace_path_problem(problem),
+                terminal_guidance=_LEAN_WORKSPACE_PATH_RESUME_GUIDANCE,
+                detail=detail,
+                workspace_path_length=problem.workspace_path_length,
+                max_supported_length=problem.max_supported_length,
+            )
+        return LeanWorkspaceRepairRequiredError(
+            failure_kind=LEAN_WORKSPACE_SETUP_FAILED,
+            message=_LEAN_WORKSPACE_SETUP_MESSAGE,
+            terminal_guidance=_LEAN_WORKSPACE_SETUP_GUIDANCE,
+            detail=detail,
+        )
+
+    def _latched_path_problem(self) -> Optional[WorkspacePathProblem]:
+        """Return (and latch) a workspace path that is too long for Mathlib."""
+        if self._workspace_path_problem is None:
+            problem = windows_workspace_path_problem(self.workspace_dir)
+            if problem is not None:
+                self._mark_workspace_path_too_long(problem)
+        return self._workspace_path_problem
 
     async def _run_workspace_bootstrap(self) -> bool:
         try:
@@ -506,10 +666,39 @@ class Lean4Client:
         )
 
     def _mark_workspace_unhealthy(self, output: str) -> None:
+        if self._workspace_path_problem is not None:
+            self._mark_workspace_path_too_long(self._workspace_path_problem, output)
+            return
         self._workspace_ready = False
+        self._workspace_failure_detail = output or ""
         self._workspace_unhealthy_error = self._format_workspace_infrastructure_error(output)
         self._workspace_bootstrap_state = "failed"
         self._workspace_bootstrap_error = self._workspace_unhealthy_error
+
+    def _mark_workspace_path_too_long(self, problem: WorkspacePathProblem, output: str = "") -> None:
+        self._workspace_ready = False
+        self._workspace_path_problem = problem
+        if output:
+            self._workspace_failure_detail = output
+        self._workspace_unhealthy_error = (
+            f"{_LEAN_WORKSPACE_ERROR_PREFIX}: {describe_workspace_path_problem(problem)} "
+            f"{WORKSPACE_PATH_GUIDANCE} This is a setup problem, not a proof error."
+        )
+        self._workspace_bootstrap_state = "failed"
+        self._workspace_bootstrap_error = self._workspace_unhealthy_error
+
+    async def _diagnose_path_failure(self, output: str) -> Optional[WorkspacePathProblem]:
+        """Measure the cloned Mathlib tree when setup failed with a Windows path error."""
+        if not _WINDOWS_PATH_ERROR_RE.search(output or ""):
+            return None
+        return await asyncio.to_thread(measured_workspace_path_problem, self.workspace_dir)
+
+    async def _record_workspace_setup_failure(self, output: str) -> None:
+        problem = await self._diagnose_path_failure(output)
+        if problem is not None:
+            self._mark_workspace_path_too_long(problem, output)
+        else:
+            self._mark_workspace_unhealthy(output)
 
     def _workspace_unavailable_result(self, *, tactic_script: bool = False) -> Lean4Result:
         error_output = self._workspace_unhealthy_error or (
@@ -566,6 +755,8 @@ class Lean4Client:
             self._format_workspace_infrastructure_error(output),
         )
         async with self._workspace_lock:
+            if self._latched_path_problem() is not None:
+                return False
             self._workspace_unhealthy_error = ""
             self._workspace_ready = False
             await asyncio.to_thread(self._wipe_lake_directory)
@@ -674,6 +865,9 @@ class Lean4Client:
 
     async def _ensure_workspace_locked(self) -> bool:
         """Create a reusable Mathlib-enabled workspace while holding the workspace lock."""
+        if self._latched_path_problem() is not None:
+            logger.warning("Lean 4 workspace not prepared: %s", self._workspace_unhealthy_error)
+            return False
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
         lean_toolchain_path = self.workspace_dir / "lean-toolchain"
@@ -735,7 +929,7 @@ class Lean4Client:
                         cwd=self.workspace_dir,
                     )
                 if update_rc != 0:
-                    self._mark_workspace_unhealthy(update_stderr or update_stdout)
+                    await self._record_workspace_setup_failure(update_stderr or update_stdout)
                     logger.warning(
                         "Lean 4 workspace update failed: %s",
                         (update_stderr or update_stdout).strip(),
@@ -760,7 +954,7 @@ class Lean4Client:
                     cwd=self.workspace_dir,
                 )
                 if update_rc != 0:
-                    self._mark_workspace_unhealthy(update_stderr or update_stdout)
+                    await self._record_workspace_setup_failure(update_stderr or update_stdout)
                     logger.warning(
                         "Lean 4 workspace update after toolchain alignment failed: %s",
                         (update_stderr or update_stdout).strip(),
@@ -772,7 +966,7 @@ class Lean4Client:
                 cwd=self.workspace_dir,
             )
             if cache_rc != 0:
-                self._mark_workspace_unhealthy(cache_stderr or cache_stdout)
+                await self._record_workspace_setup_failure(cache_stderr or cache_stdout)
                 logger.error(
                     "Lean 4 Mathlib cache fetch failed; proof checking would hit "
                     "'object file' errors. Details: %s",
@@ -826,6 +1020,10 @@ class Lean4Client:
             return cache_rc, cache_stdout, cache_stderr
 
         failed_output = "\n".join(part for part in (cache_stdout, cache_stderr) if part).strip()
+        if await self._diagnose_path_failure(failed_output) is not None:
+            # The archives are intact; Windows cannot unpack them under this
+            # path. Deleting or refetching them would only waste the download.
+            return cache_rc, cache_stdout, cache_stderr
         removed_archives = self._remove_failed_mathlib_cache_archives(failed_output)
         if removed_archives:
             logger.warning(
@@ -2178,6 +2376,38 @@ def get_lean4_client() -> Lean4Client:
 def start_lean4_workspace_bootstrap() -> asyncio.Task[bool]:
     """Lazily start the singleton workspace bootstrap without awaiting it."""
     return get_lean4_client().start_workspace_bootstrap()
+
+
+def require_lean_workspace(client: Any = None) -> None:
+    """Raise ``LeanWorkspaceRepairRequiredError`` when Lean is known to be unusable.
+
+    ``client`` is the checker the caller will run Lean with (the singleton by
+    default); a checker without workspace management needs no guard.
+    """
+    checker = get_lean4_client() if client is None else client
+    require = getattr(checker, "require_workspace", None)
+    if require is not None:
+        require()
+
+
+async def recover_lean_workspace(client: Any = None) -> None:
+    """Like ``require_lean_workspace``, after one fresh attempt at a failed setup.
+
+    Used once per proof round, rigor cycle, or final-solver attempt, so a brief
+    failure (such as a network blip during setup) does not stop a long run.
+    """
+    checker = get_lean4_client() if client is None else client
+    retry = getattr(checker, "retry_failed_workspace", None)
+    if retry is not None:
+        await retry()
+    require_lean_workspace(checker)
+
+
+def raise_for_lean_workspace_failure(result: Optional[Lean4Result]) -> None:
+    """Turn a workspace-failure Lean result into the typed repair error."""
+    if result is None or result.success or not is_lean_workspace_error_text(result.error_output):
+        return
+    raise get_lean4_client().workspace_repair_required_error(result.error_output)
 
 
 async def close_lean4_client() -> None:

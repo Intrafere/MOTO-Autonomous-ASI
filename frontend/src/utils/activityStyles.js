@@ -557,6 +557,7 @@ export const getActivityIcon = (event = '') => {
       return '⚠';
     case 'context_overflow_error':
     case 'proof_context_overflow':
+    case 'lean_workspace_repair_required':
       return '!';
     case 'proof_verified':
     case 'known_proof_verified':
@@ -769,6 +770,7 @@ export const getActivityClass = (event = '', item = {}) => {
     event === 'smt_check_error' ||
     event === 'context_overflow_error' ||
     event === 'proof_context_overflow' ||
+    event === 'lean_workspace_repair_required' ||
     event === 'leanoj_brainstorm_rejected' ||
     event === 'leanoj_brainstorm_submitter_failed' ||
     event === 'leanoj_brainstorm_prune_rejected' ||

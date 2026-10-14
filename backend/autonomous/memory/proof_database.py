@@ -25,6 +25,7 @@ from backend.shared.installation_identity import (
     InstallationIdentityError,
     ensure_installation_binding,
 )
+from backend.shared.lean4_client import is_lean_workspace_error_text
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import (
     FailedProofCandidate,
@@ -77,6 +78,15 @@ PROMPT_INJECTION_NOVEL_TIERS = frozenset(
         "major_mathematical_discovery",
     }
 )
+
+_WORKSPACE_BLOCKED_HINT = "Not yet checked by Lean (the Lean workspace was unavailable)."
+
+
+def _without_workspace_error_summary(candidate: FailedProofCandidate) -> FailedProofCandidate:
+    """Older builds stored Lean setup failures as proof feedback; Lean never ran."""
+    if not is_lean_workspace_error_text(candidate.error_summary):
+        return candidate
+    return candidate.model_copy(update={"error_summary": _WORKSPACE_BLOCKED_HINT})
 
 
 class ProofPruningMinimumProofsError(RuntimeError):
@@ -1074,7 +1084,11 @@ class ProofDatabase:
         """Return recent unresolved failed proof hints for brainstorm prompt injection."""
         async with self._lock:
             failed_candidates = await self._load_failed_candidates(source_brainstorm_id)
-            hints = [candidate for candidate in failed_candidates if not candidate.resolved_proof_id]
+            hints = [
+                _without_workspace_error_summary(candidate)
+                for candidate in failed_candidates
+                if not candidate.resolved_proof_id
+            ]
             hints.sort(key=lambda candidate: candidate.updated_at, reverse=True)
             return hints[:limit]
 

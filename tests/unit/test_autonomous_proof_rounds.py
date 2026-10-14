@@ -11,7 +11,10 @@ from backend.autonomous.core.autonomous_coordinator import (
     _proof_recovery_config_fingerprint,
     AutonomousCoordinator,
 )
-from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
+from backend.autonomous.core.proof_verification_stage import (
+    LEAN_WORKSPACE_BLOCKED_STATUS,
+    ProofVerificationStage,
+)
 from backend.autonomous.core.proof_verification_stage import (
     _candidate_fingerprint,
     _truncation_chain_exhausted,
@@ -25,6 +28,10 @@ from backend.autonomous.prompts.topic_exploration_prompts import (
     build_exploration_user_prompt,
 )
 from backend.shared.config import system_config
+from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_PATH_TOO_LONG,
+    LeanWorkspaceRepairRequiredError,
+)
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.models import (
     ModelConfig,
@@ -434,6 +441,53 @@ class _DeferredThenCompleteProofStage:
             total_candidates=1,
             verified_count=1,
         )
+
+class _LeanBlockedThenCompleteProofStage:
+    """First run: Lean cannot run, so the round is saved unprocessed and stops."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def run(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            candidates = [
+                ProofCandidate(theorem_id="first", statement="First theorem."),
+                ProofCandidate(theorem_id="second", statement="Second theorem."),
+            ]
+            await kwargs["checkpoint_callback"](
+                {
+                    "source_type": kwargs["source_type"],
+                    "source_id": kwargs["source_id"],
+                    "source_title": kwargs["source_title"],
+                    "trigger": kwargs["trigger"],
+                    "status": LEAN_WORKSPACE_BLOCKED_STATUS,
+                    "candidates": [
+                        {"index": index, "candidate": candidate.model_dump(mode="json")}
+                        for index, candidate in enumerate(candidates, start=1)
+                    ],
+                    "processed_candidate_ids": [],
+                    "deferred_candidate_ids": [],
+                    "attempts_by_candidate": {},
+                    "theorem_names_by_candidate": {},
+                    "results": [],
+                    "total_candidates": 2,
+                    "fatal_stop_reason": "",
+                    "fatal_stop_payload": {},
+                }
+            )
+            raise LeanWorkspaceRepairRequiredError(
+                failure_kind=LEAN_WORKSPACE_PATH_TOO_LONG,
+                message="MOTO's folder path is too long for Lean on Windows.",
+                terminal_guidance="Move MOTO to a short folder, then press Start again.",
+            )
+        return ProofStageResult(
+            source_type=kwargs["source_type"],
+            source_id=kwargs["source_id"],
+            total_candidates=2,
+            verified_count=2,
+        )
+
 
 def _configured_coordinator(fake_stage, *, allow_research_papers=True):
     coordinator = AutonomousCoordinator()
@@ -1393,6 +1447,44 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             coordinator._terminal_event.role_id,
             "autonomous_proof_formalization_paper",
         )
+
+    async def test_lean_workspace_stop_is_durable_and_resumes_with_unchanged_settings(self):
+        fake_stage = _LeanBlockedThenCompleteProofStage()
+        coordinator = _configured_coordinator(fake_stage)
+        coordinator._run_id = "autonomous-run"
+        fake_metadata = coordinator_module.research_metadata
+
+        first_status = await coordinator._run_proof_verification(
+            content="Paper source.",
+            source_type="paper",
+            source_id="paper_lean_blocked",
+            source_title="Paper title",
+        )
+
+        self.assertEqual(first_status, "fatal_stop")
+        self.assertTrue(coordinator._stop_event.is_set())
+        self.assertEqual(coordinator._terminal_event.reason, "lean_workspace_repair_required")
+        self.assertEqual(
+            coordinator._terminal_event.terminal_guidance,
+            "Move MOTO to a short folder, then press Start again.",
+        )
+        self.assertEqual(fake_metadata.checkpoint["status"], LEAN_WORKSPACE_BLOCKED_STATUS)
+        self.assertEqual(fake_metadata.mark_calls, [])
+
+        # The user repairs Lean and presses Start; proof model settings are unchanged.
+        coordinator._stop_event.clear()
+        coordinator._terminal_event = None
+        second_status = await coordinator._run_proof_verification(
+            content="Paper source.",
+            source_type="paper",
+            source_id="paper_lean_blocked",
+            source_title="Paper title",
+        )
+
+        self.assertEqual(second_status, "complete")
+        resumed = fake_stage.calls[1]["theorem_candidates"]
+        self.assertEqual([candidate.theorem_id for candidate in resumed], ["first", "second"])
+        self.assertEqual(fake_metadata.mark_calls, ["automatic"])
 
     async def test_changed_context_route_retries_fatal_checkpoint_without_stale_overflow_attempt(self):
         coordinator = _configured_coordinator(_FakeProofStage([1]))
