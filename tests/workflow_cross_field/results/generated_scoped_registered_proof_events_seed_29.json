@@ -5,6 +5,12 @@
   ],
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "events.frontend_events_include_scope_phase",
+    "events.proof_verified_after_registration",
+    "proof_scope.autonomous_events_not_manual"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {
     "final_mode": "autonomous",
     "final_phase": "topic_exploration"
@@ -17,6 +23,9 @@
     "events.frontend_events_include_scope_phase",
     "events.proof_verified_after_registration",
     "proof_scope.autonomous_events_not_manual"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
   ],
   "fields": [
     "websocket_api_contracts",
@@ -34,14 +43,21 @@
     "proof_scope_isolation",
     "websocket_api_contracts"
   ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
   "replay": [
     "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
     "emit_registered_proof_verified(proof_id='registered-proof-1')"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "generated_scoped_registered_proof_events_seed_29",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 29,
+  "source_identity": "workflow-source-v1:769bcda45abecc1709fb8f0b681fc2875ca372ce5699531136dbbc6a06f2a00f",
   "target_artifact": "targets/generated_scoped_registered_proof_events.json",
-  "target_id": "generated_scoped_registered_proof_events"
+  "target_id": "generated_scoped_registered_proof_events",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
 }

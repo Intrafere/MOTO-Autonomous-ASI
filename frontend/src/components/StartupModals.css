@@ -1,0 +1,318 @@
+.startup-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+}
+
+.startup-modal-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 74rem);
+  min-width: 0;
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
+  overflow: hidden;
+  color: var(--text-primary);
+  background: #141426;
+  border: 1px solid var(--border-default);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+}
+
+.inline-modal-content.startup-modal-shell {
+  min-width: 0;
+  padding: 0;
+}
+
+.startup-provider-modal {
+  width: min(100%, 74rem);
+}
+
+.startup-disclaimer-modal {
+  width: min(100%, 48rem);
+  background: var(--surface-2);
+  border-color: var(--gold-dim);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 40px var(--gold-glow);
+}
+
+.startup-modal-header,
+.startup-modal-footer {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  padding: 1.25rem 1.5rem;
+  background: inherit;
+}
+
+.startup-modal-header {
+  margin: 0;
+  border-bottom: 1px solid var(--border-default);
+}
+
+.startup-modal-header h2 {
+  margin: 0;
+  font-size: clamp(1.25rem, 1rem + 0.7vw, 1.55rem);
+  line-height: 1.2;
+}
+
+.startup-disclaimer-header {
+  text-align: center;
+}
+
+.startup-disclaimer-header h2 {
+  color: #1eff1c;
+}
+
+.startup-modal-footer {
+  display: flex;
+  justify-content: center;
+  border-top: 1px solid var(--border-default);
+}
+
+.startup-modal-scroll-shell {
+  position: relative;
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.startup-modal-scroll-region {
+  grid-area: 1 / 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-color: rgba(30, 255, 28, 0.65) rgba(255, 255, 255, 0.08);
+  scrollbar-width: auto;
+}
+
+.startup-modal-overflow-fade {
+  pointer-events: none;
+  grid-area: 1 / 1;
+  align-self: end;
+  z-index: 1;
+  height: clamp(2.75rem, 9vh, 4.5rem);
+  background: linear-gradient(to bottom, rgba(20, 20, 38, 0), rgba(20, 20, 38, 0.97));
+}
+
+.startup-disclaimer-modal .startup-modal-overflow-fade {
+  background: linear-gradient(to bottom, transparent, var(--surface-2));
+}
+
+.startup-modal-scroll-region::-webkit-scrollbar {
+  width: 12px;
+}
+
+.startup-modal-scroll-region::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.startup-modal-scroll-region::-webkit-scrollbar-thumb {
+  background: rgba(30, 255, 28, 0.65);
+  border: 3px solid #141426;
+  border-radius: 999px;
+}
+
+.startup-modal-scroll-content {
+  padding: 1.25rem 1.5rem 1.5rem;
+}
+
+.startup-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.startup-provider-grid > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.startup-provider-grid ol {
+  flex: 1 1 auto;
+}
+
+.startup-modal-more-indicator {
+  pointer-events: none;
+  position: absolute;
+  z-index: 3;
+  right: 1.75rem;
+  bottom: 0.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.65rem;
+  color: #dfffe0;
+  background: rgba(12, 12, 22, 0.94);
+  border: 1px solid rgba(30, 255, 28, 0.42);
+  border-radius: 999px;
+  box-shadow: 0 -18px 30px 16px rgba(20, 20, 38, 0.9);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.startup-disclaimer-modal .startup-modal-more-indicator {
+  bottom: 5.25rem;
+}
+
+.startup-modal-more-arrow {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.startup-disclaimer-content {
+  text-align: left;
+}
+
+.startup-disclaimer-content p {
+  color: var(--text-primary);
+}
+
+.startup-disclaimer-quickstart {
+  margin: 0 0 1rem;
+  color: #1eff1c !important;
+  font-size: clamp(0.98rem, 0.9rem + 0.2vw, 1.08rem);
+  line-height: 1.5;
+}
+
+.startup-disclaimer-legal {
+  padding: 1rem 1.1rem;
+  background: rgba(30, 255, 28, 0.05);
+  border: 1px solid rgba(30, 255, 28, 0.24);
+  border-radius: 10px;
+}
+
+.startup-disclaimer-legal-title {
+  margin: 0 0 0.65rem;
+  color: #1eff1c !important;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.startup-disclaimer-legal p:last-child {
+  margin: 0;
+  font-size: clamp(0.9rem, 0.85rem + 0.15vw, 0.98rem);
+  line-height: 1.48;
+}
+
+@media (max-width: 900px) {
+  .startup-provider-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .startup-modal-overlay {
+    padding: 0.5rem;
+  }
+
+  .startup-modal-shell {
+    max-height: calc(100vh - 1rem);
+    max-height: calc(100dvh - 1rem);
+  }
+
+  .startup-provider-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .startup-modal-header,
+  .startup-modal-footer,
+  .startup-modal-scroll-content {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .startup-modal-footer .disclaimer-acknowledge-btn {
+    width: 100%;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+}
+
+@media (max-height: 760px) {
+  .startup-modal-header,
+  .startup-modal-footer {
+    padding-top: 0.85rem;
+    padding-bottom: 0.85rem;
+  }
+
+  .startup-modal-scroll-content {
+    padding-top: 0.85rem;
+    padding-bottom: 1rem;
+  }
+
+  .startup-provider-grid {
+    gap: 0.75rem;
+  }
+
+  .startup-provider-grid > div {
+    padding: 0.75rem !important;
+  }
+
+  .startup-provider-grid h3 {
+    margin-bottom: 0.45rem;
+    font-size: 1rem;
+  }
+
+  .startup-provider-grid ol {
+    margin-bottom: 0.65rem !important;
+    font-size: 0.9rem;
+    line-height: 1.42 !important;
+  }
+
+  .startup-disclaimer-quickstart {
+    margin-bottom: 0.75rem;
+    line-height: 1.42;
+  }
+
+  .startup-disclaimer-legal {
+    padding: 0.75rem 0.85rem;
+  }
+
+  .startup-disclaimer-legal p:last-child {
+    line-height: 1.4;
+  }
+}
+
+@media (max-height: 560px) {
+  .startup-modal-overlay {
+    align-items: stretch;
+    padding: 0.35rem;
+  }
+
+  .startup-modal-shell {
+    max-height: calc(100vh - 0.7rem);
+    max-height: calc(100dvh - 0.7rem);
+    margin: auto;
+  }
+
+  .startup-modal-header,
+  .startup-modal-footer {
+    padding-top: 0.65rem;
+    padding-bottom: 0.65rem;
+  }
+
+  .startup-modal-scroll-content {
+    padding-top: 0.65rem;
+    padding-bottom: 0.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startup-modal-more-arrow {
+    animation: none;
+  }
+}

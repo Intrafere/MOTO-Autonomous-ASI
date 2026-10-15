@@ -1,10 +1,17 @@
 {
   "adapter": "real_route",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_scope.manual_clear_archives_active"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "archive_before_clear",
     "upload_cleanup"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "proof_scope_isolation",
@@ -13,11 +20,22 @@
   "invariants": [
     "proof_scope.manual_clear_archives_active"
   ],
+  "observed_transition": "archive_before_clear; upload_cleanup",
+  "real_components": [
+    "backend/api/routes/aggregator.py",
+    "backend/api/routes/compiler.py",
+    "backend/api/routes/leanoj.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_manual_aggregator_clear_archives_before_clear",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+  "source_identity": "workflow-source-v1:4178d3fd28e0a7c57e4494e6208b04880ad73026ce8c23836db5a9e3676166b5",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_manual_aggregator_clear_archives_before_destructive_clear"
+  ]
 }

@@ -14,7 +14,13 @@ def restore_runtime_roots():
     bind_runtime_roots(original_data, original_logs)
 
 
-def test_bind_runtime_roots_rederives_complete_mutable_graph(tmp_path, restore_runtime_roots):
+def test_bind_runtime_roots_rederives_complete_mutable_graph(
+    tmp_path, monkeypatch, restore_runtime_roots,
+):
+    from backend.shared import lean_workspace_paths
+
+    # Windows temp folders can be deep enough to trigger Lean workspace relocation.
+    monkeypatch.setattr(lean_workspace_paths, "is_windows_platform", lambda: False)
     data_root = tmp_path / "instance-data"
     logs_root = tmp_path / "instance-logs"
 
@@ -38,6 +44,25 @@ def test_bind_runtime_roots_rederives_complete_mutable_graph(tmp_path, restore_r
     for actual, wanted in expected.items():
         assert Path(actual) == wanted.resolve()
         system_config.assert_path_in_data_root(actual)
+
+
+def test_long_windows_root_keeps_lean_workspace_in_short_per_user_folder(
+    tmp_path, monkeypatch, restore_runtime_roots,
+):
+    from backend.shared import lean_workspace_paths
+
+    data_root = tmp_path / ("deep" * 40) / "data"
+    local_app_data = Path(tmp_path.anchor) / "la"  # computed only, never created
+    monkeypatch.setattr(lean_workspace_paths, "is_windows_platform", lambda: True)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    bind_runtime_roots(data_root)
+
+    resolved_root = data_root.resolve()
+    assert Path(system_config.lean4_workspace_dir) == (
+        local_app_data / "MOTO" / "lean" / lean_workspace_paths.data_root_workspace_key(resolved_root)
+    )
+    system_config.assert_path_in_data_root(system_config.chroma_db_dir)
 
 
 def test_active_root_validator_rejects_stale_paths(tmp_path, restore_runtime_roots):

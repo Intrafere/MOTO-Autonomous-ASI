@@ -17,7 +17,11 @@ import {
   shouldIncludeCompilerSolutionPathEvent,
 } from '../utils/manualLogRouting';
 import { formatContextOverflowActivityMessage } from '../utils/activityStyles';
-import { buildTerminalModelErrorNotification } from '../App';
+import {
+  buildSolutionPathActivityEvent,
+  buildTerminalModelErrorNotification,
+  getScopedProviderActivityFeed,
+} from '../App';
 
 describe('context overflow activity behavior', () => {
   beforeEach(() => {
@@ -123,7 +127,7 @@ describe('context overflow activity behavior', () => {
     expect(restored.data.provider).toBe('openai_codex_oauth');
   });
 
-  test('App drops obsolete manual next-round and three-zero proof activity', () => {
+  test('App drops obsolete manual next-round activity but preserves no-discovery completion', () => {
     localStorage.setItem('activity', JSON.stringify([
       {
         event: 'proof_run_round_complete',
@@ -132,8 +136,8 @@ describe('context overflow activity behavior', () => {
       },
       {
         event: 'proof_run_terminal',
-        message: 'Proof run completed after three consecutive valid rounds found no candidates.',
-        data: { terminal_reason: 'three_consecutive_zero_candidate_rounds' },
+        message: 'Proof run completed after 10 consecutive rounds found no candidates.',
+        data: { terminal_reason: 'consecutive_no_discovery_limit' },
       },
       {
         event: 'proof_run_round_started',
@@ -143,8 +147,9 @@ describe('context overflow activity behavior', () => {
     ]));
 
     const restored = readPersistedLiveActivity('activity');
-    expect(restored).toHaveLength(1);
-    expect(restored[0].data.round_index).toBe(4);
+    expect(restored).toHaveLength(2);
+    expect(restored[0].data.terminal_reason).toBe('consecutive_no_discovery_limit');
+    expect(restored[1].data.round_index).toBe(4);
   });
 
   test('App compacts durable activity without discarding sanitized messages', () => {
@@ -336,5 +341,90 @@ describe('terminal model error recovery', () => {
       fatal: false,
       message: 'Proof candidate deferred.',
     })).toBeNull();
+  });
+});
+
+describe('App provider-error activity routing', () => {
+  const ROUTE_IDENTITY = '[Autonomous · Main Submitter 1 · vendor/test-model via OpenRouter · host TestHost]';
+
+  test.each(['autonomous', 'leanoj'])(
+    'solution-path repair activity keeps the route-identity prefix in %s',
+    (workflowMode) => {
+      const activity = buildSolutionPathActivityEvent('solution_path_proposal_user_repair_required', {
+        workflow_mode: workflowMode,
+        route_identity: ROUTE_IDENTITY,
+        message: 'Solution-path review needs user configuration repair before it can continue.',
+      });
+
+      expect(activity.event).toBe('solution_path_proposal_user_repair_required');
+      expect(activity.message.startsWith(ROUTE_IDENTITY)).toBe(true);
+      expect(activity.message.split(ROUTE_IDENTITY)).toHaveLength(2);
+      expect(activity.message).toContain('needs user configuration repair');
+    },
+  );
+
+  test('provider rows route to the owning workflow feed', () => {
+    expect(getScopedProviderActivityFeed({
+      event_type: 'provider_retry_cooldown',
+      workflow_mode: 'Aggregator',
+    })).toBe('aggregator');
+    expect(getScopedProviderActivityFeed({
+      notification_key: 'oauth:compiler',
+      workflow_mode: 'compiler',
+    })).toBe('compiler');
+    expect(getScopedProviderActivityFeed({
+      notification_key: 'oauth:leanoj',
+      workflow_mode: 'leanoj',
+    })).toBe('leanoj');
+    expect(getScopedProviderActivityFeed({
+      event_type: 'provider_retry_cooldown',
+      workflow_mode: 'autonomous',
+    })).toBe('autonomous');
+    expect(getScopedProviderActivityFeed({ workflow_mode: 'autonomous' })).toBe('');
+    expect(getScopedProviderActivityFeed({ event_type: 'provider_retry_cooldown' })).toBe('');
+  });
+
+  test('manual proof-check provider rows route by the source the check runs on', () => {
+    const manualRow = (sourceId, retryLayer = 'adapter') => ({
+      event_type: 'provider_retry_cooldown',
+      workflow_mode: 'manual_proof_check',
+      role_id: 'autonomous_proof_formalization_manual_paper_manual_run_ab12cd34ef',
+      source_id: sourceId,
+      retry_layer: retryLayer,
+      route_identity: ROUTE_IDENTITY,
+    });
+    expect(getScopedProviderActivityFeed(manualRow('manual_aggregator'))).toBe('aggregator');
+    expect(getScopedProviderActivityFeed(manualRow('manual_compiler_current'))).toBe('compiler');
+    expect(getScopedProviderActivityFeed(manualRow('compiler_aggregator_run1'))).toBe('compiler');
+    expect(getScopedProviderActivityFeed(manualRow('topic_123'))).toBe('autonomous');
+    expect(getScopedProviderActivityFeed(manualRow('session_1:paper_2'))).toBe('autonomous');
+  });
+
+  test('manual proof-check workflow waits are not duplicated beside their proof retry line', () => {
+    const workflowRow = (sourceId) => ({
+      event_type: 'provider_retry_cooldown',
+      workflow_mode: 'manual_proof_check',
+      source_id: sourceId,
+      retry_layer: 'workflow',
+      route_identity: ROUTE_IDENTITY,
+    });
+    expect(getScopedProviderActivityFeed(workflowRow('manual_aggregator'))).toBe('');
+    expect(getScopedProviderActivityFeed(workflowRow('manual_compiler_current'))).toBe('');
+    // Autonomous feeds have no proof_retry_* line for manual checks, so the wait shows.
+    expect(getScopedProviderActivityFeed(workflowRow('topic_123'))).toBe('autonomous');
+  });
+
+  test('manual proof-check rows without a source are dropped', () => {
+    expect(getScopedProviderActivityFeed({
+      event_type: 'provider_retry_cooldown',
+      workflow_mode: 'manual_proof_check',
+      role_id: 'manual_proof_paper',
+      route_identity: ROUTE_IDENTITY,
+    })).toBe('');
+    expect(getScopedProviderActivityFeed({
+      notification_key: 'oauth:manual-proof',
+      workflow_mode: 'manual_proof_check',
+      role_id: 'autonomous_proof_formalization_manual_paper_ab12',
+    })).toBe('');
   });
 });

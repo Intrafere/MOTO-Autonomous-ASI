@@ -6,6 +6,7 @@ import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
   formatEmptyProofDiscoveryMessage,
+  formatHungConnectionMessage,
   formatProofRunEventMessage,
   formatSolutionPathEventMessage,
   getActivityClass,
@@ -13,6 +14,11 @@ import {
   hasRecentAssistantProofPackDuplicate,
   hasRecentProofActivityDuplicate,
 } from '../../utils/activityStyles';
+import {
+  formatValidatorDecisionActivity,
+  hasRecentActivityDuplicate,
+  normalizeActivityEvent,
+} from '../../utils/activityNormalization';
 import {
   MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
 } from '../../utils/manualProofSources';
@@ -23,6 +29,7 @@ import {
   shouldIncludeCompilerSolutionPathEvent,
 } from '../../utils/manualLogRouting';
 import { getNamespacedStorageKey } from '../../utils/runtimeConfig';
+import { formatProofLeanResponse } from '../../utils/proofLeanResponse';
 import '../autonomous/AutonomousResearch.css';
 
 const MAX_COMPILER_ACTIVITY_EVENTS = 2000;
@@ -42,6 +49,7 @@ const MANUAL_PROOF_EVENTS = [
   'proof_attempt_failed',
   'proof_attempts_exhausted',
   'proof_integrity_rejected',
+  'proof_novelty_assessment_started',
   'proof_verified',
   'known_proof_verified',
   'proof_registration_duplicate',
@@ -88,25 +96,10 @@ const proofTargetLabel = (data = {}, fallback = 'candidate') => (
   data.theorem_name || data.proof_label || data.theorem_id || data.proof_id || fallback
 );
 
-const leanProofResponse = (data = {}) => {
-  if (data.lean_response) {
-    let response = compactProofText(data.lean_response);
-    if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
-      response = `${response} You can change this timeout in Advanced Settings.`;
-    }
-    return response;
-  }
-  if (data.proof_verified === true) {
-    return 'Lean 4 response: proof verified.';
-  }
-  let error = compactProofText(data.error_summary || data.error_output || data.reason, 1800);
-  if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
-    error = `${error} You can change this timeout in Advanced Settings.`;
-  }
-  return error
-    ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
-    : '';
-};
+const leanProofResponse = (data = {}) => formatProofLeanResponse(data, {
+  formatResponse: (text) => compactProofText(text),
+  formatError: (text) => compactProofText(text, 1800),
+});
 
 const formatLeanProofAttempt = (prefix, data = {}) => {
   const attempt = data.attempt ? `, attempt ${data.attempt}` : '';
@@ -406,17 +399,20 @@ function CompilerLogs({ providerActivity = [] }) {
   const addEvent = (event) => {
     const timestamp = new Date().toLocaleTimeString();
     const fullTimestamp = new Date().toISOString();
-    const newEvent = {
+    const newEvent = normalizeActivityEvent({
       ...event,
       timestamp,
       fullTimestamp
-    };
+    });
     
     setEvents(prev => {
       if (hasRecentProofActivityDuplicate(prev, newEvent.type, newEvent.data || {})) {
         return prev;
       }
       if (hasRecentAssistantProofPackDuplicate(prev, newEvent.type, newEvent.data || {}, fullTimestamp)) {
+        return prev;
+      }
+      if (hasRecentActivityDuplicate(prev, newEvent)) {
         return prev;
       }
       const updated = [newEvent, ...prev].slice(0, MAX_COMPILER_ACTIVITY_EVENTS);
@@ -453,11 +449,10 @@ function CompilerLogs({ providerActivity = [] }) {
           event?.type !== 'proof_run_idle'
           && event?.type !== 'proof_run_next_round_required'
           && event?.data?.status !== 'idle_between_rounds'
-          && event?.data?.terminal_reason !== 'three_consecutive_zero_candidate_rounds'
-          && !/waiting for Run Next Round|three consecutive valid.*no candidates/i.test(
+          && !/waiting for Run Next Round/i.test(
             String(event?.message || ''),
           )
-        )).slice(0, MAX_COMPILER_ACTIVITY_EVENTS) : []);
+        )).map((event) => normalizeActivityEvent(event)).slice(0, MAX_COMPILER_ACTIVITY_EVENTS) : []);
       }
     } catch (e) {
       console.error('Failed to load events from localStorage:', e);
@@ -486,16 +481,19 @@ function CompilerLogs({ providerActivity = [] }) {
       return `Progress: ${data.acceptances || 0} accepted, ${data.rejections || 0} rejected, ${data.total_attempts || 0}/${data.target || 3} total`;
     }
     if (type === 'critique_accepted') {
-      return `Critique ACCEPTED (${data.count || '?'}/${data.target || 3}): ${(data.preview || '').substring(0, 80)}...`;
+      return formatValidatorDecisionActivity(event, {
+        subject: `Critique (${data.count || '?'}/${data.target || 3})`,
+        includeMode: false,
+      });
     }
     if (type === 'critique_rejected') {
-      return `Critique REJECTED: ${(data.reasoning || '').substring(0, 100)}...`;
+      return formatValidatorDecisionActivity(event, { subject: 'Critique', includeMode: false });
     }
     if (type === 'critique_decline_accepted') {
       return `Decline ACCEPTED - body is academically acceptable`;
     }
     if (type === 'critique_decline_rejected') {
-      return `Decline REJECTED - validator found issues: ${(data.reasoning || '').substring(0, 80)}...`;
+      return formatValidatorDecisionActivity(event, { subject: 'Decline', includeMode: false });
     }
     if (type === 'critique_removed') {
       return `Critique #${data.critique_number} removed via cleanup`;
@@ -526,13 +524,13 @@ function CompilerLogs({ providerActivity = [] }) {
       return `Submission: ${data.mode || 'unknown'} mode`;
     }
     if (type === 'compiler_acceptance') {
-      return `ACCEPTED: ${data.mode || 'unknown'} mode`;
+      return formatValidatorDecisionActivity(event);
     }
     if (type === 'compiler_rejection') {
-      return `REJECTED: ${data.mode || 'unknown'} - ${(data.reasoning || '').substring(0, 80)}...`;
+      return formatValidatorDecisionActivity(event);
     }
     if (type === 'compiler_decline') {
-      return `Declined: ${data.mode || 'unknown'} - ${(data.reasoning || '').substring(0, 60)}...`;
+      return formatValidatorDecisionActivity(event);
     }
     if (type === 'context_overflow_error' || type === 'proof_context_overflow') {
       return formatContextOverflowActivityMessage(data);
@@ -591,7 +589,7 @@ function CompilerLogs({ providerActivity = [] }) {
       return `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`;
     }
     if (type === 'proof_candidate_list_review_rejected') {
-      return `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (75% required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`;
+      return `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (at least one novel candidate required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`;
     }
     if (type === 'proof_candidate_list_review_interrupted') {
       return data.message || `Validator proof-list review attempt ${data.list_attempt || 1} was interrupted without a semantic decision.`;
@@ -613,6 +611,9 @@ function CompilerLogs({ providerActivity = [] }) {
     }
     if (type === 'proof_integrity_rejected') {
       return `Proof feedback: integrity check rejected this attempt — ${data.reason || data.message || proofTargetLabel(data)}`;
+    }
+    if (type === 'proof_novelty_assessment_started') {
+      return `Proof novelty assessment started: ranking the result actually established by Lean-verified code${data.verified_group_candidates_available ? ' with verified same-run group evidence available' : ''}: ${proofTargetLabel(data)}`;
     }
     if (type === 'proof_verified') {
       return `Proof verified: ${proofTargetLabel(data)}`;
@@ -658,10 +659,10 @@ function CompilerLogs({ providerActivity = [] }) {
       return formatProofRunEventMessage(type, data);
     }
     if (type === 'hung_connection_alert') {
-      const model = data.model || 'model';
-      const provider = data.provider || 'provider';
-      const elapsed = data.elapsed_minutes || 15;
-      return `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`;
+      return formatHungConnectionMessage(data);
+    }
+    if (typeof event.message === 'string' && event.message.trim()) {
+      return event.message;
     }
 
     // Default: show raw JSON

@@ -7,6 +7,12 @@
   ],
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "assistant.disable_clears_live_pack",
+    "assistant.no_validator_injection",
+    "prompt.validator_excludes_assistant_memory"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {
     "final_mode": "autonomous",
     "final_phase": "topic_exploration"
@@ -20,6 +26,9 @@
     "assistant.disable_clears_live_pack",
     "assistant.no_validator_injection",
     "prompt.validator_excludes_assistant_memory"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
   ],
   "fields": [
     "assistant_memory",
@@ -37,6 +46,8 @@
     "proof_scope_isolation",
     "websocket_api_contracts"
   ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
   "replay": [
     "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
     "refresh_assistant_pack(proof_ids=('prior-proof-1', 'prior-proof-2'))",
@@ -44,9 +55,14 @@
     "toggle_session_history_memory(enabled=False)"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "generated_assistant_prompt_context_seed_29",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 29,
+  "source_identity": "workflow-source-v1:8ddf3644266b5d4853777a5ea5ac1deb6d22fce6b6f5c16fe74dca6c3f593afe",
   "target_artifact": "targets/generated_assistant_prompt_context.json",
-  "target_id": "generated_assistant_prompt_context"
+  "target_id": "generated_assistant_prompt_context",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
 }

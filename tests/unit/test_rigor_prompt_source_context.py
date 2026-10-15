@@ -39,6 +39,21 @@ class RigorPromptSourceContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Verified proof sentinel", prompt)
         self.assertIn("Current paper sentinel", prompt)
 
+    async def test_discovery_prompt_allows_novel_indirect_targets_not_routine_lemmas(self):
+        prompt = await build_rigor_theorem_discovery_prompt(
+            user_prompt="Write a paper that advances the target problem.",
+            current_outline="I. Body",
+            current_paper="Current paper sentinel.",
+        )
+
+        self.assertNotIn("Supporting lemmas, routine helper lemmas, local facts", prompt)
+        self.assertNotIn("when a more consequential prompt-solving theorem is available", prompt)
+        self.assertIn("directly or indirectly helps answer", prompt)
+        self.assertIn("supporting lemmas without new mathematical content are NEVER", prompt)
+        self.assertIn("Prefer declining over a non-novel, easy, or off-prompt proposal", prompt)
+        self.assertIn("must prove the selected statement in full without narrowing it", prompt)
+        self.assertIn("a direct solution takes priority when it has that chance", prompt)
+
     async def test_rigor_context_strips_generated_theorem_appendix_entries(self):
         paper = (
             "Current paper body sentinel.\n\n"

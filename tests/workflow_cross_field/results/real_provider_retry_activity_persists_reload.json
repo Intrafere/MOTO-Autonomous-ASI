@@ -1,0 +1,43 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "live_activity.provider_retry_persists_reload"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "two_distinct_attempt_identities",
+    "shared_correlation_id",
+    "reload_restoration",
+    "persisted_secret_redaction"
+  ],
+  "faked_dependencies": [
+    "browser localStorage supplied by Vitest jsdom"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "workflow_filesystem_state",
+    "provider_pause_resume"
+  ],
+  "invariants": [
+    "live_activity.provider_retry_persists_reload"
+  ],
+  "observed_transition": "two correlated provider retry attempts are compacted into secret-safe storage and reload as two distinct ordered activity records",
+  "real_components": [
+    "frontend/src/utils/liveActivityPersistence.js",
+    "frontend/src/App.jsx"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "vitest",
+  "scenario_id": "real_provider_retry_activity_persists_reload",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:1c0f752ded7f74d9b56b681b20a763515414a5d58c7b6db4c10ec86f0efd8b19",
+  "test_file": "frontend/src/utils/activityPersistence.test.js",
+  "test_selectors": [
+    "frontend/src/utils/activityPersistence.test.js::activity persistence sanitization::persists two correlated provider retry attempts across reload distinctly and secret-safe"
+  ]
+}

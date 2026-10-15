@@ -10,13 +10,27 @@ from tests.workflow_harness.coverage_metadata import InteractionCoverage
 from tests.workflow_harness.invariant_catalog import INVARIANTS_BY_ID
 
 
-SUPPORT_GRAPH_SCHEMA_VERSION = 1
+SUPPORT_GRAPH_SCHEMA_VERSION = 2
 SUPPORT_GRAPH_JSON_PATH = Path(__file__).parent / "support_graph.json"
 SUPPORT_GRAPH_MARKDOWN_PATH = Path(__file__).parent / "SUPPORT_GRAPH.md"
 
 SupportStatus = Literal["passed", "failed", "skipped", "blocked", "uncovered"]
-ADAPTERS = ("model", "real_route", "real_coordinator", "browser_smoke")
+ADAPTERS = ("model", "focused_production", "real_route", "real_coordinator", "browser_smoke")
 STATUS_ORDER = {"failed": 0, "blocked": 1, "skipped": 2, "passed": 3, "uncovered": 4}
+STRUCTURAL_GAP_EXEMPTIONS = {
+    ("risk.assistant_memory_crosses_boundary", "real_coordinator"): (
+        "The risk intentionally requests a future real-coordinator observation; its current "
+        "supporting laws are model-only and the gap must remain visible until that seam exists."
+    ),
+    ("risk.pruned_paper_context_leak", "real_coordinator"): (
+        "The production observation is truthfully classified as real_route; real_coordinator "
+        "remains an inverse-risk target rather than an asserted invariant adapter."
+    ),
+    ("risk.stale_child_phase_takeover", "real_coordinator"): (
+        "No bounded production seam can own the adverse parent/child interleaving; the existing "
+        "record is blocked and the model law remains the only declared adapter."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -31,6 +45,14 @@ class SupportEdge:
     observed: bool
     test_file: str | None = None
     reason: str | None = None
+    source_identity: str | None = None
+    runner: str | None = None
+    test_selectors: tuple[str, ...] = ()
+    asserted_invariants: tuple[str, ...] = ()
+    real_components: tuple[str, ...] = ()
+    faked_dependencies: tuple[str, ...] = ()
+    blocked_dependencies: tuple[str, ...] = ()
+    observed_transition: str | None = None
 
 
 def build_support_graph(records: Iterable[InteractionCoverage]) -> dict[str, object]:
@@ -63,6 +85,14 @@ def build_support_graph(records: Iterable[InteractionCoverage]) -> dict[str, obj
                                 observed=True,
                                 test_file=record.test_file,
                                 reason=reason,
+                                source_identity=_source_identity(record),
+                                runner=record.runner,
+                                test_selectors=record.test_selectors,
+                                asserted_invariants=record.asserted_invariants,
+                                real_components=record.real_components,
+                                faked_dependencies=record.faked_dependencies,
+                                blocked_dependencies=record.blocked_dependencies,
+                                observed_transition=record.observed_transition,
                             )
                         )
                 else:
@@ -103,6 +133,14 @@ def build_support_graph(records: Iterable[InteractionCoverage]) -> dict[str, obj
                 "adapter": record.adapter,
                 "result": record.result,
                 "test_file": record.test_file,
+                "source_identity": _source_identity(record),
+                "runner": record.runner,
+                "test_selectors": record.test_selectors,
+                "asserted_invariants": record.asserted_invariants,
+                "real_components": record.real_components,
+                "faked_dependencies": record.faked_dependencies,
+                "blocked_dependencies": record.blocked_dependencies,
+                "observed_transition": record.observed_transition,
             }
             for record in ordered_records
         }.values(),
@@ -133,6 +171,15 @@ def build_support_graph(records: Iterable[InteractionCoverage]) -> dict[str, obj
         },
         "edges": edge_payloads,
         "gaps": sorted(gaps, key=lambda item: item["gap_id"]),
+        "orphan_invariants": sorted(
+            set(INVARIANTS_BY_ID)
+            - {
+                invariant_id
+                for risk in TARGET_RISKS
+                for invariant_id in risk.supporting_invariants
+            }
+        ),
+        "structural_gaps": _structural_gaps(ordered_records),
     }
 
 
@@ -145,6 +192,10 @@ def validate_support_graph(graph: dict[str, object]) -> None:
         raise AssertionError("Support graph must contain edges.")
     if not isinstance(gaps, list):
         raise AssertionError("Support graph gaps must be a list.")
+    if graph.get("orphan_invariants"):
+        raise AssertionError(
+            f"Support graph has orphan invariants: {graph['orphan_invariants']!r}."
+        )
     edge_keys: set[tuple[object, ...]] = set()
     for edge in edges:
         if not isinstance(edge, dict):
@@ -165,6 +216,14 @@ def validate_support_graph(graph: dict[str, object]) -> None:
     gap_ids = [gap.get("gap_id") for gap in gaps if isinstance(gap, dict)]
     if len(gap_ids) != len(set(gap_ids)):
         raise AssertionError("Support graph gap ids must be unique.")
+    structural_gaps = graph.get("structural_gaps")
+    if not isinstance(structural_gaps, list):
+        raise AssertionError("Support graph structural_gaps must be a list.")
+    undeclared = [gap for gap in structural_gaps if not gap.get("exempted")]
+    if undeclared:
+        raise AssertionError(
+            f"Required adapters have undeclared structural coverage: {undeclared!r}."
+        )
 
 
 def render_support_graph_json(records: Iterable[InteractionCoverage]) -> bytes:
@@ -218,6 +277,39 @@ def _reason(record: InteractionCoverage) -> str | None:
     return record.diagnostics.get("reason")
 
 
+def _source_identity(record: InteractionCoverage) -> str:
+    selectors = ",".join(record.test_selectors) or record.test_file
+    return f"{record.runner or 'metadata'}:{selectors}"
+
+
+def _structural_gaps(records: tuple[InteractionCoverage, ...]) -> list[dict[str, object]]:
+    gaps: list[dict[str, object]] = []
+    for risk in sorted(TARGET_RISKS, key=lambda item: item.risk_id):
+        for adapter in sorted(risk.required_adapters):
+            declared_by = [
+                invariant_id
+                for invariant_id in risk.supporting_invariants
+                if adapter in INVARIANTS_BY_ID[invariant_id].adapters
+            ]
+            if declared_by:
+                continue
+            exemption = STRUCTURAL_GAP_EXEMPTIONS.get((risk.risk_id, adapter))
+            gaps.append(
+                {
+                    "gap_id": f"{risk.risk_id}:{adapter}:required_adapter_undeclared",
+                    "risk_id": risk.risk_id,
+                    "adapter": adapter,
+                    "reason": (
+                        "The target risk requires this adapter, but none of its supporting "
+                        "invariants declares that adapter."
+                    ),
+                    "exempted": exemption is not None,
+                    "exemption": exemption,
+                }
+            )
+    return gaps
+
+
 def _record_key(record: InteractionCoverage) -> tuple[object, ...]:
     return record.scenario_id, record.adapter, record.result, record.test_file
 
@@ -244,6 +336,14 @@ def _edge_payload(edge: SupportEdge) -> dict[str, object]:
         "declared": edge.declared,
         "observed": edge.observed,
         "test_file": edge.test_file,
+        "source_identity": edge.source_identity,
+        "runner": edge.runner,
+        "test_selectors": edge.test_selectors,
+        "asserted_invariants": edge.asserted_invariants,
+        "real_components": edge.real_components,
+        "faked_dependencies": edge.faked_dependencies,
+        "blocked_dependencies": edge.blocked_dependencies,
+        "observed_transition": edge.observed_transition,
     }
     if edge.reason:
         payload["reason"] = edge.reason

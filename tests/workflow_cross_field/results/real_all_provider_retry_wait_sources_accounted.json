@@ -1,0 +1,53 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "live_activity.all_retry_wait_sources_accounted"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "production_wide_ast_wait_inventory",
+    "all_retry_sites_assured",
+    "non_retry_waits_explicitly_excluded"
+  ],
+  "faked_dependencies": [
+    "provider transports",
+    "wall clock",
+    "external tools"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "provider_routing",
+    "provider_pause_resume"
+  ],
+  "invariants": [
+    "live_activity.all_retry_wait_sources_accounted"
+  ],
+  "observed_transition": "the production-wide AST inventory classifies every production sleep and every actual retry source routes through the production assured emit-and-wait seam",
+  "real_components": [
+    "backend/shared/api_client_manager.py",
+    "backend/shared/openrouter_client.py",
+    "backend/shared/lm_studio_client.py",
+    "backend/shared/openai_codex_client.py",
+    "backend/shared/xai_grok_client.py",
+    "backend/shared/sakana_fugu_client.py",
+    "backend/aggregator/core/coordinator.py",
+    "backend/compiler/core/compiler_coordinator.py",
+    "backend/autonomous/core/autonomous_coordinator.py",
+    "backend/leanoj/core/leanoj_coordinator.py",
+    "backend/api/routes/proofs.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "real_all_provider_retry_wait_sources_accounted",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:f28dfa2278367731b82451bd1fbd1e7166371ca8d0a8958b2cf41a9988259dd3",
+  "test_file": "tests/workflow_real_adapters/test_live_activity_retry_inventory.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_live_activity_retry_inventory.py::test_all_retry_wait_sources_accounted_are_assured"
+  ]
+}

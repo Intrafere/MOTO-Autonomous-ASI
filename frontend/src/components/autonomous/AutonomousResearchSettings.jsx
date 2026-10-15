@@ -22,6 +22,7 @@ import {
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
   SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
+  XAI_GROK_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import { refreshCredentialProviderState } from '../../utils/credentialProviderRefresh';
 import {
@@ -238,6 +239,24 @@ const ModelSelector = ({
       )}
 
       {effectiveProvider === 'openai_codex_oauth' && modelId && <CodexReasoningControl model={currentModels.find(item => item.id === modelId)} modelId={modelId} value={openrouterReasoningEffort} disabled={isRunning} onChange={onOpenrouterReasoningEffortChange} />}
+      {effectiveProvider === XAI_GROK_PROVIDER && modelId && (
+        <div className="settings-row">
+          <label>Reasoning Effort</label>
+          <select
+            aria-label="xAI Reasoning Effort"
+            value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort, XAI_GROK_PROVIDER)}
+            onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
+            disabled={isRunning}
+          >
+            {XAI_GROK_REASONING_EFFORT_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <small className="settings-hint">
+            Auto sends high reasoning effort; disabled omits the xAI reasoning setting.
+          </small>
+        </div>
+      )}
       {effectiveProvider === SAKANA_FUGU_PROVIDER && modelId && (
         <div className="settings-row">
           <label>Reasoning Effort</label>
@@ -550,7 +569,7 @@ const AutonomousResearchSettings = ({
 
   const [proofStatus, setProofStatus] = useState(null);
   const [proofSettingsEnabled, setProofSettingsEnabled] = useState(false);
-  const [proofSettingsTimeout, setProofSettingsTimeout] = useState('900');
+  const [proofSettingsTimeout, setProofSettingsTimeout] = useState('2000');
   const [proofSettingsLspEnabled, setProofSettingsLspEnabled] = useState(false);
   const [proofSettingsLspIdleTimeout, setProofSettingsLspIdleTimeout] = useState('600');
   const [proofSettingsMaxParallelCandidates, setProofSettingsMaxParallelCandidates] = useState('6');
@@ -594,7 +613,7 @@ const AutonomousResearchSettings = ({
     }
     return cfg.submitter_configs.map((c, idx) => ({
       ...c,
-      submitterId: c.submitterId ?? (idx + 1),
+      submitterId: idx + 1,
       openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(c.openrouterReasoningEffort || c.openrouter_reasoning_effort, c.provider),
     }));
   };
@@ -607,6 +626,21 @@ const AutonomousResearchSettings = ({
   );
   
   const [localConfig, setLocalConfig] = useState(() => ({ ...config }));
+  const numSubmittersRef = useRef(numSubmitters);
+  const submitterConfigsRef = useRef(submitterConfigs);
+  const localConfigRef = useRef(localConfig);
+
+  useEffect(() => {
+    numSubmittersRef.current = numSubmitters;
+  }, [numSubmitters]);
+
+  useEffect(() => {
+    submitterConfigsRef.current = submitterConfigs;
+  }, [submitterConfigs]);
+
+  useEffect(() => {
+    localConfigRef.current = localConfig;
+  }, [localConfig]);
 
   // Normalize profile models (fix common issues like blank submitters)
   const normalizeProfile = (profile) => {
@@ -794,8 +828,8 @@ const AutonomousResearchSettings = ({
       try {
         const status = await autonomousAPI.getProofStatus();
         setProofStatus(status);
-        setProofSettingsEnabled(Boolean(status.lean4_enabled));
-        setProofSettingsTimeout(String(status.lean4_proof_timeout ?? 900));
+        setProofSettingsEnabled(Boolean(status.lean4_user_enabled ?? status.lean4_enabled));
+        setProofSettingsTimeout(String(status.lean4_proof_timeout ?? 2000));
         setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
         setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? 600));
         setProofSettingsMaxParallelCandidates(String(status.proof_max_parallel_candidates ?? 6));
@@ -856,7 +890,7 @@ const AutonomousResearchSettings = ({
     
     const settings = {
       numSubmitters,
-      submitterConfigs,
+      submitterConfigs: submitterConfigs.slice(0, numSubmitters),
       localConfig,
       freeOnly,
       freeModelLooping,
@@ -1272,11 +1306,16 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const newConfig = { ...localConfig, [field]: newValue };
     markProfileAsCustom();
     setLocalConfig(newConfig);
+    localConfigRef.current = newConfig;
     
     // CRITICAL FIX: Don't propagate numeric field changes to parent on every keystroke
     // This prevents re-renders that cause input focus loss
     if (!numericFields.includes(field)) {
-      onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+      onConfigChange({
+        ...newConfig,
+        num_submitters: numSubmitters,
+        submitter_configs: submitterConfigs.slice(0, numSubmitters),
+      });
     }
   };
 
@@ -1296,7 +1335,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       const newConfig = { ...localConfig, [field]: finalValue };
       markProfileAsCustom();
       setLocalConfig(newConfig);
-      onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+      localConfigRef.current = newConfig;
+      onConfigChange({
+        ...newConfig,
+        num_submitters: numSubmitters,
+        submitter_configs: submitterConfigs.slice(0, numSubmitters),
+      });
     }
   };
 
@@ -1315,7 +1359,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const newConfig = { ...localConfig, ...updates };
     markProfileAsCustom();
     setLocalConfig(newConfig);
-    onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+    localConfigRef.current = newConfig;
+    onConfigChange({
+      ...newConfig,
+      num_submitters: numSubmitters,
+      submitter_configs: submitterConfigs.slice(0, numSubmitters),
+    });
   };
 
   // Handle model change with provider fetching for OpenRouter
@@ -1328,7 +1377,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     };
     markProfileAsCustom();
     setLocalConfig(newConfig);
-    onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+    localConfigRef.current = newConfig;
+    onConfigChange({
+      ...newConfig,
+      num_submitters: numSubmitters,
+      submitter_configs: submitterConfigs.slice(0, numSubmitters),
+    });
 
     const provider = localConfig[`${rolePrefix}_provider`];
     if (!modelId || !(provider === 'openrouter' || isCloudAccessProvider(provider))) {
@@ -1342,13 +1396,27 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       return;
     }
 
+    const currentLocalConfig = localConfigRef.current;
+    if (
+      currentLocalConfig[`${rolePrefix}_model`] !== modelId
+      || currentLocalConfig[`${rolePrefix}_provider`] !== provider
+      || currentLocalConfig[`${rolePrefix}_openrouter_provider`] !== null
+    ) {
+      return;
+    }
     const autofilledConfig = {
-      ...newConfig,
+      ...currentLocalConfig,
       ...(autoSettings.contextWindowKnown ? { [`${rolePrefix}_context_window`]: autoSettings.contextWindow } : {}),
       ...(autoSettings.outputCapKnown ? { [`${rolePrefix}_max_tokens`]: autoSettings.maxOutputTokens } : {}),
     };
     setLocalConfig(autofilledConfig);
-    onConfigChange({ ...autofilledConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+    localConfigRef.current = autofilledConfig;
+    const currentCount = numSubmittersRef.current;
+    onConfigChange({
+      ...autofilledConfig,
+      num_submitters: currentCount,
+      submitter_configs: submitterConfigsRef.current.slice(0, currentCount),
+    });
   };
 
   const handleOpenRouterProviderChange = async (rolePrefix, providerName) => {
@@ -1358,7 +1426,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     };
     markProfileAsCustom();
     setLocalConfig(newConfig);
-    onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+    localConfigRef.current = newConfig;
+    onConfigChange({
+      ...newConfig,
+      num_submitters: numSubmitters,
+      submitter_configs: submitterConfigs.slice(0, numSubmitters),
+    });
 
     const modelId = newConfig[`${rolePrefix}_model`];
     if (newConfig[`${rolePrefix}_provider`] !== 'openrouter' || !modelId) {
@@ -1370,13 +1443,27 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       return;
     }
 
+    const currentLocalConfig = localConfigRef.current;
+    if (
+      currentLocalConfig[`${rolePrefix}_model`] !== modelId
+      || currentLocalConfig[`${rolePrefix}_provider`] !== 'openrouter'
+      || currentLocalConfig[`${rolePrefix}_openrouter_provider`] !== providerName
+    ) {
+      return;
+    }
     const autofilledConfig = {
-      ...newConfig,
+      ...currentLocalConfig,
       ...(autoSettings.contextWindowKnown ? { [`${rolePrefix}_context_window`]: autoSettings.contextWindow } : {}),
       ...(autoSettings.outputCapKnown ? { [`${rolePrefix}_max_tokens`]: autoSettings.maxOutputTokens } : {}),
     };
     setLocalConfig(autofilledConfig);
-    onConfigChange({ ...autofilledConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+    localConfigRef.current = autofilledConfig;
+    const currentCount = numSubmittersRef.current;
+    onConfigChange({
+      ...autofilledConfig,
+      num_submitters: currentCount,
+      submitter_configs: submitterConfigsRef.current.slice(0, currentCount),
+    });
   };
 
   // Handle number of submitters change
@@ -1401,34 +1488,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         superchargeEnabled: Boolean(template?.superchargeEnabled),
       });
     }
-    setSubmitterConfigs(newConfigs);
-    // Don't propagate immediately - will propagate on blur
-  };
-
-  // Handler for when user finishes editing number of submitters
-  const handleNumSubmittersBlur = (value) => {
-    const count = Math.max(1, Math.min(10, parseInt(value, 10) || 1));
-    markProfileAsCustom();
-    setNumSubmitters(count);
-    
-    const newConfigs = [...submitterConfigs];
-    while (newConfigs.length < count) {
-      const template = submitterConfigs[0];
-      newConfigs.push({
-        submitterId: newConfigs.length + 1,
-        provider: template?.provider || '',
-        modelId: template?.modelId || '',
-        openrouterProvider: template?.openrouterProvider ?? null,
-        openrouterReasoningEffort: template?.openrouterReasoningEffort,
-        lmStudioFallbackId: template?.lmStudioFallbackId ?? null,
-        contextWindow: template?.contextWindow,
-        maxOutputTokens: template?.maxOutputTokens,
-        superchargeEnabled: Boolean(template?.superchargeEnabled),
-      });
-    }
     const slicedConfigs = newConfigs.slice(0, count);
-    setSubmitterConfigs(newConfigs);
-    onConfigChange({ ...localConfig, submitter_configs: slicedConfigs, num_submitters: count });
+    setSubmitterConfigs(slicedConfigs);
+    numSubmittersRef.current = count;
+    submitterConfigsRef.current = slicedConfigs;
+    const nextLocalConfig = { ...localConfigRef.current, num_submitters: count };
+    setLocalConfig(nextLocalConfig);
+    localConfigRef.current = nextLocalConfig;
+    onConfigChange({ ...nextLocalConfig, submitter_configs: slicedConfigs });
   };
 
   // Handle per-submitter config change
@@ -1464,7 +1531,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     
     // CRITICAL FIX: Don't propagate numeric field changes on every keystroke
     if (!numericFields.includes(field)) {
-      onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
+      onConfigChange({
+        ...localConfig,
+        num_submitters: numSubmitters,
+        submitter_configs: newConfigs.slice(0, numSubmitters),
+      });
     }
   };
 
@@ -1479,7 +1550,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
     markProfileAsCustom();
     setSubmitterConfigs(newConfigs);
-    onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
+    submitterConfigsRef.current = newConfigs;
+    onConfigChange({
+      ...localConfig,
+      num_submitters: numSubmitters,
+      submitter_configs: newConfigs.slice(0, numSubmitters),
+    });
 
     if (!modelId || !(newConfigs[index].provider === 'openrouter' || isCloudAccessProvider(newConfigs[index].provider))) {
       return;
@@ -1492,15 +1568,32 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       return;
     }
 
-    const autofilledConfigs = [...newConfigs];
+    const currentConfigs = submitterConfigsRef.current;
+    const currentCount = numSubmittersRef.current;
+    const currentTarget = currentConfigs[index];
+    if (
+      index >= currentCount
+      || !currentTarget
+      || currentTarget.modelId !== modelId
+      || currentTarget.provider !== newConfigs[index].provider
+      || currentTarget.openrouterProvider !== null
+    ) {
+      return;
+    }
+    const autofilledConfigs = [...currentConfigs];
     autofilledConfigs[index] = {
-      ...autofilledConfigs[index],
+      ...currentConfigs[index],
       ...(autoSettings.contextWindowKnown ? { contextWindow: autoSettings.contextWindow } : {}),
       ...(autoSettings.outputCapKnown ? { maxOutputTokens: autoSettings.maxOutputTokens } : {}),
     };
 
     setSubmitterConfigs(autofilledConfigs);
-    onConfigChange({ ...localConfig, submitter_configs: autofilledConfigs.slice(0, numSubmitters) });
+    submitterConfigsRef.current = autofilledConfigs;
+    onConfigChange({
+      ...localConfigRef.current,
+      num_submitters: currentCount,
+      submitter_configs: autofilledConfigs.slice(0, currentCount),
+    });
   };
 
   const handleSubmitterOpenRouterProviderChange = async (index, providerName) => {
@@ -1512,7 +1605,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
     markProfileAsCustom();
     setSubmitterConfigs(newConfigs);
-    onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
+    submitterConfigsRef.current = newConfigs;
+    onConfigChange({
+      ...localConfig,
+      num_submitters: numSubmitters,
+      submitter_configs: newConfigs.slice(0, numSubmitters),
+    });
 
     const modelId = newConfigs[index].modelId;
     if (newConfigs[index].provider !== 'openrouter' || !modelId) {
@@ -1524,15 +1622,32 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       return;
     }
 
-    const autofilledConfigs = [...newConfigs];
+    const currentConfigs = submitterConfigsRef.current;
+    const currentCount = numSubmittersRef.current;
+    const currentTarget = currentConfigs[index];
+    if (
+      index >= currentCount
+      || !currentTarget
+      || currentTarget.modelId !== modelId
+      || currentTarget.provider !== 'openrouter'
+      || currentTarget.openrouterProvider !== providerName
+    ) {
+      return;
+    }
+    const autofilledConfigs = [...currentConfigs];
     autofilledConfigs[index] = {
-      ...autofilledConfigs[index],
+      ...currentConfigs[index],
       ...(autoSettings.contextWindowKnown ? { contextWindow: autoSettings.contextWindow } : {}),
       ...(autoSettings.outputCapKnown ? { maxOutputTokens: autoSettings.maxOutputTokens } : {}),
     };
 
     setSubmitterConfigs(autofilledConfigs);
-    onConfigChange({ ...localConfig, submitter_configs: autofilledConfigs.slice(0, numSubmitters) });
+    submitterConfigsRef.current = autofilledConfigs;
+    onConfigChange({
+      ...localConfigRef.current,
+      num_submitters: currentCount,
+      submitter_configs: autofilledConfigs.slice(0, currentCount),
+    });
   };
 
   // Handler for when user finishes editing a submitter numeric field
@@ -1551,7 +1666,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       
       markProfileAsCustom();
       setSubmitterConfigs(newConfigs);
-      onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
+      onConfigChange({
+        ...localConfig,
+        num_submitters: numSubmitters,
+        submitter_configs: newConfigs.slice(0, numSubmitters),
+      });
     }
   };
 
@@ -1572,7 +1691,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       }));
       markProfileAsCustom();
       setSubmitterConfigs(newConfigs);
-      onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
+      onConfigChange({
+        ...localConfig,
+        num_submitters: numSubmitters,
+        submitter_configs: newConfigs.slice(0, numSubmitters),
+      });
     }
   };
 
@@ -1585,7 +1708,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   
   const handleSaveProofSettings = async () => {
     const parsedTimeout = parseInt(proofSettingsTimeout, 10);
-    const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 900;
+    const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 2000;
     const parsedLspIdleTimeout = parseInt(proofSettingsLspIdleTimeout, 10);
     const lspIdleTimeout = Number.isFinite(parsedLspIdleTimeout) ? parsedLspIdleTimeout : 600;
     const parsedMaxParallelCandidates = parseInt(proofSettingsMaxParallelCandidates, 10);
@@ -1600,7 +1723,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       setProofSettingsMessage('');
       const latestProofStatus = await autonomousAPI.getProofStatus().catch(() => null);
       const leanEnabled = latestProofStatus
-        ? Boolean(latestProofStatus.lean4_enabled)
+        ? Boolean(latestProofStatus.lean4_user_enabled ?? latestProofStatus.lean4_enabled)
         : proofSettingsEnabled;
       const status = await autonomousAPI.updateProofSettings({
         enabled: leanEnabled,
@@ -1612,7 +1735,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         smt_timeout: smtTimeout,
       });
       setProofStatus(status);
-      setProofSettingsEnabled(Boolean(status.lean4_enabled));
+      setProofSettingsEnabled(Boolean(status.lean4_user_enabled ?? status.lean4_enabled));
       setProofSettingsTimeout(String(status.lean4_proof_timeout ?? timeout));
       setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
       setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? lspIdleTimeout));
@@ -2065,16 +2188,16 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           <label title="Number of parallel brainstorm submitters (1-10)">
             Number of Submitters
           </label>
-          <input
-            type="number"
+          <select
+            aria-label="Number of Submitters"
             value={numSubmitters}
             onChange={(e) => handleNumSubmittersChange(e.target.value)}
-            onBlur={(e) => handleNumSubmittersBlur(e.target.value)}
             disabled={isRunning}
-            min={1}
-            max={10}
-            step={1}
-          />
+          >
+            {Array.from({ length: 10 }, (_, index) => index + 1).map(count => (
+              <option key={count} value={count}>{count}</option>
+            ))}
+          </select>
           {numSubmitters > 1 && (
             <button 
               className="copy-btn"
@@ -2368,9 +2491,19 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   <div className="settings-row">
                     <label>Lean 4 Status</label>
                     <div>
-                      <strong>{proofStatus ? (proofStatus.lean4_enabled ? 'Enabled' : 'Disabled') : 'Starting…'}</strong>
+                      <strong>
+                        {proofStatus
+                          ? (proofStatus.lean4_enabled
+                            ? 'Enabled'
+                            : (proofStatus.lean4_user_enabled && !proofStatus.lean4_runtime_available
+                              ? 'Unavailable'
+                              : 'Disabled'))
+                          : 'Starting…'}
+                      </strong>
                       <small className="settings-hint" style={{ display: 'block', marginTop: '0.35rem' }}>
-                        Workspace: {proofStatus ? (proofStatus.workspace_ready ? 'Ready' : 'Not ready yet') : 'Starting…'}
+                        {proofStatus?.lean4_unavailable_reason
+                          ? `Launcher prerequisite: ${proofStatus.lean4_unavailable_reason.replaceAll('_', ' ')}`
+                          : `Workspace: ${proofStatus ? (proofStatus.workspace_ready ? 'Ready' : 'Not ready yet') : 'Starting…'}`}
                       </small>
                     </div>
                   </div>

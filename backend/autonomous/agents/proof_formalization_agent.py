@@ -11,7 +11,12 @@ from typing import Any, Awaitable, Callable, List, Optional, Tuple
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
-from backend.shared.lean4_client import get_lean4_client
+from backend.shared.lean4_client import (
+    LeanWorkspaceRepairRequiredError,
+    get_lean4_client,
+    raise_for_lean_workspace_failure,
+    require_lean_workspace,
+)
 from backend.shared.model_error_utils import (
     format_transient_provider_error,
     is_non_retryable_model_error,
@@ -22,6 +27,7 @@ from backend.shared.model_error_utils import (
 from backend.shared.models import ProofAttemptFeedback, ProofCandidate, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.provider_errors import ProviderContextLengthError
+from backend.shared.provider_route_identity import provider_label, route_identity_from_error
 from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
 from backend.shared.proof_search.tool_adapter import execute_search_lean_proofs
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
@@ -65,7 +71,6 @@ _MALFORMED_MODEL_OUTPUT_REASON = "Model returned malformed output (not valid JSO
 _INCOMPLETE_MODEL_OUTPUT_REASON = (
     "Model/provider output reached its maximum output length and was truncated before returning usable Lean proof code."
 )
-_LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
 _MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX = "MANDATORY FULL SOURCE CONTEXT OVERFLOW"
 _PROOF_SEARCH_CONTEXT_OMITTED = (
     "[Proof-search context omitted because it was unavailable or did not fit the configured context budget.]"
@@ -234,14 +239,6 @@ def _is_malformed_model_output_feedback(feedback: ProofAttemptFeedback) -> bool:
     )
 
 
-def _is_lean_workspace_error_feedback(feedback: ProofAttemptFeedback) -> bool:
-    error_output = feedback.error_output or ""
-    return (
-        not feedback.success
-        and error_output.startswith(_LEAN_WORKSPACE_ERROR_PREFIX)
-    )
-
-
 def _is_context_overflow_feedback(feedback: ProofAttemptFeedback) -> bool:
     error_output = feedback.error_output or ""
     return (
@@ -286,6 +283,44 @@ def _provider_context_overflow_feedback(
         effective_model=getattr(route, "model", None),
         effective_provider=getattr(route, "provider", None),
         overflow_origin="provider",
+    )
+
+
+def transient_provider_retry_error(
+    exc: BaseException,
+    *,
+    role_id: str,
+    model: str,
+) -> RetryableProviderError:
+    """Wrap a transient model-call failure for workflow-level provider retry.
+
+    The failed route's typed identity (provider, model, role, host) is carried in
+    structured fields for Live Activity; the message keeps the generic transient
+    wording so classification and backoff text stay unchanged. ``role_id`` and
+    ``model`` apply only when the exception carries no route identity.
+    """
+    identity = route_identity_from_error(exc)
+    provider = str(identity.get("provider") or "unknown")
+    error_role = str(identity.get("role_id") or "")
+    return RetryableProviderError(
+        provider=provider,
+        provider_label=(
+            provider_label(provider, identity.get("provider_label_text"))
+            if provider != "unknown"
+            else "Inference provider"
+        ),
+        role_id=error_role if error_role and error_role != "unknown" else role_id,
+        model=str(identity.get("model") or model),
+        reason="transient_provider_error",
+        message=format_transient_provider_error(exc),
+        route_kind=str(identity.get("route_kind") or ""),
+        task_id=str(identity.get("task_id") or ""),
+        configured_provider=str(identity.get("configured_provider") or ""),
+        configured_model=str(identity.get("configured_model") or ""),
+        configured_host_provider=identity.get("configured_host_provider"),
+        upstream_host_provider=str(identity.get("upstream_host_provider") or ""),
+        auto_fallback_from_host=str(identity.get("auto_fallback_from_host") or ""),
+        provider_request_id=str(identity.get("provider_request_id") or ""),
     )
 
 
@@ -627,15 +662,17 @@ class ProofFormalizationAgent:
                 lean_code,
                 timeout=system_config.lean4_proof_timeout,
             )
+            raise_for_lean_workspace_failure(lean_result)
             feedback = ProofAttemptFeedback(
                 attempt=attempt_number,
                 theorem_id=theorem_candidate.theorem_id,
                 reasoning=reasoning,
-                lean_code=lean_code,
+                lean_code=getattr(lean_result, "checked_source", "") or lean_code,
                 error_output=lean_result.error_output,
                 goal_states=lean_result.goal_states,
                 strategy="full_script",
                 success=lean_result.success,
+                    compile_receipt=getattr(lean_result, "compile_receipt", None),
                     failure_kind=None if lean_result.success else "lean_rejected",
                     recovery_step=attempt_number,
                     recovery_mode=recovery_mode,
@@ -649,6 +686,8 @@ class ProofFormalizationAgent:
         except FreeModelExhaustedError:
             raise
         except RetryableProviderError:
+            raise
+        except LeanWorkspaceRepairRequiredError:
             raise
         except Exception as exc:
             if response_was_truncated and not lean_was_invoked:
@@ -709,13 +748,10 @@ class ProofFormalizationAgent:
                     ),
                 )
             if is_transient_model_call_error(exc):
-                raise RetryableProviderError(
-                    provider="unknown",
-                    provider_label="Inference provider",
+                raise transient_provider_retry_error(
+                    exc,
                     role_id=self.role_id,
                     model=self.model_id,
-                    reason="transient_provider_error",
-                    message=format_transient_provider_error(exc),
                 ) from exc
             is_parse_error = _is_json_parse_error(exc)
             if self.strict_execution_errors and not is_parse_error:
@@ -765,6 +801,7 @@ class ProofFormalizationAgent:
         should_stop: ShouldStopFn = None,
     ) -> Tuple[bool, str, str, List[ProofAttemptFeedback]]:
         """Attempt to formalize and verify one theorem candidate with full scripts."""
+        require_lean_workspace(get_lean4_client())
         attempts: List[ProofAttemptFeedback] = list(prior_attempts or [])
         source_excerpt = theorem_candidate.source_excerpt or self._build_source_excerpt(
             theorem_candidate.statement,
@@ -840,8 +877,6 @@ class ProofFormalizationAgent:
                     lean_code=feedback.lean_code,
                 )
                 return True, theorem_name, feedback.lean_code, attempts
-            if _is_lean_workspace_error_feedback(feedback):
-                break
             if _is_context_overflow_feedback(feedback):
                 break
             if terminal_malformed_output:
@@ -868,6 +903,7 @@ class ProofFormalizationAgent:
         should_stop: ShouldStopFn = None,
     ) -> Tuple[bool, str, str, List[ProofAttemptFeedback]]:
         """Attempt to formalize and verify one theorem candidate with tactic scripts."""
+        require_lean_workspace(get_lean4_client())
         attempts: List[ProofAttemptFeedback] = list(prior_attempts or [])
         source_excerpt = theorem_candidate.source_excerpt or self._build_source_excerpt(
             theorem_candidate.statement,
@@ -1050,8 +1086,6 @@ class ProofFormalizationAgent:
                             lean_code=feedback.lean_code,
                         )
                         return True, theorem_name, feedback.lean_code, attempts
-                    if _is_lean_workspace_error_feedback(feedback):
-                        break
                     if _is_context_overflow_feedback(feedback):
                         break
                     if terminal_malformed_output:
@@ -1066,16 +1100,18 @@ class ProofFormalizationAgent:
                     tactic_commands,
                     timeout=system_config.lean4_proof_timeout,
                 )
+                raise_for_lean_workspace_failure(lean_result)
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,
                     theorem_id=theorem_candidate.theorem_id,
                     reasoning=reasoning,
-                    lean_code=lean_code,
+                    lean_code=getattr(lean_result, "checked_source", "") or lean_code,
                     error_output=lean_result.tactic_error_slice or lean_result.error_output,
                     goal_states=lean_result.goal_states,
                     strategy="tactic_script",
                     tactic_trace=tactic_trace,
                     success=lean_result.success,
+                    compile_receipt=getattr(lean_result, "compile_receipt", None),
                     failure_kind=None if lean_result.success else "lean_rejected",
                     recovery_step=attempt_number,
                     recovery_mode=recovery_mode,
@@ -1097,14 +1133,14 @@ class ProofFormalizationAgent:
                         lean_code=lean_code,
                     )
                     return True, theorem_name, lean_code, attempts
-                if _is_lean_workspace_error_feedback(feedback):
-                    break
                 if _is_context_overflow_feedback(feedback):
                     break
                 attempt_offset += 1
             except FreeModelExhaustedError:
                 raise
             except RetryableProviderError:
+                raise
+            except LeanWorkspaceRepairRequiredError:
                 raise
             except Exception as exc:
                 if response_was_truncated and not lean_was_invoked:
@@ -1170,13 +1206,10 @@ class ProofFormalizationAgent:
                     attempt_offset += 1
                     continue
                 if is_transient_model_call_error(exc):
-                    raise RetryableProviderError(
-                        provider="unknown",
-                        provider_label="Inference provider",
+                    raise transient_provider_retry_error(
+                        exc,
                         role_id=self.role_id,
                         model=self.model_id,
-                        reason="transient_provider_error",
-                        message=format_transient_provider_error(exc),
                     ) from exc
                 is_parse_error = _is_json_parse_error(exc)
                 if self.strict_execution_errors and not is_parse_error:

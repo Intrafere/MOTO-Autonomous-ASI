@@ -18,6 +18,7 @@ import {
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
   SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
+  XAI_GROK_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import { refreshCredentialProviderState } from '../../utils/credentialProviderRefresh';
 import {
@@ -243,6 +244,24 @@ function ModelSelector({
       )}
 
       {provider === 'openai_codex_oauth' && config.modelId && <CodexReasoningControl model={models.find(item => item.id === config.modelId)} modelId={config.modelId} value={config.openrouterReasoningEffort} disabled={isRunning} onChange={effort => onChange({ ...config, provider, openrouterReasoningEffort: effort })} />}
+      {provider === XAI_GROK_PROVIDER && config.modelId && (
+        <div className="settings-row">
+          <label>Reasoning Effort</label>
+          <select
+            aria-label="xAI Reasoning Effort"
+            value={normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort, XAI_GROK_PROVIDER)}
+            disabled={isRunning}
+            onChange={(event) => onChange({ ...config, provider, openrouterReasoningEffort: event.target.value })}
+          >
+            {XAI_GROK_REASONING_EFFORT_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <small className="settings-hint">
+            Auto sends high reasoning effort; disabled omits the xAI reasoning setting.
+          </small>
+        </div>
+      )}
       {provider === SAKANA_FUGU_PROVIDER && config.modelId && (
         <div className="settings-row">
           <label>Reasoning Effort</label>

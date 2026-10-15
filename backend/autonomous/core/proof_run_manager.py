@@ -4,13 +4,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
+from backend.shared.activity import (
+    fill_missing_activity_metadata,
+    normalize_activity_payload,
+)
 from backend.shared.models import (
+    ProofRunActivityEvent,
+    ProofRunActivityResponse,
     ProofRunCollectionItem,
     ProofRunCollectionResponse,
     ProofRunQueueResponse,
@@ -22,18 +29,27 @@ from backend.shared.provider_pause import (
     get_provider_reset_generation,
     wait_for_provider_reset,
 )
+from backend.shared.provider_route_identity import with_route_identity
 from backend.shared.sleep_inhibitor import sleep_inhibitor
 
 logger = logging.getLogger(__name__)
 ProofRunWorker = Callable[["ProofRunControl"], Awaitable[None]]
 ProofRunTerminalCallback = Callable[[ProofRunSnapshot], Awaitable[None]]
 ProofRunEventCallback = Callable[[str, dict], Awaitable[None]]
+# Published-activity replay lets a reloaded or resumed browser tab recover
+# events it never processed. It is process-local like the runs themselves.
+ACTIVITY_SEQUENCE_FIELD = "proof_run_activity_sequence"
+ACTIVITY_JOURNAL_LIMIT = 300
+ACTIVITY_JOURNAL_TERMINAL_RUN_LIMIT = 5
+ACTIVITY_REPLAY_PAGE_LIMIT = 200
 TERMINAL_STATUSES = {"completed", "stopped", "error"}
 DEDICATED_TERMINAL_REASONS = {
     "context_overflow",
     "proof_context_overflow",
     "proof_output_truncation_recovery_exhausted",
 }
+CONTINUOUS_NO_DISCOVERY_ROUND_LIMIT = 10
+NO_DISCOVERY_LIMIT_TERMINAL_REASON = "consecutive_no_discovery_limit"
 
 
 class ProofRunSourceInvalidError(RuntimeError):
@@ -56,6 +72,11 @@ class ProofRunControl:
     terminal_callback: Optional[ProofRunTerminalCallback] = None
     event_callback: Optional[ProofRunEventCallback] = None
     candidate_checkpoint: Optional[dict] = None
+    activity_journal_enabled: bool = True
+    activity_sequence: int = 0
+    activity_journal: deque = field(
+        default_factory=lambda: deque(maxlen=ACTIVITY_JOURNAL_LIMIT)
+    )
 
 
 class ProofRunManager:
@@ -99,6 +120,8 @@ class ProofRunManager:
                     "status",
                     "current_round",
                     "last_completed_round",
+                    "consecutive_no_discovery_rounds",
+                    "no_discovery_round_limit",
                     "proof_set_revision",
                     "updated_at",
                     "terminal_reason",
@@ -116,6 +139,11 @@ class ProofRunManager:
                 for control in self._runs.values()
             ]
         return sorted(snapshots, key=lambda snapshot: snapshot.updated_at, reverse=True)
+
+    async def has_active_runs(self) -> bool:
+        """Whether any process-local proof run has not finished terminal cleanup."""
+        async with self._lock:
+            return any(not control.cleaned_up for control in self._runs.values())
 
     async def list_runs(
         self,
@@ -193,6 +221,7 @@ class ProofRunManager:
         candidate_checkpoint_reference: str = "",
         terminal_callback: Optional[ProofRunTerminalCallback] = None,
         event_callback: Optional[ProofRunEventCallback] = None,
+        journal_activity: bool = True,
     ) -> ProofRunQueueResponse:
         if run_mode not in {"one_round", "loop_with_pruning"}:
             raise ValueError(f"Unsupported proof run mode: {run_mode}")
@@ -225,6 +254,11 @@ class ProofRunManager:
                 candidate_checkpoint_reference=candidate_checkpoint_reference,
                 round_limit=None if run_mode == "loop_with_pruning" else 1,
                 unbounded=run_mode == "loop_with_pruning",
+                no_discovery_round_limit=(
+                    CONTINUOUS_NO_DISCOVERY_ROUND_LIMIT
+                    if run_mode == "loop_with_pruning"
+                    else None
+                ),
                 updated_at=now,
                 pruning_status=(
                     "idle" if run_mode == "loop_with_pruning" else "disabled"
@@ -236,6 +270,7 @@ class ProofRunManager:
                 sleep_owner=sleep_owner,
                 terminal_callback=terminal_callback,
                 event_callback=event_callback,
+                activity_journal_enabled=journal_activity,
             )
             async with self._lock:
                 self._runs[proof_run_id] = control
@@ -322,11 +357,28 @@ class ProofRunManager:
             "round_index": snapshot.current_round,
             "round_limit": snapshot.round_limit,
             "unbounded": snapshot.unbounded,
+            "consecutive_no_discovery_rounds": snapshot.consecutive_no_discovery_rounds,
+            "no_discovery_round_limit": snapshot.no_discovery_round_limit,
             "lifecycle_generation": snapshot.lifecycle_generation,
             "status": snapshot.status,
             "idle_reason": snapshot.idle_reason,
             "terminal_reason": snapshot.terminal_reason,
             "last_error_summary": snapshot.last_error_summary,
+        }
+
+    @staticmethod
+    def _route_identity_event_fields(
+        route_identity: Optional[Mapping[str, Any]],
+    ) -> dict:
+        """Return provider route identity fields for one event payload.
+
+        Identity is event-payload and display-text data only; the snapshot
+        model has no identity fields.
+        """
+        return {
+            key: value
+            for key, value in (route_identity or {}).items()
+            if value is not None
         }
 
     async def _emit(
@@ -340,7 +392,122 @@ class ProofRunManager:
         payload = self._event_payload(control.snapshot)
         if extra:
             payload.update(extra)
-        await control.event_callback(event_type, payload)
+        operational = event_type == "proof_run_terminal" and control.snapshot.status in {
+            "error",
+            "stopped",
+        }
+        await self.publish_activity(
+            control,
+            control.event_callback,
+            event_type,
+            fill_missing_activity_metadata(
+                payload,
+                workflow="proof_run",
+                run_id=control.snapshot.proof_run_id,
+                generation=control.snapshot.lifecycle_generation,
+                source_type=control.snapshot.source_type,
+                source_id=control.snapshot.source_id,
+                phase=control.snapshot.status,
+                classification="operational" if operational else "informational",
+                category="workflow",
+                severity="error" if control.snapshot.status == "error" else "",
+                outcome=(
+                    "error"
+                    if operational
+                    else "success"
+                    if control.snapshot.status == "completed"
+                    else "info"
+                ),
+                detail=control.snapshot.last_error_summary,
+            ),
+        )
+
+    @staticmethod
+    async def publish_activity(
+        control: ProofRunControl,
+        send: ProofRunEventCallback,
+        event_type: str,
+        data: Mapping[str, Any],
+    ) -> None:
+        """Number, retain, then publish one activity event for this run."""
+        payload = dict(data or {})
+        if control.activity_journal_enabled:
+            payload.setdefault("proof_run_id", control.snapshot.proof_run_id)
+            control.activity_sequence += 1
+            payload[ACTIVITY_SEQUENCE_FIELD] = control.activity_sequence
+            control.activity_journal.append(
+                (
+                    control.activity_sequence,
+                    event_type,
+                    datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    payload,
+                )
+            )
+        await send(event_type, payload)
+
+    def activity_broadcaster(
+        self,
+        control: ProofRunControl,
+        send: ProofRunEventCallback,
+    ) -> ProofRunEventCallback:
+        """Wrap a broadcaster so every event it publishes joins the run journal."""
+
+        async def _broadcast(event_type: str, data: dict) -> None:
+            await self.publish_activity(control, send, event_type, data)
+
+        return _broadcast
+
+    async def get_activity(
+        self,
+        proof_run_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = ACTIVITY_REPLAY_PAGE_LIMIT,
+    ) -> Optional[ProofRunActivityResponse]:
+        safe_run_id = validate_single_path_component(proof_run_id, "proof run ID")
+        async with self._lock:
+            control = self._runs.get(safe_run_id)
+        if control is None:
+            return None
+        retained = list(control.activity_journal)
+        latest = control.activity_sequence
+        oldest = retained[0][0] if retained else 0
+        after = max(0, min(int(after_sequence), latest))
+        pending = [entry for entry in retained if entry[0] > after]
+        page = pending[: max(0, int(limit))]
+        return ProofRunActivityResponse(
+            proof_run_id=safe_run_id,
+            lifecycle_generation=control.snapshot.lifecycle_generation,
+            latest_sequence=latest,
+            oldest_retained_sequence=oldest,
+            after_sequence=after,
+            events=[
+                ProofRunActivityEvent(
+                    sequence=sequence,
+                    type=event_type,
+                    timestamp=timestamp,
+                    data=normalize_activity_payload(event_type, payload),
+                )
+                for sequence, event_type, timestamp, payload in page
+            ],
+            gap=after < latest and (not retained or oldest > after + 1),
+            truncated=len(pending) > len(page),
+        )
+
+    async def _trim_terminal_activity_journals(self) -> None:
+        """Keep replay history only for the most recent finished runs."""
+        async with self._lock:
+            finished = sorted(
+                (
+                    control
+                    for control in self._runs.values()
+                    if control.cleaned_up and control.activity_journal
+                ),
+                key=lambda control: control.snapshot.updated_at,
+                reverse=True,
+            )
+        for control in finished[ACTIVITY_JOURNAL_TERMINAL_RUN_LIMIT:]:
+            control.activity_journal.clear()
 
     async def update(
         self,
@@ -356,6 +523,14 @@ class ProofRunManager:
             ):
                 return control.snapshot.model_copy(deep=True)
             requested_status = updates.get("status")
+            if (
+                requested_status is not None
+                and control.snapshot.status in TERMINAL_STATUSES
+                and requested_status != control.snapshot.status
+            ):
+                # A finished run's outcome is final. A later status write would
+                # silently replace it after its terminal event was published.
+                return control.snapshot.model_copy(deep=True)
             if (
                 control.snapshot.stop_requested
                 and requested_status is not None
@@ -374,6 +549,7 @@ class ProofRunManager:
         *,
         status: str,
         terminal_reason: str = "",
+        terminal_event_extra: Optional[dict] = None,
         **updates,
     ) -> ProofRunSnapshot:
         effective_terminal_reason = terminal_reason or control.snapshot.terminal_reason
@@ -396,7 +572,11 @@ class ProofRunManager:
                 if control.terminal_callback is not None:
                     await control.terminal_callback(snapshot.model_copy(deep=True))
                 if snapshot.terminal_reason not in DEDICATED_TERMINAL_REASONS:
-                    await self._emit(control, "proof_run_terminal")
+                    await self._emit(
+                        control,
+                        "proof_run_terminal",
+                        terminal_event_extra,
+                    )
                 snapshot = await self.update(
                     control,
                     expected_generation=generation,
@@ -477,12 +657,32 @@ class ProofRunManager:
         proof_set_revision: Optional[int] = None,
     ) -> ProofRunSnapshot:
         """Persist only bounded round metadata; candidate payloads stay external."""
+        consecutive_no_discovery_rounds = (
+            control.snapshot.consecutive_no_discovery_rounds
+        )
+        terminal_reason = control.snapshot.terminal_reason
+        if (
+            control.snapshot.run_mode == "loop_with_pruning"
+            and valid_candidate_count is not None
+        ):
+            if valid_candidate_count == 0:
+                consecutive_no_discovery_rounds += 1
+            else:
+                consecutive_no_discovery_rounds = 0
+            if (
+                control.snapshot.no_discovery_round_limit is not None
+                and consecutive_no_discovery_rounds
+                >= control.snapshot.no_discovery_round_limit
+            ):
+                terminal_reason = NO_DISCOVERY_LIMIT_TERMINAL_REASON
         updates = {
             "current_round": round_number,
             "last_completed_round": round_number,
+            "consecutive_no_discovery_rounds": consecutive_no_discovery_rounds,
             "last_round_summary": summary[:4000],
             "last_round_reference": reference[:512],
             "candidate_checkpoint_reference": candidate_checkpoint_reference[:512],
+            "terminal_reason": terminal_reason,
         }
         if proof_set_revision is not None:
             updates["proof_set_revision"] = proof_set_revision
@@ -497,6 +697,10 @@ class ProofRunManager:
             "proof_run_round_complete",
             {
                 "candidate_count": valid_candidate_count,
+                "consecutive_no_discovery_rounds": (
+                    snapshot.consecutive_no_discovery_rounds
+                ),
+                "no_discovery_round_limit": snapshot.no_discovery_round_limit,
                 "round_summary": summary[:4000],
                 "next_round_automatic": (
                     control.snapshot.run_mode == "loop_with_pruning"
@@ -529,6 +733,7 @@ class ProofRunManager:
         control: ProofRunControl,
         *,
         provider_state: Optional[dict] = None,
+        route_identity: Optional[Mapping[str, Any]] = None,
     ) -> ProofRunSnapshot:
         control.wake_event.clear()
         durable_provider_state = dict(provider_state or {})
@@ -544,7 +749,17 @@ class ProofRunManager:
             idle_policy="provider_reset",
             provider_state=durable_provider_state,
         )
-        await self._emit(control, "proof_run_provider_paused")
+        identity_fields = self._route_identity_event_fields(route_identity)
+        if identity_fields.get("route_identity"):
+            identity_fields["message"] = with_route_identity(
+                "Proof run paused for provider credits.",
+                identity_fields,
+            )
+        await self._emit(
+            control,
+            "proof_run_provider_paused",
+            identity_fields or None,
+        )
         return snapshot
 
     async def wait_for_provider_or_control_wake(
@@ -583,12 +798,17 @@ class ProofRunManager:
         control: ProofRunControl,
         *,
         reason: str,
+        route_identity: Optional[Mapping[str, Any]] = None,
     ) -> ProofRunSnapshot:
+        identity_fields = self._route_identity_event_fields(route_identity)
+        if identity_fields.get("route_identity"):
+            reason = with_route_identity(reason, identity_fields)
         return await self._finish(
             control,
             control.snapshot.lifecycle_generation,
             status="error",
             terminal_reason="repair_required",
+            terminal_event_extra=identity_fields or None,
             last_error_summary=reason[:1800],
         )
 
@@ -612,6 +832,7 @@ class ProofRunManager:
         control: ProofRunControl,
         *,
         from_provider_pause: bool = False,
+        route_identity: Optional[Mapping[str, Any]] = None,
     ) -> ProofRunSnapshot:
         snapshot = await self.update(
             control,
@@ -621,11 +842,22 @@ class ProofRunManager:
             idle_policy=None,
             provider_state=None,
         )
+        identity_fields = (
+            self._route_identity_event_fields(route_identity)
+            if from_provider_pause
+            else {}
+        )
+        if identity_fields.get("route_identity"):
+            identity_fields["message"] = with_route_identity(
+                "Proof run resumed after the provider pause.",
+                identity_fields,
+            )
         await self._emit(
             control,
             "proof_run_provider_resumed"
             if from_provider_pause
             else "proof_run_resumed",
+            identity_fields or None,
         )
         return snapshot
 
@@ -651,6 +883,7 @@ class ProofRunManager:
             finally:
                 sleep_inhibitor.release(control.sleep_owner)
                 await self.update(control, cleanup_completed=True)
+        await self._trim_terminal_activity_journals()
 
     async def get(self, proof_run_id: str) -> Optional[ProofRunSnapshot]:
         safe_run_id = validate_single_path_component(proof_run_id, "proof run ID")

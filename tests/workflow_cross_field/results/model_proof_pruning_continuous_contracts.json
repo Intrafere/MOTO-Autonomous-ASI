@@ -1,6 +1,20 @@
 {
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_pruning.artifacts_and_future_memory_preserved",
+    "proof_pruning.owning_run_context_excludes_pruned",
+    "proof_pruning.validator_gates_automatic_mutation",
+    "proof_pruning.semantic_distinct_review_preserves_unique_routes",
+    "proof_pruning.no_prune_is_valid",
+    "proof_pruning.review_non_blocking",
+    "proof_pruning.commit_lifecycle_fenced",
+    "proof_pruning.context_overflow_truthful",
+    "proof_loop.continuous_explicit_ownership",
+    "proof_loop.automatic_round_policy_preserved",
+    "proof_pruning.occurrence_scope_isolated"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "pruned_artifact_preserved",
@@ -14,6 +28,7 @@
     "automatic_round_policy",
     "occurrence_scope"
   ],
+  "faked_dependencies": [],
   "fields": [
     "proof_pruning",
     "continuous_proof_loop",
@@ -39,13 +54,20 @@
     "proof_loop.automatic_round_policy_preserved",
     "proof_pruning.occurrence_scope_isolated"
   ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
   "replay": [
     "exercise_proof_pruning_and_continuous_contracts"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "model_proof_pruning_continuous_contracts",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "curated",
-  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+  "source_identity": "workflow-source-v1:cead859983aa7d1834880a758b6981f2afcddf7064d8c2dc8f15874a621adeb6",
+  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
 }

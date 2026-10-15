@@ -42,7 +42,7 @@ This document provides guidelines for contributing to the project.
 
 4. **Set up development environment**:
    - Install [Cursor IDE](https://cursor.com/) (recommended for AI-assisted development)
-   - The `.cursor/rules/` folder contains complete design specifications
+   - The `.claude/rules/` folder contains complete design specifications
    - Cursor can help you understand and modify the codebase
 
 5. **Create a branch for your work**:
@@ -81,17 +81,17 @@ Key directories:
 - `backend/shared/`: Shared utilities, API clients, models
 - `backend/api/`: FastAPI routes and WebSocket
 - `frontend/src/components/`: React UI components
-- `.cursor/rules/`: Complete system design specifications
+- `.claude/rules/`: Complete system design specifications
 
 ### Design Specifications
 
-**CRITICAL**: Before making significant changes, read the relevant design docs in `.cursor/rules/`:
+**CRITICAL**: Before making significant changes, read the relevant design docs in `.claude/rules/`:
 
-1. **part-1-aggregator-tool-design-specifications.mdc**: Multi-agent aggregation workflow
-2. **part-2-compiler-tool-design-specification.mdc**: Paper compilation system
-3. **part-3-autonomous-research-mode.mdc**: Autonomous topic selection and synthesis
-4. **rag-design-for-overall-program.mdc**: RAG architecture and 4-stage pipeline
-5. **program-directory-and-file-definitions.mdc**: File structure and purpose
+1. **part-1-aggregator-tool-design-specifications.md**: Multi-agent aggregation workflow
+2. **part-2-compiler-tool-design-specification.md**: Paper compilation system
+3. **part-3-autonomous-research-mode.md**: Autonomous topic selection and synthesis
+4. **rag-design-for-overall-program.md**: RAG architecture and 4-stage pipeline
+5. **program-directory-and-file-definitions.md**: File structure and purpose
 
 These specifications are used by AI agents (like Cursor) to assist with development.
 
@@ -102,7 +102,7 @@ These specifications are used by AI agents (like Cursor) to assist with developm
 ### Before Submitting
 
 1. **Search existing issues** to avoid duplicates
-2. **Check the documentation** in `.cursor/rules/` and README.md
+2. **Check the documentation** in `.claude/rules/` and README.md
 3. **Test with latest version** from main branch
 
 ### Bug Report Template
@@ -302,7 +302,7 @@ Update documentation when you:
 ### Documentation Locations
 
 - **README.md**: Main project documentation
-- **.cursor/rules/**: System design specifications (update if architecture changes)
+- **.claude/rules/**: System design specifications (update if architecture changes)
 - **Code comments**: Add inline documentation
 - **Docstrings**: Document classes and functions
 
@@ -312,7 +312,7 @@ Update documentation when you:
 
 - **Issues**: Open a GitHub issue for bugs or questions
 - **Discussions**: Use GitHub Discussions for general questions
-- **Documentation**: Check `.cursor/rules/` for detailed design specs
+- **Documentation**: Check `.claude/rules/` for detailed design specs
 - **Cursor IDE**: Use Cursor with the rules folder for AI-assisted development
 
 ---

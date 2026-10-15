@@ -1,12 +1,19 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "prompt.mandatory_source_overflow_fails_visible"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "visible_value_error",
     "zero_model_calls",
     "zero_rag_calls",
     "source_unchanged"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "prompt_context",
@@ -16,11 +23,21 @@
   "invariants": [
     "prompt.mandatory_source_overflow_fails_visible"
   ],
+  "observed_transition": "visible_value_error; zero_model_calls; zero_rag_calls; source_unchanged",
+  "real_components": [
+    "backend/autonomous/agents/proof_formalization_agent.py",
+    "backend/compiler/agents/high_param_submitter.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_rigor_mandatory_source_overflow_fails_before_model_or_rag",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py"
+  "source_identity": "workflow-source-v1:57f116ce7b9dfeaaa2d41334a7925d5fc4d8d3606872a168d379a8bf0982c977",
+  "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py::test_real_compiler_rigor_mandatory_full_source_overflow_is_visible_and_pre_llm"
+  ]
 }

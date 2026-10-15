@@ -530,6 +530,123 @@ async def test_hard_failure_requires_explicit_generation_fenced_resume(
 
 
 @pytest.mark.asyncio
+async def test_repair_event_names_the_configured_reviewer_route(tmp_path, monkeypatch):
+    from backend.shared.api_client_manager import api_client_manager
+    from backend.shared.models import ModelConfig
+
+    events = []
+
+    async def reviewer(proposal, plan):
+        raise RuntimeError("No OpenRouter API key is available")
+
+    engine = SolutionPathEngine(
+        tmp_path, "run-repair-identity", reviewer, workflow_mode="autonomous"
+    )
+
+    async def capture(event, payload):
+        events.append((event, payload))
+
+    monkeypatch.setattr(engine, "_broadcast", capture)
+    monkeypatch.setitem(
+        api_client_manager._role_model_configs,
+        "autonomous_solution_path_reviewer",
+        ModelConfig(
+            provider="openrouter",
+            model_id="vendor/test-reviewer:free",
+            openrouter_model_id="vendor/test-reviewer:free",
+            context_window=4096,
+            max_output_tokens=512,
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.shared.api_client_manager._active_notification_workflow_mode",
+        lambda: "",
+    )
+    await engine.set_acceptance_count(5)
+    await engine.propose(route("repair me"))
+    await engine.wait_idle()
+
+    payload = dict(events)["solution_path_proposal_user_repair_required"]
+    assert payload["workflow_mode"] == "autonomous"
+    assert payload["role_id"] == "autonomous_solution_path_reviewer"
+    assert payload["model"] == "vendor/test-reviewer:free"
+    assert payload["provider"] == "openrouter"
+    assert payload["configured_host_provider"] == ""
+    assert payload["host_routing"] == "auto"
+    assert payload["route_identity"] == (
+        "[Autonomous · Solution Path Reviewer · vendor/test-reviewer:free via "
+        "OpenRouter · host auto (upstream not reported)]"
+    )
+    assert payload["message"] == (
+        "Solution-path review needs user configuration repair before it can continue."
+    )
+
+
+@pytest.mark.asyncio
+async def test_broadcast_delivers_events_with_activity_workflow(tmp_path, monkeypatch):
+    delivered = []
+
+    async def reviewer(proposal, plan):
+        return ReviewDecision(decision="approve")
+
+    async def broadcast_event(event, payload):
+        delivered.append((event, payload))
+
+    monkeypatch.setattr("backend.api.routes.websocket.broadcast_event", broadcast_event)
+    engine = SolutionPathEngine(
+        tmp_path, "run-broadcast", reviewer, workflow_mode="leanoj"
+    )
+    await engine.set_acceptance_count(5)
+
+    activated = dict(delivered)["solution_path_activated"]
+    assert activated["activity_workflow"] == "leanoj"
+    assert activated["activity_run_id"] == "run-broadcast"
+
+
+@pytest.mark.asyncio
+async def test_repair_event_prefers_the_typed_error_route(tmp_path, monkeypatch):
+    from backend.shared.provider_errors import ProviderRepairRequiredError
+
+    events = []
+
+    async def reviewer(proposal, plan):
+        raise ProviderRepairRequiredError(
+            provider="xai_grok_oauth",
+            provider_label="xAI Grok",
+            role_id="manual_solution_path_reviewer",
+            model="grok-test",
+            reason="provider_spending_limit",
+            message="xAI Grok spending limit reached.",
+        )
+
+    engine = SolutionPathEngine(
+        tmp_path, "run-repair-typed", reviewer, workflow_mode="manual"
+    )
+
+    async def capture(event, payload):
+        events.append((event, payload))
+
+    monkeypatch.setattr(engine, "_broadcast", capture)
+    monkeypatch.setattr(
+        "backend.shared.api_client_manager._active_notification_workflow_mode",
+        lambda: "aggregator",
+    )
+    await engine.set_acceptance_count(5)
+    await engine.propose(route("repair me"))
+    await engine.wait_idle()
+
+    payload = dict(events)["solution_path_proposal_user_repair_required"]
+    assert payload["workflow_mode"] == "manual"
+    assert payload["role_id"] == "manual_solution_path_reviewer"
+    assert payload["model"] == "grok-test"
+    assert payload["provider"] == "xai_grok_oauth"
+    assert payload["host_routing"] == "direct"
+    assert payload["route_identity"] == (
+        "[Aggregator · Solution Path Reviewer · grok-test via xAI Grok]"
+    )
+
+
+@pytest.mark.asyncio
 async def test_stale_detached_proposal_cannot_resurrect_cleared_state(tmp_path):
     async def reviewer(proposal, plan):
         return ReviewDecision(decision="approve")

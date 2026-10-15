@@ -14,11 +14,13 @@ from tests.workflow_cross_field.artifacts import (
     TARGET_RISKS_JSON_PATH,
     TARGET_RISKS_MARKDOWN_PATH,
     render_artifacts,
+    render_metadata_artifacts,
 )
 from tests.workflow_cross_field.support_graph import (
     SUPPORT_GRAPH_JSON_PATH,
     SUPPORT_GRAPH_MARKDOWN_PATH,
 )
+from tests.workflow_cross_field.target_risks import TARGET_RISKS, TARGET_RISK_SCHEMA_VERSION
 from tests.workflow_harness.coverage_metadata import (
     InteractionCoverage,
     assert_coverage_metadata_valid,
@@ -48,6 +50,30 @@ def test_projection_is_deterministic_and_complete():
     assert "uncovered" in SUMMARY_PATH.read_text(encoding="utf-8")
 
 
+def test_metadata_projection_is_fast_deterministic_and_classified():
+    first = render_metadata_artifacts()
+    second = render_metadata_artifacts()
+    assert first == second
+    scenario_payloads = [
+        json.loads(content)
+        for path, content in first.items()
+        if path.parent == SCENARIOS_DIR
+    ]
+    target_payloads = [
+        json.loads(content)
+        for path, content in first.items()
+        if path.parent == TARGETS_DIR
+    ]
+    assert scenario_payloads
+    assert target_payloads
+    assert {
+        payload["coverage_classification"] for payload in scenario_payloads
+    } == {"deterministic_model_evidence"}
+    assert {
+        payload["coverage_classification"] for payload in target_payloads
+    } == {"recombinatory_model_evidence"}
+
+
 def test_generated_results_have_replay_diagnostics_and_evidence():
     for path in RESULTS_DIR.glob("*.json"):
         record = json.loads(path.read_text(encoding="utf-8"))
@@ -63,6 +89,18 @@ def test_generated_results_have_replay_diagnostics_and_evidence():
             assert record["diagnostics"]["final_mode"]
             assert record["diagnostics"]["final_phase"]
             assert set(record["invariants"]) == set(record["exercised_invariants"])
+        assert record["source_identity"].startswith("workflow-source-v1:")
+        assert len(record["source_identity"]) == len("workflow-source-v1:") + 64
+        for field in (
+            "runner",
+            "test_selectors",
+            "asserted_invariants",
+            "real_components",
+            "faked_dependencies",
+            "blocked_dependencies",
+            "observed_transition",
+        ):
+            assert field in record
 
 
 def test_generated_targets_are_projected_and_linked_bidirectionally():
@@ -113,10 +151,12 @@ def test_disk_artifacts_link_to_known_scenarios_and_catalog():
 
 def test_target_risk_artifacts_are_versioned_ranked_and_linked():
     payload = json.loads(TARGET_RISKS_JSON_PATH.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == TARGET_RISK_SCHEMA_VERSION
     assert payload["artifact_type"] == "target_risk_analysis"
-    assert len(payload["risks"]) == 12
-    assert [risk["rank"] for risk in payload["risks"]] == list(range(1, 13))
+    assert len(payload["risks"]) == len(TARGET_RISKS)
+    assert [risk["rank"] for risk in payload["risks"]] == list(
+        range(1, len(TARGET_RISKS) + 1)
+    )
     assert [(-risk["gap_score"], risk["risk_id"]) for risk in payload["risks"]] == sorted(
         (-risk["gap_score"], risk["risk_id"]) for risk in payload["risks"]
     )

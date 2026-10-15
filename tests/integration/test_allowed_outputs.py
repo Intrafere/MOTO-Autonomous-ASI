@@ -12,6 +12,7 @@ from backend.shared.models import (
     AutonomousResearchStartRequest,
     CompilerStartRequest,
     ProofCheckRequest,
+    ProofSettingsUpdateRequest,
     SubmitterConfig,
 )
 
@@ -431,6 +432,35 @@ class AllowedOutputRouteTests(IsolatedAsyncioTestCase):
 
 
 class ProofStatusReadinessTests(IsolatedAsyncioTestCase):
+    async def test_settings_cannot_enable_lean_when_runtime_is_unavailable(self) -> None:
+        previous = (
+            proofs_route.system_config.lean4_enabled,
+            proofs_route.system_config.lean4_runtime_available,
+            proofs_route.system_config.lean4_user_enabled,
+        )
+        proofs_route.system_config.lean4_enabled = False
+        proofs_route.system_config.lean4_runtime_available = False
+        proofs_route.system_config.lean4_user_enabled = False
+        request = ProofSettingsUpdateRequest(enabled=True, timeout=900)
+        try:
+            with mock.patch.object(proofs_route, "initialize_lean4_client") as initialize:
+                with mock.patch.object(proofs_route, "save_proof_runtime_settings"):
+                    with mock.patch.object(
+                        proofs_route,
+                        "get_proofs_status",
+                        mock.AsyncMock(return_value={"lean4_enabled": False}),
+                    ):
+                        payload = await proofs_route.update_proof_settings(request)
+        finally:
+            (
+                proofs_route.system_config.lean4_enabled,
+                proofs_route.system_config.lean4_runtime_available,
+                proofs_route.system_config.lean4_user_enabled,
+            ) = previous
+
+        self.assertFalse(payload["lean4_enabled"])
+        initialize.assert_not_called()
+
     async def test_status_keeps_manual_check_queueable_when_workspace_is_not_started(self) -> None:
         previous_lean_enabled = proofs_route.system_config.lean4_enabled
         previous_smt_enabled = proofs_route.system_config.smt_enabled

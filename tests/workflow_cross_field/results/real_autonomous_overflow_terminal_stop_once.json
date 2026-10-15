@@ -1,10 +1,18 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "events.context_overflow_route_identity",
+    "events.context_overflow_terminal_stop_once"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "configured_effective_route",
     "single_terminal_stop"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "websocket_api_contracts",
@@ -15,11 +23,21 @@
     "events.context_overflow_route_identity",
     "events.context_overflow_terminal_stop_once"
   ],
+  "observed_transition": "configured_effective_route; single_terminal_stop",
+  "real_components": [
+    "backend/aggregator/core/coordinator.py",
+    "backend/autonomous/core/autonomous_coordinator.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_autonomous_overflow_terminal_stop_once",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+  "source_identity": "workflow-source-v1:c99982150077922f7314f2035c1b5f051c71b3af42f18d7df5b67d70e7961cf0",
+  "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py::test_autonomous_fatal_overflow_terminal_stop_emits_exactly_once"
+  ]
 }

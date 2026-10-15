@@ -1,19 +1,26 @@
 {
   "action_ids": [
-    "start_manual_aggregator",
+    "start_autonomous_papers_and_proofs",
     "attempt_conflicting_start"
   ],
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {
-    "final_mode": "manual_aggregator",
-    "final_phase": "manual_aggregation"
+    "final_mode": "autonomous",
+    "final_phase": "topic_exploration"
   },
   "evidence": [
     "start_blocked"
   ],
   "exercised_invariants": [
     "runtime.single_active_workflow"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
   ],
   "fields": [
     "runtime_exclusivity",
@@ -23,18 +30,27 @@
     "runtime.single_active_workflow"
   ],
   "observed_fields": [
+    "allowed_outputs",
+    "assistant_memory",
+    "prompt_context",
     "runtime_exclusivity",
-    "websocket_api_contracts",
-    "workflow_filesystem_state"
+    "websocket_api_contracts"
   ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
   "replay": [
-    "start_manual_aggregator()",
+    "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
     "start_manual_compiler()"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "generated_runtime_start_exclusivity_seed_7",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 7,
+  "source_identity": "workflow-source-v1:9223cdfb006b1e6c03855776abb2e436a812e02134d51021d3c008a2e71767d4",
   "target_artifact": "targets/generated_runtime_start_exclusivity.json",
-  "target_id": "generated_runtime_start_exclusivity"
+  "target_id": "generated_runtime_start_exclusivity",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
 }

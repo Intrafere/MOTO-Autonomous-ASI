@@ -2,12 +2,21 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from backend.shared import lean_workspace_paths
 from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_PATH_TOO_LONG,
+    LEAN_WORKSPACE_SETUP_FAILED,
     Lean4Client,
+    Lean4Result,
+    LeanWorkspaceRepairRequiredError,
     _deduplicate_leading_import,
     _strip_markdown_fences,
+    raise_for_lean_workspace_failure,
+    recover_lean_workspace,
 )
+from backend.shared.lean_workspace_paths import MAX_SAFE_WORKSPACE_PATH
 
 
 class Lean4ClientWorkspaceTests(unittest.IsolatedAsyncioTestCase):
@@ -129,6 +138,127 @@ class Lean4ClientWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client.start_workspace_bootstrap().cancelled())
         release.set()
         self.assertTrue(await client.await_workspace_ready())
+
+
+class Lean4WorkspaceRepairTests(unittest.IsolatedAsyncioTestCase):
+    def _client(self, root: Path, workspace: Path) -> Lean4Client:
+        (root / "lake.exe").write_text("", encoding="utf-8")
+        return Lean4Client(lean_path=str(root / "lean.exe"), workspace_dir=str(workspace))
+
+    async def test_long_windows_workspace_path_fails_before_any_lake_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / ("w" * (MAX_SAFE_WORKSPACE_PATH + 1))
+            client = self._client(root, workspace)
+            calls: list[list[str]] = []
+
+            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
+                calls.append(args)
+                return 0, "", ""
+
+            client._run_process = fake_run_process  # type: ignore[method-assign]
+            with mock.patch.object(lean_workspace_paths, "is_windows_platform", return_value=True):
+                self.assertFalse(await client.ensure_workspace())
+                with self.assertRaises(LeanWorkspaceRepairRequiredError) as raised:
+                    client.require_workspace()
+
+            self.assertEqual(calls, [])
+            self.assertFalse(workspace.exists())
+            self.assertEqual(raised.exception.failure_kind, LEAN_WORKSPACE_PATH_TOO_LONG)
+            self.assertIn("folder path is too long", client.get_workspace_status()["error"])
+
+    async def test_windows_path_error_is_diagnosed_without_deleting_cache_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "ws"
+            mathlib_sources = workspace / ".lake" / "packages" / "mathlib" / "Mathlib"
+            mathlib_sources.mkdir(parents=True)
+            # Make the module's build output land 5 characters past Windows MAX_PATH.
+            module_length = 200 - len(str(workspace.resolve()))
+            (mathlib_sources / f"{'M' * (module_length - len('Mathlib/'))}.lean").write_text(
+                "", encoding="utf-8"
+            )
+            archive = root / ".cache" / "mathlib" / "intact.ltar"
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(b"valid archive")
+            client = self._client(root, workspace)
+            calls: list[list[str]] = []
+
+            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
+                calls.append(args)
+                if args[1:] == ["update"]:
+                    return 0, "updated", ""
+                return 1, "", f"({archive}) The system cannot find the path specified. (os error 3)"
+
+            client._run_process = fake_run_process  # type: ignore[method-assign]
+            with mock.patch.object(lean_workspace_paths, "is_windows_platform", return_value=True):
+                self.assertFalse(await client.ensure_workspace())
+
+            self.assertEqual([call[1:] for call in calls], [["update"], ["exe", "cache", "get"]])
+            self.assertTrue(archive.exists())
+            self.assertEqual(
+                client.workspace_repair_required_error().failure_kind,
+                LEAN_WORKSPACE_PATH_TOO_LONG,
+            )
+
+    async def test_require_workspace_only_raises_for_a_known_failure(self) -> None:
+        client = Lean4Client(lean_path="", workspace_dir=tempfile.gettempdir())
+        calls = 0
+
+        async def fake_ensure() -> bool:
+            nonlocal calls
+            calls += 1
+            return False
+
+        client._ensure_workspace_locked = fake_ensure  # type: ignore[method-assign]
+        client.require_workspace()
+        self.assertEqual(calls, 0)
+
+        self.assertFalse(await client.await_workspace_ready())
+        with self.assertRaises(LeanWorkspaceRepairRequiredError) as raised:
+            client.require_workspace()
+        self.assertEqual(calls, 1)
+        self.assertEqual(raised.exception.failure_kind, LEAN_WORKSPACE_SETUP_FAILED)
+
+    async def test_round_guard_gives_a_failed_setup_one_fresh_attempt(self) -> None:
+        client = Lean4Client(lean_path="", workspace_dir=tempfile.gettempdir())
+        outcomes = [False, True]
+        calls = 0
+
+        async def fake_ensure() -> bool:
+            nonlocal calls
+            calls += 1
+            ready = outcomes.pop(0)
+            client._workspace_ready = ready
+            return ready
+
+        client._ensure_workspace_locked = fake_ensure  # type: ignore[method-assign]
+        self.assertFalse(await client.await_workspace_ready())
+
+        await recover_lean_workspace(client)
+
+        self.assertEqual(calls, 2)
+        client.require_workspace()
+
+    async def test_round_guard_never_retries_a_too_long_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            client = self._client(root, root / ("w" * (MAX_SAFE_WORKSPACE_PATH + 1)))
+            ensure = mock.AsyncMock(return_value=True)
+            client._ensure_workspace_locked = ensure  # type: ignore[method-assign]
+            with mock.patch.object(lean_workspace_paths, "is_windows_platform", return_value=True):
+                with self.assertRaises(LeanWorkspaceRepairRequiredError):
+                    await recover_lean_workspace(client)
+            ensure.assert_not_awaited()
+
+    def test_workspace_failure_result_becomes_the_typed_repair_error(self) -> None:
+        raise_for_lean_workspace_failure(Lean4Result(success=False, error_output="error: unsolved goals"))
+        with self.assertRaises(LeanWorkspaceRepairRequiredError) as raised:
+            raise_for_lean_workspace_failure(
+                Lean4Result(success=False, error_output="LEAN 4 WORKSPACE ERROR: Mathlib cache failed.")
+            )
+        self.assertTrue(str(raised.exception).startswith("LEAN 4 WORKSPACE ERROR"))
+        self.assertEqual(raised.exception.to_payload()["reason"], "lean_workspace_repair_required")
 
 
 class Lean4ExtractionTests(unittest.IsolatedAsyncioTestCase):

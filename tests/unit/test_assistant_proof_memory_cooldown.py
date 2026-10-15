@@ -434,6 +434,63 @@ class AssistantCooldownCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state.zero_cooldown_stage, 0)
             self.assertFalse(state.zero_shutdown_active)
 
+    async def test_assistant_selector_failure_names_the_assistant_route(self) -> None:
+        from backend.shared.api_client_manager import api_client_manager
+        from backend.shared.models import ModelConfig
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = AssistantRankCache(Path(temp_dir) / "assistant_ranker.sqlite")
+
+            async def _failing_selector(*args) -> tuple[list[str], str]:
+                raise RuntimeError("No JSON found in response")
+
+            coordinator = AssistantProofSearchCoordinator(
+                service=_NoCandidateProofSearchService(),
+                cache=cache,
+                assistant_selector=_failing_selector,
+            )
+            assistant_config = ModelConfig(
+                provider="openrouter",
+                model_id="vendor/test-assistant:free",
+                openrouter_model_id="vendor/test-assistant:free",
+                openrouter_provider="TestHost",
+                context_window=4096,
+                max_output_tokens=512,
+            )
+            events: list[tuple[str, dict]] = []
+
+            async def _capture(event_type: str, payload: dict) -> None:
+                events.append((event_type, payload))
+
+            with (
+                mock.patch.dict(
+                    api_client_manager._role_model_configs,
+                    {"autonomous_assistant": assistant_config},
+                ),
+                mock.patch(
+                    "backend.shared.api_client_manager._active_notification_workflow_mode",
+                    return_value="",
+                ),
+                mock.patch("backend.api.routes.websocket.broadcast_event", new=_capture),
+            ):
+                await coordinator.refresh_now(_snapshot())
+
+            failed = dict(events)["assistant_proof_pack_failed"]
+            identity = (
+                "[Autonomous · Assistant (autonomous) · vendor/test-assistant:free via "
+                "OpenRouter · host TestHost (pinned)]"
+            )
+            self.assertEqual(failed["workflow_mode"], "autonomous")
+            self.assertEqual(failed["role_id"], "autonomous_assistant")
+            self.assertEqual(failed["model"], "vendor/test-assistant:free")
+            self.assertEqual(failed["provider"], "openrouter")
+            self.assertEqual(failed["provider_label"], "OpenRouter")
+            self.assertEqual(failed["configured_host_provider"], "TestHost")
+            self.assertEqual(failed["host_routing"], "pinned")
+            self.assertEqual(failed["route_identity"], identity)
+            self.assertEqual(failed["error_message"], "No JSON found in response")
+            self.assertNotIn("message", failed)
+
     async def test_assistant_selector_failure_does_not_reuse_unrelated_latest_pack(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             cache = AssistantRankCache(Path(temp_dir) / "assistant_ranker.sqlite")

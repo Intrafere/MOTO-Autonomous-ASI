@@ -1062,6 +1062,8 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
                     status_code=400,
                     detail=f"Number of submitters must be {system_config.min_submitters}-{system_config.max_submitters}, got {num_submitters}"
                 )
+            for index, config in enumerate(request.submitter_configs, start=1):
+                config.submitter_id = index
             await require_embedding_provider_ready()
 
             # Log submitter configurations

@@ -105,8 +105,12 @@ def _record_from_library_entry(
     corpus = "leanoj" if source_type.startswith("leanoj_") else default_corpus
     lean_code = str(entry.get("lean_code", "") or "")
     identity = canonical_proof_identity(theorem_statement, lean_code)
+    client_proof_id = str(entry.get("client_proof_id", "") or "")
+    canonical_locator = entry.get("canonical_locator")
+    locator_digest = str(entry.get("canonical_locator_digest", "") or "")
+    occurrence_key = client_proof_id or f"{session_id}:{proof_id}"
     return UnifiedProofSearchRecord(
-        search_id=f"{corpus}:{session_id}:{proof_id}",
+        search_id=f"{corpus}:{occurrence_key}",
         corpus=corpus,
         corpus_scope="archived" if default_corpus == "manual" else "history",
         source_kind="verified_proof",
@@ -126,16 +130,22 @@ def _record_from_library_entry(
         canonical_identity_version=identity.version,
         canonical_lean_code_hash=identity.lean_code_hash if lean_code else "",
         canonical_theorem_statement_hash=identity.theorem_statement_hash,
+        client_proof_id=client_proof_id,
+        canonical_locator=canonical_locator,
+        canonical_locator_digest=locator_digest,
         dependency_names=_dependency_names(entry.get("dependencies", [])),
         novelty_tier=str(entry.get("novelty_tier", "") or ""),
         novelty_reasoning=str(entry.get("novelty_reasoning", "") or ""),
+        novelty_scope=str(entry.get("novelty_scope") or "standalone"),
+        novelty_group_claim=str(entry.get("novelty_group_claim") or ""),
+        novelty_group_proof_ids=list(entry.get("novelty_group_proof_ids") or []),
         verified=True,
         created_at=str(entry.get("created_at", "") or ""),
         live_context_status=str(entry.get("live_context_status") or "active"),
         live_context_owner_run_id=str(entry.get("live_context_owner_run_id") or ""),
         live_context_pruned_at=str(entry.get("live_context_pruned_at") or ""),
         live_context_pruned_by=str(entry.get("live_context_pruned_by") or ""),
-        canonical_uri=f"moto-proof://{corpus}/{session_id}/{proof_id}",
+        canonical_uri=f"moto-proof://{corpus}/{occurrence_key}",
         metadata={
             "novel": bool(entry.get("novel", False)),
             "solver": str(entry.get("solver", "") or "Lean 4"),
@@ -174,9 +184,10 @@ def normalize_proof_record(
     identity = canonical_proof_identity(proof.theorem_statement, proof.lean_code)
     scope = "active" if default_corpus == "manual" else "current"
     run_id = str(getattr(proof, "run_id", "") or session_id)
+    occurrence_key = proof.client_proof_id or f"{session_id}:{proof.proof_id}"
 
     return UnifiedProofSearchRecord(
-        search_id=f"{corpus}:{session_id}:{proof.proof_id}",
+        search_id=f"{corpus}:{occurrence_key}",
         corpus=corpus,
         corpus_scope=scope,
         source_kind="verified_proof",
@@ -196,10 +207,27 @@ def normalize_proof_record(
         canonical_identity_version=identity.version,
         canonical_lean_code_hash=identity.lean_code_hash if proof.lean_code else "",
         canonical_theorem_statement_hash=identity.theorem_statement_hash,
-        imports=_import_names(proof.dependencies),
+        client_proof_id=proof.client_proof_id,
+        canonical_locator=proof.canonical_locator,
+        canonical_locator_digest=proof.canonical_locator_digest,
+        verification_evidence_status=proof.verification_evidence_status,
+        compile_receipt_digest=(
+            proof.compile_receipt.receipt_digest if proof.compile_receipt else ""
+        ),
+        checked_source_sha256=(
+            proof.compile_receipt.checked_source_sha256 if proof.compile_receipt else ""
+        ),
+        imports=(
+            [item.module_name for item in proof.compile_receipt.explicit_imports]
+            if proof.compile_receipt
+            else _import_names(proof.dependencies)
+        ),
         dependency_names=_dependency_names(proof.dependencies),
         novelty_tier=proof.novelty_tier,
         novelty_reasoning=proof.novelty_reasoning,
+        novelty_scope=proof.novelty_scope,
+        novelty_group_claim=proof.novelty_group_claim,
+        novelty_group_proof_ids=list(proof.novelty_group_proof_ids),
         verified=True,
         created_at=proof.created_at.isoformat() if proof.created_at else "",
         live_context_status=proof.live_context_status,
@@ -210,7 +238,7 @@ def normalize_proof_record(
             else ""
         ),
         live_context_pruned_by=proof.live_context_pruned_by or "",
-        canonical_uri=f"moto-proof://{corpus}/{proof.proof_id}",
+        canonical_uri=f"moto-proof://{corpus}/{occurrence_key}",
         metadata={
             "theorem_id": proof.theorem_id,
             "solver": proof.solver,

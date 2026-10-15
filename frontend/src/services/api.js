@@ -420,7 +420,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: apiKey }),
     });
-    if (!response.ok) throw new Error('Failed to set Wolfram Alpha API key');
+    if (!response.ok) await throwFromResponse(response, 'Failed to set Wolfram Alpha API key');
     return response.json();
   },
   
@@ -841,6 +841,16 @@ export const autonomousAPI = {
     return normalizeProofRunSnapshot(data);
   },
 
+  async getProofRunActivity(proofRunId, { afterSequence = 0, limit = null } = {}) {
+    const params = new URLSearchParams({ after_sequence: String(afterSequence) });
+    if (limit !== null) params.set('limit', String(limit));
+    return requestProofRunJson(
+      `/proofs/runs/${encodeURIComponent(proofRunId)}/activity?${params.toString()}`,
+      { cache: 'no-store' },
+      'Failed to load proof run activity',
+    );
+  },
+
   async stopProofRun(proofRunId, lifecycleGeneration) {
     const data = await requestProofRunJson(
       `/proofs/runs/${encodeURIComponent(proofRunId)}/stop`,
@@ -946,6 +956,14 @@ export const autonomousAPI = {
     return response.text();
   },
 
+  async getProofNoveltyGroup(proofId, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/${encodeURIComponent(proofId)}/novelty-group`, scope)}`);
+    if (!response.ok) {
+      await throwFromResponse(response, `Failed to get novelty group for ${proofId}`);
+    }
+    return response.json();
+  },
+
   async getProofLibrary(category = 'novel', scope = 'autonomous') {
     const normalizedCategory = typeof category === 'boolean'
       ? (category ? 'novel' : 'all')
@@ -958,6 +976,14 @@ export const autonomousAPI = {
   async getLibraryProof(sessionId, proofId, scope = 'autonomous') {
     const response = await fetch(`${API_BASE}${withProofScope(`/proofs/library/${encodeURIComponent(sessionId)}/${encodeURIComponent(proofId)}`, scope)}`);
     if (!response.ok) throw new Error(`Failed to get library proof ${proofId}`);
+    return response.json();
+  },
+
+  async getLibraryProofNoveltyGroup(sessionId, proofId, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/library/${encodeURIComponent(sessionId)}/${encodeURIComponent(proofId)}/novelty-group`, scope)}`);
+    if (!response.ok) {
+      await throwFromResponse(response, `Failed to get archived novelty group for ${proofId}`);
+    }
     return response.json();
   },
 
@@ -1544,6 +1570,24 @@ export const leanojAPI = {
     return response.json();
   },
 
+  async getProofNoveltyGroup(proofId) {
+    const response = await fetch(`${API_BASE}/leanoj/proofs/${encodeURIComponent(proofId)}/novelty-group`);
+    if (!response.ok) {
+      await throwFromResponse(response, `Failed to get Proof Solver novelty group for ${proofId}`);
+    }
+    return response.json();
+  },
+
+  async getLibraryProofNoveltyGroup(sessionId, proofId) {
+    const response = await fetch(
+      `${API_BASE}/leanoj/library/${encodeURIComponent(sessionId)}/${encodeURIComponent(proofId)}/novelty-group`
+    );
+    if (!response.ok) {
+      await throwFromResponse(response, `Failed to get archived Proof Solver novelty group for ${proofId}`);
+    }
+    return response.json();
+  },
+
   async skipBrainstorm() {
     const response = await fetch(`${API_BASE}/leanoj/skip-brainstorm`, { method: 'POST' });
     if (!response.ok) {
@@ -1633,6 +1677,14 @@ export const openRouterAPI = {
   async getApiKeyStatus() {
     const response = await fetch(`${API_BASE}/openrouter/api-key-status`);
     if (!response.ok) await throwFromResponse(response, 'Failed to get API key status');
+    return response.json();
+  },
+
+  async validateCurrentApiKey() {
+    const response = await fetch(`${API_BASE}/openrouter/validate-current-key`, {
+      method: 'POST',
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to validate current API key');
     return response.json();
   },
 
@@ -1728,6 +1780,12 @@ export const cloudAccessAPI = {
   async getProviderNotifications() {
     const response = await fetch(`${API_BASE}/cloud-access/provider-notifications`);
     if (!response.ok) await throwFromResponse(response, 'Failed to get provider notifications');
+    return response.json();
+  },
+
+  async getProviderRecoveryEvents() {
+    const response = await fetch(`${API_BASE}/cloud-access/provider-recovery/events`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to get provider recovery events');
     return response.json();
   },
 
@@ -1852,11 +1910,104 @@ export const cloudAccessAPI = {
   },
 };
 
+// Developer-only proof-trade ledger controls; IDs travel in JSON bodies only.
+async function postTradeLedgerControl(path, body, fallbackMessage) {
+  const response = await fetch(`${API_BASE}/syntheticlib4/developer/trade-ledger/${path}`, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) await throwFromResponse(response, fallbackMessage);
+  return response.json();
+}
+
 export const syntheticLib4API = {
   async getStatus() {
     const response = await fetch(`${API_BASE}/syntheticlib4/status`);
     if (!response.ok) await throwFromResponse(response, 'Failed to get SyntheticLib4 status');
     return response.json();
+  },
+
+  async getTradeEvidenceDiagnostics() {
+    const response = await fetch(`${API_BASE}/syntheticlib4/developer/trade-evidence`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to run the local proof-trade evidence audit');
+    }
+    return response.json();
+  },
+
+  async getTradeLedgerStatus() {
+    const response = await fetch(`${API_BASE}/syntheticlib4/developer/trade-ledger`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to read the local proof-trade ledger');
+    }
+    return response.json();
+  },
+
+  async getTradeAuthorizationReadiness() {
+    const response = await fetch(`${API_BASE}/syntheticlib4/developer/trade-authorization`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to read proof-trade authorization readiness');
+    }
+    return response.json();
+  },
+
+  async listTradeLedgerEntries() {
+    const response = await fetch(`${API_BASE}/syntheticlib4/developer/trade-ledger/entries`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to list local proof-trade ledger entries');
+    }
+    return response.json();
+  },
+
+  async createTradeSelectionSnapshot(clientProofIds) {
+    return postTradeLedgerControl('snapshots', { client_proof_ids: clientProofIds }, 'Failed to create the local selection snapshot');
+  },
+
+  async reconcileTradeSelectionSnapshot(snapshotId) {
+    return postTradeLedgerControl('snapshots/reconcile', { snapshot_id: snapshotId }, 'Failed to reconcile the local selection snapshot');
+  },
+
+  async cancelTradeSelectionSnapshot(snapshotId) {
+    return postTradeLedgerControl('snapshots/cancel', { snapshot_id: snapshotId }, 'Failed to cancel the local selection snapshot');
+  },
+
+  async prepareTradeBatch(snapshotId) {
+    return postTradeLedgerControl('batches/prepare', { snapshot_id: snapshotId }, 'Failed to prepare the local batch');
+  },
+
+  async cancelTradeBatch(clientBatchId) {
+    return postTradeLedgerControl('batches/cancel', { client_batch_id: clientBatchId }, 'Failed to cancel the local batch');
+  },
+
+  async archiveResetTradeLedger() {
+    return postTradeLedgerControl('archive-reset', { confirm: true }, 'Failed to archive and reset the local trade ledger');
+  },
+
+  async migrateLegacyProofs(dryRun) {
+    const response = await fetch(`${API_BASE}/syntheticlib4/developer/legacy-port/migrate`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, dry_run: Boolean(dryRun) }),
+    });
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to prepare existing proofs');
+    }
+    return response.json();
+  },
+
+  async deleteArchivedTradeLedgers() {
+    return postTradeLedgerControl('archive/delete', { confirm: true }, 'Failed to delete archived local trade ledgers');
   },
 
   async startAuth(redirectUri = null) {

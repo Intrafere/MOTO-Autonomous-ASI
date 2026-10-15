@@ -163,6 +163,9 @@ class ProofIdentificationAgent:
                     prompt_relevance_rationale=prompt_relevance_rationale,
                     novelty_rationale=novelty_rationale,
                     why_not_standard_known_result=why_not_standard_known_result,
+                    retry_open_target_id=str(
+                        theorem.get("retry_open_target_id") or ""
+                    ).strip(),
                 )
             )
 
@@ -197,9 +200,10 @@ class ProofIdentificationAgent:
             '      "statement": "the theorem statement",\n'
             '      "formal_sketch": "Lean-relevant proof sketch",\n'
             '      "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation | not_novel",\n'
-            '      "prompt_relevance_rationale": "why this directly answers or substantially advances the user prompt",\n'
+            '      "prompt_relevance_rationale": "how this solves or plausibly advances the user prompt, directly or indirectly",\n'
             '      "novelty_rationale": "why this is not merely standard or routine",\n'
-            '      "why_not_standard_known_result": "why this is not a standard Mathlib/textbook result"\n'
+            '      "why_not_standard_known_result": "why this is not a standard Mathlib/textbook result",\n'
+            '      "retry_open_target_id": "Target ID of the OPEN PROOF TARGET this retries, or an empty string"\n'
             "    }\n"
             "  ]\n"
             "}\n\n"
@@ -350,6 +354,7 @@ class ProofIdentificationAgent:
         prior_round_results: str = "",
         candidate_list_rejection_feedback: str = "",
         candidate_list_rejection_feedback_entries: Sequence[str] = (),
+        open_proof_targets: str = "",
     ) -> Tuple[bool, List[ProofCandidate]]:
         """Return whether proof candidates exist and the extracted theorem list."""
         max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
@@ -368,6 +373,7 @@ class ProofIdentificationAgent:
                 proof_max_rounds=proof_max_rounds,
                 prior_round_results=prior_round_results,
                 candidate_list_rejection_feedback="\n\n".join(entries),
+                open_proof_targets=open_proof_targets,
             )
 
         fit = fit_prompt_with_feedback(

@@ -1,23 +1,45 @@
 {
-  "adapter": "real_coordinator",
+  "adapter": "real_route",
   "artifact_type": "result",
-  "diagnostics": {
-    "reason": "Focused manager and driver tests observe no-candidate continuation, detailed round activity, Stop cleanup, and non-resumable state separately; no bounded real adapter currently observes the complete continuous route lifecycle as one interaction."
-  },
-  "evidence": [],
+  "asserted_invariants": [
+    "proof_loop.continuous_explicit_ownership"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "ten_round_terminal",
+    "single_sleep_owner",
+    "exact_once_terminal",
+    "cleanup"
+  ],
+  "faked_dependencies": [
+    "manual source resolution",
+    "provider and Lean proof-stage boundary"
+  ],
   "fields": [
     "continuous_proof_loop",
     "runtime_exclusivity",
-    "workflow_filesystem_state"
+    "workflow_filesystem_state",
+    "provider_pause_resume"
   ],
   "invariants": [
     "proof_loop.continuous_explicit_ownership"
   ],
+  "observed_transition": "real check route queues one continuous run that publishes ten rounds, terminates normally once, and releases ownership",
+  "real_components": [
+    "backend/autonomous/core/proof_round_driver.py",
+    "backend/autonomous/core/proof_run_manager.py"
+  ],
   "replay": [],
-  "result": "blocked",
+  "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_continuous_loop_stop_terminal_zero_policy",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
+  "source_identity": "workflow-source-v1:a68071b620e3e026fa1628a68fa53b3a313c825eebf37d85b5695bd3c51f4c5a",
+  "test_file": "tests/workflow_real_adapters/test_build_07_proof_loop_lifecycle.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_07_proof_loop_lifecycle.py::test_real_continuous_route_completes_after_ten_empty_rounds_and_cleans_up"
+  ]
 }

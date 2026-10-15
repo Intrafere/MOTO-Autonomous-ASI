@@ -59,6 +59,8 @@ backend/data/compiler_last_10_rejections.txt
 backend/data/compiler_last_10_acceptances.txt
 backend/data/compiler_last_10_declines.txt
 backend/data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_*.txt
+**/.moto_installation_binding.json
+backend/data/syntheticlib_trade/
 
 backend/data/auto_brainstorms/*
 !backend/data/auto_brainstorms/.gitkeep
@@ -156,6 +158,23 @@ backend/data/.moto_runtime.lock
 moto-zap-quickscan-report.html
 
 # Private/local planning notes that should not be published
+SYNTHETICLIB_MOTO_INTEGRATION_REMAINING.md
+PLANS/
+
+# SyntheticLib proof-trade plan root: only the approved MOTO compatibility
+# evidence members are publishable; reserved contract slots stay local.
+syntheticlib-trade/*
+!syntheticlib-trade/compatibility/
+syntheticlib-trade/compatibility/*
+!syntheticlib-trade/compatibility/README.md
+!syntheticlib-trade/compatibility/compatibility-matrix.json
+!syntheticlib-trade/compatibility/moto-contract-test-result.json
+!syntheticlib-trade/compatibility/moto-compatibility-receipt.json
+!syntheticlib-trade/compatibility/moto-compatibility-receipt.sha256
+!syntheticlib-trade/compatibility/frozen-asset-manifest.json
+!syntheticlib-trade/compatibility/compatibility-bundle-manifest.json
+!syntheticlib-trade/compatibility/moto-preflight-attestation.json
+!syntheticlib-trade/compatibility/MOTO_COMPATIBILITY_RECEIPT.md
 PENDING_TESTS
 BUILD_PLAN_*.md
 (old) SyntheticLib Upgrade Plans/

@@ -72,7 +72,11 @@ def select_assistant_proof_supports(
     exploration_c: float = 0.2,
 ) -> list[AssistantProofSupport]:
     """Select final supports using P-UCB and MMR-style diversity."""
-    ranked = list(ranked_candidates)
+    ranked = [
+        candidate
+        for candidate in ranked_candidates
+        if candidate.record.novelty_scope != "group"
+    ]
     stats = candidate_stats or {}
     total_visits = sum(max(0, item.visits) for item in stats.values()) + 1
     selected: list[RankedProofCandidate] = []

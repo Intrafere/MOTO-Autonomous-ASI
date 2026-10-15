@@ -7,6 +7,26 @@ export const STRICT_NOVELTY_CATEGORIES = Object.freeze([
   'not_novel',
 ]);
 
+export function getNoveltyGroupAnchorIds(proof = {}) {
+  const anchors = Array.isArray(proof.novelty_group_anchor_proof_ids)
+    ? proof.novelty_group_anchor_proof_ids.filter(Boolean)
+    : [];
+  if (proof.novelty_scope === 'group' && proof.proof_id) {
+    anchors.push(proof.proof_id);
+  }
+  return [...new Set(anchors)];
+}
+
+export function getNoveltyGroupSize(proof = {}) {
+  if (proof.novelty_scope !== 'group') return 0;
+  return new Set([
+    ...(Array.isArray(proof.novelty_group_proof_ids)
+      ? proof.novelty_group_proof_ids.filter(Boolean)
+      : []),
+    ...(proof.proof_id ? [proof.proof_id] : []),
+  ]).size;
+}
+
 const NOVELTY_PRESENTATION = Object.freeze({
   major_mathematical_discovery: {
     label: 'Major Mathematical Discovery',

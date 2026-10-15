@@ -1,0 +1,35 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [],
+  "blocked_dependencies": [
+    "live OpenRouter upstream host reporting"
+  ],
+  "diagnostics": {
+    "reason": "Upstream host parsing is proven only against synthetic OpenRouter response shapes; whether live OpenRouter error bodies keep reporting the upstream host cannot be observed without a credentialed network call."
+  },
+  "evidence": [],
+  "faked_dependencies": [],
+  "fields": [
+    "websocket_api_contracts",
+    "provider_routing",
+    "provider_pause_resume"
+  ],
+  "invariants": [
+    "live_activity.provider_error_route_identity"
+  ],
+  "observed_transition": null,
+  "real_components": [
+    "backend/shared/openrouter_client.py"
+  ],
+  "replay": [],
+  "result": "blocked",
+  "runner": null,
+  "scenario_id": "real_live_openrouter_upstream_host_reported",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:27f6ca5b46cf0fd4e3d159163434ed9fbedc1af7d65a0d1f8162da95b21bd808",
+  "test_file": "tests/workflow_real_adapters/test_build_07_source_mappings.py",
+  "test_selectors": []
+}

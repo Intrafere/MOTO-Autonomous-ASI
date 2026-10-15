@@ -1,10 +1,15 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [],
+  "blocked_dependencies": [
+    "unavailable bounded production transition seam"
+  ],
   "diagnostics": {
     "reason": "Existing coordinator coverage observes pause/reset resume, but no bounded test seam independently interleaves user Stop while the provider wait is active."
   },
   "evidence": [],
+  "faked_dependencies": [],
   "fields": [
     "provider_pause_resume",
     "workflow_filesystem_state",
@@ -13,11 +18,16 @@
   "invariants": [
     "provider.stop_resume_preserves_pause"
   ],
+  "observed_transition": null,
+  "real_components": [],
   "replay": [],
   "result": "blocked",
+  "runner": null,
   "scenario_id": "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+  "source_identity": "workflow-source-v1:d4052ff0ad677f0e688adcb93aed31978156e686569980d06265d6083a381797",
+  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py",
+  "test_selectors": []
 }

@@ -1,10 +1,17 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_runtime.no_lean_when_disabled"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "disabled_runtime",
     "zero_proof_stage_calls"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "proof_runtime_gating",
@@ -14,11 +21,21 @@
   "invariants": [
     "proof_runtime.no_lean_when_disabled"
   ],
+  "observed_transition": "disabled_runtime; zero_proof_stage_calls",
+  "real_components": [
+    "backend/autonomous/core/autonomous_coordinator.py",
+    "backend/api/routes/proofs.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_disabled_proof_runtime_skips_autonomous_checkpoint",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+  "source_identity": "workflow-source-v1:ce2af20a55d7b6c2473e0bb954d7a4d705564d076644e0622ffc635cf35fd596",
+  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_high_value_scenarios.py::test_disabled_proof_runtime_skips_autonomous_checkpoint"
+  ]
 }

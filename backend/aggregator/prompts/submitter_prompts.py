@@ -27,9 +27,9 @@ def get_submitter_system_prompt(lean4_enabled: bool = False) -> str:
     """Get system prompt for submitter agents."""
     lean_proof_route = (
         """OPTIONAL LEAN 4 PROOF ROUTE:
-If Lean 4 proof verification is enabled and you can produce a complete Lean 4 proof for a high-impact theorem that directly solves, rules out, reduces, obstructs, or otherwise makes major progress on the user prompt, you may choose the `lean_proof` submission type. Novelty means the proved theorem is absent from standard references or Mathlib and materially helps the user prompt; do not submit program-local firsts. A Lean proof candidate is NOT added directly to the knowledge base: the system first checks that it declares a valid novelty tier and anti-known-result rationale, then runs Lean 4, gives you up to 5 repair attempts with Lean/integrity feedback, and only then sends the Lean-verified proof to the normal brainstorm validator for usefulness and redundancy review.
+If Lean 4 proof verification is enabled and you can produce a complete Lean 4 proof for a novel theorem that solves, rules out, reduces, obstructs, or otherwise advances the user prompt, directly or as a plausible incremental or indirect step, you may choose the `lean_proof` submission type. Prefer the highest-impact such theorem you can completely prove. Novelty means the proved theorem is absent from standard references or Mathlib and plausibly helps the user prompt; do not submit program-local firsts. A Lean proof candidate is NOT added directly to the knowledge base: the system first checks that it declares a valid novelty tier and anti-known-result rationale, then runs Lean 4, gives you up to 5 repair attempts with Lean/integrity feedback, and only then sends the Lean-verified proof to the normal brainstorm validator for usefulness and redundancy review.
 
-Use `lean_proof` only for complete proof code you genuinely expect Lean 4 to accept for that high-impact target. Do not use this route for supporting lemmas, routine helper lemmas, local facts, trivial/easy proofs, standard Mathlib/textbook facts, general known-knowledge-base entries, weakened/downshifted substitutes, or proofs that are only new to this program. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
+Use `lean_proof` only for complete proof code you genuinely expect Lean 4 to accept for that novel target. Do not use this route for non-novel supporting lemmas, routine helper lemmas, local facts, trivial/easy proofs, standard Mathlib/textbook facts, general known-knowledge-base entries, weakened/downshifted substitutes, or proofs that are only new to this program. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
 """
         if lean4_enabled
         else ""
@@ -38,15 +38,15 @@ Use `lean_proof` only for complete proof code you genuinely expect Lean 4 to acc
         """Lean proof candidate:
 {
   "submission_type": "lean_proof",
-  "theorem_statement": "Natural-language statement of the high-impact theorem proved by the Lean code.",
-  "formal_sketch": "Brief note about assumptions, formalization choices, and why this proof directly advances the user's prompt.",
+  "theorem_statement": "Natural-language statement of the novel theorem proved by the Lean code.",
+  "formal_sketch": "Brief note about assumptions, formalization choices, and how this proof advances the user's prompt, directly or indirectly.",
   "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation",
-  "prompt_relevance_rationale": "Why this proof directly solves, solves toward, or materially helps solve the user prompt.",
+  "prompt_relevance_rationale": "Why this proof directly solves, solves toward, or plausibly helps solve the user prompt.",
   "novelty_rationale": "Why this proof is absent from standard references or Mathlib and would be public/citable novelty rather than background knowledge or a program-local first.",
   "why_not_standard_known_result": "Why this is not merely a textbook/Mathlib/routine helper result.",
   "theorem_name": "Optional Lean declaration name",
   "lean_code": "Complete Lean 4 code expected to verify.",
-  "reasoning": "Why this verified proof is high-impact brainstorm progress"
+  "reasoning": "Why this verified proof is novel brainstorm progress toward the prompt"
 }
 """
         if lean4_enabled
@@ -80,26 +80,26 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 YOUR TASK:
 Aggressively pursue the strongest credible and genuinely novel solution to the user's exact objective.
-Choose the contribution form and verification standard that fit the problem. Any submission should aggressively address the user's WHOLE question as stated where possible, no partial solutions.
+Choose the contribution form and verification standard that fit the problem. Any submission should aggressively address the user's WHOLE question as stated where possible.
 
 PROGRESSIVE SYSTEM: You will be called MANY times throughout this brainstorming process. Each call should produce ONE deep, well-developed contribution. Do not try to cover everything at once — focus on thoroughly developing a single avenue per submission with full claim-appropriate rigor. You will have many more opportunities to explore other avenues in future submissions.
 
 DIRECT-SOLUTION PREFERENCE:
 - If you can directly answer the user's whole problem, do that FIRST
-- If the whole problem cannot be answered in one submission, attack the next best necessary piece whose resolution visibly advances the full prompt
+- If the whole problem cannot be answered in one submission, attack the next best necessary piece, or another genuinely novel incremental or indirect step, whose resolution plausibly advances the full prompt
 - Prefer contributions that directly advance the user's full prompt
-- Use indirect background, exploratory framing, or supportive observations ONLY when they are clearly required for the full-question route and no stronger direct or necessary-piece step is justified
+- Indirect, exploratory, or supportive contributions are welcome when they are genuinely novel and plausibly advance the full-question route; routine background is not
 
 META-PHASE EXCEPTION:
 If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, follow that requested output format exactly:
-- For TOPIC EXPLORATION PHASE, propose one candidate brainstorm question optimized to directly answer the user's whole prompt if answered, or to answer the next necessary piece when a whole-answer route is not possible in one shot
+- For TOPIC EXPLORATION PHASE, propose one candidate brainstorm question optimized to directly answer the user's whole prompt if answered, or to target a novel piece, incremental step, or indirect route toward it when a whole-answer route is not possible in one shot
 - For PAPER TITLE EXPLORATION PHASE, propose one candidate paper title optimized for communicating the paper's direct answer-bearing content
 - In these meta-phases, do NOT solve the underlying problem or write the paper unless the user prompt explicitly asks for that; the direct-solution preference means the candidate should point toward or communicate direct resolution
 
 Use the solution form that best fits the objective: a complete answer, invention, mechanism, design, algorithm, mathematical result, theorem, proof, formalization, experimental proposal, falsifiable hypothesis, counterexample, impossibility argument, implementation strategy, or risk analysis. Mathematical reasoning and formal proof remain first-class methods whenever relevant. Use available verification resources, including web search when available.
 
 WHAT MAKES A VALUABLE SUBMISSION - Consider:
-- Does it directly answer the user's whole problem, or where that is not realistic in one step, a necessary piece of it?
+- Does it directly answer the user's whole problem, or where that is not realistic in one step, a novel piece, incremental step, or indirect route toward it?
 - Does it add genuinely new information or perspectives beyond what is already in the training database?
 - Does it provide a concrete mechanism, method, design, algorithm, theorem, proof, experiment, or other objective-appropriate contribution?
 - Is it specific and actionable, not vague or generic?
@@ -109,7 +109,7 @@ WHAT MAKES A VALUABLE SUBMISSION - Consider:
 CRITICAL REQUIREMENTS - CONTENT:
 - ALL submissions must meet domain-appropriate standards of correctness and defensibility - NO unfounded claims, fabricated support, or logical fallacies
 - Prefer directly resolving the user's whole problem over auxiliary exposition
-- Piecewise submissions are acceptable only when the piece is a clearly necessary step toward the full answer, not because it is easier or merely adjacent
+- Piecewise, incremental, or indirect submissions are acceptable when they are genuinely novel and plausibly advance the full answer, not because they are easier or merely adjacent
 - Mathematics, theorem discovery, proof, and formalization are explicitly welcome when relevant; mathematical claims require sound derivation, proof, or explicit assumptions
 - Engineering and software proposals require mechanisms, constraints, feasibility reasoning, failure modes, and verification plans
 - Be specific and actionable, not vague or generic
@@ -118,7 +118,7 @@ CRITICAL REQUIREMENTS - CONTENT:
 - Unsupported empirical or artifact claims must be framed as proposals, hypotheses, or future work rather than as completed results
 
 Your submission will be validated against these criteria:
-- Does it provide the strongest direct progress currently justified?
+- Does it provide genuinely novel progress toward the objective, directly where possible?
 - Does it meaningfully advance the solution space?
 - Is it correct and defensible under the appropriate domain and claim-type standard?
 - Does it avoid contradictions?
@@ -146,24 +146,24 @@ def get_submitter_json_schema(lean4_enabled: bool = False) -> str:
     lean_proof_schema = (
         """
 
-Lean proof candidate, only when Lean 4 is enabled and you can provide complete code for a high-impact prompt-solving theorem:
+Lean proof candidate, only when Lean 4 is enabled and you can provide complete code for a novel theorem that advances the prompt directly or indirectly:
 {
   "submission_type": "lean_proof",
-  "theorem_statement": "string - natural-language statement of the high-impact theorem proved",
+  "theorem_statement": "string - natural-language statement of the novel theorem proved",
   "formal_sketch": "string - formalization notes",
   "expected_novelty_tier": "string - one of major_mathematical_discovery, mathematical_discovery, novel_variant, novel_formulation",
-  "prompt_relevance_rationale": "string - how this directly serves the prompt",
+  "prompt_relevance_rationale": "string - how this serves the prompt, directly or indirectly",
   "novelty_rationale": "string - why this is absent from standard references or Mathlib and public/citable, not program-local novelty",
   "why_not_standard_known_result": "string - why this is not merely textbook/Mathlib/routine helper knowledge",
   "theorem_name": "string - optional Lean declaration name",
   "lean_code": "string - complete Lean 4 source code",
-  "reasoning": "string - why the verified proof is high-impact prompt-solving progress"
+  "reasoning": "string - why the verified proof is novel progress toward the prompt"
 }"""
         if lean4_enabled
         else ""
     )
     lean_proof_note = (
-        "Lean proof candidates must follow the schema above, but should not be copied from a generic example: only use that route when you can provide complete Lean 4 code for a high-impact prompt-solving theorem. Never use it for supporting lemmas, routine helpers, local facts, trivial/easy proofs, or weakened substitutes."
+        "Lean proof candidates must follow the schema above, but should not be copied from a generic example: only use that route when you can provide complete Lean 4 code for a novel theorem that advances the prompt directly or indirectly. Never use it for non-novel supporting lemmas, routine helpers, local facts, trivial/easy proofs, or weakened substitutes."
         if lean4_enabled
         else ""
     )

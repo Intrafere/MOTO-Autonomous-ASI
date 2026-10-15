@@ -675,7 +675,7 @@ function normalizeStoredSettings(settings = {}) {
       const cfg = value && typeof value === 'object' ? value : {};
       return ({
         ...cfg,
-        submitterId: cfg.submitterId || index + 1,
+        submitterId: index + 1,
         openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort, cfg.provider),
       });
     })
@@ -830,6 +830,9 @@ export function validateAutonomousConfig(config, { assistantEnabled = true } = {
   }
   if (config.num_submitters != null && Number(config.num_submitters) !== submitters.length) {
     errors.push('Submitter count does not match configured roles');
+  }
+  if (submitters.some((role, index) => Number(role?.submitterId) !== index + 1)) {
+    errors.push('Submitter IDs must be the ordered sequence 1 through the configured role count');
   }
   submitters.forEach((role, index) => checkRole(
     `Submitter ${index + 1}`, role?.provider, role?.modelId, role?.contextWindow, role?.maxOutputTokens,
@@ -1090,7 +1093,14 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
       roleConfig[`${prefix}_context_window`] = role?.contextWindow;
       roleConfig[`${prefix}_max_tokens`] = role?.maxOutputTokens;
     }
-    validateAutonomousConfig({ ...roleConfig, submitter_configs: profile.submitters });
+    validateAutonomousConfig({
+      ...roleConfig,
+      num_submitters: profile.numSubmitters,
+      submitter_configs: profile.submitters.map((role, index) => ({
+        ...role,
+        submitterId: index + 1,
+      })),
+    });
   }
 
   await loadModelCache();

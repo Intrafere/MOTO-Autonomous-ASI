@@ -8,9 +8,10 @@ a two-stage agent:
         Using the full writing context, the submitter asks itself whether the
         paper, outline, support context, or user prompt expose an impactful new
         or novel theorem worth formalizing and proving in Lean 4. Candidate
-        theorems may verify prompt-critical existing paper claims or extend
-        partial work when that materially advances the user's prompt, not merely
-        a program-local first. Output is a candidate theorem JSON (or a decline).
+        theorems may verify prompt-relevant existing paper claims or extend
+        partial work when that directly or indirectly advances the user's
+        prompt, not merely a program-local first. Output is a candidate theorem
+        JSON (or a decline).
 
     Stage 2 - Placement (build_rigor_placement_prompt):
         Given a Lean-4-verified theorem, the submitter proposes an inline
@@ -20,7 +21,7 @@ a two-stage agent:
         the validator's rejection feedback from attempt 1.
 
 Context assembly follows the RAG offload priority documented in
-`.cursor/rules/rag-design-for-overall-program.mdc`:
+`.claude/rules/rag-design-for-overall-program.md`:
 
     Submitter: Shared Training DB -> Local Submitter DB -> Rejection Log -> User Upload Files
 
@@ -58,7 +59,7 @@ The EXCEPTION is content inside the "LEAN 4 VERIFIED" certificate block provided
 # STAGE 1: THEOREM DISCOVERY
 # =============================================================================
 
-_DISCOVERY_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. Your job during the rigor loop is to look at the paper-in-progress together with the full research context and decide whether there is an impactful new or novel theorem worth formalizing and proving in Lean 4 because it directly helps answer, support, or advance the USER RESEARCH PROMPT. Paper-improvement value only counts when it visibly builds toward that prompt.
+_DISCOVERY_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. Your job during the rigor loop is to look at the paper-in-progress together with the full research context and decide whether there is an impactful new or novel theorem worth formalizing and proving in Lean 4 because it directly or indirectly helps answer, support, or advance the USER RESEARCH PROMPT. Paper-improvement value only counts when it plausibly builds toward that prompt.
 
 {INTERNAL_CONTENT_WARNING}
 
@@ -74,28 +75,28 @@ YOUR TASK - STAGE 1 (DISCOVERY)
 
 RULES FOR PROPOSING A THEOREM:
 - This is NOT a known-knowledge-base construction task. Do not propose standard facts just because they are true, useful, formalizable, or prompt-adjacent.
-- The theorem must directly help answer, support, or advance the USER RESEARCH PROMPT. Do not propose a theorem merely because it is non-trivial or mathematically interesting.
+- The theorem must directly or indirectly help answer, support, or advance the USER RESEARCH PROMPT. Do not propose a theorem merely because it is non-trivial or mathematically interesting.
 - The theorem must be provable in Lean 4 with Mathlib.
 - You MUST NOT re-propose a theorem that is already in EXISTING VERIFIED PROOFS. Look for theorems that are DIFFERENT - new results, missed lemmas, or sharper versions that are not yet on the list.
-- You MAY retry a theorem from OPEN PROOF TARGETS when it is still prompt-relevant, novelty-bearing, high-impact, and the paper now gives you a better angle on the same target. When you do, set `retry_existing_failure_id` to the failed `theorem_id`.
+- You MAY retry a theorem from OPEN PROOF TARGETS when it is still prompt-relevant and novelty-bearing, and the paper now gives you a better angle on the same target. When you do, set `retry_existing_failure_id` to the failed `theorem_id`.
 - EXTENSION IS EXPLICITLY ALLOWED AND ENCOURAGED WHERE HELPFUL: you are NOT limited to exact claims already present in the current paper. You may construct a Lean-verifiable theorem by extending partial paper work, the current outline, supporting context, or the USER RESEARCH PROMPT only when that theorem would directly solve or build toward solving the user's requested goal.
 - Seek the most impactful proof target possible for the USER RESEARCH PROMPT: direct solutions, impossibility results, decisive reductions, new obstructions, or structural theorems that materially advance the requested problem.
-- Supporting lemmas, routine helper lemmas, local facts, and trivial/easy proofs are NEVER valid proof targets, even as a fallback or last resort.
-- Do not settle for a minor reformulation, local formalization, or easy-to-prove fact when a more consequential prompt-solving theorem is available.
+- Routine helper lemmas, local facts, trivial/easy proofs, and supporting lemmas without new mathematical content are NEVER valid proof targets, even as a fallback or last resort.
+- Do not settle for a minor reformulation, local formalization, or easy-to-prove fact; when several novel targets qualify, prefer the more consequential one.
 - Reject routine helper lemmas, proof-engineering glue, local bookkeeping facts, coercion facts, algebra cleanup, definitional rewrites, standard Mathlib/textbook restatements, or single-tactic/routine proof goals.
 - Set `theorem_origin="existing_paper_claim"` only when the theorem directly formalizes a claim already present in the current paper text.
 - Set `theorem_origin="extension_from_partial_work"` when the theorem is constructed by extending the current paper, outline, or supporting context beyond the exact written claim.
 - Set `theorem_origin="extension_from_user_prompt"` when the theorem is prompted primarily by the USER RESEARCH PROMPT and helps the paper even if the current paper has not yet written the claim.
 - Extension-derived theorems (`extension_from_partial_work` or `extension_from_user_prompt`) MUST set `placement_preference="appendix_only"`. These proofs belong at the end of the paper in the Theorems Appendix, not inline in the main body.
 - Existing-paper-claim theorems may set `placement_preference="inline"` when a local body insertion would strengthen the existing argument, or `placement_preference="appendix_only"` when the proof is useful but would distract from the prose.
-- State ambitious targets tightly enough that Lean 4 can attack them, but do not downshift to supporting lemmas, local facts, or unrelated easy facts. If the target cannot be attacked without becoming trivial, decline instead.
+- State ambitious targets tightly enough that Lean 4 can attack them, but do not downshift to non-novel supporting lemmas, local facts, or unrelated easy facts. If the target cannot be attacked without becoming trivial, decline instead.
 - The `theorem_statement` is for a human reader. It should be precise, self-contained, and include the hypotheses.
 - The `formal_sketch` tells the formalization agent what tactics or lemmas look promising in Lean 4 / Mathlib and why this theorem helps the user's prompt. Keep it concrete.
 - The `source_excerpt` is 2-6 sentences of motivating context. For `existing_paper_claim`, it must be a direct paraphrase or quote from the current paper. For extension-derived theorems, it may explain the partial paper work, outline item, supporting evidence, and/or user-prompt need that the theorem extends.
 - Set `expected_novelty_tier` to one of: "major_mathematical_discovery", "mathematical_discovery", "novel_variant", "novel_formulation". If the best honest tier is "not_novel", decline.
 - Include `prompt_relevance_rationale`, `novelty_rationale`, and `why_not_standard_known_result`. If you cannot explain why the target is not merely standard known mathematics, decline.
 
-If Stage 1 selects a target, Stage 2 receives up to 5 Lean 4 attempts with error feedback. Use that retry budget for ambitious but plausibly Lean-addressable prompt-solving targets, not meager routine progress. Prefer declining over a weak, easy, or off-prompt proposal.
+If Stage 1 selects a target, Stage 2 receives up to 5 Lean 4 attempts with error feedback and must prove the selected statement in full without narrowing it. Use that retry budget for ambitious novel targets that solve or advance the prompt and have a reasonable chance of being fully proved: a direct solution takes priority when it has that chance; otherwise choose the strongest genuinely novel piece or indirect step that does, not meager routine progress. Prefer declining over a non-novel, easy, or off-prompt proposal.
 
 Output your response ONLY as JSON in this exact format:
 {{{{
@@ -106,7 +107,7 @@ Output your response ONLY as JSON in this exact format:
   "theorem_origin": "existing_paper_claim | extension_from_partial_work | extension_from_user_prompt (empty if needs_theorem_work=false)",
   "placement_preference": "inline | appendix_only (empty if needs_theorem_work=false)",
   "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation (empty if needs_theorem_work=false)",
-  "prompt_relevance_rationale": "why proving this directly solves, solves toward, or materially helps solve the user prompt (empty if needs_theorem_work=false)",
+  "prompt_relevance_rationale": "why proving this directly solves, solves toward, or plausibly helps solve the user prompt (empty if needs_theorem_work=false)",
   "novelty_rationale": "why this is absent from standard references or Mathlib and public/citable rather than known background or program-local novelty (empty if needs_theorem_work=false)",
   "why_not_standard_known_result": "why this is not merely textbook/Mathlib/routine helper knowledge (empty if needs_theorem_work=false)",
   "retry_existing_failure_id": "theorem_id from OPEN PROOF TARGETS if retrying a prior failure, empty string otherwise",
@@ -313,7 +314,7 @@ def _format_recent_failure_hints(hints: Iterable) -> str:
     if not entries:
         return ""
     return (
-        "OPEN PROOF TARGETS LEAN 4 COULD NOT YET CLOSE (optional retry candidates for the same high-impact target):\n"
+        "OPEN PROOF TARGETS LEAN 4 COULD NOT YET CLOSE (optional retry candidates for the same target):\n"
         + "\n".join(entries)
     )
 

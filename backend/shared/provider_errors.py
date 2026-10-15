@@ -19,6 +19,9 @@ class ProviderRouteIdentity:
     route_kind: str = "primary"
     configured_provider: str = ""
     configured_model: str = ""
+    upstream_host_provider: str = ""
+    auto_fallback_from_host: str = ""
+    provider_request_id: str = ""
 
     def with_context(
         self,
@@ -116,6 +119,10 @@ class ProviderRepairRequiredError(RuntimeError):
         effective_host_provider: str = "",
         route_kind: str = "",
         error_detail: str = "",
+        configured_host_provider: Optional[str] = None,
+        upstream_host_provider: str = "",
+        auto_fallback_from_host: str = "",
+        task_id: str = "",
     ) -> None:
         self.provider = redact_log_text(provider or "unknown", 80)
         self.provider_label = redact_log_text(provider_label or provider or "Provider", 120)
@@ -129,6 +136,14 @@ class ProviderRepairRequiredError(RuntimeError):
         self.effective_host_provider = redact_log_text(effective_host_provider, 120)
         self.route_kind = redact_log_text(route_kind, 40)
         self.error_detail = redact_log_text(error_detail, 1800)
+        self.configured_host_provider = (
+            None
+            if configured_host_provider is None
+            else redact_log_text(configured_host_provider, 80)
+        )
+        self.upstream_host_provider = redact_log_text(upstream_host_provider, 120)
+        self.auto_fallback_from_host = redact_log_text(auto_fallback_from_host, 80)
+        self.task_id = redact_log_text(task_id, 120)
         super().__init__(self.safe_message)
 
 

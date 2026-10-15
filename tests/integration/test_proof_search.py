@@ -18,6 +18,7 @@ from backend.shared.proof_search.indexer import ProofSearchIndexer
 from backend.shared.proof_search import moto_sources
 from backend.shared.proof_search.models import (
     ProofSearchAccessContext,
+    default_proof_search_corpora,
     ProofSearchRequest,
     UnifiedProofSearchRecord,
 )
@@ -25,6 +26,7 @@ from backend.shared.proof_search.search_service import ProofSearchService
 from backend.shared.proof_search.syntheticlib4_sources import load_syntheticlib4_fixture_records
 from backend.shared.proof_search.tool_adapter import (
     SEARCH_LEAN_PROOFS_TOOL_SCHEMA,
+    _record_to_tool_result,
     execute_search_lean_proofs,
 )
 from backend.shared.proof_search.assistant_models import AssistantProofPack, AssistantProofSupport
@@ -32,6 +34,7 @@ from backend.shared.config import system_config
 from backend.shared.models import ProofCandidate, ProofRecord
 from backend.shared.syntheticlib4_client import SyntheticLib4Client
 from backend.autonomous.agents import proof_formalization_agent as formalization_module
+from tests.unit.syntheticlib_gate_cases import syntheticlib_lifecycle
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "syntheticlib4"
@@ -183,6 +186,44 @@ class SyntheticLib4FixtureTests(TestCase):
             self.assertEqual(human.result_count, 1)
             self.assertEqual(model.result_count, 1)
             self.assertEqual(model.results[0].proof_id, "proof_2")
+
+    def test_index_round_trip_preserves_group_novelty_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            indexer = ProofSearchIndexer(Path(temp_dir) / "proofs.sqlite")
+            record = UnifiedProofSearchRecord(
+                search_id="moto:run-group:proof_2",
+                corpus="moto",
+                proof_id="proof_2",
+                run_id="run-group",
+                theorem_statement="theorem group_member : True",
+                lean_code="theorem group_member : True := by trivial",
+                theorem_statement_hash="statement_hash",
+                lean_code_hash="lean_hash",
+                novelty_tier="mathematical_discovery",
+                novelty_scope="group",
+                novelty_group_claim="The finite pair establishes the combined claim.",
+                novelty_group_proof_ids=["proof_1", "proof_2"],
+                canonical_uri="moto-proof://moto/proof_2",
+            )
+
+            indexer.rebuild([record])
+            hydrated = indexer.get_record(
+                corpus="moto",
+                proof_id="proof_2",
+                search_id="moto:run-group:proof_2",
+                run_id="run-group",
+            )
+
+            self.assertIsNotNone(hydrated)
+            self.assertEqual(hydrated.novelty_scope, "group")
+            self.assertEqual(
+                hydrated.novelty_group_claim,
+                "The finite pair establishes the combined claim.",
+            )
+            self.assertEqual(
+                hydrated.novelty_group_proof_ids,
+                ["proof_1", "proof_2"],
+            )
 
     def test_fixture_client_hydrates_metadata_only_record(self) -> None:
         client = SyntheticLib4Client(FIXTURE_DIR)
@@ -668,6 +709,10 @@ class ProofSearchIndexerTests(TestCase):
 
 
 class ProofSearchRouteTests(TestCase):
+    def setUp(self) -> None:
+        # SyntheticLib4 corpus cases need local developer-preview authority.
+        self.enterContext(syntheticlib_lifecycle())
+
     def test_overview_and_search_routes_use_shared_service(self) -> None:
         async def _prepare_service(path: Path) -> ProofSearchService:
             service = ProofSearchService(index_path=path)
@@ -878,6 +923,10 @@ class ProofSearchFreshnessTests(TestCase):
 
 
 class SyntheticLib4RouteTests(TestCase):
+    def setUp(self) -> None:
+        # SyntheticLib4 corpus cases need local developer-preview authority.
+        self.enterContext(syntheticlib_lifecycle())
+
     def test_full_app_registers_syntheticlib4_and_proof_search_routes(self) -> None:
         paths = set(full_app.openapi().get("paths", {}))
 
@@ -921,7 +970,7 @@ class SyntheticLib4RouteTests(TestCase):
         self.assertEqual(reindex.status_code, 200)
         self.assertTrue(reindex.json()["success"])
 
-    def test_auth_routes_store_and_clear_api_key_without_live_validation(self) -> None:
+    def test_generic_mode_denies_auth_routes_even_with_preview_authority(self) -> None:
         app = FastAPI()
         app.include_router(syntheticlib4_route.router)
         client = TestClient(app)
@@ -935,13 +984,9 @@ class SyntheticLib4RouteTests(TestCase):
         finally:
             system_config.generic_mode = old_generic_mode
 
-        self.assertEqual(start.status_code, 501)
-        self.assertIn("mock/offline build", start.json()["detail"])
-        self.assertEqual(api_key.status_code, 200)
-        self.assertTrue(api_key.json()["status"]["credential_configured"])
-        self.assertEqual(clear.status_code, 200)
-        self.assertTrue(clear.json()["success"])
-        self.assertFalse(clear.json()["status"]["credential_configured"])
+        self.assertEqual(start.status_code, 403)
+        self.assertEqual(api_key.status_code, 403)
+        self.assertEqual(clear.status_code, 403)
 
     def test_retrieve_batch_and_account_proof_routes(self) -> None:
         app = FastAPI()
@@ -1009,6 +1054,33 @@ class SyntheticLib4RouteTests(TestCase):
 
 
 class ProofSearchToolAdapterTests(TestCase):
+    def setUp(self) -> None:
+        # SyntheticLib4 corpus cases need local developer-preview authority.
+        self.enterContext(syntheticlib_lifecycle())
+
+    def test_tool_result_preserves_group_novelty_provenance(self) -> None:
+        record = UnifiedProofSearchRecord(
+            search_id="moto:group-anchor",
+            corpus="moto",
+            proof_id="proof_group_anchor",
+            theorem_statement="theorem group_anchor : True",
+            novelty_tier="mathematical_discovery",
+            novelty_reasoning="The finite pair establishes the claim.",
+            novelty_scope="group",
+            novelty_group_claim="Together the two declarations establish the claim.",
+            novelty_group_proof_ids=["proof_member", "proof_group_anchor"],
+            canonical_uri="moto://proofs/proof_group_anchor",
+        )
+
+        payload = _record_to_tool_result(record)
+
+        self.assertEqual(payload["novelty_scope"], "group")
+        self.assertIn("two declarations", payload["novelty_group_claim"])
+        self.assertEqual(
+            payload["novelty_group_proof_ids"],
+            ["proof_member", "proof_group_anchor"],
+        )
+
     def test_tool_schema_exposes_search_lean_proofs(self) -> None:
         self.assertEqual(
             SEARCH_LEAN_PROOFS_TOOL_SCHEMA["function"]["name"],
@@ -1406,3 +1478,100 @@ class ProofSearchToolAdapterTests(TestCase):
             self.assertIn("Memory.Helper", prompt)
             self.assertIn("theorem helper : True", prompt)
 
+
+
+# (product_state, local_preview_authorized, generic_mode)
+_CORPUS_DENIED_CONFIGS = [
+    ("coming_soon", False, False),
+    ("developer_preview", False, False),
+    ("future_unknown_state", True, False),
+    ("developer_preview", True, True),
+]
+_CORPUS_ALLOWED_CONFIGS = [
+    ("developer_preview", True, False),
+    ("launched", False, False),
+    ("launched", False, True),
+]
+
+
+class SyntheticLib4CorpusGateTests(TestCase):
+    """The SyntheticLib4 corpus is gated by the backend lifecycle, not the UI."""
+
+    def setUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp_dir.cleanup)
+        self.service = ProofSearchService(
+            index_path=Path(self._temp_dir.name) / "proof_search.sqlite",
+            syntheticlib4_source=SyntheticLib4Client(FIXTURE_DIR),
+        )
+        asyncio.run(self.service.rebuild_index())
+        toggle = system_config.syntheticlib4_enabled
+        system_config.syntheticlib4_enabled = True
+        self.addCleanup(setattr, system_config, "syntheticlib4_enabled", toggle)
+
+    def _search_corpora(self) -> list[str]:
+        app = FastAPI()
+        app.include_router(proof_search_route.router)
+        with mock.patch.object(proof_search_route, "proof_search_service", self.service):
+            response = TestClient(app).post(
+                "/api/proof-search/search",
+                json={"query": "finite sums", "corpora": ["syntheticlib4"], "limit": 7},
+            )
+        self.assertEqual(response.status_code, 200)
+        return response.json()["searched_corpora"]
+
+    def _detail_status(self) -> int:
+        app = FastAPI()
+        app.include_router(proof_search_route.router)
+        with mock.patch.object(proof_search_route, "proof_search_service", self.service):
+            return TestClient(app).get(
+                "/api/proof-search/proofs/syntheticlib4/sl4_mock_fp_013"
+            ).status_code
+
+    def _tool_corpora(self) -> list[str]:
+        result = asyncio.run(
+            execute_search_lean_proofs(
+                {"action": "search", "query": "finite", "corpora": ["syntheticlib4"]},
+                service=self.service,
+            )
+        )
+        return result.get("searched_corpora", [])
+
+    def test_prelaunch_without_preview_authority_hides_corpus_everywhere(self) -> None:
+        from backend.shared.proof_search.assistant_coordinator import (
+            _assistant_retrieval_lane_specs,
+        )
+        from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
+
+        snapshot = AssistantTargetSnapshot(
+            workflow_mode="autonomous",
+            target_kind="proof_candidate",
+            user_prompt="Prove the target.",
+            target_statement="theorem target : True",
+        )
+        for config in _CORPUS_DENIED_CONFIGS:
+            with self.subTest(config=config), syntheticlib_lifecycle(
+                config[0], authorized=config[1], generic_mode=config[2]
+            ):
+                corpora = default_proof_search_corpora()
+                self.assertNotIn("syntheticlib4", corpora)
+                self.assertEqual(self._search_corpora(), [])
+                self.assertEqual(self._detail_status(), 404)
+                self.assertNotIn("syntheticlib4", self._tool_corpora())
+                lanes = _assistant_retrieval_lane_specs(snapshot, corpora)
+                self.assertNotIn("syntheticlib4", [name for name, _, _ in lanes])
+
+    def test_preview_authority_or_launch_exposes_corpus(self) -> None:
+        for config in _CORPUS_ALLOWED_CONFIGS:
+            with self.subTest(config=config), syntheticlib_lifecycle(
+                config[0], authorized=config[1], generic_mode=config[2]
+            ):
+                self.assertIn("syntheticlib4", default_proof_search_corpora())
+                self.assertEqual(self._search_corpora(), ["syntheticlib4"])
+                self.assertEqual(self._detail_status(), 200)
+
+    def test_user_toggle_still_disables_corpus_after_launch(self) -> None:
+        system_config.syntheticlib4_enabled = False
+        with syntheticlib_lifecycle("launched", authorized=False):
+            self.assertNotIn("syntheticlib4", default_proof_search_corpora())
+            self.assertEqual(self._search_corpora(), [])

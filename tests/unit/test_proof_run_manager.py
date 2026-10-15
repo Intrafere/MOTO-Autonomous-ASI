@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 
 from backend.autonomous.core.proof_run_manager import (
+    NO_DISCOVERY_LIMIT_TERMINAL_REASON,
     ProofRunControl,
     ProofRunManager,
     ProofRunSourceInvalidError,
@@ -172,6 +173,77 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         self.assertTrue(payload["next_round_automatic"])
         self.assertIn("0/0 candidates", payload["round_summary"])
 
+    async def test_continuous_no_discovery_streak_completes_on_tenth_round(self):
+        events = []
+
+        async def event_callback(event_type, payload):
+            events.append((event_type, payload))
+
+        self.control.event_callback = event_callback
+        self.control.snapshot = self.control.snapshot.model_copy(
+            update={
+                "run_mode": "loop_with_pruning",
+                "no_discovery_round_limit": 10,
+            }
+        )
+
+        for round_number in range(1, 10):
+            snapshot = await self.manager.complete_round(
+                self.control,
+                round_number=round_number,
+                valid_candidate_count=0,
+            )
+            self.assertEqual(snapshot.consecutive_no_discovery_rounds, round_number)
+            self.assertFalse(snapshot.terminal_reason)
+            self.assertTrue(events[-1][1]["next_round_automatic"])
+
+        snapshot = await self.manager.complete_round(
+            self.control,
+            round_number=10,
+            valid_candidate_count=0,
+        )
+        self.assertEqual(snapshot.consecutive_no_discovery_rounds, 10)
+        self.assertEqual(
+            snapshot.terminal_reason,
+            NO_DISCOVERY_LIMIT_TERMINAL_REASON,
+        )
+        self.assertFalse(events[-1][1]["next_round_automatic"])
+
+    async def test_continuous_discovery_resets_no_discovery_streak(self):
+        self.control.snapshot = self.control.snapshot.model_copy(
+            update={
+                "run_mode": "loop_with_pruning",
+                "no_discovery_round_limit": 10,
+                "consecutive_no_discovery_rounds": 9,
+            }
+        )
+
+        snapshot = await self.manager.complete_round(
+            self.control,
+            round_number=10,
+            valid_candidate_count=1,
+        )
+        self.assertEqual(snapshot.consecutive_no_discovery_rounds, 0)
+        self.assertFalse(snapshot.terminal_reason)
+
+    async def test_failure_without_valid_candidate_count_does_not_advance_streak(self):
+        self.control.snapshot = self.control.snapshot.model_copy(
+            update={
+                "run_mode": "loop_with_pruning",
+                "no_discovery_round_limit": 10,
+                "consecutive_no_discovery_rounds": 4,
+            }
+        )
+
+        snapshot = await self.manager.complete_round(
+            self.control,
+            round_number=5,
+            valid_candidate_count=None,
+            summary="Provider failure",
+        )
+        self.assertEqual(snapshot.consecutive_no_discovery_rounds, 4)
+        self.assertFalse(snapshot.terminal_reason)
+
     async def test_round_completion_does_not_announce_continuation_after_fatal_reason(self):
         events = []
 
@@ -235,6 +307,25 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
             await self.control.task
         self.assertEqual(self.control.snapshot.status, "stopped")
         self.assertEqual(self.control.snapshot.terminal_reason, "cancelled")
+
+    async def test_finished_run_outcome_is_not_rewritten_by_later_status_updates(self):
+        async def worker(control):
+            await self.manager.repair_required(
+                control,
+                reason="OpenAI Codex OAuth is not configured.",
+            )
+            # A caller that only learned "the round stopped" must not reopen it.
+            await self.manager.update(control, status="stopping", stop_requested=True)
+
+        self.manager._runs["proof-run-1"] = self.control
+        await self.manager._drive(self.control, worker)
+
+        snapshot = await self.manager.get("proof-run-1")
+        self.assertEqual(snapshot.status, "error")
+        self.assertEqual(snapshot.terminal_reason, "repair_required")
+        self.assertFalse(snapshot.stop_requested)
+        self.assertIn("not configured", snapshot.last_error_summary)
+        self.assertTrue(snapshot.cleanup_completed)
 
     async def test_terminal_callback_is_exact_once(self):
         events = []
@@ -390,6 +481,57 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.control.snapshot.terminal_reason, "source_invalid")
         self.assertIn("Paper content not found", self.control.snapshot.last_error_summary)
 
+    async def test_provider_error_events_carry_route_identity_text(self):
+        events = []
+
+        async def event_callback(event_type, payload):
+            events.append((event_type, payload))
+
+        identity = "[Manual proof check · Proof Brainstorm · vendor/test-free:free via OpenRouter]"
+        route_identity = {
+            "workflow_mode": "manual_proof_check",
+            "role_id": "manual_proof_brainstorm",
+            "model": "vendor/test-free:free",
+            "provider": "openrouter",
+            "configured_host_provider": "",
+            "host_routing": "auto",
+            "route_identity": identity,
+        }
+        self.control.event_callback = event_callback
+        await self.manager.provider_paused(self.control, route_identity=route_identity)
+        snapshot = await self.manager.repair_required(
+            self.control,
+            reason="Repair the configured proof provider.",
+            route_identity=route_identity,
+        )
+
+        paused = dict(events)["proof_run_provider_paused"]
+        self.assertEqual(paused["message"], f"{identity} Proof run paused for provider credits.")
+        self.assertEqual(paused["model"], "vendor/test-free:free")
+        self.assertEqual(paused["configured_host_provider"], "")
+        terminal = dict(events)["proof_run_terminal"]
+        self.assertEqual(
+            snapshot.last_error_summary,
+            f"{identity} Repair the configured proof provider.",
+        )
+        self.assertEqual(terminal["last_error_summary"], snapshot.last_error_summary)
+        self.assertEqual(terminal["route_identity"], identity)
+        self.assertEqual(terminal["proof_run_id"], "proof-run-1")
+        self.assertNotIn("route_identity", ProofRunSnapshot.model_fields)
+
+    async def test_provider_pause_without_identity_keeps_legacy_payload(self):
+        events = []
+
+        async def event_callback(event_type, payload):
+            events.append((event_type, payload))
+
+        self.control.event_callback = event_callback
+        await self.manager.provider_paused(self.control)
+
+        paused = dict(events)["proof_run_provider_paused"]
+        self.assertNotIn("message", paused)
+        self.assertNotIn("route_identity", paused)
+
     async def test_hard_repair_is_terminal_and_not_resumable(self):
         snapshot = await self.manager.repair_required(
             self.control,
@@ -530,3 +672,124 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.count, 1)
         self.assertEqual(result.preferred_proof_run_id, "proof-run-active")
         self.assertEqual(result.runs[0].proof_run_id, "proof-run-active")
+
+    async def test_published_activity_is_numbered_retained_and_replayable(self):
+        sent = []
+
+        async def send(event_type, data):
+            sent.append((event_type, data))
+
+        self.manager._runs = {self.control.snapshot.proof_run_id: self.control}
+        broadcast = self.manager.activity_broadcaster(self.control, send)
+        await broadcast("proof_candidate_list_review_started", {"list_attempt": 1})
+        await broadcast("proof_candidate_list_review_rejected", {"list_attempt": 1})
+        await broadcast("proof_candidate_list_regeneration_started", {"list_attempt": 2})
+
+        self.assertEqual(
+            [data["proof_run_activity_sequence"] for _, data in sent],
+            [1, 2, 3],
+        )
+        self.assertTrue(all(data["proof_run_id"] == "proof-run-1" for _, data in sent))
+
+        replay = await self.manager.get_activity("proof-run-1", after_sequence=1)
+        self.assertEqual(replay.latest_sequence, 3)
+        self.assertEqual([event.sequence for event in replay.events], [2, 3])
+        self.assertEqual(
+            [event.type for event in replay.events],
+            [
+                "proof_candidate_list_review_rejected",
+                "proof_candidate_list_regeneration_started",
+            ],
+        )
+        self.assertEqual(replay.events[1].data["list_attempt"], 2)
+        self.assertFalse(replay.gap)
+        self.assertFalse(replay.truncated)
+
+        baseline = await self.manager.get_activity("proof-run-1", limit=0)
+        self.assertEqual(baseline.events, [])
+        self.assertTrue(baseline.truncated)
+        self.assertEqual(baseline.latest_sequence, 3)
+
+    async def test_activity_replay_reports_evicted_events_as_a_gap(self):
+        async def send(event_type, data):
+            return None
+
+        self.manager._runs = {self.control.snapshot.proof_run_id: self.control}
+        for attempt in range(1, 306):
+            await self.manager.publish_activity(
+                self.control,
+                send,
+                "proof_candidate_list_review_started",
+                {"list_attempt": attempt},
+            )
+
+        replay = await self.manager.get_activity("proof-run-1", after_sequence=2)
+        self.assertTrue(replay.gap)
+        self.assertEqual(replay.oldest_retained_sequence, 6)
+        self.assertEqual(replay.events[0].sequence, 6)
+        self.assertTrue(replay.truncated)
+
+    async def test_disabled_journal_publishes_without_sequence(self):
+        sent = []
+
+        async def send(event_type, data):
+            sent.append(data)
+
+        self.control.activity_journal_enabled = False
+        self.manager._runs = {self.control.snapshot.proof_run_id: self.control}
+        await self.manager.publish_activity(self.control, send, "proof_check_started", {})
+
+        self.assertNotIn("proof_run_activity_sequence", sent[0])
+        replay = await self.manager.get_activity("proof-run-1")
+        self.assertEqual(replay.latest_sequence, 0)
+        self.assertEqual(replay.events, [])
+
+    async def test_lifecycle_events_join_the_activity_journal(self):
+        sent = []
+
+        async def send(event_type, data):
+            sent.append(event_type)
+
+        self.control.event_callback = send
+        self.manager._runs = {self.control.snapshot.proof_run_id: self.control}
+        await self.manager.begin_round(self.control, round_number=2)
+
+        replay = await self.manager.get_activity("proof-run-1")
+        self.assertEqual(sent, ["proof_run_round_started"])
+        self.assertEqual([event.type for event in replay.events], ["proof_run_round_started"])
+        self.assertEqual(replay.events[0].data["round_index"], 2)
+
+    async def test_only_recent_finished_runs_keep_activity_journals(self):
+        async def send(event_type, data):
+            return None
+
+        controls = []
+        for index in range(7):
+            control = ProofRunControl(
+                snapshot=self.control.snapshot.model_copy(
+                    update={
+                        "proof_run_id": f"proof-run-{index}",
+                        "status": "completed",
+                        "updated_at": datetime(2026, 1, 1 + index),
+                    }
+                ),
+                cleaned_up=True,
+            )
+            await self.manager.publish_activity(control, send, "proof_check_started", {})
+            controls.append(control)
+        self.manager._runs = {
+            control.snapshot.proof_run_id: control for control in controls
+        }
+
+        await self.manager._trim_terminal_activity_journals()
+
+        self.assertEqual(
+            [bool(control.activity_journal) for control in controls],
+            [False, False, True, True, True, True, True],
+        )
+        cleared = await self.manager.get_activity("proof-run-0")
+        self.assertTrue(cleared.gap)
+        self.assertEqual(cleared.latest_sequence, 1)
+
+    async def test_unknown_run_activity_is_none(self):
+        self.assertIsNone(await self.manager.get_activity("proof-run-missing"))

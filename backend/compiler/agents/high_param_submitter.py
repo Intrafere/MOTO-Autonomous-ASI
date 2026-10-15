@@ -60,6 +60,12 @@ from backend.shared.prompt_feedback_budget import (
     fit_prompt_with_feedback_async,
 )
 from backend.shared.provider_errors import ProviderContextLengthError
+from backend.shared.provider_route_identity import merge_route_identity
+from backend.shared.lean4_client import (
+    LeanWorkspaceRepairRequiredError,
+    is_lean_workspace_error_text,
+    recover_lean_workspace,
+)
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
@@ -584,6 +590,9 @@ class HighParamSubmitter:
         if not system_config.lean4_enabled:
             logger.info("submit_rigor_lean_theorem: Lean 4 disabled; declining rigor cycle")
             return None
+        # Known-broken Lean stops the compiler before discovery spends a model
+        # call on a theorem that cannot be checked.
+        await recover_lean_workspace()
 
         logger.info("Rigor cycle: Stage 1 - theorem discovery")
         await self._load_competition_state()
@@ -1076,7 +1085,14 @@ class HighParamSubmitter:
                         competitor_attempts = len(recovered)
                         return True, saved.get("theorem_name", ""), accepted["lean_code"], recovered
             active_state = states.setdefault(key, {"attempts": [], "route": route})
-            prior = [ProofAttemptFeedback.model_validate(item) for item in active_state["attempts"]]
+            # Saved Lean workspace failures are not proof attempts: Lean never ran.
+            prior = [
+                feedback
+                for feedback in (
+                    ProofAttemptFeedback.model_validate(item) for item in active_state["attempts"]
+                )
+                if not is_lean_workspace_error_text(feedback.error_output)
+            ]
             competitor_attempts = len(prior)
             accepted = next((item for item in prior if item.success), None)
             if accepted:
@@ -1202,7 +1218,11 @@ class HighParamSubmitter:
         try:
             success, theorem_name, lean_code, attempts = await run_competitor(formalizer)
         except Exception as exc:
-            if self.proof_competition.enabled or _is_rigor_model_call_failure(exc):
+            if (
+                isinstance(exc, LeanWorkspaceRepairRequiredError)
+                or self.proof_competition.enabled
+                or _is_rigor_model_call_failure(exc)
+            ):
                 raise
             logger.error("Rigor formalization raised (%s); declining cycle", exc, exc_info=True)
             await self._broadcast(
@@ -1217,18 +1237,12 @@ class HighParamSubmitter:
             return None
 
         primary_attempts = attempts
-        if self.proof_competition.enabled and any(
-            "LEAN 4 WORKSPACE ERROR" in str(item.error_output).upper() for item in attempts
-        ):
-            raise RuntimeError("LEAN 4 WORKSPACE ERROR during compiler formalization")
         await report_competitor("success" if success else ("exhausted" if len(attempts) >= 5 else "blocked"))
         if not success and len(attempts) >= 5 and self.proof_competition.enabled:
             # Only completed proof-attempt exhaustion authorizes fallback. In particular,
-            # context and shared Lean infrastructure failures are not competitive losses.
+            # context failures are not competitive losses (Lean workspace failures raise).
             primary_error = str(attempts[-1].error_output or "")
-            if not any(marker in primary_error.upper() for marker in (
-                "MANDATORY FULL SOURCE CONTEXT OVERFLOW", "LEAN 4 WORKSPACE ERROR"
-            )):
+            if MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX.upper() not in primary_error.upper():
                 for index, route in enumerate(self.proof_competition.secondaries, start=1):
                     competitor_index = index
                     competitor_attempts = 0
@@ -1256,37 +1270,45 @@ class HighParamSubmitter:
                         success, theorem_name, lean_code, attempts = await run_competitor(secondary)
                     except Exception as exc:
                         from backend.autonomous.core.proof_competition import secondary_provider_failure
-                        if "LEAN 4 WORKSPACE ERROR" in str(exc).upper() or not (
+                        if isinstance(exc, LeanWorkspaceRepairRequiredError) or not (
                             secondary_provider_failure(exc)
                             or type(exc).__name__ == "ProofFormalizationContextOverflowError"
                         ):
                             raise
                         self._unavailable_proof_competitors.add(index)
                         await report_competitor("unavailable", type(exc).__name__)
-                        await self._broadcast("proof_competition_unavailable", {
+                        await self._broadcast("proof_competition_unavailable", merge_route_identity({
                             "source_type": "compiler_rigor",
                             "source_id": self._compiler_source_id(),
                             "competitor_index": index,
                             "configured_model": route.model_id,
                             "configured_provider": route.provider,
                             "message": "Secondary proof model unavailable; research continues.",
-                        })
+                        }, api_client_manager.route_identity_for_role(
+                            role_id,
+                            # Proof competition is only enabled for Autonomous-owned compilers.
+                            workflow_mode="autonomous",
+                            error=exc,
+                        )))
                         continue
                     await report_competitor("success" if success else ("exhausted" if len(attempts) >= 5 else "blocked"))
                     if success:
                         break
-                    if attempts and "LEAN 4 WORKSPACE ERROR" in str(attempts[-1].error_output).upper():
-                        raise RuntimeError("LEAN 4 WORKSPACE ERROR during secondary formalization")
                     if len(attempts) < 5 or any(
                         feedback.failure_kind == "context_overflow" for feedback in attempts
                     ):
                         self._unavailable_proof_competitors.add(index)
-                        await self._broadcast("proof_competition_unavailable", {
+                        await self._broadcast("proof_competition_unavailable", merge_route_identity({
                             "source_type": "compiler_rigor",
                             "source_id": self._compiler_source_id(),
                             "competitor_index": index,
+                            "configured_model": route.model_id,
+                            "configured_provider": route.provider,
                             "message": "Secondary proof model interrupted; research continues.",
-                        })
+                        }, api_client_manager.route_identity_for_role(
+                            role_id,
+                            workflow_mode="autonomous",
+                        )))
                         attempts = []
 
         if not success:
@@ -1425,6 +1447,7 @@ class HighParamSubmitter:
                 verification_notes=verification_notes,
                 attempt_count=len(attempts),
                 attempts=list(attempts),
+                compile_receipt=attempts[-1].compile_receipt if attempts else None,
                 broadcast_fn=self.websocket_broadcaster,
                 base_event={
                     "source_type": "compiler_rigor",

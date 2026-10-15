@@ -23,6 +23,6 @@
     "generated_rag_prompt_boundaries_seed_7",
     "generated_rag_prompt_boundaries_seed_29"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "target_id": "generated_rag_prompt_boundaries"
 }

@@ -16,6 +16,13 @@ export const SAKANA_FUGU_REASONING_EFFORT_OPTIONS = [
   { value: 'xhigh', label: 'xhigh (maximum)' },
   { value: 'high', label: 'high' },
 ];
+export const XAI_GROK_REASONING_EFFORT_OPTIONS = [
+  { value: 'auto', label: 'Auto (high)' },
+  { value: 'high', label: 'high' },
+  { value: 'medium', label: 'medium' },
+  { value: 'low', label: 'low' },
+  { value: 'none', label: 'none / disabled' },
+];
 const AUTO_ENDPOINT_OUTLIER_RATIO = 0.75;
 const AUTO_MIN_CAPABLE_OUTPUT_TOKENS = 32768;
 const KNOWN_WEAK_AUTO_PROVIDERS = new Set([
@@ -370,6 +377,14 @@ export function getOpenRouterProviderTitle(providerName) {
 export function normalizeOpenRouterReasoningEffort(value, provider = 'openrouter') {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (provider === 'openai_codex_oauth' && normalized === 'max') return 'max';
+  if (provider === 'xai_grok_oauth') {
+    if (['xhigh', 'max', 'maximum', 'highest'].includes(normalized)) return 'high';
+    if (normalized === 'minimal') return 'low';
+    if (XAI_GROK_REASONING_EFFORT_OPTIONS.some((option) => option.value === normalized)) {
+      return normalized;
+    }
+    return DEFAULT_OPENROUTER_REASONING_EFFORT;
+  }
   if (OPENROUTER_REASONING_EFFORT_OPTIONS.some((option) => option.value === normalized)) {
     return normalized;
   }

@@ -1,24 +1,45 @@
 {
-  "adapter": "real_coordinator",
+  "adapter": "focused_production",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_pruning.artifacts_and_future_memory_preserved"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
-    "human_visible",
-    "future_run_retrievable"
+    "certificate_exports",
+    "dependency_graph",
+    "future_run_search",
+    "syntheticlib_novel_unchanged"
+  ],
+  "faked_dependencies": [
+    "external SyntheticLib donation service"
   ],
   "fields": [
     "proof_pruning",
+    "proof_scope_isolation",
     "workflow_filesystem_state",
     "assistant_memory"
   ],
   "invariants": [
     "proof_pruning.artifacts_and_future_memory_preserved"
   ],
+  "observed_transition": "owner-run pruning preserves canonical exports and graph identity while excluding only owner-run model search and retaining future-run eligibility",
+  "real_components": [
+    "backend/autonomous/memory/proof_database.py",
+    "backend/api/routes/proofs.py",
+    "backend/shared/proof_search/indexer.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_pruned_proof_artifacts_and_future_memory_preserved",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/regressions/test_proof_context_regressions.py"
+  "source_identity": "workflow-source-v1:7ae51ec1f53bdbb4187358ecca94b577bd8092c4db3b37d1d5438207c4c7b813",
+  "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_preservation.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_07_proof_pruning_preservation.py::test_pruned_occurrence_remains_exportable_graph_visible_searchable_and_eligible"
+  ]
 }

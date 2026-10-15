@@ -1,0 +1,1784 @@
+---
+description: Autonomous research tiers, brainstorm-to-paper workflow, Tier 3, proof checks, and persistence
+---
+
+# Part 3 (Adding an Autonomous-Controlling Tier in Hierarchy Over Part 1 and 2) - Autonomous Research Mode Design Specification
+
+## Overview
+
+The Autonomous Research Mode is Part 3 of MOTO's self-directing three-tier research system. It autonomously generates brainstorm topics, builds knowledge databases, produces rigorous solution-oriented research papers or reports, and can synthesize a final answer centered on the user's high-level objective. Mathematics and formal proof remain first-class when relevant.
+
+**Example User Prompt**: "Solve the Langlands Bridge problem" or "Advance understanding of the Riemann Hypothesis"
+
+**Key Difference from Manual Modes**: 
+- Part 1 (Aggregator) requires user-provided topic prompts
+- Part 2 (Compiler) requires user-directed paper compilation prompts
+- Part 3 (Autonomous Research) self-directs topic selection, brainstorming, and paper generation
+
+**Three-Tier Architecture**:
+- **Tier 1**: Brainstorm aggregation databases (solution concept, mechanism, evidence, algorithm, and mathematical exploration)
+- **Tier 2**: Finished rigorous research papers or solution reports (compiled from brainstorm databases)
+- **Tier 3**: Final answer synthesis (short-form answer or long-form volume from Tier 2 papers)
+
+## Design Philosophy
+
+**Self-Directing Research**: The AI autonomously identifies the most valuable research avenues based on the high-level goal prompt.
+
+**Domain-General Strategy**: Ordinary topic exploration/selection, completion review, reference selection, title selection, and continuation aggressively pursue the strongest solution path for the exact objective using domain- and claim-appropriate rigor. When Mathematical Proofs is allowed, mathematics and formal proof remain first-class when useful under the eager startup proof-framing emphasis; when disabled in Allowed Outputs, that framing is skipped. Positive proof framing is emphasis, not a hard mathematical admission requirement for every ordinary contribution.
+
+**Basin Exploration**: Each brainstorm topic represents a "basin" of related solution concepts, mechanisms, evidence, algorithms, designs, or mathematical structures. The system explores each basin until sufficiently complete, then generates a paper.
+
+**Cumulative Knowledge**: All brainstorm databases and papers persist, building a comprehensive research library over time.
+
+**Model Weight Exploration**: Completion review uses SPECIAL SELF-VALIDATION MODE because only the same model can assess whether its own weights have been exhausted for a given topic.
+
+**External Verification Allowed**: The autonomous system may use the model's domain and mathematical knowledge, RAG context from prior work, user prompt, and external verification/search when the selected model/provider supports it. Internal AI-generated context remains non-authoritative and should be treated skeptically.
+
+## Progressive Solution Path
+
+Each autonomous research session owns exactly one durable Progressive Solution Path across all topics, brainstorms, papers, proof checkpoints, and Tier 3 phases. It remains absent from prompts and UI until five cumulative accepted Tier 1 brainstorm submissions in that session; topic/title mini-aggregator acceptances, paper edits, validator decisions, and proof events do not count or create independent owners. After activation, only the bounded Main Submitter 1-approved canonical revision is optional advisory direct context and may be ignored for a better prompt-serving route.
+
+The activation count is a persisted, monotonic session-wide counter of real Tier 1 accept events, distinct from the post-cleanup retained submission count. The autonomous parent is its sole writer; child Aggregators receive the shared manager for context/proposals without writing topic-local counts. It never resets at topic boundaries and resumes from durable metadata/workflow/solution-path state.
+
+Existing semantic LLM validators may separately propose a material route, goal, evidence, or meaningful-step-status update in their normal JSON response. Missing/malformed extensions do not affect the primary result; selectors, submitters, deterministic checks, Lean/SMT/tools, and integrity gates do not originate proposals. Proposals queue durably and non-blockingly for serial transactional review under the exact Main Submitter 1 provider/model/host/reasoning/fallback/context/output/Supercharge configuration. Hard failures enter user-repair state and resume only through the explicit generation-fenced retry action. Stop/crash/session resume preserves plan and queue; explicit session Clear/new-run removes them and is serialized against reacquisition.
+
+The Workflow panel hides the path before activation. After activation it distinguishes no-approved-plan, queued/reviewing updates, approved plans, and repair-required proposals; the typed snapshot separately exposes active/resumable ownership. Snapshot/event updates are fenced by run identity and lifecycle generation so stale cross-run responses cannot replace the current view.
+
+---
+
+## Integration Architecture
+
+### Part 1 Aggregator Integration (Tier 1)
+The autonomous coordinator USES actual Part 1 aggregator infrastructure for brainstorm aggregation:
+- Creates separate `Coordinator` instance per brainstorm topic
+- Configures with topic-specific database path (`auto_brainstorms/brainstorm_{topic_id}.txt` under the active instance data root; default desktop path: `backend/data/auto_brainstorms/brainstorm_{topic_id}.txt`)
+- Runs configurable 1-10 submitters + 1 validator workflow (default 3 submitters)
+- Each submitter can have its own model, context window, and max output tokens for multi-model exploration
+- Each role can independently enable Supercharge; child Aggregator coordinators must preserve `supercharge_enabled` from the autonomous role configs.
+- Parallel brainstorm/topic/title exploration submitters inherit the Part 1 temperature ladder; autonomous validators and compiler/final-answer roles stay `0.0`.
+- Developer-enabled Creativity Emphasis Boost is inherited by all Aggregator-backed autonomous brainstorm generation: topic exploration, Tier 1 brainstorm aggregation, and paper-title exploration. It remains every fifth valid submission slot per submitter, optional in content, validator-neutral, and skipped for that slot if the extra prompt block would overflow the configured context budget.
+- SINGLE validator maintains coherent Markov chain evolution (same constraint as Part 1)
+- Monitors acceptance count for completion triggers (every 10 acceptances)
+- Handles aggregator cleanup/pruning automatically on the child coordinator's run-local 7-acceptance cadence
+- Uses global RAG lock to prevent collision with manual aggregator mode
+
+**Implementation Details**:
+- Temporarily overrides `system_config.shared_training_file` to point to brainstorm-specific database
+- Calls `shared_training_memory.reload_insights_from_current_path()` after path change to prevent data loss (without reload, old insights from rag_shared_training.txt would overwrite brainstorm file)
+- Sets WebSocket broadcaster to propagate aggregator events through autonomous coordinator
+- Monitors aggregator stats in real-time to track acceptances/rejections
+- Stops aggregator when completion review decides to write paper
+- **Phase enforcement**: Writing Submitter must check current phase before declaring completion
+- **Premature decline rejection**: Coordinator rejects declines if required sections are missing based on current phase
+- **Parent precedence**: Forced paper writing and forced Tier 3 must stop active child aggregators before the parent tier continues; local exploration/title aggregators must be tracked so they can be stopped.
+
+### Part 2 Compiler Integration (Tier 2)
+The autonomous coordinator USES actual Part 2 compiler infrastructure for paper compilation:
+- Creates separate `CompilerCoordinator` instance per paper
+- Configures with brainstorm database as high-priority optional source material
+- Adds selected reference papers to compiler RAG context if selected (topic-cycle cap 3; Tier 3 short-form cap 6)
+- Monitors compiler progress and saves/stops the parent workflow once an Abstract section is detected; child compiler phase progression remains `section_complete`-driven
+- Extracts abstract from completed paper for metadata storage
+
+Compiler submitters may selectively use, synthesize beyond, or depart from brainstorm material when that better serves the user's prompt and remains rigorous. Validator must not reject solely for selective non-use of brainstorm/database material.
+
+**Critical Implementation Details**:
+- **system_config propagation (REQUIRED)**: Before creating `CompilerCoordinator`, autonomous mode MUST write all compiler context/token settings to `system_config` (e.g., `system_config.compiler_writer_context_window = self._writer_context`). Compiler modules read from `system_config` at init — the manual `/api/compiler/start` route does this, but autonomous mode bypasses that route and must do it explicitly. Applies to both `_compile_paper()` and `_compile_tier3_paper()`.
+- **Supercharge propagation (REQUIRED)**: Autonomous mode must preserve per-role `supercharge_enabled` for brainstorm submitters, validator, Writing Submitter, Rigor & Proofs Submitter (legacy `high_param_*` fields), Assistant, proof runtime snapshots, and child Compiler/Aggregator coordinators. Deprecated critique fields mirror Rigor & Proofs during the compatibility period. This setting lives in role configs / `ModelConfig`, not `system_config`.
+- **Rigor proof source propagation (REQUIRED)**: Autonomous and Tier 3 child compiler runs must pass the active paper id/title into compiler rigor so Rigor & Proofs Lean-verified proofs are ranked and indexed under the real paper source.
+- Constrains section order: Body → post-body critique/self-review → Conclusion → Introduction → pre-abstract empirical red-team review → Abstract
+- Child compiler phase completion is driven by explicit `section_complete: true`; the autonomous wrapper still uses Abstract detection as its parent-level completion monitor
+- Regex patterns may extract abstract text for metadata and parent monitoring, but child phase advancement remains explicit-signal based
+- Reference papers and brainstorm/paper source routing follow the centralized policy in `rag-design-for-overall-program.md`; paper-writing rigor/proof mode direct-injects the active source brainstorm alongside the current paper and verified-proof summaries, while prior papers/references remain high-priority RAG evidence.
+- Outline is ALWAYS fully injected (never RAGed) for structural framework integrity
+- Autonomous/Tier 3 compiler runs must not start the manual Part 1 aggregator monitor; the parent tier owns all brainstorm/reference context.
+
+---
+
+## Workflow Overview
+
+**Tier 1 → Tier 2 → Tier 3 Loop:**
+0. **Topic Exploration** — Mini-aggregation: collect 5 validated candidate brainstorm questions (submit→validate→accumulate loop with rejection feedback). Broadens exploration landscape before committing to a direction.
+1. **Topic Selection** (sees all 5 candidates + existing topics) → Validator → Pre-Brainstorm Reference Selection (if papers exist)
+2. **Brainstorm Aggregation** (1-10 submitters, 1 validator, run-local cleanup/pruning every 7 acceptances, with reference papers)
+3. **Completion Review** every 10 acceptances (SPECIAL SELF-VALIDATION) → Continue or Write Paper
+4. If Write Paper: **Additional Reference Selection** → **Paper Title Exploration** (5 candidates) → **Paper Title Selection** → **Paper Compilation** (Body→Critique→Conclusion→Introduction→pre-abstract review→Abstract)
+5. **Paper Complete** → Log to Tier 2, cache brainstorm
+6. **Paper Redundancy Review** every 3 papers
+7. **Brainstorm Continuation Decision** (if papers < 3): write another paper or move on. If write another: new title → compilation with prior brainstorm papers as auto-refs → loop to step 5
+8. **Tier 3 Final Answer** every 5 papers (Certainty→Format→Short-form or Long-form volume)
+9. Loop back to Topic Selection (or STOP if Tier 3 complete)
+
+---
+
+## PHASE 0: Topic Exploration (Pre-Selection Candidate Brainstorm)
+
+### Purpose
+Before committing to a brainstorm direction, the system runs a full aggregation using the Part 1 infrastructure that collects 5 validated candidate brainstorm questions. This broadens the exploration landscape using the configured submitters and batch validation, inheriting Aggregator single-model sequential mode when all roles share one model without LM Studio sibling instances.
+
+### Why This Exists (Top-p Exploration at Strategic Level)
+Without exploration, the topic selector samples from the model's highest-probability region — the most obvious topic. By forcing 5 distinct, validated candidate directions first, the system maps direct-answer routes before committing:
+- Breaks greedy single-sample selection
+- Validator enforces diversity (rejects redundant candidates)
+- Final selector sees the full landscape of options
+- Uses full Part 1 aggregator infrastructure (parallel submitters, batch validation up to 3)
+- Candidate questions first prefer avenues that aggressively attack the user's WHOLE question as stated; an impossibility answer counts as answering the whole question. Directness orders preference, never admission: genuinely novel pieces, incremental steps, and indirect routes with a plausible path toward the question are acceptable, while non-novel easy/practical/background detours are rejected.
+
+### Architecture
+- **Uses `AggregatorCoordinator`** from Part 1 — same parallel submitters + batch validator as normal brainstorms, but with **cleanup/pruning disabled** (`enable_cleanup_review=False`) since target is only 5 candidates
+- **Prompts** (`backend/autonomous/prompts/topic_exploration_prompts.py`): `build_exploration_user_prompt()` frames the aggregation task for candidate question generation
+- **Temp DB**: `exploration_candidates.txt` in brainstorms directory (cleaned up after phase)
+- **Scoped rejection feedback**: Topic/title mini-aggregators and brainstorm aggregators use rejection-log files under the active brainstorm/session directory, never the manual Aggregator `Summary_Of_Last_5...` files.
+- **Target**: exactly 5 accepted candidates per exploration cycle before topic selection; rejection count, partial candidates, and failed child runs do not advance selection
+
+### Workflow
+1. Aggregator starts through the standard Part 1 coordinator; submitters run in parallel except when inherited Aggregator single-model mode serializes them
+2. Submitters generate candidate brainstorm questions as standard submissions
+3. Validator batch-validates (up to 3 at a time) checking quality, relevance, and DIVERSITY
+4. Accepted candidates accumulate in temp exploration database
+5. Coordinator monitors aggregator stats and completes only at 5 acceptances; explicit stop or child-aggregator failure exits/retries without feeding partial candidates to topic selection
+6. Reads the completed 5-candidate exploration DB and formats it for topic selector
+
+### WebSocket Events
+Topic exploration should emit user-visible progress through the standard workflow/WebSocket stream, but exact internal event names are not rule-level invariants unless consumed by the hosted wrapper or frontend contract.
+
+### Crash Recovery
+On resume, exploration restarts fresh (short phase, no state to preserve).
+
+### Every Brainstorm Starts This Way
+Topic exploration runs before EVERY new topic selection cycle — no exceptions.
+
+---
+
+## STARTING POINT A: Topic Selection
+
+### Purpose
+The autonomous topic submitter decides what to work on next. It can:
+1. **Generate a NEW topic**: Identify the next most valuable brainstorm avenue
+2. **Continue an EXISTING topic**: Resume work on an incomplete brainstorm
+
+### Topic Submitter Context
+The submitter receives:
+- **5 validated candidate brainstorm questions** from Topic Exploration phase (direct injected)
+- User's high-level research prompt (PRIMARY context, always direct injected)
+- List of all existing brainstorm topics with metadata:
+  - Topic ID
+  - Topic prompt/question
+  - Status (in-progress / complete)
+  - Submission count (acceptance count)
+  - Last activity timestamp
+- All completed Tier 2 papers with metadata:
+  - Paper ID
+  - Paper title
+  - Abstract (full text)
+  - Word count
+  - Source brainstorm topic ID(s)
+- Topic selection rejection history (last 5)
+
+### Decision Criteria
+When choosing between new / continue:
+- **New Topic**: When all existing topics are complete OR when a new solution avenue more aggressively attacks the user's WHOLE question as stated
+- **Continue Existing**: When an incomplete brainstorm still attacks the whole prompt, or still yields a genuinely novel piece, incremental step, or indirect route toward it
+
+### Hard Code Guard: continue_existing on Completed Brainstorms
+The coordinator enforces a **hard code guard** in `_execute_topic_selection`: if the LLM selects `continue_existing` on a brainstorm whose status is `"complete"`, the action is **rejected** and the topic selection loop retries. This prevents runaway re-brainstorming on already-completed topics regardless of LLM judgment. The LLM prompt and validator prompt both instruct against this, but the code guard is the authoritative enforcement.
+
+Production prompt/parser/model code is authoritative for the exact JSON contract. High-level fields: `action` (new_topic/continue_existing), `topic_id`, `topic_prompt`, `reasoning`.
+
+---
+
+## Topic Validator
+
+### Purpose
+Validates the topic submitter's choice to ensure it represents the best use of research resources.
+
+### Context
+Receives the SAME context as the topic submitter:
+- User's high-level research prompt
+- All existing brainstorm topics with metadata
+- All completed Tier 2 papers with metadata (title, abstract, word count, source)
+- The topic submitter's proposed action
+
+### Validation Criteria
+
+**ACCEPT if**:
+1. New topic addresses a genuinely valuable solution avenue not yet covered
+2. Continue existing makes sense given the brainstorm's current state and the depth appropriate to the objective
+3. Choice is relevant to the user's research goal
+4. Reasoning is sound and grounded under the rigor appropriate to its domain and claim types
+
+**REJECT if**:
+1. New topic duplicates an existing brainstorm
+2. Continue existing on a brainstorm that should be marked complete
+3. Choice ignores more valuable research avenues
+4. Reasoning is flawed or lacks the rigor appropriate to its domain and claim types
+
+High-level fields: `decision` (accept/reject), `reasoning`; production prompt/parser/model code owns the exact contract.
+
+### Rejection Feedback
+When rejected, the validator's reasoning is added to the topic submitter's rolling feedback cache (last 5 rejections), similar to aggregator submitter rejection logs.
+
+**File**: `auto_research_topic_rejections.txt` under the active instance data root (default desktop path: `backend/data/auto_research_topic_rejections.txt`)
+
+---
+
+## Reference Paper Selection for Brainstorm (COMPOUNDING KNOWLEDGE)
+
+### Purpose - The Crucial Mechanism for Compounding Knowledge
+
+The autonomous research system's power comes from its ability to **compound knowledge across research cycles**. Each completed paper represents distilled mechanisms, evidence, designs, algorithms, mathematical results, proofs, or other solution insights that can inform and enhance future brainstorm explorations.
+
+By selecting reference papers BEFORE brainstorming begins, submitters can:
+- Build upon promising mechanisms, evidence, designs, algorithms, mathematical frameworks, or proofs from prior AI-generated papers while independently re-checking their claims
+- Avoid re-exploring territory already covered in depth
+- Identify novel connections between new topics and previously explored results
+- Accelerate convergence on valuable insights by standing on prior work
+
+**This is the most crucial mechanism that allows database creativity to compound.**
+
+### Workflow
+
+**SKIP THIS STEP if no Tier 2 papers exist yet.**
+
+After topic selection is validated, the reference selector runs a self-contained browsing workflow:
+1. Reviews ALL completed paper abstracts
+2. Requests expansion of papers that would be VERY USEFUL for brainstorm exploration
+3. Reviews full content of expanded papers
+4. Selects up to 3 papers to use as topic-cycle base context during brainstorming
+5. Selected papers are loaded into brainstorm aggregator as `user_files`
+
+### Why Outlines Are Included
+
+**Design Principle:** Paper outlines are displayed alongside abstracts in all reference selection phases.
+
+**Rationale - LLM Weight Activation:**
+- Paper outlines contain structural information about the paper's organization
+- Section headers, subsection names, and hierarchical structure activate relevant LLM weights
+- This helps the model better assess topical relevance without reading full content
+- Outlines provide "semantic anchors" that prime the model for recognizing connections
+- The model can identify mathematical concepts, proof structures, and methodological approaches from the outline alone
+
+**Context Handling:**
+- Outlines are fetched from `paper_{paper_id}_outline.txt`
+- If outline is unavailable, displays "[Not available]"
+- Outlines are included in BOTH abstract review (Step 1) AND full paper review (Step 2)
+- Paper titles shown during reference review and later selected-reference contexts include compact validator-review snapshots: initial system critique always, plus up to the latest 4 user-triggered critiques when available. Snapshot content is model ID + novelty/correctness/impact ratings only (no feedback text).
+- Model-visible full-paper reference browsing strips appended generated-proof sections; canonical proof records and final user-facing paper files/archives keep those proof appendices.
+
+### Two-Step Browsing Workflow
+
+**Step 1**: Review abstracts+outlines → Request expansion of promising papers  
+**Step 2**: Review full content → Final selection (max 3 papers)
+
+Context: Direct inject if fits (~40% budget), RAG if too large. No truncation.
+
+---
+
+### Context for Pre-Brainstorm Reference Selection
+- User's high-level research prompt (direct injection)
+- Current brainstorm topic prompt (direct injection)
+- ALL Tier 2 paper titles + abstracts + outlines (direct injection if fits, RAG if too large)
+
+Two-step contract: the submitter requests paper expansions (`expand_papers`, `proceed_without_references`), then makes the final selection (`selected_papers`). Production prompt/parser/model code owns the exact contract. Maximum 3 papers total for the topic cycle.
+
+**Context Handling (DIRECT INJECTION FIRST, RAG SECOND):**
+
+- **Abstracts phase**: Always direct injected (small metadata - typically < 5000 tokens total)
+- **Full papers phase**: 
+  - If all papers fit in ~40% of context budget: Direct inject full content
+  - If papers exceed context budget: RAG retrieves most relevant sections from each paper
+  - Submitter ALWAYS sees either complete papers or highly-relevant RAG chunks
+  - No blind truncation is ever used; appended generated-proof sections are excluded from model-visible paper bodies so verified proofs enter through the explicit proof-library context
+
+**Key Features:**
+
+- Submitter BROWSES abstracts before committing to see full papers
+- Submitter CHOOSES which papers to expand (not automatic expansion of all papers)
+- Submitter makes FINAL selection after reviewing full content
+- System intelligently handles large papers via RAG when needed
+- Maximum 3 papers enforced across the topic-cycle selection modes
+
+### Key Design Points
+- **Same references persist**: References selected here are used for BOTH brainstorming AND paper writing
+- **Additional selection later**: AI can select MORE references (up to 3 total) before paper writing
+- **No re-selection/removal**: Already-selected references remain selected throughout topic cycle
+
+---
+
+## Brainstorm Aggregation Runtime
+
+Once a topic is validated and references selected, standard aggregation begins on that brainstorm topic.
+
+### Architecture
+- **1–10 configurable submitters (default 3)**: Generate objective-relevant solution contributions for the brainstorm topic
+- **1 Validator**: Validates submissions for domain- and claim-appropriate rigor, novelty, and relevance
+- **Pruning**: Cleanup review runs on the child Aggregator's run-local 7-acceptance cadence (same mechanism as Part 1)
+- **Same as Part 1 Aggregator**: Uses identical submitter/validator patterns, RAG cycling, etc.
+- **PARALLEL EXECUTION**: Submitters run in parallel regardless of boost status (boost is routing-only)
+
+### Batch Validation (Inherited from Part 1)
+The autonomous brainstorm aggregator inherits batch validation from Part 1 infrastructure:
+- **Validator processes up to 3 submissions at once**: Uses batch-specific prompts for 1, 2, or 3 submissions
+- **Independent assessment of each submission's value**: Each submission evaluated against existing database independently
+- **Intra-batch redundancy prevention**: If multiple submissions would be accepted but are redundant with each other, only the strongest is accepted
+- **Queue overflow handling**: If 10+ submissions queued, submitters are paused by the coordinator until queue drops below threshold
+- **Accelerated brainstorm exploration**: Batch validation increases throughput while maintaining quality through redundancy checks
+
+### Key Differences from Part 1 Aggregator
+1. **Topic-Specific Database**: Writes to `auto_brainstorms/brainstorm_{topic_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_brainstorms/brainstorm_{topic_id}.txt`) instead of `rag_shared_training.txt`
+2. **No User-Provided Topic Prompt**: Uses the AI-generated brainstorm topic prompt
+3. **Completion Tracking**: Tracks accepted-submission events for completion review and hard caps; cleanup removals are tracked separately and do not advance completion-review intervals
+4. **Deletion Safety**: An active/current brainstorm must not be deleted while autonomous research or its aggregator is running; if its metadata or database disappears, aggregation must stop and clear stale coordinator pointers rather than recreate an invisible DB.
+5. **Hard Limit**: 30 accepted submissions (FORCE transition to paper writing, no completion review)
+   - Purpose: Prevents runaway brainstorms from accumulating indefinitely
+   - Trigger: After each acceptance, check if count >= 30
+   - Behavior: Immediately transition to paper writing, skip completion review
+   - WebSocket event: `brainstorm_hard_limit_reached`
+   - **TOTAL across all rounds**: When `continue_existing` resumes an incomplete brainstorm, the 30-cap applies to the TOTAL acceptance count (prior + new). The aggregator loop tracks a `resume_acceptance_base` offset so `_acceptance_count` always reflects the true total. If a topic already has >= 30 acceptances on entry, aggregation is skipped entirely and paper writing is forced immediately.
+6. **Rejection Hard Limit**: 10 consecutive rejections (with minimum 7 acceptances) FORCE transition to paper writing
+   - Purpose: Prevents infinite rejection loops when brainstorm is exhausted
+   - Trigger: After rejection, check if consecutive rejections >= 10 AND acceptances >= 7
+   - Behavior: Immediately transition to paper writing, skip completion review
+   - WebSocket event: `brainstorm_rejection_limit_reached`
+
+### Context for Submitters
+- User's high-level research prompt (direct injection)
+- Current brainstorm topic prompt (direct injection)
+- **Selected reference papers (user_files - enables compounding knowledge)**
+- Topic-specific database (RAG if large, direct injection if fits)
+- Local rejection logs (per submitter, last 5)
+- Completion feedback from prior completion reviews (last 5, topic-specific)
+
+### Context for Validator
+- User's high-level research prompt (direct injection)
+- Current brainstorm topic prompt (direct injection)
+- Topic-specific database (for REDUNDANCY check)
+- Submission under review (direct injection if fits, RAG if large)
+
+---
+
+## Completion Review (SPECIAL SELF-VALIDATION MODE)
+
+### Regular Trigger
+Runs after each configured interval of accepted submissions (default 10). Cleanup/pruning runs independently and removals do not advance the completion-review trigger.
+
+**Hard Limit Override**: If brainstorm reaches 30 accepted submissions, completion review is SKIPPED and paper writing is forced.
+
+**Early Review Triggers**: The coordinator may also run completion review early when accepted-submission polling observes exhaustion signals, but model-driven completion reviews are deferred until at least 7 accepted submissions. The 10-consecutive-rejection rule force-transitions only after the minimum acceptance threshold is met.
+
+**Example trigger behavior**:
+- Review runs once the accepted-event count has advanced by the configured interval since the last review; parallel submitters may jump past exact multiples
+- If cleanup removes an entry, the next review is still based on accepted-event count, not the smaller post-cleanup database size
+- At 30 acceptances: Hard limit triggers, completion review is skipped, and paper writing is forced
+
+### Manual Paper Writing Trigger (User Override)
+
+**Purpose**: Allow user to act as special submitter reviewer and manually force transition to paper writing.
+
+**Trigger**: User clicks "Force Paper Writing" button during active brainstorm (tier1_aggregation).
+
+**Workflow**:
+1. User sees current brainstorm progress (acceptance count, queue size, rejection count)
+2. User decides brainstorm is ready for paper writing (based on their assessment)
+3. User clicks "📝 Force Paper Writing" button in brainstorm status section
+4. Confirmation dialog appears: "Confirm Force Paper Writing" / "Cancel"
+5. On confirmation:
+   - API endpoint `/api/auto-research/force-paper-writing` is called
+   - Coordinator validates state (must be in tier1_aggregation)
+   - Brainstorm aggregator is stopped immediately
+   - Brainstorm is marked complete
+   - System transitions to the normal post-brainstorm handoff: proof checkpoint first when proof outputs are enabled, then paper compilation only when research-paper output is enabled
+
+**API Endpoint**: `POST /api/auto-research/force-paper-writing`
+
+**Error Cases**:
+- 400: Autonomous research not running
+- 400: Not in tier1_aggregation (can only force during brainstorm)
+- 400: No active brainstorm found
+- 500: Transition failed
+
+**WebSocket Event**: `manual_paper_writing_triggered`
+
+**UI Location**: Within current brainstorm status section, appears only when tier1_aggregation is active
+
+**Design Rationale**:
+- User may have domain knowledge that brainstorm is sufficient before completion review interval
+- Saves time when user knows brainstorm has explored enough territory
+- Provides manual control over autonomous workflow
+- User acts as "special submitter reviewer" deciding when to proceed
+
+**Important Notes**:
+- Does NOT run completion review (bypassed entirely)
+- Does NOT require self-validation (user decision is final)
+- Brainstorm is marked complete regardless of acceptance count
+- Subsequent paper compilation proceeds normally with all selected reference papers when research-paper output is enabled; proofs-only runs skip paper/title work after brainstorm proof work and return to topic exploration.
+- **Race condition guard**: Force requests claim ownership before awaiting child shutdown. Child start and forced stop are serialized; the parent awaits the same completed drain and durable proof-handoff preparation before proof/title work, and never treats that intentional child stop as unexpected. Top-level Stop drains pending handoff work before a later Start.
+
+### Purpose
+Assess whether the current brainstorm has been sufficiently explored relative to THIS MODEL'S internal knowledge (weights) and decide whether to continue brainstorming or begin writing a paper.
+
+### Special Self-Validation Mode
+
+**The submitter model MUST be its own validator for completion review.**
+
+**Reasoning**: A different model cannot validate the weight-exploration assessment of another model because:
+1. Each model has different training data and knowledge encoded in its weights
+2. Model A cannot know what Model B "knows" or has exhausted
+3. Only the same model can accurately assess whether its own knowledge basin is depleted for a brainstorm topic
+
+**Implementation**:
+- The completion review submitter generates an assessment
+- The same configured completion-review role/model validates its own assessment
+- This is the ONLY place in the system where a submitter self-validates
+
+### Completion Review Flow
+
+1. **Submitter Assessment**: Model evaluates if it can think of anything extremely useful to add to the brainstorm
+2. **Self-Validation**: Same model validates: "Is this assessment accurate? Is this brainstorm truly exhausted or ready for paper writing?"
+3. **Decision**:
+   - If CONTINUE_BRAINSTORM: Add feedback to rolling cache, return to aggregation
+   - If WRITE_PAPER: Proceed to paper writing workflow (Tier 2)
+
+High-level contract: completion submitter uses `decision` (continue_brainstorm/write_paper), `reasoning`, and `suggested_additions`; self-validator uses `validated` (bool) and `reasoning`. Production prompt/parser/model code owns the exact contract.
+
+### Completion Review Context
+- User's high-level research prompt
+- Current brainstorm topic prompt
+- Full brainstorm database when it fits; otherwise explicitly evidence-bounded RAG context, with appended generated-proof sections stripped from model-visible context
+- Brainstorm metadata (submission count, duration, etc.)
+- Prior completion feedback (last 5)
+
+### Feedback on Non-Completion
+If the decision is CONTINUE_BRAINSTORM, the `suggested_additions` field provides direction for future submissions. This feedback goes to a rolling cache (last 5) that is passed to the brainstorm aggregation submitters.
+
+**File**: `auto_brainstorms/completion_feedback_{topic_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_brainstorms/completion_feedback_{topic_id}.txt`)
+
+---
+
+## Transition to Paper Writing
+
+Once completion review decides WRITE_PAPER (and self-validates), the system transitions to paper writing workflow.
+
+### Additional Reference Paper Selection (Pre-Paper Writing)
+
+**Purpose**: Allow AI to select ADDITIONAL references discovered to be relevant during brainstorming.
+
+**SKIP THIS STEP if**:
+- No Tier 2 papers exist yet, OR
+- Already at max capacity (3 papers selected during pre-brainstorm)
+
+**Context**:
+- Papers already selected for brainstorming (shown as "ALREADY SELECTED")
+- ALL other paper abstracts (papers not yet selected)
+- Completed brainstorm database (RAG) - provides insights from exploration
+
+**Key Differences from Pre-Brainstorm Selection**:
+- Shows which papers are ALREADY SELECTED (cannot be removed)
+- Only shows papers NOT YET selected for expansion
+- Maximum additional papers = 3 - (already selected count)
+- Benefits from brainstorm insights to identify newly-relevant papers
+
+### Two-Step Browsing Workflow (Additional Mode)
+
+Same production two-step browsing contract as pre-brainstorm selection (expand request → final selection). Already-selected papers are shown as context; the submitter requests expansion of remaining papers, then selects additional ones. Already-selected papers cannot be removed.
+
+**Validator Role**: 
+- Reference selection is handled by the dedicated reference selector workflow and hard caps
+- No separate `TopicValidatorAgent` pass currently reviews reference selections
+
+**Final Reference List**: Already-selected papers + newly-selected papers (max 3 total)
+
+### Paper Title Exploration (Pre-Title Candidate Brainstorm)
+
+**Purpose**: Before committing to a paper title, the system collects 5 validated candidate titles using the Part 1 aggregator infrastructure. The final title selection then chooses from candidates, synthesizes them, or proposes a new title with justification.
+
+**Architecture**: Uses `AggregatorCoordinator` from Part 1 — same parallel submitters + batch validator, but with **cleanup/pruning disabled** (`enable_cleanup_review=False`) since target is only 5 candidates.
+
+**Applies to EVERY paper creation**: Tier 2 papers (1/2/3 from brainstorm), Tier 3 short-form, Tier 3 gap/intro/conclusion chapters.
+
+**Workflow**:
+1. Aggregator starts through the standard Part 1 coordinator; submitters run in parallel except when inherited Aggregator single-model mode serializes them
+2. Submitters generate candidate paper titles as standard submissions
+3. Validator checks quality, relevance, and DIVERSITY (rejects near-duplicates)
+4. Accepted candidates accumulate in temp title DB
+5. Coordinator completes only at 5 acceptances; explicit stop or child-aggregator failure exits/retries without feeding partial candidates to final title selection
+6. Reads the completed 5-title DB and formats it for final title selection
+
+**Temp DB**: `title_candidates_{topic_id}.txt` in brainstorms dir (cleaned up after phase)
+
+**WebSocket Events**: Paper title exploration should expose user-visible progress; exact internal event names are not rule-level invariants unless consumed by the hosted wrapper or frontend contract.
+
+**Crash Recovery**: On resume, title exploration reuses any surviving accepted title candidates from `title_candidates_{topic_id}.txt` and tops up to 5; normal completion cleans up the temp file.
+
+**Prompts**: `paper_title_exploration_prompts.py` — `build_title_exploration_user_prompt()` frames the aggregation task for candidate title generation with context: user prompt, topic, brainstorm summary, existing papers, reference papers.
+
+### Paper Title Selection
+
+**Context**:
+- User's high-level research prompt
+- Current brainstorm summary (direct injection; no full brainstorm RAG in title selection)
+- Selected reference paper summaries (if any, direct injection)
+- ALL existing paper titles from THIS brainstorm topic (direct injection)
+- ALL existing paper abstracts from THIS brainstorm topic (if any, direct injection)
+- **5 validated candidate titles from Paper Title Exploration phase** (direct injection)
+
+**Purpose**: Choose a title for the paper that will be compiled from this brainstorm. The selector sees 5 pre-validated candidate titles and may select one, synthesize, or propose a new title with justification.
+
+High-level fields: `paper_title`, `reasoning`; production prompt/parser/model code owns the exact contract.
+
+**DISTINCTION FOR TITLE VALIDATION:**
+
+| Concept | Definition | Validation Behavior |
+|---------|------------|---------------------|
+| **Brainstorm Submissions** | Raw research insights in "BRAINSTORM SUMMARY" - the SOURCE MATERIAL for the paper | Title SHOULD reflect this content - that's expected! DO NOT reject for similarity to brainstorm submissions |
+| **Existing Papers from Brainstorm** | Previously completed Tier 2 papers listed in "EXISTING PAPERS FROM THIS BRAINSTORM" | ONLY reject if title is too similar to these existing papers |
+
+**Key Points:**
+- If "EXISTING PAPERS FROM THIS BRAINSTORM: None" → Nothing to differentiate from, accept if other criteria met
+- Title similarity to brainstorm content is CORRECT (captures source material)
+- Title similarity to existing papers is a rejection reason (creates redundancy)
+
+**Validator Role**:
+- The dedicated paper-title validator role reviews title selection
+- Validator also sees selected reference paper summaries (if any) so acceptance/rejection reflects the intended paper scope
+- Rejects if title is too similar to **EXISTING COMPLETED PAPERS** from this brainstorm (NOT brainstorm submissions!)
+- Rejects if title doesn't align with brainstorm content
+- DO NOT reject simply because title reflects brainstorm submission content - that is INTENDED behavior
+- Rejection feedback is threaded into subsequent retries within the current title-selection loop (keeps last 5 attempts in local retry history)
+
+---
+
+## Tier 2 - Paper Compilation
+
+Once paper title is selected and validated, paper compilation begins using the FULL Part 2 compiler workflow.
+
+### Retroactive Brainstorm Correction (Unified Workspace)
+
+During paper compilation, the compiler submitter sees both the paper AND the source brainstorm database simultaneously. On each construction turn, the submitter may optionally propose a brainstorm edit/delete/add alongside its paper operation.
+
+**Key design**: Submitter sees full workspace (paper + brainstorm). Validator sees ONLY the specific operation being validated (paper OR brainstorm, never both). Each operation must be independently justified.
+
+**Operations**: edit (correct entry), delete (remove entry), add (new insight). Each validated independently by the compiler validator with brainstorm-only context.
+
+**Independent acceptance**: Paper and brainstorm results are independent. Paper accepted + brainstorm rejected = valid. RAG refreshed after accepted brainstorm modifications.
+
+**Not available in manual Part 2 mode** — only during autonomous paper compilation where `_current_topic_id` is set.
+
+### Compilation Workflow
+
+**Uses existing Part 2 (Compiler) infrastructure**:
+- Sequential Markov chain workflow
+- Writing Submitter (outline, construction, review modes)
+- Rigor & Proofs Submitter (rigor mode)
+- Compiler validator (coherence, rigor, placement validation)
+- **Iterative outline creation** (submitter refines outline until satisfied or 15 iteration limit)
+
+**Sequential Writing Order**
+
+Unlike manual Part 2 mode (which writes "next best section"), autonomous mode writes sections in this SPECIFIC ORDER:
+
+1. **Outline Creation + Validation** (iterative refinement with validator feedback, max 15 iterations)
+2. **Body Sections** (write all body sections following outline order)
+3. **Post-Body Critique / Self-Review** (3 total critique attempts; accepted critiques append transparently)
+4. **Conclusion** (write conclusion section)
+5. **Introduction** (write introduction section)
+6. **Pre-Abstract Empirical Red-Team Review** (up to 2 review passes)
+7. **Abstract** (write abstract - FINAL section)
+
+**Paper Completion Condition**: The child compiler's phase machine is authoritative: abstract completion requires an accepted `section_complete=true` transition plus an Abstract section and required final structure. The autonomous wrapper monitors that completion state before saving and stopping the child workflow.
+
+**REQUIRED SECTION STRUCTURE (MANDATORY)**:
+Final papers must include these sections. Outlines must include Introduction, Body, and Conclusion; an Abstract heading is allowed but not required because the abstract is written last.
+
+| Section | Exact Name | Required | Position |
+|---------|-----------|----------|----------|
+| Abstract | "Abstract" | YES in final paper; optional in outline | First |
+| Introduction | "Introduction" or "I. Introduction" | YES | After Abstract |
+| Body | Flexible (II., III., etc.) | YES (at least 1) | Between Intro and Conclusion |
+| Conclusion | "Conclusion" or "N. Conclusion" | YES | Last required core section; optional appendix/self-review material may follow |
+
+The validator will reject outlines missing the required non-abstract sections or using incorrect section names.
+
+### Compiler Cycle Behavior
+
+**Full Part 2 cycle is used** (construction → outline_update → review → review → rigor), BUT with constrained section selection:
+
+**During Body Section Phase**:
+- Construction mode: Write next body section following outline order
+- Cannot skip to conclusion/introduction/abstract
+
+**Critique Phase (Post-Body, Pre-Conclusion)**:
+- **Triggered**: Automatically when body construction completes
+- **Purpose**: Peer review body section before proceeding to conclusion
+- **Target**: 3 total attempts (accepted + rejected + declined)
+- **Decline Mechanism**: Submitter can assess "no critique needed" if body is academically acceptable (no mathematical errors, all outline requirements met, proper rigor)
+- **Self-Review Append**: If accepted critiques exist after 3 attempts, append them as `AI Self-Review and Limitations`; if 0 critiques are accepted, continue without the section
+- **No Rewrites**: Critiques never trigger partial revision, total rewrite, body clearing, title changes, or outline updates
+- **Placement**: Self-review is inserted immediately before the paper anchor, making it the final reader-facing section after any existing appendix/proof material. Later proof appends must stay before self-review.
+- **JSON Schema**: `{"critique_needed": true/false, "submission": "...", "reasoning": "..."}` for critiques only
+
+**Outline Updates**: Outline updates run only during body construction (same as Part 2)
+
+**Review/Rigor**: These modes operate normally throughout all phases
+
+**Section Order Enforcement Mechanism (EXPLICIT COMPLETION SIGNALS)**:
+- Compiler operates in "autonomous mode" with phase tracking via `autonomous_section_phase`
+- Phase transitions triggered by EXPLICIT `section_complete: true` signals from submitter JSON
+- Each phase has a dedicated prompt function: `get_body_construction_system_prompt()`, `get_conclusion_construction_system_prompt()`, `get_introduction_construction_system_prompt()`, `get_abstract_construction_system_prompt()`
+- Submitter sets `section_complete: true` when current phase is done, coordinator advances to next phase
+- Child phase transitions use explicit completion signals plus section-existence checks
+- Paper is complete in the child compiler when abstract phase receives `section_complete: true` and an Abstract section exists
+- Abstract phase should set section_complete=true when submitting final abstract content
+- The autonomous wrapper saves/stops only after the child compiler reports authoritative abstract-phase completion.
+- Phase tracking prevents premature section writing (e.g., cannot write abstract until introduction phase complete)
+
+### Context Priority
+
+**Context Priority**:
+1. User's high-level research prompt (ALWAYS direct)
+2. Paper title (ALWAYS direct)
+3. Current outline (ALWAYS fully direct - never RAGed)
+4. Current paper progress and source brainstorm where the compiler caller injects them directly, including for paper-writing rigor/proof mode theorem discovery and formalization
+5. Referenced papers and prior brainstorm papers loaded as high-priority compiler RAG evidence
+
+All autonomous offload order and source-exclusion rules are centralized in `rag-design-for-overall-program.md`.
+
+**Note**: Outline is always fully injected (never RAGed) for structural framework integrity.
+
+### Autonomous RAG Manager Implementation
+
+The autonomous RAG manager follows the same "no truncation" principle for full source content paths used as research evidence: source material that doesn't fit is offloaded to RAG semantic search instead of being blindly cut. Compact metadata summaries, UI previews, prompts that intentionally show abstracts/outlines, and rejection/debug previews may be length-capped to keep orchestration prompts within context.
+
+**Context Handling Methods**:
+
+1. **`get_brainstorm_context(topic_id, max_tokens)`**:
+   - Direct injects if brainstorm database fits within max_tokens
+   - Falls back to RAG retrieval if exceeds budget
+   - Returns tuple: (context_text, used_rag_fallback: bool)
+   - Brainstorm summaries/submission lists strip appended generated-proof sections before entering model context
+
+2. **`get_reference_papers_context(paper_ids, max_total_tokens)`**:
+   - Direct-injects the selected paper set when it fits within the total budget
+   - Falls back to RAG retrieval when the selected papers exceed the budget
+   - Includes outlines when requested
+
+3. **`prepare_compiler_context(topic_id, reference_paper_ids, outline, paper, context_budget)`**:
+   - Legacy/helper allocator for direct-first planning; current compiler construction primarily receives direct source blocks from the caller plus RAG-indexed reference evidence
+
+**Prompt Size Validation** (autonomous agents):
+- Topic selector: validates prompt size before LLM call
+- Topic validator: validates prompt size before LLM call
+- Completion reviewer: validates prompt size for both assessment and self-validation
+- Reference selector: validates prompt size for abstract review and expansion requests
+- Paper title selector: validates prompt size before LLM call
+- Agents may shed oldest whole feedback entries or use existing optional-summary fallbacks; newest-only rolling-feedback overflow must propagate through the existing durable context-overflow lifecycle, never become a semantic rejection, decline, or ordinary retry.
+
+**Error Handling**:
+- If prompt size exceeds context window even with full RAG offloading → raise ValueError with diagnostic info
+- If RAG retrieval fails in non-mandatory browsing/metadata helpers → log and return bounded summary/abstract/empty fallback as that helper defines
+- Mandatory source paths, especially proof/formalization, fail visibly instead of silently truncating
+- Rolling rejection and proof-attempt feedback is projected from durable state as at
+most the newest five whole entries. Prompt assembly removes only the oldest entry at
+a time after complete-prompt accounting, including provider context rejection; the
+newest entry remains mandatory, and newest-only overflow follows the existing durable
+Autonomous/proof context-overflow lifecycle.
+
+### Rejection Feedback
+
+Compiler validator rejections are logged to:
+- `auto_papers/paper_{paper_id}_last_10_rejections.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_last_10_rejections.txt`)
+- Follows same structure as Part 2 compiler rejection logs
+
+---
+
+## Tier 2 - Paper Completion Handling
+
+### Paper Finalization
+
+When the child compiler authoritatively completes the abstract phase and the parent confirms the required final structure, the paper is considered complete and saved. Additionally, if the system switches to a new topic before abstract completion, the current paper is automatically saved as incomplete progress rather than as a completed paper.
+
+**Actions on Completion**:
+
+1. **Save Final Paper**:
+   - File: `auto_papers/paper_{paper_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}.txt`)
+   - Contains: Full paper with all sections
+
+2. **Save Outline**:
+   - File: `auto_papers/paper_{paper_id}_outline.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_outline.txt`)
+   - Contains: Paper outline for structural reference
+
+3. **Extract and Save Abstract**:
+   - File: `auto_papers/paper_{paper_id}_abstract.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_abstract.txt`)
+   - Contains: Abstract text only
+
+4. **Cache Brainstorm Database**:
+   - File: `auto_papers/paper_{paper_id}_source_brainstorm.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_source_brainstorm.txt`)
+   - Contains: Complete brainstorm database that sourced this paper
+
+5. **Update Metadata**:
+   - File: `auto_research_metadata.json` under the active instance data root (default desktop path: `backend/data/auto_research_metadata.json`)
+   - Add paper entry with:
+     - paper_id
+     - paper_title
+     - abstract (full text)
+     - word_count
+     - source_brainstorm_id(s)
+     - creation_timestamp
+     - status: "complete"
+
+5. **Update Statistics**:
+   - Increment total_papers_completed
+   - Track papers per brainstorm
+   - Track average word counts
+
+6. **Auto-Generate Critique** (background task):
+   - Automatically generates validator critique for every completed Tier 2 paper
+   - Uses validator model from current session configuration
+   - Calculates average rating: `(novelty + correctness + impact) / 3`
+   - Saves critique to paper's critique storage
+   - If average rating ≥ 6.25, emits `high_score_critique` WebSocket event
+   - Frontend displays popup notification (max 3, FIFO queue) and recovers missed high-score popups from saved paper critique badges on reload/poll
+   - Non-blocking: errors logged but don't affect paper completion
+   - See "Auto-Critique Popup Notifications" section below for details
+
+### Paper Redundancy Review
+
+**Trigger**: After 3 completed-paper counter increments since the last redundancy-check baseline. The checker reviews the current active paper summaries; normal startup baselines existing completed papers so old library items do not immediately retrigger the review.
+
+**Purpose**: Maintain quality of paper library by identifying redundant papers.
+
+**Tier 3 Protection**: Paper redundancy checks are disabled when Tier 3 is active (`_tier3_active = True`). This prevents accidentally purging papers that are being used in the final volume. The flag is set at the start of `_tier3_final_answer_workflow()` and reset in the finally block.
+
+**Workflow**:
+
+1. **Validator Review**:
+   - Context: ALL paper titles + abstracts (direct injection)
+   - User's high-level research prompt
+   - Instruction: "Review all papers and determine if ANY ONE paper should be REMOVED due to redundancy"
+
+High-level fields: `should_remove` (bool), `paper_id` (or null), `reasoning`; production prompt/parser/model code owns the exact contract.
+
+2. **Removal Criteria**:
+   - Paper is REDUNDANT with other papers (content fully covered elsewhere)
+   - Paper was MARGINALLY useful but other papers provide better coverage
+   - Paper's unique solution mechanism, evidence, derivation, design, implementation, algorithm, theorem/proof, validation method, or risk analysis is minimal compared to other papers
+
+4. **Conservative Approach**:
+   - When in doubt, DO NOT remove
+   - Only remove if CERTAIN the library would be better without it
+   - Maximum 1 removal per review cycle
+
+5. **Execution**:
+   - If removal validated: prune the paper into `auto_papers/pruned/` (or the session `papers/pruned/` directory) with `pruned_paper_{paper_id}*` filenames and a top-of-file `PRUNED PAPER - REMOVED FROM MODEL CONTEXT` banner
+   - Update metadata to mark `status="pruned"`, store prune reason/actor/time, and remove active RAG sources for that paper
+   - Pruned papers are excluded from all future model context/reference selection, but remain visible and downloadable for the user until they explicitly delete all pruned papers
+
+### Return to Topic Selection / Brainstorm Multi-Paper Continuation
+
+After paper completion and redundancy review, the system enters a **continuation decision loop** (max 3 papers per brainstorm):
+
+1. If `papers_from_brainstorm < 3`: Run continuation decision (submitter + topic validator)
+   - **write_another_paper**: New title selection + compilation (skip reference re-selection, auto-inject prior brainstorm papers)
+   - **move_on**: Proceed to Tier 3 check, then Topic Selection
+2. If 3 papers reached (hard limit): Skip decision, proceed to Tier 3 check
+
+**Continuation Decision Context**: User prompt + brainstorm topic + brainstorm summary + all prior papers from that brainstorm (title/abstract/outline). It intentionally does not include the full brainstorm DB or cross-topic reference papers.
+
+**Prior Brainstorm Papers as References**: For paper 2/3, all prior papers from the same brainstorm are auto-loaded as permanent high-priority compiler RAG references. These are separate from the 3-paper topic-cycle cross-topic reference limit.
+
+**Reference Selection**: Runs ONCE per brainstorm cycle. Papers 2/3 reuse the same cross-topic references.
+
+**WebSocket Events**: Brainstorm continuation decisions should expose user-visible progress; exact internal event names are not rule-level invariants unless consumed by the hosted wrapper or frontend contract.
+
+**Crash Recovery**: `brainstorm_paper_count` and `current_brainstorm_paper_ids` persisted in workflow state.
+
+---
+
+## Tier 3 - Final Answer Generation
+
+### Overview
+
+Tier 3 synthesizes all accumulated research (Tier 2 papers) into a **final answer** to the user's original research prompt. This tier triggers every 5 completed papers and produces either:
+- **Short Form**: A single comprehensive paper directly answering the user's question
+- **Long Form**: A curated volume/collection of papers with Introduction and Conclusion papers
+
+### Key Design Principles
+
+1. **Context Isolation**: Tier 3 operates ONLY on Tier 2 papers, NOT on Tier 1 brainstorm databases
+2. **Independent Rejection Feedback**: Tier 3 has its own 10-rejection cache, separate from Tiers 1/2
+3. **System Termination**: Once the final answer is complete, the autonomous system stops
+4. **Modular Code Reuse**: Uses existing Tier 2 paper writing infrastructure (no duplicate code)
+5. **Domain-Appropriate Synthesis**: Tier 3 presents the strongest defensible direct answer under the applicable rigor/evidence standard, distinguishes demonstrated results from proposals and required validation, and retains mathematics/formal proof as first-class modalities when relevant.
+
+### Trigger Condition
+
+- **Disabled by default**: `tier3_enabled` defaults to `False`. Tier 3 never triggers automatically unless the user enables it in Settings.
+- **Every 5 new papers in library** (when enabled): Triggers when `actual_library_count - last_check >= 5`; normal startup baselines existing active papers unless resuming a persisted Tier 3 checkpoint
+- Based on actual papers saved in the paper library, not internal counters
+- Uses `paper_library.count_papers()["active"]` to get the true count
+- Example trigger points are relative to the last Tier 3 baseline, not necessarily absolute library counts
+- **Force override**: Backend force requests bypass the automatic `tier3_enabled` trigger gate, but the current frontend only shows the Force Tier 3 button when Tier 3 is enabled in Settings.
+
+### Phase 1: Certainty Assessment
+
+**Purpose**: Assess the strongest defensible answer and the evidence status of its components from existing research papers.
+
+**Two-Step Paper Browsing** (same pattern as reference selection):
+
+1. **Abstract Review Phase**:
+   - Show all paper titles + abstracts + outlines
+   - AI requests expansion of relevant papers
+
+2. **Full Content Review Phase**:
+   - Show full content of expanded papers
+   - Strip appended generated-proof sections from model-visible paper bodies; proof artifacts remain in canonical proof storage and final archives
+   - AI assesses "known certainties"
+
+**Certainty Levels**:
+| Level | Description |
+|-------|-------------|
+| `total_answer` | Complete answer is well-supported at the applicable standard |
+| `partial_answer` | Only identified portions are well-supported |
+| `no_answer_known` | Available papers do not support a defensible answer - MORE RESEARCH NEEDED |
+| `appears_impossible` | Objective appears mathematically impossible, physically/constraint infeasible, internally inconsistent, or otherwise unsupported for a clearly reasoned reason |
+| `other` | Special cases |
+
+High-level fields: `certainty_level` (total_answer/partial_answer/no_answer_known/appears_impossible/other), `known_certainties_summary`, `reasoning`; production prompt/parser/model code owns the exact contract.
+
+**Special Case - `no_answer_known`**:
+- If certainty assessment returns `no_answer_known`, Tier 3 exits
+- System returns to normal research (Topic Selection)
+- More papers will be generated before next Tier 3 trigger
+
+**Validation**: Dedicated certainty-assessor validation reviews the assessment (10-rejection feedback loop)
+
+### Phase 2: Format Selection
+
+**Purpose**: Select the format for the final answer based on certainty assessment.
+
+**Format Options**:
+
+| Format | Use Case |
+|--------|----------|
+| `short_form` | Answer can be presented coherently in single paper |
+| `long_form` | Genuinely independent solution components require a curated collection |
+
+**Decision Factors**:
+- Complexity of user's question
+- Independent mechanisms, evidence, implementations, proofs, validations, or risk analyses
+- Whether single coherent narrative is possible
+- Whether the solution has a genuine multi-chapter dependency structure; paper count alone is insufficient
+
+High-level fields: `answer_format` (short_form/long_form), `reasoning`; production prompt/parser/model code owns the exact contract.
+
+**Validation**: Dedicated answer-format validation reviews the selection (10-rejection feedback loop)
+
+### Phase 3A: Short Form Answer
+
+**Workflow**:
+
+1. **Reference Selection**: Browse all papers, select up to 6 for Tier 3 short-form context
+2. **Title Selection**: Title that directly answers user's prompt (uses existing `PaperTitleSelectorAgent`)
+3. **Paper Compilation**: Use existing Tier 2 compiler infrastructure
+   - Outline creation → Body → Critique/Self-Review → Conclusion → Introduction → pre-abstract empirical red-team review → Abstract
+   - Context: Selected reference papers (NO brainstorm databases - Tier 3 context isolation)
+4. **System Stops**: After abstract is written, autonomous research terminates
+
+**Paper Title Requirement**: Title must DIRECTLY and TRANSPARENTLY answer the user's question.
+
+The production final-title contract follows paper title selection. The title must directly and transparently answer the user's question; production prompt/parser/model code owns the exact contract.
+
+### Phase 3B: Long Form Answer (Volume)
+
+**Volume Organization Workflow** (iterative refinement like outline creation):
+
+1. **Initial Organization**:
+   - AI selects which existing papers become body chapters
+   - AI identifies "gap papers" that need to be written
+   - AI creates volume structure with title and chapter order
+
+2. **Validation Loop**:
+   - Validator reviews volume organization
+   - If rejected, AI refines organization
+   - Continues until `outline_complete=true` AND validator accepts (max 15 iterations)
+
+**Chapter Types**:
+| Type | Description |
+|------|-------------|
+| `existing_paper` | Existing Tier 2 paper used as-is |
+| `gap_paper` | New paper to be written to fill content gap |
+| `introduction` | Introduction paper (frames the volume, written LAST) |
+| `conclusion` | Conclusion paper (synthesizes findings, written second-to-last) |
+
+High-level fields: `volume_title`, `chapters` (array with chapter_type/paper_id/title/order/description), `outline_complete`, `reasoning`; production prompt/parser/model code owns the exact contract.
+
+**Paper Writing Order (Long Form)**:
+1. **Gap Papers** (if any): Write in chapter order
+2. **Conclusion Paper**: Synthesizes all chapters, directly answers user's question
+3. **Introduction Paper**: Frames the volume, provides roadmap (written LAST)
+
+**Chapter Reference Scope**: Gap/introduction/conclusion chapter writing uses all `existing_paper` chapters chosen for the organized volume as references. There is no separate 6-paper selector inside long-form chapter writing.
+
+**Volume Assembly**: After all chapters are written:
+- Papers are combined into final volume
+- Displayed in "FINAL ANSWER" section of GUI
+- System stops after Introduction paper abstract is written
+
+### Model Tracking and Attribution
+
+The system implements **two tiers of model tracking**:
+1. **Per-Paper Tracking**: Tracks API calls for each individual paper (Tier 1 brainstorm + Tier 2 compilation)
+2. **Global Tier 3 Tracking**: Tracks all API calls during final answer generation
+
+#### Per-Paper Model Tracking
+
+**Purpose**: Each paper includes author attribution showing which AI models were used to create it.
+
+**Tracking Mechanism (Autonomous Mode - Part 3)**:
+- When brainstorm aggregation starts, a `PaperModelTracker` is initialized
+- A callback is set on `api_client_manager` that tracks every API call to the per-paper tracker
+- Same model used in multiple instances counts as ONE author, but all API calls are tallied
+- Model usage is stored in `PaperMetadata.model_usage` (Dict[str, int] mapping model_id to call count)
+- When Tier 3 is active, API calls are tracked to BOTH the per-paper tracker AND the global Tier 3 tracker
+
+**Tracking Mechanism (Manual Mode - Part 2)**:
+- When compiler initializes (not in autonomous mode), a `PaperModelTracker` is initialized
+- A callback is set on `api_client_manager` that tracks every API call during compilation
+- Model tracking data is included when saving the paper via `/api/compiler/save-paper`
+- No reference papers section in manual mode (manual mode doesn't have reference papers)
+
+**Per-Paper Author Attribution Section** (at beginning of each paper):
+```
+================================================================================
+AUTONOMOUS AI SOLUTION
+
+Disclaimer: This content is provided for informational purposes only. This
+paper was autonomously generated with the novelty-seeking MOTO harness without
+peer review or user oversight beyond the original prompt. It may contain
+incorrect, incomplete, misleading, or fabricated claims presented with high
+confidence. Use of this content is at your own risk. You are solely
+responsible for reviewing and independently verifying any output before relying
+on it, and the developers, operators, and contributors are not responsible for
+errors, omissions, decisions made from this content, or any resulting loss,
+damage, cost, or liability.
+
+User's Research Prompt: [user's original prompt here]
+
+Paper Title: [paper title]
+
+AI Model Authors: deepseek-r1:70b, qwen-2.5:32b
+
+Possible Models Used for Additional Reference:
+- DeepSeek (3)
+- Llama-3.1 (2)
+- Qwen-2.5 (1)
+
+Generated: 2026-01-02
+================================================================================
+```
+
+**Reference Paper Models Section**:
+- Lists models from all reference papers used in creating this paper
+- Models are listed **alphabetically** (case-insensitive)
+- If a model appears in multiple reference papers, count is shown: `ModelName (N)`
+- If a model appears in only one reference paper, no count is shown: `ModelName`
+- Helps track the complete lineage of AI contributions to each paper
+- Omitted for papers with no reference papers
+
+**Per-Paper Model Credits Section** (at end of each paper):
+```
+================================================================================
+MODEL CREDITS
+
+This autonomous solution attempt was generated with the Intrafere LLC AI Harness,
+MOTO, and the following model(s):
+
+- deepseek-r1:70b (85 API calls)
+- qwen-2.5:32b (23 API calls)
+
+Total AI Model API Calls: 108
+
+Wolfram Alpha Verifications: 3 queries
+================================================================================
+```
+
+**Wolfram Alpha Verification Tracking**:
+- Wolfram Alpha API calls are tracked separately from LLM API calls
+- Only Wolfram calls attached to accepted construction submissions are counted in paper credits
+- Displayed in MODEL CREDITS section below LLM model list
+- Format: "Wolfram Alpha Verifications: N queries"
+- Tracking happens in `compiler_coordinator._track_submission_wolfram_calls()` after validator acceptance
+- If no Wolfram calls made, this line is omitted from credits
+- **Graceful edge case handling**: Credits show even if only Wolfram calls exist (no model tracking data), or if only model calls exist (no Wolfram calls)
+
+**PaperMetadata Model Updates**:
+```python
+class PaperMetadata(BaseModel):
+    # ... existing fields ...
+    model_usage: Optional[Dict[str, int]] = None  # model_id -> API call count
+    generation_date: Optional[datetime] = None    # When paper was generated
+    wolfram_calls: Optional[int] = None           # Wolfram Alpha verification count
+```
+
+**PaperModelTracker Class** (`backend/autonomous/memory/paper_model_tracker.py`):
+- `track_call(model_id)`: Record an API call for a model
+- `track_wolfram_call(query)`: Increment the Wolfram verification count; query text is not persisted for credits
+- `get_wolfram_call_count()`: Get total Wolfram queries
+- `has_tracking_data()`: Returns True if any model calls OR Wolfram calls exist (handles edge cases gracefully)
+- `get_models_dict()`: Get Dict[str, int] for metadata storage
+- `get_author_list()`: Get list of unique model IDs
+- `generate_author_attribution(...)`: Generate header text with reference models
+- `generate_model_credits()`: Generate footer text (includes Wolfram count if >0, handles edge case of Wolfram-only credits)
+- `generate_credits_for_existing_paper(model_usage, wolfram_calls)`: Includes Wolfram count for saved papers, gracefully handles missing model_usage
+- `aggregate_reference_models(paper_usages)`: Aggregate models from reference papers
+- `format_reference_models(models_dict)`: Format alphabetically with duplicate counts
+
+#### Global Tier 3 Model Tracking
+
+Tier 3 tracks all models used during final answer generation for author attribution and model credits.
+
+**Tracking Mechanism**:
+- When Tier 3 starts, model usage tracking is initialized via `final_answer_memory.initialize_model_tracking(user_prompt)`
+- A callback is set on `api_client_manager` that tracks every API call made during Tier 3
+- Same model used in multiple instances counts as ONE author, but all API calls are tallied
+- Tracking is automatically disabled when Tier 3 completes or fails
+- Per-paper tracking also occurs during Tier 3 for gap/intro/conclusion papers
+
+**Author Attribution Section** (at beginning of final answer):
+```
+================================================================================
+AUTONOMOUS AI SOLUTION
+
+Disclaimer: This content is provided for informational purposes only. This
+paper was autonomously generated with the novelty-seeking MOTO harness without
+peer review or user oversight beyond the original prompt. It may contain
+incorrect, incomplete, misleading, or fabricated claims presented with high
+confidence. Use of this content is at your own risk. You are solely
+responsible for reviewing and independently verifying any output before relying
+on it, and the developers, operators, and contributors are not responsible for
+errors, omissions, decisions made from this content, or any resulting loss,
+damage, cost, or liability.
+
+User's Research Prompt: [user's original prompt here]
+
+AI Model Authors: deepseek-r1:70b, qwen-2.5:32b, llama-3.1:70b
+
+Generated: 2025-12-31
+================================================================================
+```
+
+**Model Credits Section** (at end of final answer):
+```
+================================================================================
+MODEL CREDITS
+
+This autonomous solution attempt was generated with the Intrafere LLC AI Harness,
+MOTO, and the following model(s):
+
+- deepseek-r1:70b (127 API calls)
+- qwen-2.5:32b (43 API calls)
+- llama-3.1:70b (18 API calls)
+
+Total API Calls: 188
+================================================================================
+```
+
+**Key Design Points**:
+- Author section lists unique model IDs WITHOUT call counts
+- Credits section lists models WITH call counts, sorted by usage (descending)
+- Mid-generation volumes without tracking data gracefully skip these sections
+- Models used in parallel instances are counted as single author entries
+- Tracking includes all API calls: certainty assessment, format selection, volume organization, paper writing
+- Per-paper tracking runs SIMULTANEOUSLY with Tier 3 tracking for papers written during Tier 3
+
+### Tier 3 Data Persistence
+
+**Directory**: `auto_final_answer/` under the active instance data root (default desktop path: `backend/data/auto_final_answer/`) or `auto_sessions/{session_id}/final_answer/`
+
+| File | Purpose |
+|------|---------|
+| `final_answer_state.json` | Current Tier 3 state (for crash recovery), includes `model_usage` tracking |
+| `volume_organization.json` | Volume structure (long form) |
+| `tier3_rejections.txt` | Tier 3 rejection log (last 10, INDEPENDENT from Tiers 1/2) |
+| `chapter_{index}_paper.txt` | Gap/intro/conclusion papers |
+| `chapter_{index}_outline.txt` | Chapter outlines |
+| `final_volume.txt` | Assembled volume (long form) with author attribution and model credits |
+| `final_short_form_paper.txt` | Short form final answer with author attribution and model credits |
+| **`source_papers/`** | **NEW: Archived copies of all Tier 2 papers used in final answer** |
+| **`source_papers/paper_{id}.txt`** | **Paper content** |
+| **`source_papers/paper_{id}_abstract.txt`** | **Paper abstract** |
+| **`source_papers/paper_{id}_outline.txt`** | **Paper outline** |
+| **`source_papers/paper_{id}_metadata.json`** | **Paper metadata** |
+| **`source_brainstorms/`** | **NEW: Archived copies of all Tier 1 brainstorms that sourced those papers** |
+| **`source_brainstorms/brainstorm_{id}.txt`** | **Brainstorm database** |
+| **`source_brainstorms/brainstorm_{id}_metadata.json`** | **Brainstorm metadata** |
+
+### Research Lineage Archival
+
+When Tier 3 assembles a final answer (short-form or long-form), the system automatically archives the complete research lineage:
+
+1. **Paper Archival**: All Tier 2 papers referenced in the final answer are copied to `source_papers/`:
+   - Short-form: Copies all papers from `short_form_reference_papers` list
+   - Long-form: Copies all papers from `existing_paper` chapters in volume organization
+   - Includes: paper content, abstract, outline, and metadata
+
+2. **Brainstorm Archival**: All Tier 1 brainstorms that sourced those papers are copied to `source_brainstorms/`:
+   - Extracted from each paper's `source_brainstorm_ids` metadata field
+   - Automatically deduplicates (same brainstorm may source multiple papers)
+   - Includes: brainstorm database and metadata
+
+3. **Archive Statistics**: Logged at INFO level:
+   - Number of papers archived
+   - Number of brainstorms archived
+   - List of paper IDs and brainstorm IDs
+
+**Purpose**: Ensures the entire research journey from initial brainstorm → papers → final answer is preserved together for complete provenance and reproducibility.
+
+**Timing**: Archival happens BEFORE the final volume/paper is saved, ensuring consistency if the process crashes.
+
+**Access**: Archived resources are read-only copies. Deleting a paper from the main library does NOT affect archived copies in completed final answers.
+
+### Tier 3 API Endpoints
+
+#### GET /api/auto-research/tier3/status
+Returns: is_active, status, answer_format, certainty_assessment, volume progress, rejection counts.
+
+#### GET /api/auto-research/tier3/final-answer
+Returns: has_final_answer, format, title, content, word_count, status.
+
+#### GET /api/auto-research/tier3/volume-progress
+Returns: is_long_form, volume_title, outline_complete, current/total/completed chapters.
+
+### Tier 3 WebSocket Events
+
+Tier 3 should emit enough user-visible progress for the UI to distinguish forced start, certainty/format/organization phases, chapter writing, rejection feedback, and final completion. Exact internal event names are not rule-level invariants unless consumed by the hosted wrapper or frontend contract.
+
+### Tier 3 Frontend Components
+
+#### FinalAnswerView.jsx
+Main component for displaying Tier 3 status and content:
+- Status badge: "FINAL ANSWER IN PROGRESS" uses the active Tier 3 accent state; completion uses the green success state
+- Certainty assessment display
+- Format selection display
+- Volume organization with chapter status (long form)
+- Final answer content viewer
+
+**Tab Styling**:
+- When Tier 3 active: Tab pulses with highlight animation
+- When complete: Tab shows green "FINAL ANSWER ✓" indicator
+
+#### Archive Viewer UI
+
+**Access Point**: Discrete "View Research Archive" button in FinalAnswerView component (when viewing a specific final answer)
+
+**Display Format**: Modal overlay with two tabs:
+- **Papers Tab**: List all archived Tier 2 papers with metadata
+  - Click paper → view full content (paper, abstract, outline) in read-only format
+  - Clear "ARCHIVED - READ ONLY" badge
+  - Back button to return to list
+  
+- **Brainstorms Tab**: List all archived Tier 1 brainstorms with metadata
+  - Click brainstorm → view full database content in read-only format
+  - Clear "ARCHIVED - READ ONLY" badge
+  - Back button to return to list
+
+**API Endpoints**:
+- `GET /api/auto-research/final-answer/{answer_id}/archive/papers` - List archived papers
+- `GET /api/auto-research/final-answer/{answer_id}/archive/papers/{paper_id}` - Get paper details
+- `GET /api/auto-research/final-answer/{answer_id}/archive/brainstorms` - List archived brainstorms
+- `GET /api/auto-research/final-answer/{answer_id}/archive/brainstorms/{topic_id}` - Get brainstorm details
+
+Archive IDs are untrusted path components. Resolve `answer_id`, `paper_id`, and `topic_id` with `validate_single_path_component()` / `resolve_path_within_root()` before reading archived files.
+
+**Design Principles**:
+- Non-intrusive: Button is discrete, not prominently displayed
+- Familiar interface: Looks similar to live BrainstormList/PaperLibrary components
+- Read-only: Clear visual indicators (badges, no action buttons)
+- Complete lineage: Shows entire research journey from brainstorms → papers → final answer
+
+### Tier 3 Critical Invariants
+
+1. **Tier 3 papers do NOT use brainstorm databases** - Only reference Tier 2 papers
+2. **Tier 3 rejection log is independent** - Separate from Tiers 1/2
+3. **System stops after final answer** - No more paper generation
+4. **Volume papers use standard Tier 2 compiler** - No duplicate paper-writing code
+5. **Crash recovery preserves Tier 3 state** - Can resume from any phase
+
+---
+
+**The autonomous research cycle continues until Tier 3 produces a final answer and the system stops, OR until user manually stops the autonomous research mode.**
+
+---
+
+## Opt-In Proof Competition
+
+Autonomous-only competition adds ordered formalization-only secondary roles, persisted in scoped settings/profiles/run snapshots; the primary keeps discovery, critique, novelty, and placement duties. Secondary work begins only after the preceding model's existing five attempts are exhausted, never after Lean success. Each model owns candidate-batch capacity and private feedback/checkpoints so primary work can advance while secondaries solve earlier failures; Lean and registration remain serialized. Secondary provider/config/context failures are visible nonfatal interruptions, not five failed attempts; primary safety policies, shared Lean infrastructure, cancellation, and post-Lean persistence remain authoritative. Papers-only and disabled runs do not compete. Autonomous user/history checks stay source/session bound and process-local; standalone Manual and LeanOJ paths are unchanged. Competition-only durable benchmarks compare shared actually-attempted candidates, exclude interrupted/incomplete opportunities from completed-opportunity solve-rate denominators, expose conditional rescue and evolving-context caveats, and survive API-log clearing. Resumed attempts retain their started identity rather than reverting to queued work. Secondary checkpoints depend on their own route, not primary-route edits; malformed secondary contracts follow bounded output recovery. Benchmark proof links are exact-occurrence scoped, and configured-lane scores distinguish observed effective routes from unknown attribution.
+
+## Proof Verification Stage (Optional, Part 3 Checkpoint)
+
+Runs automatically after every completed brainstorm (Tier 1) and completed Tier 2 paper-library paper, gated on `system_config.lean4_enabled`. Tier 3 short-form final papers may reuse the same paper-completion path; long-form volume chapters are saved as final-answer artifacts and do not currently run this checkpoint. When disabled, proof verification must not invoke Lean/proof model work or block brainstorm/paper completion.
+
+**Proof Framing Gate (one-shot, at autonomous start; essential when proof output is allowed)**: On fresh autonomous starts with Mathematical Proofs allowed, the coordinator runs `_run_proof_framing_gate()` before research begins. When Mathematical Proofs is disabled in Allowed Outputs, the framing model call and all proof-specific prompt context—including framing, direct proof-database context, failed-proof hints, known-proof summaries, and Assistant proof-memory packs for Autonomous and its child Aggregator/Compiler roles—are skipped, including on resume. Otherwise this LLM proof-emphasis gateway, its eager true bias, persistence/resume, and later prompt injection must not be bypassed, deferred, narrowed, or weakened. A single LLM call on the user prompt decides `is_proof_amenable` (`build_proof_framing_gate_prompt` → `autonomous_proof_framing_gate` role). The gate errs on the side of `true` when formal proof can help the user's prompt — it returns `false` when the prompt is purely empirical, engineering-focused, or has no meaningful prompt-relevant mathematical content. If `true`, `PROOF_FRAMING_CONTEXT` (which directs submissions to pursue novel theorems/lemmas/formalizations that answer, support, or advance the user prompt directly or as indirect steps, direct solutions first, with novelty/non-triviality valuable only inside that boundary) is appended to every subsequent submitter prompt via `_append_proof_framing()` and persisted to workflow state for crash recovery. Decision is broadcast via `proof_framing_decided`. Lean/proof execution remains separately gated by `lean4_enabled`, and the complete enabled Lean pipeline remains protected.
+
+**Automatic proof rounds**: Proofs-only autonomous runs let brainstorm proof checkpoints run the pipeline below for 4 rounds. Round 1 uses normal candidate identification. After each completed round (failed targets are not re-proposed unchanged), the coordinator asks again whether there are any remaining novel proofs in the same source that solve the user's prompt or plausibly advance toward it, directly or indirectly, with newly verified proofs visible through the proof-library context. Automatic multi-round checkpoints always run every configured round; a valid no-candidate round does not end the checkpoint early, and later rounds see its empty summary. When research papers and mathematical proofs are both enabled, automatic brainstorm proof checkpoints run 2 rounds, while completed-paper proof checkpoints remain single-round so paper generation remains the main output path. Compiler rigor and LeanOJ remain single-round unless their own mode rules say otherwise. User-triggered `POST /api/proofs/check` requests use explicit `run_mode`: `one_round` is the compatibility default, while process-local `loop_with_pruning` automatically continues until explicit Stop, backend shutdown, hard provider/configuration repair, or ten consecutive valid rounds discover no candidates. Any discovered candidate resets that streak. A later request starts a fresh loop. Manual runs expose no durable idle, restart-resume, or next-round controls. The per-source reservation spans the whole automatic multi-round checkpoint, and completed earlier rounds must never overwrite an active later-round Autonomous resume cursor.
+
+**Assistant memory-support role**: When Session History Memory is enabled, each active workflow uses one shared Assistant memory role (`autonomous_assistant` for autonomous, `leanoj_assistant` for LeanOJ), not one Assistant per submitter/proof candidate/solver lane. Assistant runs beside eligible non-validator, non-critique brainstorming, selection, writing, proof, and Tier 3 roles as optional verified Lean proof-history support; it cannot redirect or mathematically reinterpret an unrelated parent goal, and returning no support is valid. Short-lived topic/title exploration candidate mini-aggregators are excluded. It may provide up to 7 prior verified proof supports from enabled proof-history corpora and reuse useful packs for two eligible receiver reads before refresh, but validators never receive Assistant context and parent workflows never wait on Assistant. Lean 4 formalization attempts may reuse the last available Assistant proof pack, but they must not refresh Assistant retrieval until the Lean attempt phase has finished. Assistant skips true no-external-history targets because it only performs proof-memory retrieval for now. Durable cooldown is keyed to stable run scope, grouping transient task IDs/roles while preserving real source/session separation; zero-useful retrieval can eventually shut down for the run, while stagnant same-pack retrieval backs off without shutdown. User live activity should show normal Assistant retrieval result summaries and explicit Assistant model-output failures, not skip/backoff/shutdown turns. Top-level Stop clears live/latest packs; schema-compatible SQLite cache state may remain for re-filtered reuse, while explicit Clear/reset or Session History Memory disable clears durable run-scoped state.
+
+**Pipeline** (`backend/autonomous/core/proof_verification_stage.py`):
+1. **Candidate identification and pre-Lean list validation** — `ProofIdentificationAgent` extracts prompt-relevant new/novel theorem candidates ordered by impact (direct targets first; novel incremental or indirect advances also qualify); brainstorm sources show it their own unresolved failed targets and completed papers show their source brainstorms' (there is no separate fixed retry pass). The configured Validator independently reviews every complete parser-valid list before proof cost; deterministic code accepts any list with at least one approved novel entry and forwards only those entries; Validator-rejected entries are never attempted. Lists with zero approved entries regenerate until accepted, stopped, or regeneration validly finds no candidates; valid empty regeneration completes the round through the normal no-discovery lifecycle. At most the latest five semantic rejections from that exact round are used. Identity-fenced checkpoints preserve approved/rejected state without cross-round leakage, while provider/parser/context failures use their normal recovery paths and do not count as semantic rejection. Review outcomes and feedback are visible in run-scoped activity.
+2. **Optional Mathlib lemma search** — `MathlibLemmaSearchAgent` surfaces relevant existing lemmas into the formalization prompt, tied to the target theorem, user prompt, and brainstorm topic when present
+3. **Optional SMT early-exit** — when `smt_enabled`, `SmtClient` classifies candidates conservatively; only valid `unsat` checks become Lean tactic hints (for example `nativeDecide`, `omega`, `decide`, `norm_num`, `linarith`, or `polyrith`-style hints). `sat`, `unknown`, failed translation, and non-amenable candidates produce no hint. SMT results are never stored as standalone proofs; prompts receive the same user prompt + brainstorm topic relevance context
+4. **Lean 4 formalization attempts** — two-phase retry: up to 3 full-proof attempts via `ProofFormalizationAgent.prove_candidate`, then up to 2 multi-tactic script attempts via `prove_candidate_tactic_script` (5 total per candidate). Formalization prompts receive the same source title/brainstorm topic context plus the complete source brainstorm/paper as mandatory direct context; focused excerpts are supplemental only. The last available Assistant memory pack may be injected as optional proof-pattern/dependency guidance, dropping it before mandatory source context if the prompt would overflow; formalization attempts reuse that pack without scheduling Assistant refreshes from Lean feedback. Direct `search_lean_proofs` prefetch/tool loops are explicit legacy/debug or narrow emergency-repair paths only, not the normal retrieval path. Provider max-output truncation before usable Lean code is a failed attempt with live activity, not a research-stopping provider failure. When full SyntheticLib4 Lean code is injected into a prompt and the formalization succeeds, MOTO records a local non-whole-code `model_visible_context` usage attestation; live whole-code usage submission remains tied to the future SyntheticLib4 service contract. Prompt source reads strip appended generated-proof sections so verified proofs enter through the explicit proof-library context, while canonical proof files and user-visible appendices remain preserved. If the complete source cannot fit, fail visibly instead of silently truncating or proving from excerpt-only context. A discovery candidate whose validated `retry_open_target_id` names an offered open target resolves that `FailedProofCandidate` when Lean verifies it, or updates it on failure.
+5. **Post-Lean preservation + novelty check** — hard integrity rejects only fake proof devices such as new `axiom`/`constant`/`opaque`; statement mismatch is classified as a downshift, never a discard. `autonomous_proof_novelty` explicitly ranks either the accepted Lean statement alone or a finite listed group of same-run verified proof occurrences; project ambition and unresolved campaign targets cannot raise either rank. Group-scoped decisions persist the exact member IDs and combined theorem-level claim for display and separate JSON bundle export across Autonomous, Manual, and LeanOJ current/history views. Every member exposes a group-anchor backlink without replacing its independent rank. Group-ranked direct context is injected atomically with its claim and complete active same-run member set, never as a standalone-ranked member; incomplete groups are omitted. If the complete optional same-run group-candidate set cannot fit the configured novelty-validator context, classification falls back to the verified statement alone rather than losing the Lean-verified artifact. Cross-run exact-proof overlays may annotate standalone ranks but must not replace a group-scoped independent judgment. New group-capable assessments require explicit scope, while legacy records safely default to standalone. The classifier otherwise judges against public/standard references, Mathlib, and current prompt relevance without cross-run private proof-history influence; program-local firsts are not novel. Malformed/schema-invalid JSON gets one bounded sanitized retry before falling back to `not_novel`; a transient provider failure in a manual post-Lean novelty call also preserves the verified artifact conservatively as `not_novel`.
+6. **Storage** — Every newly Lean-verified current-run occurrence gets a full record and independent novelty pass even when private history has identical theorem/code. Afterward, enabled historical MOTO/manual/LeanOJ corpora are silently checked by versioned canonical theorem+Lean identity with the current run/session excluded. A prompt-novel cross-run exact match retains its independent tier/reasoning as provenance and receives the searchable `duplicate_novel` storage/display overlay; `not_novel` remains unchanged, and no duplicate suppresses current-run context or persistence. Persist canonical user prompts and stable run IDs; SyntheticLib4 integrity hashes remain separate from internal canonical hashes.
+
+**Unified proof search**: Assistant owns routine workflow-memory retrieval from prior MOTO, LeanOJ, manual, and authorized SyntheticLib4 history while excluding the requesting run/session from fresh and reused packs. Exact neighborhoods use `moto-proof-identity-v1` and composite `(corpus, run_id, session_id, source_type, source_id)` occurrence identity. The derived schema-versioned SQLite index stores canonical and standalone/group novelty provenance and atomically publishes a sibling rebuild when schema/identity compatibility fails. Assistant packs exclude group-scoped anchors until complete-group atomic hydration is implemented, and filter them before final support selection so excluded candidates cannot consume pack capacity or deduplication slots. Explicit `search_lean_proofs` results preserve novelty scope, combined claim, and member IDs so a group tier is never presented as belonging to one theorem alone. SyntheticLib4 publisher hashes remain integrity data. Assistant selects at most 7 supports; search never changes candidate eligibility or bypasses proof gates.
+
+**Parallelism (two-phase execution per stage run)**: Steps 2–4 above (the per-candidate "Phase A" pipeline: lemma search → optional SMT hint → `prove_candidate` → `prove_candidate_tactic_script` → `proof_attempts_exhausted` broadcast on failure) run concurrently across identified candidates inside a single `ProofVerificationStage.run()` invocation. `system_config.proof_max_parallel_candidates` controls Phase A batching: the default is `6`; `0` (env: `MOTO_PROOF_MAX_PARALLEL_CANDIDATES` / `PROOF_MAX_PARALLEL_CANDIDATES`) means unlimited; positive values run strict batches of that size before the next batch starts. Phase A parallelizes agent/model work, but actual Lean 4 subprocess verification is serialized by `Lean4Client` behind a shared execution lock so all candidates queue one-at-a-time against the shared Mathlib workspace; LSP mode remains independently serialized by its operation lock and subprocess fallback uses the same shared queue. The identification stage (step 1) filters off-prompt, trivial, and well-known results before Phase A begins, so Phase A only processes prompt-relevant theorem candidates. Completed candidates are consumed as tasks finish, and steps 5–6 (the "Phase B" post-processing: novelty assessment, `add_proof`, dependency extraction via `ProofDependencyExtractor`, `append_proofs_section`, `novel_proof_discovered` / `known_proof_verified` broadcast, `record_failed_candidate` for brainstorm failures) are performed strictly **one-at-a-time** in Phase-A completion order inside that driver loop so later candidates can observe earlier stored proofs as MOTO dependencies. If any Phase-A task raises account-credit exhaustion, the driver cancels siblings and re-raises so the autonomous coordinator persists the proof checkpoint pause and waits for OpenRouter reset before retrying. Retryable and repair-required provider failures instead save a `provider_paused` checkpoint and propagate to the shared stop-aware retry wait or repair path. Other non-provider Phase-A exceptions cancel siblings, save an error checkpoint, broadcast completion with error state, and return `had_error=True` so the coordinator recovery path can continue without orphaned background API calls. `should_stop` is plumbed into each Phase-A pipeline and checked before each Phase-B pass, so a stop-request short-circuits cleanly without leaking tasks.
+
+**Rigor mode is NOT parallelized** (compiler Part 2): `submit_rigor_lean_theorem()` runs one candidate per rigor cycle by design (discovery → 5 Lean attempts → novelty → placement) and the outer `_rigor_loop` drives up to 5 consecutive cycles serially so each proven theorem can land in the paper before the next discovery sees updated context. The parallel candidate pipeline lives only in `ProofVerificationStage`.
+
+**Per-Source Reservation**: `ProofVerificationStage` maintains a class-level `{source_type}:{source_id}` active set behind an asyncio lock so the same brainstorm or paper cannot be verified twice concurrently (required for autonomous + manual proof-check interleaving).
+
+**Lean 4 is authoritative**: SMT results never substitute for Lean verification. The `Lean4Result` contract is the only path to a stored proof. SMT contributes hints only.
+Successful `Lean4Result` values also own immutable proof-time compile receipts
+bound to the exact checked source, actual subprocess/LSP route, proof-time
+toolchain/build, timeout/profile, and parsed imports. Every proof-producing
+workflow preserves that receipt into canonical storage; partial/scaffold checks
+are nonqualifying. Portable dependencies exclude local paths and local-only IDs.
+Historical records never gain invented proof-time evidence; they are ported
+through the explicit legacy-port migration and receipt instead.
+
+**Subprocess vs LSP**: `lean4_client` runs Lean via subprocess by default. When `lean4_lsp_enabled`, a persistent LSP-style process reduces cold-start overhead; the subprocess path remains the fallback and must keep working when LSP is disabled. Placeholder-allowed partial/scaffold checks may use subprocess even when LSP is enabled. Missing/corrupt Mathlib `.olean` diagnostics are infrastructure failures, not proof failures: the client must re-check workspace readiness inside the serialized Lean execution queue, invalidate readiness when the cache is bad, refetch the Mathlib cache, retry the same Lean check once, and return a distinct `LEAN 4 WORKSPACE ERROR` if repair still fails. Consumers turn that result into the typed `LeanWorkspaceRepairRequiredError`, which is never a proof attempt, rejection, failed open target, or model feedback: the owning workflow stops with a durable `lean_workspace_repair_required` repair message and keeps its proof checkpoint (Autonomous saves the round as resumable `lean_workspace_blocked`, never a fingerprint-guarded fatal checkpoint), and Start retries setup and resumes. Lean-bound model calls (identification, rigor discovery, formalization, LeanOJ final solver) are skipped when setup is known failed; each proof round, rigor cycle, and final-solver attempt first gives a failed setup (never a too-long path) one fresh attempt, so a transient failure does not stop a long run. On Windows, when `<data root>/lean4_workspace` is too long for Mathlib's build files (Lean's tools ignore the system long-path setting), config and launcher place the workspace in a per-data-root derived-cache folder under `%LOCALAPPDATA%\MOTO\lean`, and the launcher deletes the unusable in-root MOTO workspace. If no short location exists, the too-long path is detected before any `lake` work (launcher disables Lean with `lean_workspace_path_too_long`), latched for the process, and never wiped or refetched.
+
+**Manual proof checks** (Build 5): `POST /api/proofs/check` uses the shared `ProofRoundDriver` and `ProofVerificationStage.run_manual()` with a `ProofRuntimeConfigSnapshot` (brainstorm / paper / validator role configs) loaded from stored autonomous metadata or supplied directly in the request. Manual checks accept `source_type="brainstorm"` or `"paper"`; history papers are addressed through the paper source path with `source_id="{session_id}:{paper_id}"` and must resolve to a completed, non-pruned history paper. A history-paper check is storage-bound to that original autonomous session: proof records are written under that session's proof directory and verified proof appendices update that historical paper, never the currently active autonomous or manual proof store. Prompt-local source reads strip appended generated-proof sections. Active and history paper checks direct-inject available source brainstorm context from the matching session when `source_brainstorm_ids` are available; no hidden character cap replaces mandatory proof source context. Manual checks always use standard proof discovery: first ask for candidates that directly solve the user prompt, then novel candidates that build toward solving it, directly or indirectly. Active process-local manual rounds may carry candidate/checkpoint state through the shared proof stage for same-run provider pause/retry and control recovery, but this must not become backend-restart resume authority. Provider retry activity from a check's run-scoped roles is attributed to `manual_proof_check` with its source and `proof_run_id`, and routes to the Live Activity feed of the surface owning that source. Each queued check owns a unique best-effort Windows sleep-inhibitor owner without becoming a top-level workflow; terminal cleanup releases both that owner and the source reservation, including cancellation while queued. Readiness is surfaced via `/api/proofs/status.manual_check_ready` + `manual_check_message`. Required state: `lean4_enabled=True` AND a stored or request-provided runtime snapshot.
+
+**Proof runtime config snapshot** (`research_metadata.set_proof_runtime_config`): Captures a `ProofRuntimeConfigSnapshot` whose `brainstorm` and `paper` proof-solving slots both copy the Rigor & Proofs Submitter configuration, whose `validator` slot copies Validator, and whose optional `assistant` slot copies Assistant. Each holds provider, model_id, OpenRouter host/reasoning settings, LM Studio fallback, context/output limits, and Supercharge. This lets manual checks run without an active autonomous session when a request snapshot is not supplied.
+
+**Proof WebSocket events** are broadcast through the standard `/api/ws` stream for user-visible progress. Keep frontend-consumed events stable and bump the hosted contract when changing them. Post-Lean novelty review emits a safe start activity before classification; `proof_verified` emits only after registration/reuse and includes `proof_id`; novelty result events expose the stored display tier/reasoning, while independent novelty and duplicate provenance live in typed proof records.
+
+**Shared proof-run UX (Build 6)**: All six user-triggered proof-check surfaces—manual Aggregator live results, manual Compiler live paper, active Autonomous brainstorms, active Autonomous papers, Autonomous Stage 2 paper history, and the current Mathematical Proofs tab—use one accessible `one_round` versus `loop_with_pruning` chooser and one source-keyed runtime controller. The controller retains `proof_run_id` and lifecycle generation, combines typed run collection/source lookup and non-cacheable snapshots with run-scoped WebSocket events, and recovers the same run after remount, browser reload, reconnect, or a lost queue response only while that process-local run remains active; backend restart does not reconstruct manual runs. Ambiguous source matches remain explicit rather than being guessed. Current proof cards keep pruned content readable with active-context-run status and occurrence-identity-fenced user prune/restore confirmation; historical cards expose persisted prune provenance read-only. Successful mutations refresh proof, dependency-graph, and Assistant-pack surfaces, while stale revision/generation conflicts require refresh before retry. Each run numbers its published activity in a bounded process-local journal; after WebSocket reconnect, page resume, or reload the tab replays only unprocessed sequences into Live Activity feeds, and replayed events never drive run state.
+
+**Proof Stage Critical Invariants**:
+1. Proof stage is skipped when `lean4_enabled=False`; it must not run Lean/proof model work or block brainstorm or paper completion
+2. Lean 4 is authoritative — SMT results are hints only, never stored as standalone proofs, `Lean4Result` contract is unchanged by SMT
+3. Subprocess checker must continue to work when `lean4_lsp_enabled=False`; LSP path must not regress subprocess behavior when enabled. Missing/corrupt `.olean` cache errors must trigger one workspace repair/retry, then fail the current check with `LEAN 4 WORKSPACE ERROR` if repair fails; these infrastructure failures must not fall through into tactic mode, emit `proof_attempts_exhausted`, consume proof attempts, become model feedback, or be recorded as failed open targets — they stop the workflow with a resumable Lean repair message
+4. Proof storage is session-aware (`session_manager` → `get_proofs_dir()`) and falls back to the legacy `backend/data/proofs/` layout when no session is active
+5. Per-source reservation lock prevents concurrent proof checks on the same `{source_type}:{source_id}` (autonomous vs manual interleaving)
+6. Only independently prompt-novel, non-duplicate display tiers become highest-priority direct-injection context via `proof_database.inject_into_prompt()`; `duplicate_novel` and `not_novel` remain searchable but excluded there. Failure hints are limited to unresolved active/resumable targets, and clear/archive removes failed candidates while preserving verified history.
+7. Proof certificates stay text-based (`.lean` source + JSON metadata) — no binary artifacts
+8. Hosted/generic mode keeps `lean4_enabled` and `smt_enabled` default false and the hosted image stays Lean-free and Z3-free (no proof binaries in the `python:3.12-slim` runtime)
+9. When Mathematical Proofs is allowed, the proof framing gate runs once on fresh autonomous starts; the resulting `proof_framing_active` flag and `PROOF_FRAMING_CONTEXT` are persisted in workflow state for crash recovery. When proof output is disabled, the gate and framing injection are skipped on fresh starts and resume. Lean/proof model execution remains controlled by `lean4_enabled`.
+10. Candidate identification (`build_proof_identification_prompt`) is an impact-first user-prompt relevance gate, not a known-knowledge-base builder. It rejects off-prompt curiosities, routine helper lemmas, non-novel supporting lemmas, trivial/easy proofs, standard/textbook/Mathlib restatements, program-local firsts, minor reformulations/local formalizations, and single-tactic/routine proof goals, then returns candidates ordered by impact on the user's prompt: direct solutions or impossibility results first, then decisive reductions, obstructions, and structural theorems, then novel intermediate or indirect results with a plausible path toward the requested problem. Every candidate needs a reasonable chance of full proof within the 5-attempt Lean budget; an out-of-reach direct target yields its strongest provable novel piece, and provability never lowers the novelty bar. Candidate prompts require expected novelty plus non-empty prompt-relevance, novelty, and anti-standard-result rationale fields; an optional `retry_open_target_id` is kept only when it names an offered open target; invalid, missing-rationale, or `not_novel` candidates are skipped before list review. Only candidates independently approved by the pre-Lean candidate-list Validator are attempted — `proof_max_parallel_candidates` defaults to 6, `0` runs all approved Phase A work without a batch cap, and positive values run strict batches without truncating the approved list; actual Lean 4 subprocess verification queues one-at-a-time through `Lean4Client`, and Phase B (novelty / `add_proof` / dependency extraction / brainstorm+paper `append_proofs_section` / novel/known broadcasts / `record_failed_candidate`) remains strictly serialized in Phase-A completion order so intra-batch MOTO dependencies and per-source proof appending stay coherent
+10b. Proof-identification empty-output, provider output truncation, malformed/schema-invalid JSON, or no-JSON reasoning-only failures get one bounded sanitized JSON retry; if recovery still fails, preserve the proof checkpoint as an error. Only a valid JSON no-candidates response may advance past proof checking as no candidates.
+11. Each Phase-A task owns its own `ProofIdentificationAgent` / `MathlibLemmaSearchAgent` / `ProofFormalizationAgent` instance to keep per-agent `task_sequence` counters collision-free; account-credit exhaustion cancels siblings and preserves the checkpoint for provider pause/retry, and retryable or repair-required provider failures likewise preserve it for the shared retry or repair path, while other Phase-A failures cancel siblings and return a structured `had_error=True` stage result for coordinator recovery
+12. `should_stop` propagates into Phase A and is re-checked before each Phase-B pass so stop-requests short-circuit without leaking tasks or partially-applied Phase-B writes. A mandatory candidate-list Validator or proof-formalization context overflow cancels and drains sibling Autonomous proof tasks, durably stops the whole Autonomous run with context-overflow repair guidance, and preserves the checkpoint for recovery after effective proof-route settings change. Autonomous proof checkpoints otherwise persist the resolved candidate cursor, processed candidate IDs, cumulative results/counts, proof labels/indexes, Lean attempt feedback, and post-Lean metadata needed for Phase B (including accepted theorem names/code) in workflow state so provider-credit pause, Stop/Start, restart, and model changes resume remaining candidates instead of re-identifying from Proof A or undercounting completed proofs; provider pauses during Phase A or Phase B must preserve the same checkpoint. Proof checkpoint completion markers are source- and round-trigger-scoped and must not transfer between brainstorms/papers or overwrite active later-round cursors.
+13. Compiler rigor mode (`submit_rigor_lean_theorem`, `_rigor_loop`) is NOT parallelized and is capped at 5 consecutive cycles per rigor loop — rigor cycles discover, verify, and route one theorem per cycle (inline for eligible existing-paper claims, appendix-only for extension-derived theorems or placement fallback) so each verified theorem lands in the paper before the next discovery; the parallel candidate pipeline lives only in `ProofVerificationStage`
+14. Post-Lean integrity scanning rejects newly introduced `axiom`, `constant`, and `opaque` declarations even when the declaration name appears on following lines. Generated source text is not an authorization baseline unless explicitly passed as allowed baseline.
+15. Lean-accepted real proof code is preservation-worthy even when it misses the intended candidate. Alignment classifiers may downshift the stored theorem statement and ranking may classify it as `not_novel`, but the proof artifact must not be discarded except for hard integrity failures.
+15b. Validator-provider availability never changes Lean truth. Transient statement-alignment or novelty-provider failures use the provider's normal retry/cooldown/fallback path from the preserved successful Lean attempt; they do not rerun proof generation, become zero-count completion, or become semantic rejection. Hard provider repair conditions remain visible and resumable.
+16. Unified proof/history search is bounded retrieval support only. It must never broaden proof candidate identification beyond the user's prompt, replace mandatory source context, or count SyntheticLib4 retrieved records as new MOTO proofs without the normal MOTO artifact path.
+17. Assistant memory-support retrieval is a parallel, non-blocking configured LLM role across eligible non-validator, non-critique brainstorming, writing, proof, selection/path, and final-answer roles. It provides optional up-to-7 verified supports and reuses useful packs for two eligible receiver reads before refresh, but every cached/latest/stale/OAuth-cooldown reuse is re-filtered against the requesting stable run/session; an emptied pack falls through to normal retrieval. Durable run-scoped cooldown, hidden skip/backoff/shutdown activity, explicit failure visibility, clear/reset semantics, and phase/candidate neutrality remain unchanged.
+18. Proof live-context pruning is occurrence-level and effective only for the active top-level run owning that model context. The proof occurrence's immutable run identity remains a separate stale-mutation fence. Canonical proof blocks are refreshed from current owning-run state at safe later proof model-call boundaries without changing already-dispatched calls or checkpointed candidate identity. Persisted provenance remains on proof records; same-run Stop/restart/resume behavior applies only to owners with an explicit durable checkpoint contract such as Autonomous or LeanOJ, never to process-local manual proof runs. Clear/new-run removes its contextual effect. It never changes proof validity, records/certificates, novelty/duplicate provenance, human/history/graph/export visibility, future-run local or Assistant retrieval, or SyntheticLib eligibility/donation.
+Linked inline brainstorm-proof submissions are projected by source and `brainstorm_submission_N` identity and obey this same filter across Autonomous direct context, RAG, compiler, and manual/history proof checks without changing canonical brainstorm storage.
+19. Proof checks use explicit `run_mode`, with `one_round` as the compatibility default. Process-local manual `loop_with_pruning` runs continue automatically until explicit Stop, backend shutdown, hard provider/configuration repair, unresolved mandatory Validator/proof-solver context overflow, or ten consecutive valid rounds discover no candidates; a round discovering candidates resets the streak. Candidate-local overflow remains deferred while siblings finish, but a continuous run must not begin another round under unchanged overflowing settings. Each round exposes detailed start, discovery/attempt, completion, automatic-continuation, and no-discovery-streak activity. Manual runs expose no durable idle, restart-resume, or next-round controls. In-process provider reset recovery does not create durable manual resume state. Autonomous and LeanOJ checkpoint recovery remain unchanged.
+20. Proof-pruning model review is fail-closed and non-mutating until commit: an immutable revisioned whole-set ledger plus bounded candidate-centered evidence feeds the Rigor & Proofs proposer and independent Validator. Target, retained supports, dependency neighborhood, and independently selected contrasts stay together; sectioned review requires conservative global arbitration and never chooses by page order. At most one obsolete, misaligned, redundant, superseded, or no-longer-unique occurrence may be suppressed only when per-claim validation confirms retained active proofs preserve every material contribution. Complete model-visible semantic evidence, fallback canonical identities, transitive dependencies, support provenance, owning run, source, lifecycle, and stale state are commit-fenced. Related routes, weak overlap, malformed output, provider failure, context overflow, uncertainty, or incomplete evidence cannot become approval.
+21. Proof-pruning orchestration is run-scoped, non-blocking, and may be scheduled from `one_round`, the proofs-only automatic four-round caller, and `loop_with_pruning`. Every three newly registered prompt-novel occurrences, or candidate-local overflow materially relievable by active proof context, schedules/coalesces at most one proposer→Validator review while solving continues. Bounded review-call volume and retry reserve are mandatory. Trigger generations preserve newer same-kind work; terminal review failures do not silently consume cadence. Cited support provenance remains protected while dependent exclusions remain effective. Stop/terminal cleanup drains owned tasks; compatible pruning state may rebind across lifecycle generations only for the same durable Autonomous proof run, source, and store while transient proposal authority is discarded, whereas manual runs retain no restart-resume authority. Clear/new-run fences pending state, and cancellation or multi-file persistence failure must not leave or report a partial prune commit.
+
+---
+
+## Data Persistence
+
+### Brainstorm Databases
+
+**File Pattern**: `auto_brainstorms/brainstorm_{topic_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_brainstorms/brainstorm_{topic_id}.txt`)
+
+Each brainstorm has its own database file containing accepted submissions, formatted identically to Part 1's `rag_shared_training.txt`.
+
+**Metadata File**: `auto_brainstorms/brainstorm_{topic_id}_metadata.json` under the active instance data root (default desktop path: `backend/data/auto_brainstorms/brainstorm_{topic_id}_metadata.json`) — Fields: topic_id, topic_prompt, status, submission_count, timestamps, papers_generated.
+
+### Paper Files
+
+**File Pattern**: `auto_papers/paper_{paper_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}.txt`)
+
+Contains full paper content.
+
+**Abstract File**: `auto_papers/paper_{paper_id}_abstract.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_abstract.txt`)
+
+Contains abstract only.
+
+**Source Brainstorm Cache**: `auto_papers/paper_{paper_id}_source_brainstorm.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_source_brainstorm.txt`)
+
+Contains complete brainstorm database that sourced this paper.
+
+**Pruned Papers**: `auto_papers/pruned/pruned_paper_{paper_id}.txt` (or session `papers/pruned/`) preserves papers removed from model context. The raw file begins with a `PRUNED PAPER - REMOVED FROM MODEL CONTEXT` banner and is for user review/download only. Companion metadata/abstract/outline files use the same `pruned_` prefix. Brainstorms do not use this soft-prune preservation feature.
+
+### Research Metadata File
+
+**File**: `auto_research_metadata.json` under the active instance data root (default desktop path: `backend/data/auto_research_metadata.json`)
+
+```
+
+### Workflow State File (Crash Recovery / Resume)
+
+**File**: `auto_workflow_state.json` under the active instance data root (default desktop path: `backend/data/auto_workflow_state.json`)
+
+This file persists the current workflow state to enable resume after program restart, crash, or user stop. Backend startup restores session/path context for the UI; model-work continuation resumes from this state on the next Start unless explicitly cleared. The system automatically saves this state at key checkpoints:
+
+Fatal Autonomous termination is durable lifecycle state, not WebSocket-only activity. Workflow state stores a generation-fenced latest terminal event with stable run identity; the typed non-cacheable status snapshot is authoritative for reconnect/refresh control and Live Activity recovery, while WebSockets remain the immediate projection. A committed restart advances the lifecycle and supersedes the prior event; Clear removes it.
+
+Autonomous parent and child Aggregator/Compiler/proof activity carries the owning
+session/run/lifecycle scope through live delivery and recovery. Validator outcomes
+include bounded safe feedback; model/provider/parser failures remain operational
+events; provider-error activity and the durable terminal event (Autonomous-owned even
+for child failures) name the failing route (workflow, role, model, provider, host
+routing) when one exists. Proof, pruning, Assistant, and solution-path producers attach their known
+source/run/generation and semantic classification before broadcast. Stable activity
+identity prevents WebSocket, status, and provider-recovery
+hydration from duplicating the same terminal or retry item.
+
+- After topic selection (starting brainstorm aggregation)
+- Periodically during brainstorm aggregation (every 5 acceptances)
+- Before and after brainstorm proof verification (`paper_phase="brainstorm_proof_verification"` / `pre_paper_compilation`)
+- When transitioning to paper compilation
+- During paper writing phases (`body`, `conclusion`, `introduction`, `abstract`)
+- Before completed-paper proof verification (`paper_phase="paper_proof_verification"`)
+- **During Tier 3 final answer generation phases**
+
+On **clean stop** (user-initiated via stop button), this file is preserved for pause/resume. Only `clear_all_data()` should clear workflow state. `clear_all_data()` preserves completed session files for history, marks existing sessions non-resumable/history-only, clears pending child-aggregator queue state, and resets live memory path bindings so the next Start creates a fresh session. `_save_workflow_state()` must preserve a previous `paper_phase` only when that phase is valid for the tier being saved; explicit `phase=None` clears it, and Tier 1 exploration saves must not inherit stale proof/paper phases.
+
+On **restart/crash recovery**, if this file exists with a resumable tier/topic/paper (regardless of `is_running`), the next Start detects the interrupted workflow and:
+1. Restores internal state (topic ID, acceptance counts, model config, etc.)
+2. Recovers stale acceptance counts from brainstorm metadata/database files when workflow state says `0`
+3. Resumes from the last known valid phase; completed brainstorms with no generated paper resume at proof/paper handoff, while completed brainstorms that already generated papers are treated as finished and must not replay proof/paper handoff. In proofs-only runs, every resume path after brainstorm completion must run/finish brainstorm proof work and save a clean topic-exploration boundary without entering paper-title or paper-compilation phases.
+4. Detects completed papers paused before proof verification and resumes `paper_proof_verification` before moving on
+5. Broadcasts `auto_research_resumed` WebSocket event
+
+If `workflow_state.json` is stale, idle, or missing, session recovery conservatively synthesizes a resume point from durable `session_stats.json`, brainstorm metadata/database files, and in-progress paper metadata/content unless the session metadata is marked non-resumable/history-only. This includes scanning `papers/*_metadata.json` for `status="in_progress"` when stats lost `current_paper_id`; the resume phase is detected from saved paper content rather than defaulting to body. Active Tier 3 resume still relies on persisted workflow/Tier 3 state rather than generic missing-workflow synthesis.
+
+
+**Important Notes:**
+- Session/research metadata is authoritative for the user research prompt; workflow state also stores a recovery fallback. `GET /api/auto-research/prompt` exposes only the active/resumable prompt for UI restart hydration.
+- Model configuration is saved to allow resuming with the same model settings
+- If the workflow state file is corrupted or missing, first try durable session-file recovery; start fresh only if no current topic, in-progress paper, completed unpapered brainstorm, or completed papers can be recovered, and only when the session is not marked non-resumable/history-only
+- The `clear_all_data` API endpoint preserves session files for history, marks sessions `resume_disabled=true` / `status="cleared"`, and must fail if any session cannot be marked non-resumable
+- Topic exploration and paper-title exploration are explicit resume boundaries. Starting a new topic cycle must clear stale completed topic/paper IDs and stale proof phases; stopping during exploration must never cause a completed brainstorm with generated papers to replay brainstorm proof verification or paper handoff. Stopped mini-aggregators must clear their process-global submission queue before any later phase starts.
+
+---
+
+## Session-Based Folder Organization
+
+### Overview
+Each autonomous research session gets its own folder organized by the user's research prompt. This enables:
+- Easy navigation of past research sessions
+- Automatic data organization by topic
+- Crash recovery per-session
+- Export and archival of complete research sets
+
+```
+```
+
+### Session ID Format
+- Sanitized prompt (first 50 chars, special chars replaced with underscores)
+- Timestamp suffix: `YYYY-MM-DD_HH-MM`
+- Example: `solve_langlands_bridge_2025-01-15_14-30`
+
+### SessionManager Class (`backend/autonomous/memory/session_manager.py`)
+Singleton that manages session folder organization:
+- `initialize(user_prompt)`: Creates new session folder
+- `resume_session(session_id)`: Resumes existing session
+- `get_brainstorms_dir()`: Returns path to brainstorms subdirectory
+- `get_papers_dir()`: Returns path to papers subdirectory  
+- `get_final_answer_dir()`: Returns path to final_answer subdirectory
+- `list_all_sessions()`: Lists all sessions with metadata
+
+### Memory Module Integration
+All memory modules (`brainstorm_memory`, `paper_library`, `final_answer_memory`, `research_metadata`) support session-based paths via `set_session_manager()`:
+- When session manager is set, paths resolve to session subdirectories
+- Enables complete data isolation between sessions
+- Backward compatible with legacy flat structure
+
+### Dual-Path Storage Architecture
+
+The autonomous research system maintains backward compatibility through a dual-path architecture:
+
+**Runtime root note:** The examples below are shown with the default desktop root `backend/data/`. In multi-launch or hosted environments, these same relative paths resolve under the active `MOTO_DATA_ROOT`. Per-instance isolation comes from the runtime root; session isolation happens inside that instance root.
+
+**Legacy Paths (backward compatibility):**
+```
+backend/data/auto_brainstorms/      # Brainstorm databases
+backend/data/auto_papers/           # Completed papers  
+backend/data/auto_final_answer/     # Final answer files
+```
+
+**Session-Based Paths (preferred for new sessions):**
+```
+backend/data/auto_sessions/{session_id}/brainstorms/     # Session brainstorms
+backend/data/auto_sessions/{session_id}/papers/          # Session papers
+backend/data/auto_sessions/{session_id}/final_answer/    # Session final answers
+```
+
+**Path Resolution Priority:**
+1. Check for active session via `session_manager`
+2. If session active: use session-based paths
+3. If no session: fall back to legacy paths
+4. Memory modules handle path resolution automatically
+
+**Critique Storage Integration:**
+- Critiques are stored as JSON files inside the resolved legacy/session `papers/` or `final_answer/` directory
+- `critique_memory.py` accepts `base_dir` for session-aware storage and revalidates it against trusted roots before file access
+- When a paper or final answer is deleted, critiques are automatically cleaned up from the matching resolved storage location
+- Callers derive the directory from session-aware memory/path helpers before invoking critique storage
+
+**Important for New Features:**
+- Always use memory module methods (e.g., `paper_library.get_paper_path()`) to get paths
+- Never hardcode fixed-root paths like `data/auto_papers/` or `backend/data/auto_papers/` directly
+- Pass resolved paths to any persistence layer that needs session awareness
+- Config paths (`system_config.auto_papers_dir`, etc.) are legacy-only references
+- Session-aware storage does not replace instance-aware storage; separate running MOTO instances must also keep separate `MOTO_DATA_ROOT` values
+
+---
+
+## Force Tier 3 Manual Override
+
+### Overview
+Users can force the transition to Tier 3 final answer generation at any time during autonomous research (when at least 1 paper exists). This provides manual control over when to synthesize results.
+
+### Trigger Conditions
+- Autonomous research must be running
+- At least 1 completed paper must exist
+- Not already in Tier 3 final answer generation
+
+### Two Modes
+
+**complete_current**: Complete current work first, then trigger Tier 3
+- If in Tier 1 (brainstorm): Forces paper writing completion, then Tier 3
+- If in Tier 2 (paper writing): Waits for current paper to complete, then Tier 3
+
+**skip_incomplete**: Skip incomplete work, proceed with completed papers only
+- **Stops main loop FIRST** (`_running = False`, `_stop_event.set()`) to prevent race conditions
+- Stops current aggregator/compiler unconditionally (without checking tier state)
+- Marks incomplete brainstorm as "complete" (schema doesn't support "abandoned")
+- **Resets execution flags for Tier 3** (`_running=True`, `_stop_event.clear()`) - allows chapter writing and paper compilation loops to run
+- **Runs Tier 3 synchronously** - no background task, returns result directly
+- **Resets flags back to stopped state after final-answer completion** (`_running=False`, `_stop_event.set()`); if Tier 3 exits with `no_answer_known`, normal autonomous research resumes in the background
+- Triggers Tier 3 with whatever papers are already complete
+
+---
+
+## Frontend Components
+
+### AutonomousResearchInterface.jsx
+Main interface component:
+- User research prompt input
+- Start/Stop/Clear buttons
+- Current tier display (Tier 1 Brainstorm / Tier 2 Paper Writing)
+- Current brainstorm/paper progress
+- Live activity feed (topic selections, submissions, completions). Rejected brainstorm/topic/title activity should indicate that validator feedback was provided and reassure users that rejection streaks can be normal on difficult problems.
+
+### BrainstormList.jsx
+Brainstorm management component:
+- Background polling and unrelated parent renders preserve the mounted expanded reader; reset content/loading only for a real document or endpoint change, not API-wrapper object identity.
+- List of all brainstorm topics with status indicators
+- Expandable to show brainstorm database content
+- Status badges: In Progress uses the active accent state; Complete uses the green success state
+- Submission counts per brainstorm
+- Papers generated from each brainstorm
+- **Delete button**: Removes brainstorm and all associated files
+  - Shows confirmation dialog before deletion
+  - Displays count of associated papers that will be orphaned
+  - Prevents deletion of active brainstorm during aggregation
+  - Calls `DELETE /api/auto-research/brainstorm/{topic_id}?confirm=true`
+
+### PaperLibrary.jsx
+Paper library component:
+- Grid/list view of all completed papers
+- Paper cards showing title + abstract preview
+- Paper views default to rendered content, collapse each embedded verified proof into an
+ ordered expandable section, and report only paper-only, proof-only, and combined
+ word counts while preserving complete raw/download content. Paper tiles use a wider
+ responsive layout with counts in a dedicated three-column row below selection/identity.
+- Expandable to show full paper content
+- Word count, source brainstorm links
+- Download/export options:
+ - **Download PDF**: Calls the backend Playwright PDF endpoint; default mode can generate PDFs, while generic mode returns 501 and the UI/helper should surface the unavailability or use raw export
+  - **Download Raw**: Downloads raw text with outline (available in both modes)
+- Search/filter functionality lives in the completed-works history components, not the live current-session `PaperLibrary.jsx`.
+- **Prune button**: Removes paper from active model context/RAG while preserving it as pruned history (shown when paper is expanded)
+  - Shows inline confirmation dialog before pruning
+  - Located after download buttons in paper actions
+  - Prevents pruning of active paper during compilation
+  - Calls `DELETE /api/auto-research/paper/{paper_id}?confirm=true`
+  - Permanent cleanup is handled by explicit pruned/history deletion routes
+- Active paper cards in the current library and Stage 2 history also support
+  checkbox selection and atomic bulk pruning without opening each paper.
+  Select-all applies only to currently visible eligible papers; cross-session
+  targets remain session-qualified and any invalid target rejects the whole batch.
+
+### CritiqueNotificationStack.jsx
+Persistent popup notification component for high-scoring paper critiques:
+- **Fixed position**: Bottom-right corner with z-index 999999
+- **Max 3 notifications**: FIFO queue (oldest removed when 4th arrives)
+- **Trigger condition**: Paper has validator critique avg rating ≥ 6.25
+- **Each notification displays**:
+  - Paper title (truncated to 2 lines)
+  - Average rating with color coding (green ≥8, blue ≥7)
+  - Star icon
+  - X button to dismiss
+  - "Click to view critique" hint
+- **Interactions**:
+  - Click anywhere (except X) → opens `PaperCritiqueModal` with full critique
+  - Click X → dismisses notification with slide-out animation
+- **Persistence**: Stays visible across screens until dismissed; dismissed/clicked high-score popup keys are stored in localStorage so missed WebSocket events can be replayed once from saved paper critique ratings without repeating forever
+- **Styling**: Purple gradient, compact design (~250px × ~80px), smooth animations
+- **WebSocket Integration**: Listens to `high_score_critique` event from backend and de-duplicates against recovered paper-list notifications
+
+**State Management** (in App.jsx):
+- `critiqueNotifications` array stores active notifications
+- `selectedCritiquePaper` tracks paper selected from notification click
+- `showCritiqueModal` toggles critique modal visibility
+
+### AutonomousResearchSettings.jsx
+Settings integrated into main Settings panel:
+- The user research prompt lives in `AutonomousResearchInterface.jsx`, persists through the shared prompt-draft storage (`autonomous_research_prompt`, with large drafts offloaded from localStorage), and is disabled while a run is active.
+- Covers model/provider/runtime settings for brainstorm submitters, validator, Writing Submitter, Rigor & Proofs Submitter (legacy `high_param_*` fields), and Assistant. Deprecated critique settings mirror Rigor & Proofs.
+- Includes OpenRouter/OAuth provider controls (OpenRouter provider/reasoning and desktop OAuth model choices), profiles/raw settings, free-model looping/auto-selector, developer-mode Supercharge controls, Tier 3 toggle, and proof-strength/sidebar UI. Wolfram Alpha access is managed from the grouped connectivity panel. Advanced Lean/SMT proof runtime controls are shown only when desktop capabilities/runtime paths make them available; the user-facing proof-output toggle lives in the main interface Allowed Outputs row.
+
+### Allowed Outputs
+Autonomous start requests include `allow_mathematical_proofs` and `allow_research_papers`; at least one must be true. Both true preserves today's paper-reference → brainstorm → proof checkpoint → paper-writing behavior. The Mathematical Proofs checkbox is the main user-facing Lean proof-output toggle; if it cannot enable/use Lean in the current runtime, proof-only starts must fail visibly rather than run brainstorms with no allowed output. Proofs-only runs skip paper writing after completed brainstorm proof work, clear any paper-handoff workflow phase before looping, and select up to 3 completed prior brainstorms as proof-stripped references for future brainstorms. Papers-only runs skip proof verification/proof output work. Brainstorm reference selection must use structured JSON handling with retry/validation or clear failure feedback, and selected reference content must enter context only through `strip_proofs=True`/sanitized text paths because novel proofs are injected separately from the proof database.
+
+### AutonomousResearchLogs.jsx
+Metrics and logging component:
+- Metric cards and per-submitter stats for brainstorms, papers, acceptance/rejection counts, and pruned/history counts
+- Combined API call log view
+- Event/activity log with timestamps
+
+### LiveTier3Progress.jsx
+Real-time Tier 3 final answer display component (embedded in AutonomousResearchInterface):
+- **Purpose**: Shows Tier 3 paper/chapter content AS IT'S BEING WRITTEN (like LivePaperProgress does for Tier 2)
+- **Renders when**: `status.current_tier === 'tier3_final_answer'`
+- **Features**:
+  - Overall Tier 3 status (phase, format, certainty assessment)
+  - Status badges: Assessing Certainty, Selecting Format, Organizing Volume, Writing
+  - Format indicator: Short Form (📄) or Long Form Volume (📚)
+  - For long-form: Chapter list with progress (pending/writing/complete)
+  - Current writing indicator: Shows which chapter is being written
+  - Real-time paper content display via LatexRenderer
+  - Auto-scroll toggle
+  - Download options (Raw Text, PDF)
+- **Data Sources**:
+  - Uses `/api/auto-research/current-paper-progress` for in-progress content (same as Tier 2)
+  - Uses `/api/auto-research/tier3/volume-progress` for chapter status (long-form)
+- **WebSocket Events**: Listens to Tier 3/paper progress events needed for live content and phase updates; exact event names belong in code/API contract, not as rule-level invariants.
+- **Distinction from FinalAnswerView.jsx**: LiveTier3Progress shows content DURING generation (embedded in main interface), while FinalAnswerView is a separate tab for viewing COMPLETED final answers
+
+### FinalAnswerView.jsx
+Tier 3 Final Answer display component (separate tab for completed/overall final answer status):
+- Status badge: "FINAL ANSWER IN PROGRESS" uses the active Tier 3 accent state; "FINAL ANSWER ✓" uses the green success state
+- Certainty assessment summary display
+- Format selection indicator (Short Form / Long Form)
+- Volume organization outline with chapter status (for long form):
+  - Chapter list with status badges (pending/writing/complete)
+  - Click to expand individual chapter content
+  - Progress indicator (X of Y chapters complete)
+- Final answer content viewer via **LatexRenderer with Rendered/Raw toggle (defaults to rendered with progressive large-document rendering)**:
+  - Short form: Single paper display
+  - Long form: Volume with expandable chapters
+- Auto-scroll toggle for real-time updates
+- Export/download options (PDF with smart rendering, raw text download)
+
+**Tab Styling**:
+- When Tier 3 is enabled, the final-answer view appears as an optional autonomous-main tab with Stage 3/progress labeling
+- Active Tier 3 tab uses the in-progress highlight state with pulse animation
+- Green highlight with checkmark when complete
+
+
+---
+
+## Integration Notes
+
+### Relationship to Part 1 (Aggregator)
+- Part 3 USES Part 1's aggregator infrastructure for Tier 1 brainstorm aggregation
+- Same configurable 1-10 submitters + 1 validator architecture (default 3 submitters)
+- Each submitter can have its own model, context window, and max output tokens
+- Single validator maintains coherent Markov chain evolution
+- Same child-aggregator cleanup mechanism (run-local 7-acceptance cadence)
+- Same RAG cycling for submitters (256 → 512 → 768 → 1024)
+- Same rejection feedback mechanisms
+- **DIFFERENCE**: AI-generated topic prompts instead of user-provided prompts
+
+### Relationship to Part 2 (Compiler)
+- Part 3 USES Part 2's compiler infrastructure for Tier 2 paper compilation
+- Same sequential Markov chain workflow
+- Same Writing + Rigor & Proofs submitter architecture
+- Same outline/construction/review/rigor modes
+- Same validator with coherence/rigor/placement checking
+- **DIFFERENCES**: 
+  - Constrained section order (body → critique/self-review → conclusion → intro → pre-abstract empirical red-team review → abstract)
+  - AI-generated paper titles instead of user-provided prompts
+  - Reference paper selection workflow
+  - Brainstorm database as high-priority optional source material
+  - Selective non-use of brainstorm/database material is allowed when the resulting paper is stronger, rigorous, and aligned with the prompt
+
+### Running Modes
+- **Part 1, Part 2, Part 3, and LeanOJ Proof Solver remain user-selectable modes**
+- **Only ONE workflow mode may be active at a time** — Aggregator, Compiler, Autonomous Research, and LeanOJ Proof Solver are mutually exclusive at runtime (applies identically in both default and generic deployment)
+- **Part 3 internally controls Part 1 and Part 2 components** during autonomous execution
+- **LeanOJ is proof-only and separate from Part 3** — it does not write papers, does not mutate autonomous brainstorm/paper memory, and stores resumable run-local state under the active `leanoj_sessions` data root until explicit clear
+- Starting any mode while another mode is running must be blocked until the active mode is stopped
+- In generic mode, the shared route surface remains mostly identical, but desktop-only proof settings/cleanup, OAuth providers, and PDF generation return unavailable (`501`) while provider availability is OpenRouter-only and embeddings use FastEmbed.
+
+---
+
+## Prerequisites
+
+- Either an OpenRouter API key or at least one LM Studio model must be available to begin in default mode; desktop OAuth provider logins are supplementary role providers after startup because RAG embeddings still require OpenRouter or LM Studio. Generic mode requires an OpenRouter API key only.
+- LM Studio is recommended in default mode for free local embeddings/RAG; desktop OAuth providers do not supply embeddings. Generic mode uses in-process FastEmbed for embeddings and has no LM Studio service/runtime requirement.
+- User must provide high-level research prompt
+- No dependency on prior Part 1 or Part 2 manual usage. A new autonomous run may start independently, while existing autonomous sessions, paper libraries, reference history, and resumable topics remain supported.
+
+---
+
+## Error Handling
+
+### JSON Parse Failure (Topic Selection)
+- Retry indefinitely with rejection feedback (same as other agents)
+- Each retry includes prior failure context
+
+### JSON Parse Failure (Brainstorm Aggregation)
+- Same as Part 1 Aggregator: reject submission, feedback to submitter
+
+### JSON Parse Failure (Paper Compilation)
+- Same as Part 2 Compiler: reject submission, feedback to submitter
+
+### Long-Running Model Calls
+- OpenRouter calls do not use short hard timeouts; continuous runtime is intentional.
+- The API client emits a non-canceling live-activity hung-connection notification after the configured watchdog interval (default 25 minutes) so the user knows the model may still be thinking and can keep waiting or reduce reasoning effort in Settings.
+- Provider/account exhaustion, rate limits, and hard configuration errors use their dedicated fallback, pause, or visible-failure paths.
+
+### Completion Review Failure
+- If self-validation fails to parse, treat as "continue_brainstorm"
+- Log error and continue brainstorm aggregation
+
+### Paper Compilation Failure
+- When research-paper output is enabled, paper compilation is retried indefinitely until success or user stops - no skipping allowed
+- A completed brainstorm produces a paper only when research-paper output is enabled; proofs-only runs must finish proof work and return to topic exploration without entering paper/title phases
+- If the referenced brainstorm database was deleted, clear stale Tier 2 paper-writing state and restart the normal topic exploration → reference selection → brainstorm cycle
+- Title selection retries indefinitely with rejection feedback threaded into each attempt
+
+---
+
+## Configuration Defaults
+
+### Autonomous Research Mode
+Normal GUI/API startup must pass explicit context-window and max-output-token settings for every role from the user's selected provider/model settings, including the Assistant role when present. Runtime code must not substitute hidden 131K/25K fallbacks. Built-in/default profiles set Assistant equal to the primary Validator unless the user edits it; Session History Memory disabled greys out Assistant and prevents Assistant workflow-memory retrieval.
+- Completion review interval: 10 accepted submissions (cleanup removals do not advance the trigger)
+- Max brainstorms in parallel: 1 (sequential brainstorm → paper cycle)
+- Max topic-cycle reference papers: 3; Tier 3 short-form reference cap: 6
+- Desktop Lean/SMT proof runtime settings, including concurrent proof-attempt batching, persist as non-secret runtime settings under the active data root; hosted/generic mode still keeps proof tooling unavailable by default.
+
+### Token Tracking & Research Timer
+- `token_tracker` singleton resets and starts timer on `autonomous_coordinator.start()`, stops on stop/finally
+- Cumulative input/output tokens tracked per model from every successful LLM completion call (all completion routes in `api_client_manager`, including free-model rotation and auto-selector)
+- `token_usage_updated` WebSocket event broadcast after each tracked call; `GET /api/token-stats` for initial fetch
+- Displayed in WorkflowPanel sidebar (timer, totals, expandable per-model breakdown)
+- Also activated for standalone aggregator/compiler via API route start/stop
+
+---
+
+## Critical Invariants
+
+1. **User research prompt is ALWAYS direct injected** - Non-negotiable in all operations
+2. **Brainstorm database is ALWAYS saved with its produced paper** - Full cache for provenance
+3. **Outline is ALWAYS fully injected during paper compilation** - Never RAGed, structural framework integrity
+4. **Topic selection can ALWAYS choose to continue an existing brainstorm** - Not forced to create new topics
+5. **Paper is NOT complete until abstract is written AND validated** - Sequential order must complete
+6. **Same model MUST self-validate completion review decisions** - SPECIAL SELF-VALIDATION MODE
+7. **Completion review is acceptance-count based** - Pruning/removal cleanup does not advance the 10-acceptance trigger
+8. **Maximum 3 topic-cycle base reference papers total** - Applies across pre-brainstorm + additional selection for brainstorm/Tier 2 paper writing. Tier 3 short-form keeps its own 6-paper selection cap, and Tier 3 long-form chapter writing uses all selected `existing_paper` volume chapters as references.
+9. **Paper section order is FIXED**: Body → post-body critique/self-review → Conclusion → Introduction → pre-abstract empirical red-team review → Abstract - Cannot skip or reorder
+10. **Paper redundancy review is CONSERVATIVE** - Maximum 1 removal per cycle, when in doubt keep
+11. **Workflow state is ALWAYS persisted for crash recovery** - Startup restores session context, and the next Start resumes model work from the last checkpoint unless cleared
+12. **Reference papers selected before brainstorm PERSIST through topic cycle** - Same papers used for brainstorming AND paper writing, enabling compounding knowledge
+13. **Tier 3 papers do NOT use brainstorm databases** - Only reference Tier 2 completed papers (context isolation)
+14. **Tier 3 has INDEPENDENT rejection feedback** - Separate 10-rejection cache from Tiers 1/2
+15. **System STOPS after final answer is complete** - No more paper generation after Tier 3 completes
+16. **Tier 3 is DISABLED by default** — `tier3_enabled=False`; must be explicitly enabled in Settings. When disabled, automatic Tier 3 final-answer synthesis does not trigger; autonomous research continues producing Tier 1/Tier 2 work until the user stops or enables/forces Tier 3.
+17. **Tier 3 triggers every 5 papers IN THE LIBRARY** (when enabled) - Based on actual `paper_library.count_papers()["active"]`, not internal counters
+18. **`no_answer_known` exits Tier 3** - Returns to normal research, more papers needed
+19. **Long-form volume writing order is FIXED** - Gap papers → Conclusion → Introduction (last)
+20. **Model tracking is ENABLED during Tier 3** - All API calls tracked for author attribution and model credits
+21. **Same model = single author** - Model used in multiple instances counts as ONE author entry, but all API calls tallied
+22. **Paper redundancy is DISABLED during Tier 3** - `_tier3_active` flag prevents redundancy checks from purging papers being used in the final volume
+23. **Brainstorm hard limit is 30 acceptances** - After 30 acceptances, paper writing is forced (no completion review)
+24. **Critiques append as self-review, never rewrite** - Post-body critique runs 3 total attempts and appends validator-accepted critiques as `AI Self-Review and Limitations`; no partial or total body rewrites are allowed
+25. **Self-review follows proofs/conclusion** - The self-review section is inserted immediately before the paper anchor as the final reader-facing section, and later proof appends must stay before it
+26. **Critique declines remain valid** - If no critiques are accepted after the 3 attempts, the workflow proceeds to conclusion without adding a self-review section
+27. **Rejection hard limit is 10 consecutive rejections (with 7+ acceptances)** - Forces paper writing. Model-driven completion reviews and rejection-limit handoff are deferred before 7 acceptances.
+28. **Retroactive brainstorm corrections during Tier 2 paper compilation** - Submitter sees unified paper+brainstorm workspace; operations validated independently by validator (paper-only context for paper ops, brainstorm-only context for brainstorm ops); each operation must stand alone without requiring the other for correctness
+29. **Max 3 papers per brainstorm** - hard limit, continuation decision skipped after 3rd paper
+30. **Prior brainstorm papers ALWAYS auto-included** for paper 2/3 as permanent high-priority RAG references, separate from the 3-paper topic-cycle cross-topic reference limit
+31. **Reference selection runs ONCE per brainstorm cycle** - papers 2/3 reuse same cross-topic references
+32. **Topic validator validates continuation decisions** - not self-validation (strategic decision, not weight assessment)
+33. **Tier 3 checks after brainstorm cycle completes** (move_on or hard limit), not between papers
+34. **No brainstorm re-opening during continuation** - strictly write_another_paper or move_on
+35. **Topic exploration runs before EVERY topic selection** — Uses the full Part 1 aggregator with batch validation to collect 5 candidate questions; topic selection must not run on zero or partial exploration candidates. It inherits normal Aggregator execution semantics, including single-model sequential mode when applicable.
+36. **Topic exploration uses standard aggregator (cleanup disabled)** — Same submitter scheduling, batch validation (up to 3), queue management, and single-model handling as normal brainstorms. Cleanup/pruning is disabled because the phase is capped at 5 candidates and the temp DB is deleted afterwards.
+37. **Paper title exploration runs before EVERY title selection** — Uses full Part 1 aggregator to collect 5 candidate titles before every paper creation (Tier 2 papers 1/2/3, Tier 3 short-form, Tier 3 gap/intro/conclusion chapters); title selection must not run on zero or partial title candidates. No exceptions.
+38. **Title exploration uses standard aggregator (cleanup disabled)** — Same submitter scheduling, batch validation, queue management, and single-model handling as normal brainstorms. Cleanup/pruning is disabled because the phase is capped at 5 candidates and the temp DB is deleted afterwards.
+39. **Final title selection sees candidate titles** — The 6th selection can choose a candidate, synthesize, or propose new. Must justify divergence from all candidates.
+40. **Proof verification is an optional post-brainstorm and post-paper checkpoint** — Gated on `lean4_enabled`; when disabled it may emit lightweight skip/status events, but must not invoke Lean/proof model work or block workflows. Lean 4 is authoritative; SMT (when `smt_enabled`) contributes hints only. See "Proof Verification Stage" section for the full invariant list.
+41. **Hard code guard: continue_existing on completed brainstorms is REJECTED** — `_execute_topic_selection` checks `metadata.status == "complete"` and returns `None`, forcing topic re-selection. LLM prompts instruct against this but the code guard is authoritative.
+42. **30-cap is TOTAL across all brainstorm rounds for a topic** — When `continue_existing` resumes an incomplete brainstorm, the aggregator loop tracks a `resume_acceptance_base` offset. `_acceptance_count` always equals `base + fresh_aggregator_count`. If the topic already has >= 30 acceptances on entry, aggregation is skipped and paper writing is forced immediately.
+
+---
+
+## Comparison: Manual Modes vs Autonomous Mode
+
+| Aspect | Part 1 (Aggregator) | Part 2 (Compiler) | Part 3 (Autonomous Research) |
+|--------|---------------------|-------------------|------------------------------|
+| Topic Source | User provides prompt | User provides prompt | AI generates topics |
+| Database | Single shared DB | Outline + paper | Per-brainstorm DBs + paper library |
+| Completion | User stops manually | User stops manually | AI determines completion OR Tier 3 completes |
+| Paper Generation | N/A | User-directed compilation | AI-directed compilation |
+| Section Order | N/A | Next best section | Fixed: Body→Critique→Concl→Intro→pre-abstract review→Abstract |
+| Running | Independent | Independent | Autonomous (controls Part 1 & 2) |
+| Final Answer | N/A | N/A | Tier 3: Short-form paper OR Long-form volume |
+| System Termination | N/A | N/A | Tier 3 completion stops entire system |
+
+---
+
+## Model Selection and Context Notes
+
+**All model selections and context windows are user-configurable via GUI settings** (same as Part 1 and Part 2).
+
+### Cloud Provider Integration
+
+Each role in autonomous research mode supports cloud provider selection where configured:
+
+- **Provider Toggle** (default mode): Role selectors can choose LM Studio, OpenRouter, or configured desktop-only cloud providers (OAuth or Sakana Fugu API key). In generic mode, all roles use OpenRouter only and non-OpenRouter provider toggles are hidden/unavailable.
+- **OpenRouter Model Selector**: When OpenRouter enabled, dropdown shows available OpenRouter models
+- **OAuth Model Selector**: When a desktop OAuth provider is configured, dropdowns show that account's provider-backed models from the OpenRouter/OAuth flow; this is distinct from regular provider API-key billing.
+- **Provider/Host Selector**: Specific provider selection (e.g., "Anthropic", "Google AI", "AWS Bedrock") or "Default (OpenRouter chooses)"
+- **OpenRouter Auto-Fill**: Selecting an OpenRouter model auto-fills context from the model-level `context_length`. Max output tokens use `min(20% of model context_length, endpoint max_completion_tokens)`: auto provider mode filters weak/low-cap endpoints and uses the smallest remaining capable endpoint cap, while an explicit host selection uses that host's largest exposed endpoint cap. Endpoint `context_length` / `max_prompt_tokens` rows are diagnostics, not context shrink limits. If endpoint output caps are incomplete, preserve current values (no guessing).
+- **LM Studio Fallback** (default mode only): Optional fallback model if cloud provider access fails (credit exhaustion, auth errors, or transient provider errors)
+
+**Fallback Behavior**:
+- Default mode with fallback configured: Automatically falls back to LM Studio on cloud-provider credit/auth/transient errors
+- Default mode without LM Studio: OpenRouter-backed cloud operation, optionally with desktop OAuth roles after startup; OAuth-only is not a valid start path because embeddings need OpenRouter. Autonomous proof checkpoints preserve progress on provider credit exhaustion and currently waiting tasks wake after OpenRouter reset where applicable.
+- Generic mode: OpenRouter-only; no LM Studio fallback available. Ordinary workflow credit exhaustion raises a provider/config error; proof checkpoints preserve progress and currently waiting tasks wake after OpenRouter reset.
+- Fallback is per-role. OpenRouter exhaustion is resettable via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key; reset wakes currently waiting proof pauses while stopped/restarted runs resume from persisted workflow checkpoints.
+
+## Other Notes
+
+Special Self-validation mode: The SPECIAL SELF-VALIDATION MODE for completion review is critical to the system's integrity. Do not attempt to use a different model for completion validation, as this would compromise the accuracy of the "knowledge exhaustion" assessment.
+
+Out-of-order paper writing: The sequential paper writing order (body → critique/self-review → conclusion → intro → pre-abstract empirical red-team review → abstract) is designed to ensure the paper has substantive content before writing the introduction (which previews the content) and abstract (which summarizes the content), with transparent self-review and final empirical/provenance review before the abstract. This order produces more coherent papers than writing introduction-first.
+
+**JSON Response Handling**:
+- All LLM responses preprocessed by `sanitize_json_response()` in `backend/shared/json_parser.py`
+- Handles reasoning tokens (`<think>...</think>`), markdown wrappers, control tokens
+- Extracts first complete JSON object when multiple present
+- Handles LaTeX escape sequences comprehensively: fixes invalid `\u{word}` patterns, fixes invalid `\uXXXX` non-hex escapes, **pre-escapes dangerous LaTeX commands BEFORE any json.loads() attempt** using `(?<!\\)` negative lookbehind (prevents `\to` becoming tab+o, `\text` becoming tab+ext, etc., while also preserving already-escaped `\\begin` from being double-corrupted) - dangerous commands include `\to`, `\text`, `\textbf`, `\times`, `\top`, `\tau`, `\theta`, `\triangle`, `\frac`, `\forall`, `\beta`, `\bar`, `\big*`, `\begin`, `\nu`, `\nabla`, `\neq`, `\not*`, `\rho`, `\right*`, `\rightarrow`, `\Rightarrow`, `\upsilon`, `\underline`, `\uparrow`
+- Retry/context hygiene uses `sanitize_model_output_for_retry_context()` before any failed model output is replayed or stored as reusable feedback. It removes known private thought/channel/control tokens while preserving visible malformed JSON and Lean/math syntax such as `<|`; retry-facing parser exceptions must not include raw response excerpts.
+- Agent-level array handling for models that return arrays instead of objects

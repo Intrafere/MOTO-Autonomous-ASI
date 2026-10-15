@@ -592,7 +592,7 @@
 }
 
 /* Accent positioning */
-.latex-rendered-content .katex .accent {
+.latex-rendered-content .katex .katex-accent {
   position: relative;
 }
 

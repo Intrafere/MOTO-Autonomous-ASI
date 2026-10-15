@@ -33,11 +33,17 @@ import WorkflowPanel from './components/WorkflowPanel';
 import SolutionPathModal from './components/SolutionPathModal';
 import { solutionPathEventMatches } from './utils/solutionPathPresentation';
 import { reconcileAutonomousLifecycle } from './utils/workflowLifecycle';
+import { getNoveltyGroupSize } from './utils/proofPresentation';
+import { MANUAL_AGGREGATOR_PROOF_SOURCE_ID } from './utils/manualProofSources';
 import BoostControlModal from './components/BoostControlModal';
 import StartupProviderSetupModal from './components/StartupProviderSetupModal';
+import StartupDisclaimerModal from './components/StartupDisclaimerModal';
 import OpenRouterApiKeyModal from './components/OpenRouterApiKeyModal';
 import ConnectivityPanel from './components/ConnectivityPanel';
 import SyntheticLib4AccessModal from './components/SyntheticLib4AccessModal';
+import SyntheticLib4DeveloperWorkspace from './components/SyntheticLib4DeveloperWorkspace';
+import useSyntheticLibPrivateSurface from './hooks/useSyntheticLibPrivateSurface';
+import useDeveloperModeShortcut from './hooks/useDeveloperModeShortcut';
 import WolframAlphaAccessModal from './components/WolframAlphaAccessModal';
 import LMStudioConnectivityModal from './components/LMStudioConnectivityModal';
 import AgentConversationMemoryModal from './components/AgentConversationMemoryModal';
@@ -53,6 +59,7 @@ import useWhatsNew from './hooks/useWhatsNew';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import intrafereLogoMark from './assets/brand/intrafere-logo-no-text.png';
 import { websocket } from './services/websocket';
+import { installProofRunActivityRecovery } from './utils/proofRunActivityRecovery';
 import {
   API_ERROR_KINDS,
   api,
@@ -99,6 +106,8 @@ import {
   isProviderUsageLimitActive,
   shouldShowProviderUsageLimitPopup,
   shouldAddRejectionFeedbackNotice,
+  formatHungConnectionMessage,
+  withRouteIdentity,
 } from './utils/activityStyles';
 import {
   compactLiveActivityEvent,
@@ -109,12 +118,26 @@ import {
   shouldRecordWorkflowStoppedActivity,
 } from './utils/liveActivityPersistence';
 import {
+  hasRecentActivityDuplicate,
+  normalizeActivityEvent,
+} from './utils/activityNormalization';
+import {
   canStorePromptDraftInLocalStorage,
   readPromptDraftSync,
   removePromptDraft,
   savePromptDraft,
 } from './utils/promptDraftStorage';
+import {
+  DEFAULT_EMPTY_PROOF_FEEDBACK,
+  LEAN_WORKSPACE_REPAIR_REASON,
+  buildLeanWorkspaceRepairNotification,
+  formatLeanWorkspaceRepairActivity,
+  formatProofLeanResponse,
+} from './utils/proofLeanResponse';
 import { readBooleanStorage } from './utils/safeStorage';
+import {
+  getSyntheticLibPresentation,
+} from './utils/syntheticLibPresentation';
 
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
 const AGGREGATOR_PROMPT_STORAGE_KEY = 'aggregator_user_prompt';
@@ -142,6 +165,7 @@ const DEFAULT_CAPABILITIES = Object.freeze({
   openAICodexOauthAvailable: true,
   xaiGrokOauthAvailable: true,
   sakanaFuguAvailable: true,
+  syntheticLibProductState: undefined,
   version: '',
   buildCommit: '',
   updateChannel: 'main',
@@ -297,6 +321,9 @@ export function buildTerminalModelErrorNotification(data = {}) {
       && ['manual_proof_check', 'autonomous'].includes(data.workflow_mode)
     );
   if (!isModelError) return null;
+  if (data.reason === LEAN_WORKSPACE_REPAIR_REASON) {
+    return buildLeanWorkspaceRepairNotification(data);
+  }
   return {
     ...data,
     notification_kind: 'model_error',
@@ -309,6 +336,44 @@ export function buildTerminalModelErrorNotification(data = {}) {
           ? 'Proof context limit reached'
           : 'Model configuration requires repair'
       ),
+  };
+}
+
+const SCOPED_PROVIDER_ACTIVITY_FEEDS = new Set(['autonomous', 'leanoj', 'aggregator', 'compiler']);
+
+const MANUAL_COMPILER_PROOF_SOURCE_PREFIXES = ['manual_compiler_', 'compiler_manual_', 'compiler_aggregator_'];
+
+// Manual proof checks route by the source the check runs on. The Aggregator and
+// Compiler feeds already show a check's workflow-level waits as its proof_retry_*
+// line, so only adapter-level rows are added there; checks on Autonomous sources
+// have no such line, so every row is shown in the Autonomous feed.
+const getManualProofProviderActivityFeed = (notification = {}) => {
+  const sourceId = String(notification.source_id || '');
+  if (!sourceId) return '';
+  const manualFeed = sourceId === MANUAL_AGGREGATOR_PROOF_SOURCE_ID
+    ? 'aggregator'
+    : MANUAL_COMPILER_PROOF_SOURCE_PREFIXES.some((prefix) => sourceId.startsWith(prefix))
+      ? 'compiler'
+      : '';
+  if (!manualFeed) return 'autonomous';
+  return notification.retry_layer === 'workflow' ? '' : manualFeed;
+};
+
+// Returns the Live Activity feed that owns a provider row, or '' to drop it.
+export function getScopedProviderActivityFeed(notification = {}) {
+  if (!notification.notification_key && notification.event_type !== 'provider_retry_cooldown') return '';
+  const workflowMode = String(notification.workflow_mode || '').toLowerCase();
+  if (workflowMode === 'manual_proof_check') return getManualProofProviderActivityFeed(notification);
+  return SCOPED_PROVIDER_ACTIVITY_FEEDS.has(workflowMode) ? workflowMode : '';
+}
+
+// The payload spreads before `message` so the route-identity-prefixed text wins.
+export function buildSolutionPathActivityEvent(eventName, data = {}) {
+  return {
+    event: eventName,
+    timestamp: new Date().toISOString(),
+    ...data,
+    message: formatSolutionPathEventMessage(eventName, data),
   };
 }
 
@@ -336,10 +401,12 @@ function buildOAuthActivityMessage(data = {}, fallbackProviderLabel = 'OAuth pro
   const detail = truncateOAuthActivityDetail(
     data.oauth_error_message || data.error_message || data.error_summary,
   );
-  if (detail) {
-    return `${providerLabel} ${providerKind} failed for ${roleId}: ${detail}`;
-  }
-  return `${providerLabel} ${providerKind} failed for ${roleId}; ${repairHint}.`;
+  return withRouteIdentity(
+    detail
+      ? `${providerLabel} ${providerKind} failed for ${roleId}: ${detail}`
+      : `${providerLabel} ${providerKind} failed for ${roleId}; ${repairHint}.`,
+    data,
+  );
 }
 
 function buildOAuthUsageLimitActivityMessage(data = {}, fallbackProviderLabel = 'OAuth provider') {
@@ -370,17 +437,22 @@ function readAggregatorStorage(key) {
   }
 }
 
-function buildAggregatorConfigFromStorage() {
+export function buildAggregatorConfigFromStorage() {
   const settings = readAggregatorStorage('aggregator_settings') || {};
   const legacy = readAggregatorStorage('aggregatorConfig') || {};
   const promptDraft = readPromptDraftSync(AGGREGATOR_PROMPT_STORAGE_KEY);
   const promptSource = typeof settings.userPrompt === 'string' && settings.userPrompt.trim().length > 0
     ? settings
     : legacy;
+  const storedSubmitters = settings.submitterConfigs || legacy.submitterConfigs || createDefaultAggregatorSubmitterConfigs();
+  const submitterConfigs = storedSubmitters.map((role, index) => ({
+    ...role,
+    submitterId: index + 1,
+  }));
 
   return {
     userPrompt: promptDraft || promptSource.userPrompt || '',
-    submitterConfigs: settings.submitterConfigs || legacy.submitterConfigs || createDefaultAggregatorSubmitterConfigs(),
+    submitterConfigs,
     validatorModel: settings.validatorModel || legacy.validatorModel || '',
     validatorProvider: settings.validatorProvider || legacy.validatorProvider || 'lm_studio',
     validatorOpenrouterProvider: settings.validatorOpenrouterProvider || legacy.validatorOpenrouterProvider || null,
@@ -455,6 +527,7 @@ function normalizeFeaturesPayload(payload = {}) {
     sakanaFuguAvailable: payload.sakana_fugu_available === undefined
       ? !genericMode
       : payload.sakana_fugu_available !== false,
+    syntheticLibProductState: payload.syntheticlib_product_state,
     version: payload.version || '',
     buildCommit: payload.build_commit || '',
     updateChannel: payload.update_channel || 'main',
@@ -606,7 +679,6 @@ function App() {
   // OpenRouter API Key modal state
   const [showOpenRouterKeyModal, setShowOpenRouterKeyModal] = useState(false);
   const [openRouterKeyReason, setOpenRouterKeyReason] = useState('setup');
-  const [showSyntheticLib4Modal, setShowSyntheticLib4Modal] = useState(false);
   const [showWolframModal, setShowWolframModal] = useState(false);
   const [showLmStudioModal, setShowLmStudioModal] = useState(false);
   const [showAgentMemoryModal, setShowAgentMemoryModal] = useState(false);
@@ -665,76 +737,22 @@ function App() {
     }
   }, [developerModeEnabled, appMode]);
 
-  useEffect(() => {
-    const pressedCodes = new Set();
-    let shortcutChordActive = false;
+  const syntheticLibPresentation = getSyntheticLibPresentation(
+    capabilities.syntheticLibProductState,
+    developerModeEnabled,
+    capabilities.genericMode,
+  );
+  const syntheticLibSurface = useSyntheticLibPrivateSurface(
+    syntheticLibPresentation.showDeveloperWorkspace,
+  );
 
-    const toggleDeveloperMode = () => {
-      setDeveloperModeEnabled((currentValue) => {
-        const nextValue = !currentValue;
-        localStorage.setItem(DEVELOPER_MODE_STORAGE_KEY, String(nextValue));
-        return nextValue;
-      });
-    };
-
-    const getShortcutCode = (event) => {
-      if (event.code?.startsWith('Shift') || event.key === 'Shift') {
-        return 'Shift';
-      }
-      if (event.code === 'KeyZ' || event.key?.toLowerCase() === 'z') {
-        return 'KeyZ';
-      }
-      if (event.code === 'KeyX' || event.key?.toLowerCase() === 'x') {
-        return 'KeyX';
-      }
-      return null;
-    };
-
-    const hasDeveloperShortcutChord = () => (
-      pressedCodes.has('Shift') &&
-      pressedCodes.has('KeyZ') &&
-      pressedCodes.has('KeyX')
-    );
-
-    const handleKeyDown = (event) => {
-      const shortcutCode = getShortcutCode(event);
-      if (!shortcutCode) {
-        return;
-      }
-
-      pressedCodes.add(shortcutCode);
-      if (hasDeveloperShortcutChord() && !shortcutChordActive) {
-        shortcutChordActive = true;
-        event.preventDefault();
-        toggleDeveloperMode();
-      }
-    };
-
-    const handleKeyUp = (event) => {
-      const shortcutCode = getShortcutCode(event);
-      if (shortcutCode) {
-        pressedCodes.delete(shortcutCode);
-      }
-      if (!hasDeveloperShortcutChord()) {
-        shortcutChordActive = false;
-      }
-    };
-
-    const clearPressedCodes = () => {
-      pressedCodes.clear();
-      shortcutChordActive = false;
-    };
-
-    window.addEventListener('keydown', handleKeyDown, true);
-    window.addEventListener('keyup', handleKeyUp, true);
-    window.addEventListener('blur', clearPressedCodes);
-
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown, true);
-      window.removeEventListener('keyup', handleKeyUp, true);
-      window.removeEventListener('blur', clearPressedCodes);
-    };
-  }, []);
+  useDeveloperModeShortcut(() => {
+    setDeveloperModeEnabled((currentValue) => {
+      const nextValue = !currentValue;
+      localStorage.setItem(DEVELOPER_MODE_STORAGE_KEY, String(nextValue));
+      return nextValue;
+    });
+  });
   
   // Initialize config from localStorage or use defaults
   // CRITICAL: Read from 'aggregator_settings' (used by AggregatorSettings component)
@@ -863,14 +881,13 @@ function App() {
   const [modelErrorNotifications, setModelErrorNotifications] = useState([]);
 
   const addScopedProviderActivity = useCallback((notification = {}) => {
-    const notificationKey = notification.notification_key;
-    const workflowMode = String(notification.workflow_mode || '').toLowerCase();
-    if (!workflowMode || (!notificationKey && notification.event_type !== 'provider_retry_cooldown')) return;
-    const event = {
+    const feed = getScopedProviderActivityFeed(notification);
+    if (!feed) return;
+    const event = normalizeActivityEvent({
       event: notification.event_type || 'oauth_provider_error',
       type: notification.event_type || 'oauth_provider_error',
       timestamp: notification.created_at || notification._serverTimestamp || new Date().toISOString(),
-      message: notification.event_type === 'provider_usage_limit_resumed'
+      message: ['provider_usage_limit_resumed', 'provider_cooldown_resumed'].includes(notification.event_type)
         ? formatProviderUsageLimitResumedMessage(notification, notification.provider_label)
         : notification.event_type === 'provider_retry_cooldown'
           ? formatProviderRetryCooldownMessage(notification)
@@ -880,16 +897,18 @@ function App() {
             : buildOAuthActivityMessage(notification, notification.provider_label)
         ),
       data: notification,
-    };
-    const appendOnce = setter => setter(previous => (
-      notificationKey && previous.some(item => item?.data?.notification_key === notificationKey)
+    });
+    const setFeed = {
+      autonomous: setAutonomousActivity,
+      leanoj: setLeanojActivity,
+      aggregator: setAggregatorProviderActivity,
+      compiler: setCompilerProviderActivity,
+    }[feed];
+    setFeed(previous => (
+      hasRecentActivityDuplicate(previous, event)
         ? previous
         : [...previous, event].slice(-MAX_LIVE_ACTIVITY_EVENTS)
     ));
-    if (workflowMode === 'autonomous') appendOnce(setAutonomousActivity);
-    else if (workflowMode === 'leanoj') appendOnce(setLeanojActivity);
-    else if (workflowMode === 'aggregator') appendOnce(setAggregatorProviderActivity);
-    else if (workflowMode === 'compiler') appendOnce(setCompilerProviderActivity);
   }, []);
 
   useEffect(() => {
@@ -1156,6 +1175,9 @@ function App() {
     for (let attempt = 0; attempt < delays.length; attempt += 1) {
       try {
         keyStatus = await openRouterAPI.getApiKeyStatus();
+        if (keyStatus.has_key && keyStatus.validation_state !== 'valid') {
+          keyStatus = await openRouterAPI.validateCurrentApiKey();
+        }
         keyStatusOk = true;
         break;
       } catch (err) {
@@ -1174,7 +1196,9 @@ function App() {
       oauthConfigured = false;
     }
 
-    const finalHasOpenRouterKey = Boolean(keyStatus.has_key);
+    const finalHasOpenRouterKey = Boolean(
+      keyStatus.has_key && keyStatus.validation_state === 'valid'
+    );
     if (keyStatusOk) {
       setHasOpenRouterKey(finalHasOpenRouterKey);
       setHasCloudAccess(finalHasOpenRouterKey || oauthConfigured);
@@ -1287,8 +1311,16 @@ function App() {
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        const keyStatus = await openRouterAPI.getApiKeyStatus();
-        const hasKey = Boolean(keyStatus.has_key);
+        let keyStatus = await openRouterAPI.getApiKeyStatus();
+        if (
+          keyStatus.has_key
+          && !['valid', 'invalid'].includes(keyStatus.validation_state)
+        ) {
+          keyStatus = await openRouterAPI.validateCurrentApiKey();
+        }
+        const hasKey = Boolean(
+          keyStatus.has_key && keyStatus.validation_state === 'valid'
+        );
         setHasOpenRouterKey(hasKey);
         try {
           const cloudStatus = await cloudAccessAPI.getStatus();
@@ -1476,12 +1508,21 @@ function App() {
     };
   }, []);
 
+  // Replay proof-run activity a frozen, discarded, or reloaded tab never processed.
+  useEffect(() => installProofRunActivityRecovery({ websocket, api: autonomousAPI }), []);
+
   useEffect(() => {
     let cancelled = false;
 
     const hydrateProviderNotifications = async () => {
       try {
-        const payload = await cloudAccessAPI.getProviderNotifications();
+        let payload;
+        try {
+          payload = await cloudAccessAPI.getProviderRecoveryEvents();
+        } catch (recoveryError) {
+          // Compatibility with backends from before the provider-neutral route.
+          payload = await cloudAccessAPI.getProviderNotifications();
+        }
         if (cancelled) {
           return;
         }
@@ -1497,7 +1538,10 @@ function App() {
             return;
           }
           addScopedProviderActivity(notification);
-          if (notification.event_type === 'provider_usage_limit_resumed') {
+          if (['provider_usage_limit_resumed', 'provider_cooldown_resumed'].includes(notification.event_type)) {
+            return;
+          }
+          if (notification.event_type === 'provider_retry_cooldown') {
             return;
           }
           addOAuthProviderNotification(
@@ -1534,21 +1578,25 @@ function App() {
       (left.source_id || '') === (right.source_id || '')
     );
     const addActivity = (event) => {
+      const normalizedEvent = normalizeActivityEvent(event);
       setAutonomousActivity(prev => {
-        if (hasRecentProofActivityDuplicate(prev, event.event, event.data || {})) {
+        if (hasRecentProofActivityDuplicate(prev, normalizedEvent.event, normalizedEvent.data || {})) {
           return prev;
         }
-        if (hasRecentAssistantProofPackDuplicate(prev, event.event, event.data || {}, event.timestamp)) {
+        if (hasRecentAssistantProofPackDuplicate(prev, normalizedEvent.event, normalizedEvent.data || {}, normalizedEvent.timestamp)) {
           return prev;
         }
-        if (event.event === 'assistant_proof_pack_updated') {
+        if (hasRecentActivityDuplicate(prev, normalizedEvent)) {
+          return prev;
+        }
+        if (normalizedEvent.event === 'assistant_proof_pack_updated') {
           const withoutPriorRecall = prev.filter((existing) => (
             existing.event !== 'assistant_proof_pack_updated' ||
-            !isSameAssistantRecallTarget(existing.data || {}, event.data || {})
+            !isSameAssistantRecallTarget(existing.data || {}, normalizedEvent.data || {})
           ));
-          return [...withoutPriorRecall, event].slice(-MAX_LIVE_ACTIVITY_EVENTS);
+          return [...withoutPriorRecall, normalizedEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS);
         }
-        return [...prev, event].slice(-MAX_LIVE_ACTIVITY_EVENTS);
+        return [...prev, normalizedEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS);
       });
     };
     const countTrailingRejections = (events) => {
@@ -1594,14 +1642,13 @@ function App() {
         return [...prev, ...nextEvents].slice(-MAX_LIVE_ACTIVITY_EVENTS);
       });
     };
-    const formatHungConnectionMessage = (data = {}) => {
-      const model = data.model || 'model';
-      const provider = data.provider || 'provider';
-      const elapsed = data.elapsed_minutes || 15;
-      return `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`;
-    };
     const addLeanOJActivityFromGlobalAlert = (event) => {
-      setLeanojActivity(prev => [...prev, event].slice(-MAX_LIVE_ACTIVITY_EVENTS));
+      const normalizedEvent = normalizeActivityEvent(event);
+      setLeanojActivity(prev => (
+        hasRecentActivityDuplicate(prev, normalizedEvent)
+          ? prev
+          : [...prev, normalizedEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS)
+      ));
     };
     const shouldAddHungAlertToAutonomousFeed = (data = {}) => {
       const roleId = String(data.role_id || '').toLowerCase();
@@ -1666,23 +1713,10 @@ function App() {
       const prefix = roundLabel ? `${roundLabel} discovery` : 'Proof discovery';
       return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
     };
-    const proofLeanResponse = (data = {}) => {
-      if (data.lean_response) {
-        let response = data.lean_response;
-        if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
-          response = `${response} You can change this timeout in Advanced Settings.`;
-        }
-        return response;
-      }
-      if (data.proof_verified === true) return 'Lean 4 response: proof verified.';
-      let error = formatReason(data.error_summary || data.error_output || data.reason || '', 960);
-      if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
-        error = `${error} You can change this timeout in Advanced Settings.`;
-      }
-      return error
-        ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
-        : 'Lean 4 proof-attempt feedback (not a MOTO system error): proof not verified. The model uses these diagnostics if another attempt follows.';
-    };
+    const proofLeanResponse = (data = {}) => formatProofLeanResponse(data, {
+      formatError: (text) => formatReason(text, 960),
+      emptyFallback: DEFAULT_EMPTY_PROOF_FEEDBACK,
+    });
     const formatProofNoveltyTier = (tier) => {
       switch (tier) {
         case 'major_mathematical_discovery':
@@ -1706,7 +1740,20 @@ function App() {
       const duplicateNote = data.duplicate ? ' (duplicate proof reused)' : '';
       const reason = formatReason(data.novelty_reasoning || data.reasoning || '', 240);
       const target = proofTarget(data);
-      return `${proofName(data)} Lean 4 novelty validator rating: ${tierLabel}${duplicateNote}${reason ? ` - ${reason}` : ''}${target ? ` (${target})` : ''}`;
+      const isGroup = data.novelty_scope === 'group';
+      const groupSize = getNoveltyGroupSize(data);
+      const scopeLabel = isGroup
+        ? `finite verified group${groupSize ? ` of ${groupSize} proofs` : ''}`
+        : 'accepted Lean statement alone';
+      const groupClaim = isGroup ? formatReason(data.novelty_group_claim || '', 240) : '';
+      return `${proofName(data)} Lean 4 novelty validator rating (${scopeLabel}): ${tierLabel}${duplicateNote}${reason ? ` - ${reason}` : ''}${groupClaim ? ` Combined claim: ${groupClaim}` : ''}${target ? ` (${target})` : ''}`;
+    };
+    const proofNoveltyAssessmentStartedMessage = (data = {}) => {
+      const target = proofTarget(data);
+      const groupNote = data.verified_group_candidates_available
+        ? ' Verified same-run group evidence is available if it establishes a stronger combined claim.'
+        : '';
+      return `${proofName(data)} novelty assessment started: ranking the mathematical result actually established by Lean-verified code.${groupNote}${target ? ` (${target})` : ''}`;
     };
     const isLeanOJProofEvent = (data = {}) => {
       const sourceType = String(data.source_type || '');
@@ -1810,12 +1857,7 @@ function App() {
           solutionPathFenceRef.current
           && !solutionPathEventMatches(data, solutionPathFenceRef.current, expectedMode)
         ) return;
-        const activityEvent = {
-          event: eventName,
-          message: formatSolutionPathEventMessage(eventName, data),
-          timestamp: new Date().toISOString(),
-          ...data,
-        };
+        const activityEvent = buildSolutionPathActivityEvent(eventName, data);
         if (data.workflow_mode === 'leanoj') {
           setLeanojActivity((prev) => [...prev, activityEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS));
         } else if (data.workflow_mode === 'autonomous') {
@@ -2165,7 +2207,7 @@ function App() {
           proof_candidate_list_review_accepted:
             `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`,
           proof_candidate_list_review_rejected:
-            `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (75% required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`,
+            `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (at least one novel candidate required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`,
           proof_candidate_list_review_interrupted:
             data.message || `Validator proof-list review attempt ${data.list_attempt || 1} was interrupted without a semantic decision.`,
           proof_candidate_list_regeneration_started:
@@ -2186,8 +2228,11 @@ function App() {
         addActivity({
           event,
           timestamp: getTimestamp(data),
-          message: data.message || 'Secondary proof model unavailable; research continues.',
           ...data,
+          message: withRouteIdentity(
+            data.message || 'Secondary proof model unavailable; research continues.',
+            data,
+          ),
         });
       }));
     });
@@ -2262,7 +2307,10 @@ function App() {
         addActivity({
           event: eventName,
           timestamp: getTimestamp(data),
-          message: data.message || data.reason || eventName.replaceAll('_', ' '),
+          message: withRouteIdentity(
+            data.message || data.reason || eventName.replaceAll('_', ' '),
+            data,
+          ),
           data
         });
       }));
@@ -2308,6 +2356,16 @@ function App() {
       });
     }));
 
+    unsubscribers.push(websocket.on('proof_novelty_assessment_started', (data) => {
+      if (!shouldShowAutonomousProofNovelty(data)) return;
+      addActivity({
+        event: 'proof_novelty_assessment_started',
+        timestamp: getTimestamp(data),
+        message: proofNoveltyAssessmentStartedMessage(data),
+        data
+      });
+    }));
+
     unsubscribers.push(websocket.on('novel_proof_discovered', (data) => {
       setProofRefreshToken((prev) => prev + 1);
       const showAutonomousProofNovelty = shouldShowAutonomousProofNovelty(data);
@@ -2335,6 +2393,11 @@ function App() {
             source_type: data.source_type,
             source_id: data.source_id,
             novelty_tier: data.novelty_tier || 'mathematical_discovery',
+            novelty_scope: data.novelty_scope || 'standalone',
+            novelty_group_claim: data.novelty_group_claim || '',
+            novelty_group_proof_ids: Array.isArray(data.novelty_group_proof_ids)
+              ? data.novelty_group_proof_ids
+              : [],
             timestamp: getTimestamp(data),
           }
         ];
@@ -2629,7 +2692,8 @@ function App() {
       addActivity({
         event: 'openrouter_privacy_error',
         timestamp: getTimestamp(data),
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message, data),
       });
     }));
     
@@ -2648,8 +2712,8 @@ function App() {
       addActivity({
         event: 'openrouter_rate_limit',
         timestamp: getTimestamp(data),
-        message: `⏳ Rate limit: ${data.model} (retry in 1 hour)`,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || `⏳ Rate limit: ${data.model} (retry in 1 hour)`, data),
       });
     }));
 
@@ -2658,8 +2722,8 @@ function App() {
       addActivity({
         event: 'free_model_rotated',
         timestamp: getTimestamp(data),
-        message: `🔄 Model rotated: ${data.from_model} → ${data.to_model} (${data.role_id})`,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || `🔄 Model rotated: ${data.from_model} → ${data.to_model} (${data.role_id})`, data),
       });
     }));
 
@@ -2668,8 +2732,8 @@ function App() {
       addActivity({
         event: 'free_model_auto_selector_used',
         timestamp: getTimestamp(data),
-        message: `🔄 Auto-selector backup: openrouter/free used for ${data.role_id}`,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || `🔄 Auto-selector backup: openrouter/free used for ${data.role_id}`, data),
       });
     }));
 
@@ -2678,8 +2742,8 @@ function App() {
       addActivity({
         event: 'free_models_exhausted',
         timestamp: getTimestamp(data),
-        message: `❌ All free models exhausted: ${data.message}`,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || `❌ All free models exhausted: ${data.message}`, data),
       });
     }));
 
@@ -2705,16 +2769,49 @@ function App() {
       }
     }));
 
+    unsubscribers.push(websocket.on(LEAN_WORKSPACE_REPAIR_REASON, (data = {}) => {
+      const event = {
+        event: LEAN_WORKSPACE_REPAIR_REASON,
+        timestamp: getTimestamp(data),
+        message: formatLeanWorkspaceRepairActivity(data),
+        data,
+      };
+      const workflowMode = String(data.workflow_mode || '').toLowerCase();
+      if (workflowMode === 'leanoj') {
+        addLeanOJActivityFromGlobalAlert(event);
+      } else if (workflowMode === 'autonomous') {
+        // A child Aggregator/Compiler stop; the Autonomous terminal stop that
+        // follows carries the durable repair popup.
+        addActivity(event);
+        return;
+      } else if (workflowMode === 'aggregator' || workflowMode === 'compiler') {
+        const setFeed = workflowMode === 'aggregator'
+          ? setAggregatorProviderActivity
+          : setCompilerProviderActivity;
+        const feedEvent = normalizeActivityEvent({ ...event, type: LEAN_WORKSPACE_REPAIR_REASON });
+        setFeed(previous => (
+          hasRecentActivityDuplicate(previous, feedEvent)
+            ? previous
+            : [...previous, feedEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS)
+        ));
+      }
+      void addModelErrorNotification(
+        setModelErrorNotifications,
+        buildLeanWorkspaceRepairNotification(data),
+      );
+    }));
+
     unsubscribers.push(websocket.on('account_credits_exhausted', (data) => {
       console.error('Account credits exhausted:', data);
       addActivity({
         event: 'account_credits_exhausted',
         timestamp: getTimestamp(data),
-        message: `❌ Account free credits depleted: ${data.message}`,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || `❌ Account free credits depleted: ${data.message}`, data),
       });
       setCreditExhaustionNotifications(prev => {
-        const roleId = data.role_id || 'Account';
+        // Account credit exhaustion is account-wide: one popup, whichever role hit it.
+        const roleId = 'Account';
         if (prev.some(n => n.role_id === roleId && n.reason === 'account_credits_exhausted')) return prev;
         return [...prev, {
           id: `account_exhausted_${Date.now()}`,
@@ -2732,8 +2829,8 @@ function App() {
       addActivity({
         event: 'openrouter_fallback',
         timestamp: getTimestamp(data),
-        message: `⚠️ OpenRouter credits exhausted for ${data.role_id} — fell back to ${data.fallback_model || 'LM Studio'}`,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || `⚠️ OpenRouter credits exhausted for ${data.role_id} — fell back to ${data.fallback_model || 'LM Studio'}`, data),
       });
       setCreditExhaustionNotifications(prev => {
         const reason = data.reason || 'credit_exhaustion';
@@ -2755,8 +2852,8 @@ function App() {
       addActivity({
         event: 'openrouter_fallback_failed',
         timestamp: getTimestamp(data),
-        message: `🛑 OpenRouter credits exhausted for ${data.role_id} — NO FALLBACK configured!`,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || `🛑 OpenRouter credits exhausted for ${data.role_id} — NO FALLBACK configured!`, data),
       });
       setCreditExhaustionNotifications(prev => {
         if (prev.some(n => n.role_id === data.role_id && n.reason === 'no_fallback_configured')) return prev;
@@ -2819,8 +2916,8 @@ function App() {
       addActivity({
         event: 'leanoj_provider_paused',
         timestamp: getTimestamp(data),
-        message: `Proof Solver paused until OpenRouter credits are reset: ${data.message || data.role_id || 'provider credits exhausted'}`,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || `Proof Solver paused until OpenRouter credits are reset: ${data.message || data.role_id || 'provider credits exhausted'}`, data),
       });
       setCreditExhaustionNotifications(prev => {
         const roleId = data.role_id || 'Proof Solver';
@@ -2840,8 +2937,8 @@ function App() {
       addActivity({
         event: 'leanoj_provider_resumed',
         timestamp: getTimestamp(data),
-        message: 'Proof Solver resumed after OpenRouter reset.',
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || 'Proof Solver resumed after OpenRouter reset.', data),
       });
     }));
 
@@ -2851,8 +2948,8 @@ function App() {
       addActivity({
         event: 'autonomous_proof_provider_paused',
         timestamp: getTimestamp(data),
-        message,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || message, data),
       });
       if (!isCreditPause) {
         return;
@@ -2875,8 +2972,8 @@ function App() {
       addActivity({
         event: 'autonomous_proof_provider_resumed',
         timestamp: getTimestamp(data),
-        message: 'Autonomous proof verification resumed after OpenRouter reset.',
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || 'Autonomous proof verification resumed after OpenRouter reset.', data),
       });
     }));
 
@@ -2886,8 +2983,8 @@ function App() {
       addActivity({
         event: 'boost_credits_exhausted',
         timestamp: getTimestamp(data),
-        message: `⚠️ Boost credits exhausted for task ${data.task_id}`,
-        ...data
+        ...data,
+        message: withRouteIdentity(data.message || `⚠️ Boost credits exhausted for task ${data.task_id}`, data),
       });
       setCreditExhaustionNotifications(prev => {
         if (prev.some(n => n.reason === 'boost_credits_exhausted')) return prev;
@@ -3014,14 +3111,17 @@ function App() {
       );
     };
     const addLeanOJActivity = (event, data = {}, message = '') => {
-      const nextEvent = {
+      const nextEvent = normalizeActivityEvent({
         event,
         timestamp: getTimestamp(data),
         message: message || data.message || data.reasoning || data.decision || data.phase || 'Proof Solver update',
         data,
-      };
+      });
       setLeanojActivity(prev => {
         if (hasRecentAssistantProofPackDuplicate(prev, event, data, nextEvent.timestamp)) {
+          return prev;
+        }
+        if (hasRecentActivityDuplicate(prev, nextEvent)) {
           return prev;
         }
         return [...prev, nextEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS);
@@ -3143,7 +3243,15 @@ function App() {
       const duplicateNote = data.duplicate ? ' (duplicate proof reused)' : '';
       const reason = summarizeLeanOJText(data.novelty_reasoning || data.reasoning || '', 240);
       const target = leanOJProofTarget(data);
-      return `${leanOJProofName(data)} Lean 4 novelty validator rating: ${tierLabel}${duplicateNote}${reason ? ` - ${reason}` : ''}${target ? ` (${target})` : ''}`;
+      const isGroup = data.novelty_scope === 'group';
+      const groupSize = getNoveltyGroupSize(data);
+      const scopeLabel = isGroup
+        ? `finite verified group${groupSize ? ` of ${groupSize} proofs` : ''}`
+        : 'accepted Lean statement alone';
+      const groupClaim = isGroup
+        ? summarizeLeanOJText(data.novelty_group_claim || '', 240)
+        : '';
+      return `${leanOJProofName(data)} Lean 4 novelty validator rating (${scopeLabel}): ${tierLabel}${duplicateNote}${reason ? ` - ${reason}` : ''}${groupClaim ? ` Combined claim: ${groupClaim}` : ''}${target ? ` (${target})` : ''}`;
     };
     const leanOJAttemptStartedMessage = (data = {}) => {
       const attemptNumber = data.attempt?.attempt || data.attempt || 1;
@@ -3202,7 +3310,7 @@ function App() {
           addLeanOJActivity('leanoj_model_call_completed', data, formatLeanOJCallResult(data));
         }
       }],
-      ['leanoj_model_call_failed', (data) => addLeanOJActivity('leanoj_model_call_failed', data, `${formatLeanOJRole(data.role_id)} call failed${data.retryable ? '; retrying' : ''}: ${summarizeLeanOJText(data.message, 160)}`)],
+      ['leanoj_model_call_failed', (data) => addLeanOJActivity('leanoj_model_call_failed', data, withRouteIdentity(`${formatLeanOJRole(data.role_id)} call failed${data.retryable ? '; retrying' : ''}: ${summarizeLeanOJText(data.message, 160)}`, data))],
       ['leanoj_role_json_retrying', (data) => addLeanOJActivity('leanoj_role_json_retrying', data, `Proof Solver role ${data.role_id || 'model'} returned invalid JSON; retrying attempt ${data.attempt || '?'}`)],
       ['leanoj_skip_brainstorm_requested', (data) => addLeanOJActivity('leanoj_skip_brainstorm_requested', data, 'Skip brainstorm requested')],
       ['leanoj_brainstorm_skip_deferred', (data) => addLeanOJActivity('leanoj_brainstorm_skip_deferred', data, 'Brainstorm skip queued after topic setup')],
@@ -3217,12 +3325,12 @@ function App() {
       ['leanoj_topic_validated', (data) => addLeanOJActivity('leanoj_topic_validated', data, formatLeanOJTopicValidationMessage(data, true))],
       ['leanoj_topic_rejected', (data) => addLeanOJActivity('leanoj_topic_rejected', data, formatLeanOJTopicValidationMessage(data, false))],
       ['leanoj_recursive_brainstorm_started', (data) => addLeanOJActivity('leanoj_recursive_brainstorm_started', data, `Recursive brainstorm cycle ${data.cycle || '?'} ${data.resumed ? 'resumed' : 'started'}; targeting the current proof attempt`)],
-      ['leanoj_topic_submitter_failed', (data) => addLeanOJActivity('leanoj_topic_submitter_failed', data, `Topic submitter ${data.submitter || '?'} failed: ${summarizeLeanOJText(data.message, 160)}`)],
+      ['leanoj_topic_submitter_failed', (data) => addLeanOJActivity('leanoj_topic_submitter_failed', data, withRouteIdentity(`Topic submitter ${data.submitter || '?'} failed: ${summarizeLeanOJText(data.message, 160)}`, data))],
       ['leanoj_recursive_brainstorm_completed', (data) => addLeanOJActivity('leanoj_recursive_brainstorm_completed', data, `Recursive brainstorm cycle ${data.cycle || '?'} completed with ${data.accepted_delta || 0} new accepted ideas`)],
       ['leanoj_initial_topic_selected', (data) => addLeanOJActivity('leanoj_initial_topic_selected', data, `Initial topic: ${summarizeLeanOJText(data.topic, 140)}`)],
       ['leanoj_brainstorm_submitters_started', (data) => addLeanOJActivity('leanoj_brainstorm_submitters_started', data, `Brainstorm submitters started for ${data.phase || 'brainstorm'} (${data.submitter_count || 0} parallel submitters)`)],
       ['leanoj_brainstorm_submission_queued', (data) => addLeanOJActivity('leanoj_brainstorm_submission_queued', data, `Submitter ${data.submitter_id ?? data.submitter ?? '?'} queued brainstorm idea for validation: ${summarizeLeanOJText(data.submission_preview, 140)}`)],
-      ['leanoj_brainstorm_submitter_failed', (data) => addLeanOJActivity('leanoj_brainstorm_submitter_failed', data, `Brainstorm submitter ${data.submitter || '?'} failed: ${summarizeLeanOJText(data.message, 160)}`)],
+      ['leanoj_brainstorm_submitter_failed', (data) => addLeanOJActivity('leanoj_brainstorm_submitter_failed', data, withRouteIdentity(`Brainstorm submitter ${data.submitter || '?'} failed: ${summarizeLeanOJText(data.message, 160)}`, data))],
       ['leanoj_brainstorm_batch_validation_started', (data) => addLeanOJActivity('leanoj_brainstorm_batch_validation_started', data, `Brainstorm validator reviewing batch of ${data.batch_size || 0} submission(s)`)],
       ['leanoj_brainstorm_accepted', (data) => addLeanOJActivity('leanoj_brainstorm_accepted', data, formatLeanOJBrainstormMessage(data, true))],
       ['leanoj_brainstorm_rejected', (data) => addLeanOJActivity('leanoj_brainstorm_rejected', data, formatLeanOJBrainstormMessage(data, false))],
@@ -3270,6 +3378,7 @@ function App() {
       ['proof_attempt_failed', (data) => addLeanOJSharedProofActivity('proof_attempt_failed', data, leanOJAttemptFinalMessage)],
       ['proof_lean_accepted', (data) => addLeanOJSharedProofActivity('proof_lean_accepted', data, leanOJAttemptFinalMessage)],
       ['proof_integrity_rejected', (data) => addLeanOJSharedProofActivity('proof_integrity_rejected', data, (eventData) => `${leanOJProofName(eventData)} error: integrity rejected - ${summarizeLeanOJText(eventData.reason || leanOJProofTarget(eventData), 960)}`)],
+      ['proof_novelty_assessment_started', (data) => addLeanOJSharedProofActivity('proof_novelty_assessment_started', data, (eventData) => `${leanOJProofName(eventData)} novelty assessment started: ranking the result actually established by Lean-verified code${eventData.verified_group_candidates_available ? ' with verified same-run group evidence available' : ''}: ${leanOJProofTarget(eventData)}`)],
       ['proof_verified', (data) => addLeanOJSharedProofActivity('proof_verified', data, (eventData) => `${leanOJProofName(eventData)} verified and accepted: ${leanOJProofTarget(eventData)}`)],
       ['proof_attempts_exhausted', (data) => addLeanOJSharedProofActivity('proof_attempts_exhausted', data, (eventData) => `${leanOJProofName(eventData)} terminated: proof attempts exhausted for ${leanOJProofTarget(eventData)}`)],
       ['novel_proof_discovered', (data) => addLeanOJSharedProofActivity('novel_proof_discovered', data, leanOJNoveltyMessage)],
@@ -3874,12 +3983,11 @@ function App() {
       capabilities: nextCapabilities,
       lmAvailable,
       hasOpenRouterKey: keyPresent,
-      hasCloudAccess: cloudAccessPresent,
       keyStatusReachable,
       hasUsableLmStudioChatModel,
       hasLmStudioEmbeddingModel,
     } = await syncProviderAvailability();
-    if (keyPresent || cloudAccessPresent) {
+    if (keyPresent) {
       return;
     }
 
@@ -4244,7 +4352,7 @@ function App() {
             setShowOpenRouterKeyModal(true);
           }}
           onOpenLmStudio={() => setShowLmStudioModal(true)}
-          onOpenSyntheticLib4={() => setShowSyntheticLib4Modal(true)}
+          onOpenSyntheticLib4={syntheticLibSurface.open}
           onOpenAgentMemory={() => setShowAgentMemoryModal(true)}
           onOpenWolfram={() => setShowWolframModal(true)}
           onToggleSyntheticLib4={(enabled) => handleConnectivityToggle({ syntheticlib4_enabled: enabled })}
@@ -4489,6 +4597,9 @@ function App() {
                     selectedProofId={selectedHistoryProof?.corpus === 'moto' ? selectedHistoryProof.proofId : null}
                     selectedSessionId={selectedHistoryProof?.corpus === 'moto' ? selectedHistoryProof.sessionId : ''}
                     selectedRunId={selectedHistoryProof?.corpus === 'moto' ? selectedHistoryProof.runId : ''}
+                    syntheticLibIntegrationVisible={syntheticLibPresentation.showIntegration}
+                    syntheticLibTradeVisible={syntheticLibPresentation.showTrade}
+                    syntheticLibLaunched={syntheticLibPresentation.isLaunched}
                   />
                 )}
               </div>
@@ -4616,6 +4727,9 @@ function App() {
               selectedProofId={selectedHistoryProof?.corpus === 'manual' ? selectedHistoryProof.proofId : null}
               selectedSessionId={selectedHistoryProof?.corpus === 'manual' ? selectedHistoryProof.sessionId : ''}
               selectedRunId={selectedHistoryProof?.corpus === 'manual' ? selectedHistoryProof.runId : ''}
+              syntheticLibIntegrationVisible={syntheticLibPresentation.showIntegration}
+              syntheticLibTradeVisible={syntheticLibPresentation.showTrade}
+              syntheticLibLaunched={syntheticLibPresentation.isLaunched}
             />
           )}
         </div>
@@ -4724,63 +4838,11 @@ function App() {
       )}
       
       {/* Disclaimer Modal - Shows on every app load */}
-      {showDisclaimer && (
-        <>
-          <div className="disclaimer-overlay" onClick={(e) => e.stopPropagation()} />
-          <div className="disclaimer-modal">
-            <div className="disclaimer-content">
-              <h2 style={{ marginTop: 0, marginBottom: '1.5rem', color: '#1eff1c' }}>
-                  Disclaimer & Quickstart
-              </h2>
-              <p style={{ fontSize: '1.1rem', lineHeight: '1.6', marginBottom: '1.5rem', color: '#1eff1c' }}>
-                {capabilities.lmStudioEnabled ? (
-                  <>
-                    <strong>QUICKSTART:</strong> In LM Studio, load the embedding model <code>nomic-ai/nomic-embed-text-v1.5</code> by <strong>Nomic AI</strong> (optional but recommended), or use OpenRouter instead of LM Studio. You must leave your PC on and awake during runtime, the program will often run for days without interruption.
-                  </>
-                ) : (
-                  <>
-                    <strong>QUICKSTART:</strong> This hosted deployment uses OpenRouter-only inference. Set your OpenRouter API key, choose a profile or role models, and then begin your research run. LM Studio is intentionally disabled in this environment.
-                  </>
-                )}
-              </p>
-              <div
-                style={{
-                  marginBottom: '1.5rem',
-                  padding: '1rem 1.1rem',
-                  border: '1px solid rgba(30, 255, 28, 0.24)',
-                  borderRadius: '10px',
-                  background: 'rgba(30, 255, 28, 0.05)',
-                }}
-              >
-                <p
-                  style={{
-                    margin: '0 0 0.75rem 0',
-                    fontSize: '0.82rem',
-                    fontWeight: 700,
-                    letterSpacing: '0.06em',
-                    textTransform: 'uppercase',
-                    color: '#1eff1c',
-                  }}
-                >
-                  Legal Disclaimer
-                </p>
-                <p style={{ fontSize: '0.95rem', lineHeight: '1.5', margin: 0 }}>
-                  MOTO is a prototype system under active development. It directs selected AI models to generate novel solution attempts in response to your prompt. Outputs may be incorrect, incomplete, misleading, fabricated, poorly reasoned, or otherwise unsuitable for reliance without independent review, especially for high-stakes, academic, financial, legal, medical, engineering, or operational use.
-                  <br />
-                  <br />
-                  This software and all generated content are provided as-is and at your own risk. By using MOTO, you acknowledge that you are solely responsible for reviewing, validating, and deciding how to use any output, and that the developers, operators, and contributors are not responsible or liable for incorrect solutions, hallucinations, omissions, formatting issues, infinite loops, wasted API calls, model or provider failures, data loss, third-party charges, or any direct or indirect loss, damage, cost, or liability resulting from use of the program or its outputs.
-                </p>
-              </div>
-              <button 
-                className="disclaimer-acknowledge-btn"
-                onClick={handleDisclaimerAcknowledge}
-              >
-                I Have Read and Acknowledge This Disclaimer
-              </button>
-            </div>
-          </div>
-        </>
-      )}
+      <StartupDisclaimerModal
+        isOpen={showDisclaimer}
+        lmStudioEnabled={capabilities.lmStudioEnabled}
+        onAcknowledge={handleDisclaimerAcknowledge}
+      />
 
       {!showDisclaimer && whatsNewVersion && (
         <WhatsNewModal version={whatsNewVersion} onClose={closeWhatsNew} />
@@ -4827,13 +4889,19 @@ function App() {
         onRefresh={syncProviderAvailability}
       />
 
-      <SyntheticLib4AccessModal
-        isOpen={showSyntheticLib4Modal}
-        onClose={() => setShowSyntheticLib4Modal(false)}
-        connectivityStatus={connectivityStatus}
-        onConnectivityChanged={setConnectivityStatus}
-        anyWorkflowRunning={anyWorkflowRunning}
-      />
+      {!syntheticLibSurface.privateSurfaceOpen ? (
+        <SyntheticLib4AccessModal
+          isOpen={syntheticLibSurface.modalOpen}
+          onClose={syntheticLibSurface.close}
+        />
+      ) : (
+        <SyntheticLib4DeveloperWorkspace
+          isOpen={syntheticLibSurface.modalOpen}
+          onClose={syntheticLibSurface.close}
+          productState={syntheticLibPresentation.productState}
+          launched={syntheticLibPresentation.isLaunched}
+        />
+      )}
 
       <AgentConversationMemoryModal
         isOpen={showAgentMemoryModal}

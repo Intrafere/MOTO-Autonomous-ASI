@@ -1,0 +1,40 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "live_activity.provider_error_route_identity"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "backend_route_identity_prefix",
+    "idempotent_prefix"
+  ],
+  "faked_dependencies": [
+    "provider-error activity payloads supplied by Vitest"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "provider_routing",
+    "provider_pause_resume"
+  ],
+  "invariants": [
+    "live_activity.provider_error_route_identity"
+  ],
+  "observed_transition": "a provider-error activity line is prefixed with the backend-composed route identity exactly once",
+  "real_components": [
+    "frontend/src/utils/activityStyles.js"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "vitest",
+  "scenario_id": "real_provider_error_line_renders_route_identity_once",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:97e4a4394a27b55a8790da1fe622d595a462a7859384696bcae6210707fdf67e",
+  "test_file": "frontend/src/utils/activityStyles.test.js",
+  "test_selectors": [
+    "frontend/src/utils/activityStyles.test.js::provider route identity::prefixes provider error lines with backend route identity once"
+  ]
+}

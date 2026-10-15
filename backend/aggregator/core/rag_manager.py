@@ -634,7 +634,19 @@ class RAGManager:
                     if "hnsw" in error_str or "nothing found on disk" in error_str or "segment reader" in error_str:
                         if attempt < max_retries - 1:
                             logger.warning(f"ChromaDB HNSW index temporarily unavailable (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
-                            await asyncio.sleep(retry_delay)
+                            await api_client_manager.emit_and_wait_for_retry(
+                                {
+                                    "provider": "chromadb",
+                                    "provider_label": "ChromaDB",
+                                    "role_id": "rag_vector_search",
+                                    "retry_attempt": attempt + 1,
+                                    "max_attempts": max_retries,
+                                    "retry_after_seconds": retry_delay,
+                                    "reason": "hnsw_index_race",
+                                    "error_summary": str(e),
+                                },
+                                role_id="rag_vector_search",
+                            )
                             retry_delay *= 2  # Exponential backoff
                             continue
                     # Re-raise non-HNSW errors or if max retries exceeded

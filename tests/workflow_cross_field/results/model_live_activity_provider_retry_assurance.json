@@ -1,0 +1,53 @@
+{
+  "adapter": "model",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "live_activity.provider_retry_each_wait_visible",
+    "live_activity.provider_retry_identity_stable",
+    "live_activity.provider_retry_secret_safe",
+    "live_activity.provider_retry_persists_reload",
+    "live_activity.provider_error_route_identity",
+    "live_activity.provider_error_sources_route_attributed"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "provider_retry_each_wait_visible",
+    "provider_retry_attempts_distinct",
+    "provider_retry_correlation_stable",
+    "provider_retry_secret_redacted",
+    "provider_retry_reload_visible",
+    "provider_error_route_identity"
+  ],
+  "faked_dependencies": [],
+  "fields": [
+    "websocket_api_contracts",
+    "provider_pause_resume",
+    "provider_routing",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "live_activity.provider_retry_each_wait_visible",
+    "live_activity.provider_retry_identity_stable",
+    "live_activity.provider_retry_secret_safe",
+    "live_activity.provider_retry_persists_reload",
+    "live_activity.provider_error_route_identity",
+    "live_activity.provider_error_sources_route_attributed"
+  ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
+  "replay": [
+    "exercise_live_activity_assurance"
+  ],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "model_live_activity_provider_retry_assurance",
+  "schema_version": 2,
+  "seed": null,
+  "source": "curated",
+  "source_identity": "workflow-source-v1:3cc735cf069b7e8d600500095278eb2f77fc2a730a720b7195e6ff97dbf4bdaa",
+  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
+}

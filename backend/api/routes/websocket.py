@@ -10,6 +10,7 @@ import secrets
 import time
 
 from backend.api.proxy_auth import ProxyAuthError, validate_proxy_headers
+from backend.shared.activity import normalize_activity_payload
 from backend.shared.config import system_config
 
 logger = logging.getLogger(__name__)
@@ -37,9 +38,10 @@ class ConnectionManager:
     
     async def broadcast(self, event_type: str, data: Dict):
         """Broadcast message to all connected clients."""
+        normalized_data = normalize_activity_payload(event_type, data)
         message = json.dumps({
             "type": event_type,
-            "data": data,
+            "data": normalized_data,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         })
         

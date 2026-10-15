@@ -1,13 +1,20 @@
 {
   "action_ids": [
-    "start_autonomous_proofs_only",
+    "start_leanoj",
     "emit_context_overflow_contract_events"
   ],
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "events.context_overflow_route_identity",
+    "events.context_overflow_persists_across_reload",
+    "events.context_overflow_terminal_stop_once",
+    "events.proof_context_overflow_nonfatal"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {
-    "final_mode": "autonomous",
-    "final_phase": "topic_exploration"
+    "final_mode": "leanoj",
+    "final_phase": "leanoj_brainstorm"
   },
   "evidence": [
     "context_overflow"
@@ -17,6 +24,9 @@
     "events.context_overflow_route_identity",
     "events.context_overflow_terminal_stop_once",
     "events.proof_context_overflow_nonfatal"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
   ],
   "fields": [
     "websocket_api_contracts",
@@ -32,21 +42,27 @@
     "events.proof_context_overflow_nonfatal"
   ],
   "observed_fields": [
-    "allowed_outputs",
     "proof_runtime_gating",
     "provider_pause_resume",
     "runtime_exclusivity",
     "websocket_api_contracts",
     "workflow_filesystem_state"
   ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
   "replay": [
-    "start_autonomous(lean_enabled=True, papers=False, proofs=True)",
+    "start_leanoj()",
     "emit_context_overflow_contract_events()"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "generated_context_overflow_contract_seed_29",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 29,
+  "source_identity": "workflow-source-v1:cb418e35d7f8b136cef3e5803586bd6e3d81aee47abdf5e5cbcea74725121bc0",
   "target_artifact": "targets/generated_context_overflow_contract.json",
-  "target_id": "generated_context_overflow_contract"
+  "target_id": "generated_context_overflow_contract",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
 }

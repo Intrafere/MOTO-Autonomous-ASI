@@ -1,5 +1,7 @@
 import { MANUAL_AGGREGATOR_PROOF_SOURCE_ID, MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID } from './manualProofSources';
 import { formatContextOverflowActivityMessage } from './activityStyles';
+import { normalizeActivityEvent } from './activityNormalization';
+import { sanitizePersistedActivityValue } from './activityPersistence';
 
 const MAX_COMPILER_ACTIVITY_EVENTS = 2000;
 const MAX_PERSISTED_TEXT_LENGTH = 1200;
@@ -61,10 +63,21 @@ const compactPersistedValue = (value) => {
 };
 
 export const compactCompilerActivityEvents = (events = []) => (
-  events.slice(0, MAX_COMPILER_ACTIVITY_EVENTS).map((event) => ({
-    type: event.type,
-    timestamp: event.timestamp,
-    fullTimestamp: event.fullTimestamp,
-    data: compactPersistedValue(event.data || {}),
-  }))
+  events.slice(0, MAX_COMPILER_ACTIVITY_EVENTS).map((event) => {
+    const normalized = normalizeActivityEvent(sanitizePersistedActivityValue(event));
+    return {
+      type: normalized.type,
+      event: normalized.event,
+      activityIdentity: normalized.activityIdentity,
+      category: normalized.category,
+      severity: normalized.severity,
+      outcome: normalized.outcome,
+      validatorFeedback: compactPersistedValue(normalized.validatorFeedback),
+      errorDetail: compactPersistedValue(normalized.errorDetail),
+      message: compactPersistedValue(normalized.message || ''),
+      timestamp: normalized.timestamp,
+      fullTimestamp: normalized.fullTimestamp,
+      data: compactPersistedValue(normalized.data || {}),
+    };
+  })
 );

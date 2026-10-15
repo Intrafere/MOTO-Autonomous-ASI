@@ -62,6 +62,7 @@ class SyntheticLib4Client:
         return {
             **status,
             "credential_configured": credential_configured,
+            "credential_validation_state": "unvalidated" if credential_configured else "missing",
             "auth_mode": "api_key" if credential_configured else auth_mode,
             "hosted_auth_connected": False,
             "production_contract_pending": True,
@@ -82,11 +83,11 @@ class SyntheticLib4Client:
 
     def clear_credentials(self) -> dict[str, Any]:
         """Clear the configured SyntheticLib4 credential without touching snapshots."""
-        self._memory_api_key = None
         if not system_config.generic_mode:
             from backend.shared.secret_store import clear_syntheticlib4_api_key
 
             clear_syntheticlib4_api_key()
+        self._memory_api_key = None
         return self.get_status()
 
     def has_configured_credentials(self) -> bool:

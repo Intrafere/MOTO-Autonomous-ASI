@@ -7,6 +7,7 @@ import {
   isSolutionPathSnapshotAtLeast,
   solutionPathEventMatches,
 } from '../utils/solutionPathPresentation';
+import useModalDialogFocus from '../hooks/useModalDialogFocus';
 import './SolutionPathModal.css';
 
 export default function SolutionPathModal({ snapshot, onClose, onSnapshotChange, onOpenSettings }) {
@@ -57,36 +58,12 @@ export default function SolutionPathModal({ snapshot, onClose, onSnapshotChange,
       events.forEach((eventName) => websocket.off(eventName, refresh));
     };
   }, [onSnapshotChange]);
-  useEffect(() => {
-    const previouslyFocused = document.activeElement;
-    closeButtonRef.current?.focus();
-    const handleKeyDown = (event) => {
-      if (event.key === 'Escape') onClose();
-      if (event.key !== 'Tab' || !dialogRef.current) return;
-      const focusable = dialogRef.current.querySelectorAll(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      );
-      if (!focusable.length) {
-        event.preventDefault();
-        dialogRef.current.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      previouslyFocused?.focus?.();
-    };
-  }, [onClose]);
+  useModalDialogFocus({
+    active: Boolean(snapshot),
+    dialogRef,
+    initialFocusRef: closeButtonRef,
+    onEscape: onClose,
+  });
 
   if (!snapshot || typeof document === 'undefined') return null;
   const steps = Array.isArray(snapshot.steps) ? snapshot.steps : [];

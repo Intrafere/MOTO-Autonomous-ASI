@@ -20,6 +20,7 @@ from backend.shared.models import (
     ProofRunCollectionResponse,
     ProofRunSnapshot,
     ProofRunSourceLookupResponse,
+    ProofStageResult,
 )
 
 
@@ -674,6 +675,60 @@ class ManualProofScopeRouteTests(TestCase):
         self.assertEqual(lookup_response.status_code, 200)
         self.assertEqual(lookup_response.headers["cache-control"], "no-store")
 
+    def test_proof_run_activity_replay_is_no_store_and_schema_typed(self) -> None:
+        schema = self.client.get("/openapi.json").json()
+        self.assertEqual(
+            schema["paths"]["/api/proofs/runs/{proof_run_id}/activity"]["get"]["responses"][
+                "200"
+            ]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ProofRunActivityResponse",
+        )
+        manager = proofs_route.proof_run_manager
+        control = proofs_route.ProofRunControl(
+            snapshot=ProofRunSnapshot(
+                proof_run_id="proof-run-activity",
+                run_mode="loop_with_pruning",
+                scope="autonomous",
+                source_type="brainstorm",
+                source_id="topic_001",
+                proof_store_id="autonomous:session",
+                run_id="session",
+                lifecycle_generation=1,
+                status="running",
+            )
+        )
+
+        async def send(event_type, data):
+            return None
+
+        async def publish():
+            for attempt in (1, 2):
+                await manager.publish_activity(
+                    control,
+                    send,
+                    "proof_candidate_list_review_rejected",
+                    {"list_attempt": attempt, "feedback": "Regenerate."},
+                )
+
+        asyncio.run(publish())
+        with mock.patch.dict(manager._runs, {"proof-run-activity": control}):
+            response = self.client.get(
+                "/api/proofs/runs/proof-run-activity/activity",
+                params={"after_sequence": 1},
+            )
+            missing = self.client.get("/api/proofs/runs/proof-run-missing/activity")
+        bad = self.client.get("/api/proofs/runs/bad%5Cid/activity")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        body = response.json()
+        self.assertEqual(body["latest_sequence"], 2)
+        self.assertEqual([event["sequence"] for event in body["events"]], [2])
+        self.assertEqual(body["events"][0]["data"]["list_attempt"], 2)
+        self.assertEqual(body["events"][0]["data"]["proof_run_activity_sequence"], 2)
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(bad.status_code, 400)
+
     def test_proof_run_source_lookup_rejects_path_components(self) -> None:
         response = self.client.get(
             "/api/proofs/runs/by-source",
@@ -1014,6 +1069,39 @@ class ManualProofScopeRouteTests(TestCase):
 
 
 class ManualAggregatorProofEventLogTests(IsolatedAsyncioTestCase):
+    def test_no_discovery_streak_classification_resets_on_discovery_even_if_round_errors(self) -> None:
+        discovered_then_failed = ProofStageResult(
+            source_type="paper",
+            source_id="paper-1",
+            total_candidates=2,
+            had_error=True,
+        )
+        empty_failure = ProofStageResult(
+            source_type="paper",
+            source_id="paper-1",
+            total_candidates=0,
+            had_error=True,
+        )
+        valid_empty = ProofStageResult(
+            source_type="paper",
+            source_id="paper-1",
+            total_candidates=0,
+        )
+
+        self.assertEqual(
+            proofs_route._candidate_count_for_no_discovery_streak(
+                discovered_then_failed
+            ),
+            2,
+        )
+        self.assertIsNone(
+            proofs_route._candidate_count_for_no_discovery_streak(empty_failure)
+        )
+        self.assertEqual(
+            proofs_route._candidate_count_for_no_discovery_streak(valid_empty),
+            0,
+        )
+
     def test_empty_discovery_messages_explain_model_search_without_changing_counts(self) -> None:
         no_candidates = proofs_route._manual_aggregator_proof_event_message(
             "proof_check_no_candidates",
@@ -1025,6 +1113,8 @@ class ManualAggregatorProofEventLogTests(IsolatedAsyncioTestCase):
                 "round_index": 3,
                 "candidate_count": 0,
                 "run_mode": "loop_with_pruning",
+                "consecutive_no_discovery_rounds": 4,
+                "no_discovery_round_limit": 10,
                 "next_round_automatic": True,
             },
         )
@@ -1036,8 +1126,22 @@ class ManualAggregatorProofEventLogTests(IsolatedAsyncioTestCase):
         self.assertIn("model searched for useful novel proof candidates", no_candidates)
         self.assertIn("no Lean proof attempts were needed", no_candidates)
         self.assertIn("model searched for useful novel proof candidates", round_complete)
+        self.assertIn("4/10 consecutive no-discovery rounds", round_complete)
         self.assertIn("next round will start automatically", round_complete.lower())
+        self.assertIn("10 consecutive rounds find no candidates", round_complete)
         self.assertEqual(completion, "Proof check complete: 0 verified, 0 novel")
+
+    def test_no_discovery_terminal_message_explains_normal_completion(self) -> None:
+        message = proofs_route._manual_aggregator_proof_event_message(
+            "proof_run_terminal",
+            {
+                "terminal_reason": "consecutive_no_discovery_limit",
+                "no_discovery_round_limit": 10,
+            },
+        )
+
+        self.assertIn("completed after 10 consecutive rounds", message)
+        self.assertIn("finished normally", message)
 
     async def test_manual_aggregator_proof_event_is_broadcast_and_persisted_with_same_id(self) -> None:
         with (

@@ -2,15 +2,20 @@
   "action_ids": [
     "start_leanoj",
     "skip_leanoj_brainstorm",
-    "stop",
-    "resume",
-    "force_leanoj_brainstorm",
     "attempt_conflicting_start",
     "edit_leanoj_master_proof",
+    "force_leanoj_brainstorm",
+    "stop",
+    "resume",
     "clear_leanoj_state"
   ],
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "runtime.single_active_workflow",
+    "provider.stop_resume_preserves_pause"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {
     "final_mode": "none",
     "final_phase": "idle"
@@ -27,6 +32,9 @@
     "provider.stop_resume_preserves_pause",
     "runtime.single_active_workflow"
   ],
+  "faked_dependencies": [
+    "workflow executable state model"
+  ],
   "fields": [
     "runtime_exclusivity",
     "workflow_filesystem_state"
@@ -42,20 +50,27 @@
     "websocket_api_contracts",
     "workflow_filesystem_state"
   ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
   "replay": [
     "start_leanoj()",
     "skip_leanoj_brainstorm()",
-    "stop()",
-    "resume()",
-    "force_leanoj_brainstorm()",
     "start_manual_compiler()",
     "edit_leanoj_master_proof()",
+    "force_leanoj_brainstorm()",
+    "stop()",
+    "resume()",
     "clear()"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "generated_leanoj_durable_lifecycle_seed_7",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 7,
+  "source_identity": "workflow-source-v1:93a23d21ffdb3f81426f50f90619bd9d342cc9838aae3110fe084dbdb8a44ca4",
   "target_artifact": "targets/generated_leanoj_durable_lifecycle.json",
-  "target_id": "generated_leanoj_durable_lifecycle"
+  "target_id": "generated_leanoj_durable_lifecycle",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
 }

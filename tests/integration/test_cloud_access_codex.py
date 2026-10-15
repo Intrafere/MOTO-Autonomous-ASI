@@ -5,6 +5,7 @@ import tempfile
 from unittest import IsolatedAsyncioTestCase, mock
 
 from fastapi import HTTPException
+import httpx
 from keyring.errors import PasswordDeleteError
 
 from backend.api.routes import cloud_access as cloud_access_route
@@ -18,10 +19,12 @@ from backend.shared.openai_codex_client import (
     OpenAICodexRequestError,
 )
 from backend.shared.provider_notification_store import list_provider_notifications, record_provider_notification
+from backend.shared.openrouter_client import sanitize_provider_error_text
 from backend.shared.xai_grok_client import (
     XAIGrokClient,
     XAIGrokRequestError,
     XAIGrokSpendingLimitError,
+    XAIGrokUsageLimitError,
 )
 
 
@@ -31,6 +34,30 @@ def _jwt(payload: dict) -> str:
 
 
 class ProviderNotificationStoreTests(IsolatedAsyncioTestCase):
+    def test_provider_notification_reports_degraded_persistence(self) -> None:
+        old_data_dir = system_config.data_dir
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_config.data_dir = temp_dir
+            try:
+                with mock.patch(
+                    "backend.shared.provider_notification_store._write_payload",
+                    return_value=False,
+                ):
+                    stored = record_provider_notification(
+                        "provider_retry_cooldown",
+                        {
+                            "provider": "openrouter",
+                            "role_id": "agg_val",
+                            "reason": "http_error",
+                        },
+                    )
+
+                self.assertTrue(stored["persistence_degraded"])
+                self.assertEqual(stored["persistence_status"], "degraded")
+                self.assertIn("durable recovery storage", stored["persistence_detail"])
+            finally:
+                system_config.data_dir = old_data_dir
+
     async def test_model_error_notification_round_trips_explicit_run_scoped_fields(self) -> None:
         old_data_dir = system_config.data_dir
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -185,6 +212,16 @@ class ProviderNotificationStoreTests(IsolatedAsyncioTestCase):
 
 
 class OAuthLiveActivityErrorTests(IsolatedAsyncioTestCase):
+    async def test_embedded_responses_input_is_redacted_from_provider_error(self) -> None:
+        message = sanitize_provider_error_text(
+            'request failed: {"input":[{"role":"user","content":"private-user-text"}],'
+            '"error":{"message":"gateway failed"}}',
+            max_chars=1800,
+        )
+
+        self.assertIn('"input":[redacted]', message)
+        self.assertNotIn("private-user-text", message)
+
     async def test_codex_context_length_message_is_extracted_for_live_activity(self) -> None:
         message = oauth_live_activity_error_message(
             RuntimeError(
@@ -328,6 +365,163 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(data["id"], "resp_1")
         self.assertEqual(data["output_text"], "hello")
         self.assertEqual(data["usage"]["total_tokens"], 5)
+
+    def test_decode_stream_requires_completed_terminal_event(self) -> None:
+        raw_stream = "\n\n".join([
+            'data: {"type":"response.output_text.delta","delta":"partial"}',
+            'data: {"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress"}}',
+            "data: [DONE]",
+        ])
+
+        with self.assertRaisesRegex(OpenAICodexRequestError, "without response.completed") as raised:
+            OpenAICodexClient._decode_response_body(raw_stream)
+
+        self.assertEqual(raised.exception.failure_kind, "terminal_missing")
+        self.assertIn("Remote outcome is unknown", str(raised.exception))
+
+    def test_decode_stream_rejects_incomplete_with_structured_reason(self) -> None:
+        raw_stream = (
+            'data: {"type":"response.incomplete","response":{"id":"resp_1",'
+            '"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
+        )
+
+        with self.assertRaises(OpenAICodexRequestError) as raised:
+            OpenAICodexClient._decode_response_body(raw_stream)
+
+        self.assertEqual(raised.exception.failure_kind, "output_truncated")
+        self.assertEqual(raised.exception.error_code, "max_output_tokens")
+        self.assertIn("max_output_tokens", str(raised.exception))
+
+    def test_decode_stream_classifies_top_level_error_event(self) -> None:
+        raw_stream = (
+            'data: {"type":"error","code":"invalid_request_error",'
+            '"message":"Unsupported request shape"}\n\n'
+        )
+
+        with self.assertRaises(OpenAICodexRequestError) as raised:
+            OpenAICodexClient._decode_response_body(raw_stream)
+
+        self.assertEqual(raised.exception.failure_kind, "stream_rejected")
+        self.assertEqual(raised.exception.error_code, "invalid_request_error")
+        self.assertIn("Unsupported request shape", str(raised.exception))
+
+    def test_decode_plain_json_rejects_nonterminal_status(self) -> None:
+        with self.assertRaisesRegex(OpenAICodexRequestError, "status=in_progress") as raised:
+            OpenAICodexClient._decode_response_body(
+                json.dumps({"id": "resp_1", "status": "in_progress", "output_text": "partial"})
+            )
+        self.assertEqual(raised.exception.failure_kind, "terminal_missing")
+
+    async def test_stream_transport_failure_after_completed_event_returns_success(self) -> None:
+        client = OpenAICodexClient()
+        completed = (
+            'data: {"type":"response.completed","response":{"id":"resp_1",'
+            '"status":"completed","output_text":"finished"}}'
+        )
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            class BrokenAfterComplete(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    yield completed.encode("utf-8") + b"\n\n"
+                    raise httpx.RemoteProtocolError("incomplete chunked read")
+
+            return httpx.Response(200, stream=BrokenAfterComplete(), request=request)
+
+        await client.client.aclose()
+        client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+            )
+        await client.client.aclose()
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "finished")
+
+    async def test_stream_transport_failure_before_terminal_retries_with_safe_activity(self) -> None:
+        client = OpenAICodexClient()
+        calls = 0
+        activities = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                class BrokenBeforeComplete(httpx.AsyncByteStream):
+                    async def __aiter__(self):
+                        yield b'data: {"type":"response.output_text.delta","delta":"secret partial"}\n\n'
+                        raise httpx.RemoteProtocolError(
+                            "peer closed connection; Authorization: Bearer hidden-token"
+                        )
+
+                return httpx.Response(200, stream=BrokenBeforeComplete(), request=request)
+            stream = (
+                'data: {"type":"response.completed","response":{"id":"resp_2",'
+                '"status":"completed","output_text":"recovered"}}\n\n'
+            )
+            return httpx.Response(200, content=stream, request=request)
+
+        async def retry_callback(payload):
+            activities.append(payload)
+
+        await client.client.aclose()
+        client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
+            mock.patch("backend.shared.openai_codex_client.asyncio.sleep", return_value=None),
+        ):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+                retry_callback=retry_callback,
+            )
+        await client.client.aclose()
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+        self.assertEqual(activities[0]["reason"], "connection_error")
+        self.assertIn("remote outcome is unknown", activities[0]["message"])
+        self.assertIn("[redacted]", activities[0]["message"])
+        self.assertNotIn("hidden-token", activities[0]["message"])
+        self.assertNotIn("secret partial", activities[0]["message"])
+
+    async def test_stream_cancellation_does_not_retry(self) -> None:
+        client = OpenAICodexClient()
+        calls = 0
+        activities = []
+        entered = asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+
+            class BlockingStream(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    entered.set()
+                    await asyncio.Event().wait()
+                    yield b""
+
+            return httpx.Response(200, stream=BlockingStream(), request=request)
+
+        async def retry_callback(payload):
+            activities.append(payload)
+
+        await client.client.aclose()
+        client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            task = asyncio.create_task(client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+                retry_callback=retry_callback,
+            ))
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        await client.client.aclose()
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(activities, [])
 
     async def test_list_models_normalizes_codex_catalog_limits(self) -> None:
         client = OpenAICodexClient()
@@ -729,7 +923,10 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         client.client = fake_http
         with (
             mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
-            mock.patch("backend.shared.openai_codex_client.asyncio.sleep", return_value=None) as sleep_mock,
+            mock.patch(
+                "backend.shared.openai_codex_client.assured_retry_wait",
+                new=mock.AsyncMock(return_value=True),
+            ) as wait_mock,
         ):
             with self.assertRaisesRegex(OpenAICodexRequestError, "after 4 retries"):
                 await client.generate_completion(
@@ -738,7 +935,10 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(fake_http.calls, 5)
-        sleep_mock.assert_has_awaits([mock.call(2.0), mock.call(4.0), mock.call(8.0), mock.call(16.0)])
+        self.assertEqual(
+            [call.args[0]["retry_after_seconds"] for call in wait_mock.await_args_list],
+            [2.0, 4.0, 8.0, 16.0],
+        )
 
     async def test_generate_completion_retries_transient_codex_stream_failure(self) -> None:
         client = OpenAICodexClient()
@@ -772,7 +972,10 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         client.client = fake_http
         with (
             mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
-            mock.patch("backend.shared.openai_codex_client.asyncio.sleep", return_value=None) as sleep_mock,
+            mock.patch(
+                "backend.shared.openai_codex_client.assured_retry_wait",
+                new=mock.AsyncMock(return_value=True),
+            ) as wait_mock,
         ):
             response = await client.generate_completion(
                 model="gpt-5.5",
@@ -780,8 +983,48 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(fake_http.calls, 2)
-        sleep_mock.assert_awaited_once_with(2.0)
+        wait_mock.assert_awaited_once()
+        self.assertEqual(
+            wait_mock.await_args.args[0]["retry_after_seconds"],
+            2.0,
+        )
         self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+
+    async def test_mixed_stream_and_transport_failures_share_one_request_budget(self) -> None:
+        client = OpenAICodexClient()
+        calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                body = (
+                    'data: {"type":"response.failed","error":{"code":"server_error",'
+                    '"message":"Upstream provider timeout. You can retry your request."}}\n\n'
+                )
+                return httpx.Response(200, content=body, request=request)
+
+            class BrokenStream(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    raise httpx.RemoteProtocolError("incomplete chunked read")
+                    yield b""
+
+            return httpx.Response(200, stream=BrokenStream(), request=request)
+
+        await client.client.aclose()
+        client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
+            mock.patch("backend.shared.openai_codex_client.asyncio.sleep", return_value=None),
+        ):
+            with self.assertRaises(OpenAICodexRequestError):
+                await client.generate_completion(
+                    model="gpt-5.5",
+                    messages=[{"role": "user", "content": "user"}],
+                )
+        await client.client.aclose()
+
+        self.assertEqual(calls, 5)
 
     async def test_generate_completion_retries_with_newer_stored_token_after_revocation(self) -> None:
         client = OpenAICodexClient()
@@ -890,12 +1133,410 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
 
 
+    # ---- Responses websocket transport (websocket first, SSE fallback) ----
+
+    def _enable_fake_websocket(self, client, connects):
+        """Enable the websocket transport on this instance with a scripted connector."""
+        self.assertFalse(
+            OpenAICodexClient.websocket_transport_enabled,
+            "the test overlay must keep the real websocket transport disabled",
+        )
+        client.websocket_transport_enabled = True
+        attempts = []
+
+        def open_websocket(url, headers):
+            attempts.append({"url": url, "headers": dict(headers)})
+            if not connects:
+                raise AssertionError("no scripted websocket connection left")
+            return connects.pop(0)
+
+        client._open_websocket = open_websocket
+        return attempts
+
+    @staticmethod
+    def _sse_client_that_must_not_run():
+        async def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("SSE transport must not be used when the websocket turn completes")
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+
+    @staticmethod
+    def _sse_client_completing_with(text: str):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            body = (
+                'data: {"type":"response.completed","response":{"id":"resp_sse",'
+                f'"status":"completed","output_text":"{text}"}}}}\n\n'
+            )
+            return httpx.Response(200, content=body, request=request)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+
+    async def test_websocket_transport_completes_turn_without_sse(self) -> None:
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        client.client = self._sse_client_that_must_not_run()
+        websocket = _FakeCodexWebsocket([
+            _ws_event({"type": "codex.rate_limits", "rate_limits": {}}),
+            _ws_event({"type": "response.created", "response": {"id": "resp_ws", "status": "in_progress"}}),
+            _ws_event({"type": "response.output_text.delta", "delta": "websocket "}),
+            _ws_event({"type": "response.output_text.delta", "delta": "done"}),
+            _ws_event({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_ws",
+                    "status": "completed",
+                    "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                },
+            }),
+        ])
+        attempts = self._enable_fake_websocket(client, [_FakeCodexWebsocketConnect(websocket)])
+
+        with mock.patch.object(
+            client,
+            "get_valid_tokens",
+            return_value={"access_token": "access", "account_id": "acct_123"},
+        ):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "user"},
+                ],
+                reasoning_effort="low",
+            )
+        await client.client.aclose()
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "websocket done")
+        self.assertEqual(response["usage"]["total_tokens"], 6)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["url"], "wss://chatgpt.com/backend-api/codex/responses")
+        headers = attempts[0]["headers"]
+        self.assertEqual(headers["OpenAI-Beta"], "responses_websockets=2026-02-06")
+        self.assertEqual(headers["originator"], "moto-autonomous-asi")
+        self.assertEqual(headers["Authorization"], "Bearer access")
+        self.assertEqual(headers["ChatGPT-Account-ID"], "acct_123")
+        self.assertNotIn("Accept", headers)
+        self.assertNotIn("Content-Type", headers)
+        self.assertEqual(len(websocket.sent), 1)
+        sent = json.loads(websocket.sent[0])
+        self.assertEqual(sent["type"], "response.create")
+        self.assertEqual(sent["model"], "gpt-5.5")
+        self.assertIs(sent["stream"], True)
+        self.assertIs(sent["store"], False)
+        self.assertEqual(sent["instructions"], "sys")
+        self.assertEqual(sent["input"], [{"role": "user", "content": "user"}])
+        self.assertEqual(sent["reasoning"], {"effort": "low", "summary": "auto"})
+
+    async def test_websocket_unsupported_handshake_falls_back_to_sse_and_stays_off(self) -> None:
+        from websockets.datastructures import Headers
+        from websockets.exceptions import InvalidStatus
+        from websockets.http11 import Response as WsResponse
+
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        client.client = self._sse_client_completing_with("sse fallback")
+        rejected = InvalidStatus(WsResponse(426, "Upgrade Required", Headers(), b"upgrade required"))
+        attempts = self._enable_fake_websocket(
+            client,
+            [
+                _FakeCodexWebsocketConnect(handshake_error=rejected),
+                _FakeCodexWebsocketConnect(handshake_error=rejected),
+            ],
+        )
+
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            first = await client.generate_completion(
+                model="gpt-5.5", messages=[{"role": "user", "content": "user"}],
+            )
+            second = await client.generate_completion(
+                model="gpt-5.5", messages=[{"role": "user", "content": "user"}],
+            )
+        await client.client.aclose()
+
+        self.assertEqual(first["choices"][0]["message"]["content"], "sse fallback")
+        self.assertEqual(second["choices"][0]["message"]["content"], "sse fallback")
+        self.assertEqual(len(attempts), 1, "an unsupported transport is not retried for later requests")
+        self.assertIn("HTTP 426", client._websocket_disabled_reason)
+
+    async def test_websocket_connect_failure_falls_back_without_disabling_transport(self) -> None:
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        client.client = self._sse_client_completing_with("sse fallback")
+        websocket = _FakeCodexWebsocket([_ws_completed("resp_ws", "websocket done")])
+        attempts = self._enable_fake_websocket(
+            client,
+            [
+                _FakeCodexWebsocketConnect(handshake_error=OSError("connect refused")),
+                _FakeCodexWebsocketConnect(websocket),
+            ],
+        )
+
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            first = await client.generate_completion(
+                model="gpt-5.5", messages=[{"role": "user", "content": "user"}],
+            )
+            second = await client.generate_completion(
+                model="gpt-5.5", messages=[{"role": "user", "content": "user"}],
+            )
+        await client.client.aclose()
+
+        self.assertEqual(first["choices"][0]["message"]["content"], "sse fallback")
+        self.assertEqual(second["choices"][0]["message"]["content"], "websocket done")
+        self.assertEqual(len(attempts), 2)
+        self.assertIsNone(client._websocket_disabled_reason)
+
+    async def test_websocket_close_before_terminal_retries_with_safe_activity(self) -> None:
+        from websockets.exceptions import ConnectionClosedError
+        from websockets.frames import Close
+
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        client.client = self._sse_client_that_must_not_run()
+        broken = _FakeCodexWebsocket([
+            _ws_event({"type": "response.output_text.delta", "delta": "secret partial"}),
+            ConnectionClosedError(
+                Close(1011, "keepalive ping timeout; Authorization: Bearer hidden-token"),
+                None,
+            ),
+        ])
+        recovered = _FakeCodexWebsocket([_ws_completed("resp_2", "recovered")])
+        attempts = self._enable_fake_websocket(
+            client,
+            [_FakeCodexWebsocketConnect(broken), _FakeCodexWebsocketConnect(recovered)],
+        )
+        activities = []
+
+        async def retry_callback(payload):
+            activities.append(payload)
+
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+                retry_callback=retry_callback,
+            )
+        await client.client.aclose()
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(activities), 1)
+        activity = activities[0]
+        self.assertEqual(activity["reason"], "connection_error")
+        self.assertEqual(activity["retry_attempt"], 1)
+        self.assertEqual(activity["provider"], "openai_codex_oauth")
+        self.assertIn("closed the Codex websocket stream", activity["error_summary"])
+        self.assertIn("close_code=1011", activity["error_summary"])
+        self.assertIn("remote outcome is unknown", activity["error_summary"])
+        self.assertIn("closed this connection on its side", activity["error_summary"])
+        self.assertIn("How to fix: lower this role's reasoning effort in Settings", activity["error_summary"])
+        self.assertIn("How to fix", activity["message"])
+        self.assertNotIn("hidden-token", activity["error_summary"])
+        self.assertNotIn("secret partial", activity["error_summary"])
+
+    async def test_websocket_close_after_terminal_uses_confirmed_response(self) -> None:
+        from websockets.exceptions import ConnectionClosedOK
+        from websockets.frames import Close
+
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        client.client = self._sse_client_that_must_not_run()
+        websocket = _FakeCodexWebsocket([_ws_completed("resp_1", "finished")])
+        attempts = self._enable_fake_websocket(
+            client,
+            [_FakeCodexWebsocketConnect(websocket, close_error=ConnectionClosedOK(Close(1000, ""), None))],
+        )
+        activities = []
+
+        async def retry_callback(payload):
+            activities.append(payload)
+
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+                retry_callback=retry_callback,
+            )
+        await client.client.aclose()
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "finished")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(activities, [])
+
+    async def test_websocket_connection_limit_error_event_reconnects(self) -> None:
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        client.client = self._sse_client_that_must_not_run()
+        limited = _FakeCodexWebsocket([
+            _ws_event({
+                "type": "error",
+                "status": 409,
+                "error": {
+                    "code": "websocket_connection_limit_reached",
+                    "message": "Responses websocket connection limit reached (60 minutes).",
+                },
+            }),
+        ])
+        recovered = _FakeCodexWebsocket([_ws_completed("resp_2", "recovered")])
+        attempts = self._enable_fake_websocket(
+            client,
+            [_FakeCodexWebsocketConnect(limited), _FakeCodexWebsocketConnect(recovered)],
+        )
+        activities = []
+
+        async def retry_callback(payload):
+            activities.append(payload)
+
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+                retry_callback=retry_callback,
+            )
+        await client.client.aclose()
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0]["reason"], "connection_error")
+        self.assertIn("websocket_connection_limit_reached", activities[0]["error_summary"])
+
+    async def test_websocket_provider_error_event_raises_without_sse_fallback(self) -> None:
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        client.client = self._sse_client_that_must_not_run()
+        rejected = _FakeCodexWebsocket([
+            _ws_event({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "unsupported_parameter",
+                    "message": "Unsupported parameter.",
+                },
+            }),
+        ])
+        attempts = self._enable_fake_websocket(client, [_FakeCodexWebsocketConnect(rejected)])
+
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            with self.assertRaises(OpenAICodexRequestError) as raised:
+                await client.generate_completion(
+                    model="gpt-5.5", messages=[{"role": "user", "content": "user"}],
+                )
+        await client.client.aclose()
+
+        self.assertEqual(raised.exception.failure_kind, "stream_rejected")
+        self.assertEqual(raised.exception.error_code, "unsupported_parameter")
+        self.assertEqual(len(attempts), 1)
+
+    async def test_websocket_usage_limit_error_event_raises_typed_cooldown(self) -> None:
+        from backend.shared.openai_codex_client import OAuthUsageLimitError
+
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        client.client = self._sse_client_that_must_not_run()
+        limited = _FakeCodexWebsocket([
+            _ws_event({
+                "type": "error",
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "Usage window exhausted.",
+                    "resets_in_seconds": 120,
+                    "plan_type": "plus",
+                },
+            }),
+        ])
+        attempts = self._enable_fake_websocket(client, [_FakeCodexWebsocketConnect(limited)])
+
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            with self.assertRaises(OAuthUsageLimitError) as raised:
+                await client.generate_completion(
+                    model="gpt-5.5", messages=[{"role": "user", "content": "user"}],
+                )
+        await client.client.aclose()
+
+        self.assertEqual(raised.exception.resets_in_seconds, 120)
+        self.assertEqual(len(attempts), 1)
+
+    async def test_websocket_transport_disabled_uses_sse_only(self) -> None:
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        client.client = self._sse_client_completing_with("sse only")
+        attempts = self._enable_fake_websocket(client, [])
+        client.websocket_transport_enabled = False
+
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            response = await client.generate_completion(
+                model="gpt-5.5", messages=[{"role": "user", "content": "user"}],
+            )
+        await client.client.aclose()
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "sse only")
+        self.assertEqual(attempts, [])
+
+
+def _ws_event(event: dict) -> str:
+    return json.dumps(event)
+
+
+def _ws_completed(response_id: str, output_text: str) -> str:
+    return _ws_event({
+        "type": "response.completed",
+        "response": {"id": response_id, "status": "completed", "output_text": output_text},
+    })
+
+
+class _FakeCodexWebsocket:
+    """Scripted websocket connection: strings are server frames, exceptions are raised in order."""
+
+    def __init__(self, script):
+        self.sent = []
+        self._script = list(script)
+
+    async def send(self, text):
+        self.sent.append(text)
+
+    def __aiter__(self):
+        return self._events()
+
+    async def _events(self):
+        for item in self._script:
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+
+class _FakeCodexWebsocketConnect:
+    """Async context manager standing in for websockets.asyncio.client.connect()."""
+
+    def __init__(self, websocket=None, *, handshake_error=None, close_error=None):
+        self.websocket = websocket
+        self.handshake_error = handshake_error
+        self.close_error = close_error
+
+    async def __aenter__(self):
+        if self.handshake_error is not None:
+            raise self.handshake_error
+        return self.websocket
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if exc_type is None and self.close_error is not None:
+            raise self.close_error
+        return False
+
+
 class XAIGrokClientTests(IsolatedAsyncioTestCase):
+    def test_reasoning_effort_normalization_matches_xai_controls(self) -> None:
+        self.assertEqual(XAIGrokClient._reasoning_effort("auto"), "high")
+        self.assertEqual(XAIGrokClient._reasoning_effort("high"), "high")
+        self.assertEqual(XAIGrokClient._reasoning_effort("medium"), "medium")
+        self.assertEqual(XAIGrokClient._reasoning_effort("low"), "low")
+        self.assertIsNone(XAIGrokClient._reasoning_effort("none"))
+
     async def test_spending_limit_bypasses_transient_retries(self) -> None:
         client = XAIGrokClient()
 
         class FakeResponse:
             status_code = 429
+            headers = {}
             text = json.dumps({
                 "code": "personal-team-blocked:spending-limit",
                 "error": "You have run out of credits or need a Grok subscription.",
@@ -926,6 +1567,168 @@ class XAIGrokClientTests(IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(fake_http.calls, 1)
+
+    async def test_spending_limit_with_retry_after_header_stays_untimed(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeResponse:
+            status_code = 429
+            headers = {"retry-after": "120", "x-ratelimit-reset": "120"}
+            text = json.dumps({
+                "code": "personal-team-blocked:spending-limit",
+                "error": "You have run out of credits or need a Grok subscription.",
+            })
+
+            def json(self):
+                return json.loads(self.text)
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, *args, **kwargs):
+                self.calls += 1
+                return FakeResponse()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with mock.patch.object(
+            client,
+            "get_valid_tokens",
+            return_value={"access_token": "access"},
+        ):
+            with self.assertRaises(XAIGrokSpendingLimitError):
+                await client.generate_completion(
+                    model="grok-4.3",
+                    messages=[{"role": "user", "content": "user"}],
+                )
+
+        self.assertEqual(fake_http.calls, 1)
+
+    async def test_spending_limit_with_body_reset_metadata_becomes_timed_usage_limit(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeResponse:
+            status_code = 429
+            headers = {"retry-after": "5"}
+            text = json.dumps({
+                "code": "usage_limit_reached",
+                "error": "Usage window exhausted.",
+                "resets_in_seconds": 120,
+                "plan_type": "grok",
+            })
+
+            def json(self):
+                return json.loads(self.text)
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, *args, **kwargs):
+                self.calls += 1
+                return FakeResponse()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with mock.patch.object(
+            client,
+            "get_valid_tokens",
+            return_value={"access_token": "access"},
+        ):
+            with self.assertRaises(XAIGrokUsageLimitError) as caught:
+                await client.generate_completion(
+                    model="grok-4.3",
+                    messages=[{"role": "user", "content": "user"}],
+                )
+
+        self.assertEqual(fake_http.calls, 1)
+        self.assertEqual(caught.exception.resets_in_seconds, 120)
+        self.assertEqual(caught.exception.plan_type, "grok")
+        self.assertIsNotNone(caught.exception.resets_at)
+
+    async def test_rate_limit_retry_after_becomes_timed_usage_limit(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeResponse:
+            status_code = 429
+            headers = {"retry-after": "90"}
+            text = json.dumps({
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "message": "Usage window exhausted",
+                }
+            })
+
+            def json(self):
+                return json.loads(self.text)
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, *args, **kwargs):
+                self.calls += 1
+                return FakeResponse()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with mock.patch.object(
+            client,
+            "get_valid_tokens",
+            return_value={"access_token": "access"},
+        ):
+            with self.assertRaises(XAIGrokUsageLimitError) as caught:
+                await client.generate_completion(
+                    model="grok-4.3",
+                    messages=[{"role": "user", "content": "user"}],
+                )
+
+        self.assertEqual(fake_http.calls, 1)
+        self.assertEqual(caught.exception.resets_in_seconds, 90)
+        self.assertIsNotNone(caught.exception.resets_at)
+
+    async def test_server_error_retry_after_stays_transient(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeResponse:
+            status_code = 503
+            headers = {"retry-after": "30"}
+            text = json.dumps({
+                "error": {
+                    "code": "server_error",
+                    "message": "Temporary unavailable",
+                }
+            })
+
+            def json(self):
+                return json.loads(self.text)
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, *args, **kwargs):
+                self.calls += 1
+                return FakeResponse()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with (
+            mock.patch.object(
+                client,
+                "get_valid_tokens",
+                return_value={"access_token": "access"},
+            ),
+            mock.patch.object(client, "_retry_delay", return_value=0),
+        ):
+            with self.assertRaises(XAIGrokRequestError):
+                await client.generate_completion(
+                    model="grok-4.3",
+                    messages=[{"role": "user", "content": "user"}],
+                )
+
+        self.assertGreater(fake_http.calls, 1)
 
     def test_authorization_url_uses_pkce_and_loopback_callback(self) -> None:
         verifier, challenge = XAIGrokClient.generate_pkce_pair()
@@ -1093,6 +1896,35 @@ class XAIGrokClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(fake_http.payload["reasoning_effort"], "high")
         self.assertEqual(response["choices"][0]["message"]["content"], "hello")
 
+    async def test_generate_completion_omits_disabled_reasoning_effort(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeHttp:
+            async def post(self, url, json=None, headers=None):
+                self.payload = json
+
+                class Response:
+                    status_code = 200
+                    text = "{}"
+
+                    def json(self):
+                        return {
+                            "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+                        }
+
+                return Response()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            await client.generate_completion(
+                model="grok-4.3",
+                messages=[{"role": "user", "content": "user"}],
+                reasoning_effort="none",
+            )
+
+        self.assertNotIn("reasoning_effort", fake_http.payload)
+
     async def test_generate_completion_stops_after_four_exponential_xai_retries(self) -> None:
         client = XAIGrokClient()
 
@@ -1112,7 +1944,10 @@ class XAIGrokClientTests(IsolatedAsyncioTestCase):
         client.client = fake_http
         with (
             mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
-            mock.patch("backend.shared.xai_grok_client.asyncio.sleep", return_value=None) as sleep_mock,
+            mock.patch(
+                "backend.shared.xai_grok_client.assured_retry_wait",
+                new=mock.AsyncMock(return_value=True),
+            ) as wait_mock,
         ):
             with self.assertRaisesRegex(XAIGrokRequestError, "after 4 retries"):
                 await client.generate_completion(
@@ -1121,7 +1956,10 @@ class XAIGrokClientTests(IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(fake_http.calls, 5)
-        sleep_mock.assert_has_awaits([mock.call(2.0), mock.call(4.0), mock.call(8.0), mock.call(16.0)])
+        self.assertEqual(
+            [call.args[0]["retry_after_seconds"] for call in wait_mock.await_args_list],
+            [2.0, 4.0, 8.0, 16.0],
+        )
 
 
 class FeaturesContractTests(IsolatedAsyncioTestCase):
@@ -1210,7 +2048,7 @@ class CodexCallbackServerStateTests(IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(cloud_access_route._PENDING_CODEX_OAUTH, {})
 
-    async def test_manual_exchange_failure_releases_callback_server_when_pending_consumed(self) -> None:
+    async def test_manual_terminal_exchange_failure_consumes_pending_state(self) -> None:
         class FakeServer:
             def __init__(self) -> None:
                 self.closed = False
@@ -1243,6 +2081,29 @@ class CodexCallbackServerStateTests(IsolatedAsyncioTestCase):
         self.assertTrue(fake_server.closed)
         self.assertTrue(fake_server.waited)
         self.assertIsNone(cloud_access_route._CODEX_CALLBACK_SERVER_STATE.server)
+        self.assertNotIn("state-1", cloud_access_route._PENDING_CODEX_OAUTH)
+
+    async def test_manual_unexpected_exchange_failure_retains_pending_state(self) -> None:
+        cloud_access_route._PENDING_CODEX_OAUTH["state-retry"] = {
+            "code_verifier": "verifier",
+            "redirect_uri": OpenAICodexClient.DEFAULT_REDIRECT_URI,
+            "expires_at": 9999999999,
+        }
+
+        async def fail_exchange(**_kwargs):
+            raise RuntimeError("temporary persistence failure")
+
+        with mock.patch.object(cloud_access_route.system_config, "generic_mode", False):
+            with mock.patch.object(cloud_access_route.openai_codex_client, "exchange_code", fail_exchange):
+                with self.assertRaises(RuntimeError):
+                    await cloud_access_route.exchange_openai_codex_oauth(
+                        cloud_access_route.CodexOAuthExchangeRequest(
+                            code="code",
+                            state="state-retry",
+                        )
+                    )
+
+        self.assertIn("state-retry", cloud_access_route._PENDING_CODEX_OAUTH)
 
 
 class XAIGrokCallbackServerStateTests(IsolatedAsyncioTestCase):
@@ -1350,3 +2211,66 @@ class CodexSecretStoreTests(IsolatedAsyncioTestCase):
             if key.startswith("openai_codex_oauth_chunk_")
         ]
         self.assertGreater(len(chunk_entries), 1)
+
+    def test_scalar_marker_failure_removes_uncommitted_candidate(self) -> None:
+        stored = {}
+
+        def fake_get_password(service_name, secret_name):
+            return stored.get((service_name, secret_name))
+
+        def fake_set_password(service_name, secret_name, secret_value):
+            if secret_name == "openrouter_api_key_active":
+                raise secret_store.KeyringError("marker failed")
+            stored[(service_name, secret_name)] = secret_value
+
+        def fake_delete_password(service_name, secret_name):
+            key = (service_name, secret_name)
+            if key not in stored:
+                raise PasswordDeleteError("missing")
+            del stored[key]
+
+        with mock.patch.object(secret_store.keyring, "get_password", fake_get_password):
+            with mock.patch.object(secret_store.keyring, "set_password", fake_set_password):
+                with mock.patch.object(secret_store.keyring, "delete_password", fake_delete_password):
+                    with self.assertRaises(secret_store.SecretStoreError):
+                        secret_store.store_openrouter_api_key("candidate-secret")
+
+        self.assertNotIn(
+            (secret_store.get_active_service_name(), "openrouter_api_key_a"),
+            stored,
+        )
+
+    def test_chunked_marker_failure_removes_uncommitted_candidate(self) -> None:
+        stored = {}
+
+        def fake_get_password(service_name, secret_name):
+            return stored.get((service_name, secret_name))
+
+        def fake_set_password(service_name, secret_name, secret_value):
+            if secret_name == "openai_codex_oauth_chunk_count_active":
+                raise secret_store.KeyringError("marker failed")
+            stored[(service_name, secret_name)] = secret_value
+
+        def fake_delete_password(service_name, secret_name):
+            key = (service_name, secret_name)
+            if key not in stored:
+                raise PasswordDeleteError("missing")
+            del stored[key]
+
+        with mock.patch.object(secret_store.keyring, "get_password", fake_get_password):
+            with mock.patch.object(secret_store.keyring, "set_password", fake_set_password):
+                with mock.patch.object(secret_store.keyring, "delete_password", fake_delete_password):
+                    with self.assertRaises(secret_store.SecretStoreError):
+                        secret_store.store_openai_codex_oauth_tokens({
+                            "access_token": "a" * 2400,
+                            "refresh_token": "r" * 2400,
+                        })
+
+        service_name = secret_store.get_active_service_name()
+        self.assertFalse(
+            any(
+                service == service_name
+                and secret_name.startswith("openai_codex_oauth_chunk_a")
+                for service, secret_name in stored
+            )
+        )

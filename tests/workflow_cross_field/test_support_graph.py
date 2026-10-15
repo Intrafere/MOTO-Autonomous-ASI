@@ -50,6 +50,12 @@ def test_support_graph_separates_declared_and_observed_basis():
         and edge["reason"]
         for edge in parent_fence
     )
+    observed = next(edge for edge in hosted if edge["observed"])
+    assert observed["source_identity"].startswith("pytest:")
+    assert observed["test_selectors"]
+    assert observed["asserted_invariants"]
+    assert observed["real_components"]
+    assert observed["observed_transition"]
 
 
 def test_support_graph_emits_structured_required_adapter_gaps():
@@ -58,6 +64,9 @@ def test_support_graph_emits_structured_required_adapter_gaps():
     assert graph["gaps"]
     assert all(gap["status"] == "uncovered" for gap in graph["gaps"])
     assert all(gap["gap_id"] and gap["reason"] for gap in graph["gaps"])
+    assert graph["orphan_invariants"] == []
+    assert graph["structural_gaps"]
+    assert all(gap["exempted"] and gap["exemption"] for gap in graph["structural_gaps"])
 
 
 def test_support_graph_preserves_failed_skipped_and_blocked_statuses():
@@ -91,4 +100,25 @@ def test_support_graph_validation_rejects_false_observation():
     graph["edges"][0]["scenario_id"] = None
 
     with pytest.raises(AssertionError, match="Observed support edge"):
+        validate_support_graph(graph)
+
+
+def test_support_graph_validation_rejects_orphans_and_unexempted_structural_gaps():
+    graph = build_support_graph(REAL_ADAPTER_COVERAGE)
+    graph["orphan_invariants"] = ["orphan.fixture"]
+    with pytest.raises(AssertionError, match="orphan invariants"):
+        validate_support_graph(graph)
+
+    graph = build_support_graph(REAL_ADAPTER_COVERAGE)
+    graph["structural_gaps"] = [
+        {
+            "gap_id": "fixture",
+            "risk_id": "risk.fixture",
+            "adapter": "real_route",
+            "reason": "missing declaration",
+            "exempted": False,
+            "exemption": None,
+        }
+    ]
+    with pytest.raises(AssertionError, match="undeclared structural coverage"):
         validate_support_graph(graph)

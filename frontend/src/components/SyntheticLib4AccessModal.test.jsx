@@ -1,5 +1,6 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import SyntheticLib4AccessModal from './SyntheticLib4AccessModal';
 
 function renderModal() {
@@ -34,4 +35,19 @@ test('explains contribution access and redistribution limits', () => {
   expect(screen.getByText(/pay a small monthly fee/i)).toBeInTheDocument();
   expect(screen.getByText(/cite, use, and reference individual proofs/i)).toBeInTheDocument();
   expect(screen.getByText(/not be redistributable as a whole/i)).toBeInTheDocument();
+});
+
+test('is a labelled modal dialog that takes focus and closes on Escape', async () => {
+  const user = userEvent.setup();
+  const onClose = vi.fn();
+  render(<SyntheticLib4AccessModal isOpen onClose={onClose} />);
+
+  const dialog = screen.getByRole('dialog', { name: /SyntheticLib4/ });
+  expect(dialog).toHaveAttribute('aria-modal', 'true');
+  const close = screen.getByRole('button', { name: /close SyntheticLib4 access/i });
+  expect(close).toHaveAttribute('type', 'button');
+  expect(close).toHaveFocus();
+
+  await user.keyboard('{Escape}');
+  expect(onClose).toHaveBeenCalledTimes(1);
 });

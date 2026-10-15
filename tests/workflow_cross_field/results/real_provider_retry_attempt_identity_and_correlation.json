@@ -1,0 +1,41 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "live_activity.provider_retry_identity_stable"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "unique_event_id",
+    "stable_correlation_id",
+    "ordered_retry_attempt"
+  ],
+  "faked_dependencies": [
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "provider_pause_resume",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "live_activity.provider_retry_identity_stable"
+  ],
+  "observed_transition": "two retry attempts retain one correlation id while publishing distinct event ids and ordered attempt numbers",
+  "real_components": [
+    "backend/shared/api_client_manager.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "real_provider_retry_attempt_identity_and_correlation",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:a5d257bcf82dc89236fb8aebca0c8c7b5d03cbf57bebba9e02e632033d69c42e",
+  "test_file": "tests/integration/test_oauth_provider_cooldown.py",
+  "test_selectors": [
+    "tests/integration/test_oauth_provider_cooldown.py::APIClientManagerOAuthCooldownTests::test_retry_attempts_share_correlation_but_have_unique_event_ids"
+  ]
+}

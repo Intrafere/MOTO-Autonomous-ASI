@@ -1,10 +1,17 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "outputs.proofs_only_no_paper_phase"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "proofs_only_handoff",
     "topic_exploration"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "allowed_outputs",
@@ -14,11 +21,22 @@
   "invariants": [
     "outputs.proofs_only_no_paper_phase"
   ],
+  "observed_transition": "proofs_only_handoff; topic_exploration",
+  "real_components": [
+    "backend/api/routes/compiler.py",
+    "backend/autonomous/core/autonomous_coordinator.py",
+    "backend/leanoj/core/leanoj_coordinator.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_autonomous_proofs_only_handoff_returns_to_topic_exploration",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+  "source_identity": "workflow-source-v1:34060679f419fe09f1b16063b6d03f12676e870e729c723f148b0adcec38b04e",
+  "test_file": "tests/workflow_real_adapters/test_proof_routes.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_proof_routes.py::test_autonomous_proofs_only_brainstorm_handoff_returns_to_topic_exploration"
+  ]
 }

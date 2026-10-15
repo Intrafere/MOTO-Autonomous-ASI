@@ -14,10 +14,33 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
+from backend.shared.build_info import get_build_info
 from backend.shared.config import system_config
+from backend.shared.lean_source_evidence import (
+    LEAN_COMPILE_RECEIPT_VERSION,
+    LEAN_IMPORT_PARSER_VERSION,
+    LEAN_SOURCE_TRANSFORMATION_VERSION,
+    LEAN_VERIFICATION_PROFILE_VERSION,
+    parse_explicit_import_modules,
+    seal_receipt,
+    source_bytes,
+    source_sha256,
+    transformations_between,
+)
+from backend.shared.lean_workspace_paths import (
+    WORKSPACE_PATH_FIX,
+    WORKSPACE_PATH_GUIDANCE,
+    WorkspacePathProblem,
+    describe_workspace_path_problem,
+    measured_workspace_path_problem,
+    windows_workspace_path_problem,
+)
+from backend.shared.log_redaction import redact_log_text
+from backend.shared.models import LeanCompileReceipt, LeanImportEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +80,8 @@ class Lean4Result:
     raw_stderr: str = ""
     tactic_error_slice: str = ""
     failing_tactic_index: int = -1
+    checked_source: str = ""
+    compile_receipt: Optional[LeanCompileReceipt] = None
 
 
 def _strip_lean_comments_and_strings(code: str) -> str:
@@ -113,6 +138,92 @@ _LEAN_WORKSPACE_ERROR_MARKERS: tuple[str, ...] = (
 _LEAN_WORKSPACE_COMBINED_MARKERS: tuple[tuple[str, ...], ...] = (
     ("no such file or directory", ".lake"),
 )
+
+# Windows reports over-long paths as "path not found" (os error 3) or
+# "filename too long" (os error 206) when Mathlib's cache unpacks.
+_WINDOWS_PATH_ERROR_RE = re.compile(
+    r"\(os error (?:3|206)\)|cannot find the path specified|filename or extension is too long",
+    re.IGNORECASE,
+)
+
+LEAN_WORKSPACE_REPAIR_REQUIRED_REASON = "lean_workspace_repair_required"
+LEAN_WORKSPACE_REPAIR_TITLE = "Lean 4 setup needs repair"
+LEAN_WORKSPACE_PATH_TOO_LONG = "lean_workspace_path_too_long"
+LEAN_WORKSPACE_SETUP_FAILED = "lean_workspace_setup_failed"
+_LEAN_WORKSPACE_DETAIL_LIMIT = 1800
+_LEAN_WORKSPACE_SETUP_MESSAGE = (
+    "Lean 4 could not prepare its Mathlib workspace, so proofs cannot be checked."
+)
+_LEAN_WORKSPACE_SETUP_GUIDANCE = (
+    "Check your internet connection and free disk space (Mathlib needs several GB), then "
+    "press Start again to retry Lean setup. Saved proof progress is kept."
+)
+_LEAN_WORKSPACE_PATH_RESUME_GUIDANCE = (
+    f"{WORKSPACE_PATH_FIX}, then relaunch MOTO and press Start again. "
+    "Saved proof progress is kept."
+)
+
+
+class LeanWorkspaceRepairRequiredError(RuntimeError):
+    """Lean cannot check proofs until the operator repairs its Mathlib workspace.
+
+    Workflows stop instead of treating this as a proof failure, rejection, or
+    model feedback.
+    """
+
+    def __init__(
+        self,
+        *,
+        failure_kind: str,
+        message: str,
+        terminal_guidance: str,
+        detail: str = "",
+        workspace_path_length: Optional[int] = None,
+        max_supported_length: Optional[int] = None,
+    ) -> None:
+        super().__init__(f"{_LEAN_WORKSPACE_ERROR_PREFIX}: {message}")
+        self.reason = LEAN_WORKSPACE_REPAIR_REQUIRED_REASON
+        self.failure_kind = failure_kind
+        self.message = message
+        self.terminal_guidance = terminal_guidance
+        self.detail = redact_log_text(detail, _LEAN_WORKSPACE_DETAIL_LIMIT)
+        self.workspace_path_length = workspace_path_length
+        self.max_supported_length = max_supported_length
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the non-secret user-facing repair payload."""
+        payload: dict[str, Any] = {
+            "reason": self.reason,
+            "lean_workspace_failure": self.failure_kind,
+            "message": self.message,
+            "problem": self.message,
+            "terminal_guidance": self.terminal_guidance,
+            "error_detail": self.detail,
+            "recoverable": True,
+            "workflow_continues": False,
+        }
+        if self.workspace_path_length is not None:
+            payload["workspace_path_length"] = self.workspace_path_length
+        if self.max_supported_length is not None:
+            payload["max_supported_length"] = self.max_supported_length
+        return payload
+
+    def to_repair_event(self, *, workflow_mode: str, stopped_subject: str) -> dict[str, Any]:
+        """Return the ``lean_workspace_repair_required`` WebSocket event payload."""
+        return {
+            **self.to_payload(),
+            "workflow_mode": workflow_mode,
+            "notification_kind": "model_error",
+            "title": LEAN_WORKSPACE_REPAIR_TITLE,
+            "message": (
+                f"{stopped_subject} stopped because Lean 4 cannot check proofs. {self.message}"
+            ),
+        }
+
+
+def is_lean_workspace_error_text(text: Any) -> bool:
+    """True when stored Lean output is a workspace failure, not a proof result."""
+    return str(text or "").lstrip().upper().startswith(_LEAN_WORKSPACE_ERROR_PREFIX)
 
 # Lean emits "bad import" when an `import` statement references a module whose
 # .lean source doesn't exist. This is NOT an infrastructure error — it means the
@@ -220,7 +331,7 @@ def _format_placeholder_rejection(token_name: str, *, from_lean_diagnostic: bool
         "trivialize the target theorem, or any other placeholder. If the target "
         "cannot be proved yet, do not replace it with a narrower, easier, "
         "routine, trivial, local, or merely supporting lemma; keep attacking "
-        "the same high-impact target so Lean feedback exposes the real blocker."
+        "the same selected target so Lean feedback exposes the real blocker."
     )
 
 
@@ -238,6 +349,10 @@ class Lean4Client:
         self._workspace_bootstrap_task: Optional[asyncio.Task[bool]] = None
         self._workspace_bootstrap_state = "not_started"
         self._workspace_bootstrap_error = ""
+        self._workspace_failure_detail = ""
+        # A too-long workspace path cannot change without moving MOTO and
+        # relaunching, so it latches for the life of this process.
+        self._workspace_path_problem: Optional[WorkspacePathProblem] = None
         self._lean_version = ""
 
     @classmethod
@@ -302,6 +417,13 @@ class Lean4Client:
         task = self._workspace_bootstrap_task
         if task is not None and not task.done():
             return task
+        if self._latched_path_problem() is not None:
+            async def _path_blocked() -> bool:
+                return False
+
+            task = asyncio.create_task(_path_blocked())
+            self._workspace_bootstrap_task = task
+            return task
         if self._workspace_ready and self._workspace_bootstrap_state == "ready":
             async def _already_ready() -> bool:
                 return True
@@ -320,6 +442,60 @@ class Lean4Client:
         """Wait for the shared bootstrap without letting one cancelled waiter stop it."""
         task = self.start_workspace_bootstrap()
         return await asyncio.shield(task)
+
+    def require_workspace(self) -> None:
+        """Raise ``LeanWorkspaceRepairRequiredError`` when Lean is known to be unusable.
+
+        Called before model calls whose output only matters if Lean later runs.
+        It never starts or waits for setup: a first-time setup keeps running in
+        the background and Lean checks wait for it. Workflow Start routes kick a
+        fresh setup attempt, so pressing Start retries a failed workspace.
+        """
+        if self._latched_path_problem() is not None:
+            raise self.workspace_repair_required_error()
+        if self._workspace_bootstrap_state == "failed":
+            raise self.workspace_repair_required_error()
+
+    async def retry_failed_workspace(self) -> None:
+        """Give a failed setup one fresh attempt; a too-long path is never retried."""
+        if self._workspace_bootstrap_state == "failed" and self._latched_path_problem() is None:
+            await self.await_workspace_ready()
+
+    def workspace_repair_required_error(
+        self,
+        error_output: str = "",
+    ) -> LeanWorkspaceRepairRequiredError:
+        """Build the typed repair error for the current workspace failure."""
+        problem = self._workspace_path_problem or windows_workspace_path_problem(self.workspace_dir)
+        detail = (
+            error_output
+            or self._workspace_failure_detail
+            or self._workspace_unhealthy_error
+            or self._workspace_bootstrap_error
+        )
+        if problem is not None:
+            return LeanWorkspaceRepairRequiredError(
+                failure_kind=LEAN_WORKSPACE_PATH_TOO_LONG,
+                message=describe_workspace_path_problem(problem),
+                terminal_guidance=_LEAN_WORKSPACE_PATH_RESUME_GUIDANCE,
+                detail=detail,
+                workspace_path_length=problem.workspace_path_length,
+                max_supported_length=problem.max_supported_length,
+            )
+        return LeanWorkspaceRepairRequiredError(
+            failure_kind=LEAN_WORKSPACE_SETUP_FAILED,
+            message=_LEAN_WORKSPACE_SETUP_MESSAGE,
+            terminal_guidance=_LEAN_WORKSPACE_SETUP_GUIDANCE,
+            detail=detail,
+        )
+
+    def _latched_path_problem(self) -> Optional[WorkspacePathProblem]:
+        """Return (and latch) a workspace path that is too long for Mathlib."""
+        if self._workspace_path_problem is None:
+            problem = windows_workspace_path_problem(self.workspace_dir)
+            if problem is not None:
+                self._mark_workspace_path_too_long(problem)
+        return self._workspace_path_problem
 
     async def _run_workspace_bootstrap(self) -> bool:
         try:
@@ -366,7 +542,7 @@ class Lean4Client:
         return self.workspace_dir / ".moto_mathlib_index.json"
 
     def get_mathlib_commit(self) -> str:
-        """Best-effort lookup of the pinned Mathlib revision for certificate export."""
+        """Best-effort lookup of the pinned Mathlib source revision."""
         manifest_path = self.workspace_dir / "lake-manifest.json"
         if manifest_path.exists():
             try:
@@ -395,13 +571,6 @@ class Lean4Client:
                     return head_value
             except Exception as exc:
                 logger.debug("Failed to read Mathlib git HEAD: %s", exc)
-
-        toolchain_path = package_dir / "lean-toolchain"
-        if toolchain_path.exists():
-            try:
-                return toolchain_path.read_text(encoding="utf-8").strip()
-            except Exception as exc:
-                logger.debug("Failed to read Mathlib lean-toolchain: %s", exc)
 
         return ""
 
@@ -497,10 +666,39 @@ class Lean4Client:
         )
 
     def _mark_workspace_unhealthy(self, output: str) -> None:
+        if self._workspace_path_problem is not None:
+            self._mark_workspace_path_too_long(self._workspace_path_problem, output)
+            return
         self._workspace_ready = False
+        self._workspace_failure_detail = output or ""
         self._workspace_unhealthy_error = self._format_workspace_infrastructure_error(output)
         self._workspace_bootstrap_state = "failed"
         self._workspace_bootstrap_error = self._workspace_unhealthy_error
+
+    def _mark_workspace_path_too_long(self, problem: WorkspacePathProblem, output: str = "") -> None:
+        self._workspace_ready = False
+        self._workspace_path_problem = problem
+        if output:
+            self._workspace_failure_detail = output
+        self._workspace_unhealthy_error = (
+            f"{_LEAN_WORKSPACE_ERROR_PREFIX}: {describe_workspace_path_problem(problem)} "
+            f"{WORKSPACE_PATH_GUIDANCE} This is a setup problem, not a proof error."
+        )
+        self._workspace_bootstrap_state = "failed"
+        self._workspace_bootstrap_error = self._workspace_unhealthy_error
+
+    async def _diagnose_path_failure(self, output: str) -> Optional[WorkspacePathProblem]:
+        """Measure the cloned Mathlib tree when setup failed with a Windows path error."""
+        if not _WINDOWS_PATH_ERROR_RE.search(output or ""):
+            return None
+        return await asyncio.to_thread(measured_workspace_path_problem, self.workspace_dir)
+
+    async def _record_workspace_setup_failure(self, output: str) -> None:
+        problem = await self._diagnose_path_failure(output)
+        if problem is not None:
+            self._mark_workspace_path_too_long(problem, output)
+        else:
+            self._mark_workspace_unhealthy(output)
 
     def _workspace_unavailable_result(self, *, tactic_script: bool = False) -> Lean4Result:
         error_output = self._workspace_unhealthy_error or (
@@ -557,6 +755,8 @@ class Lean4Client:
             self._format_workspace_infrastructure_error(output),
         )
         async with self._workspace_lock:
+            if self._latched_path_problem() is not None:
+                return False
             self._workspace_unhealthy_error = ""
             self._workspace_ready = False
             await asyncio.to_thread(self._wipe_lake_directory)
@@ -572,13 +772,88 @@ class Lean4Client:
         """Return the Lean 4 version string when available."""
         lean_cmd = self.lean_path or self._resolve_executable("lean")
         returncode, stdout, stderr = await self._run_process(
-            [lean_cmd, "--version"],
+            [self.lake_path, "env", lean_cmd, "--version"],
             cwd=self.workspace_dir if self.workspace_dir.exists() else Path.cwd(),
             timeout=15,
         )
         if returncode != 0:
             return (stderr or stdout).strip()
         return (stdout or stderr).strip()
+
+    async def _build_compile_receipt(
+        self,
+        *,
+        original_source: str,
+        checked_source: str,
+        checker_mode: Literal["subprocess", "lsp"],
+        timeout: int,
+        verification_profile: str,
+    ) -> LeanCompileReceipt:
+        """Capture immutable evidence only after Lean accepted exact checked bytes."""
+        lean_version = (await self.get_version()).strip()
+        mathlib_revision = self.get_mathlib_commit().strip()
+        if not lean_version or not mathlib_revision:
+            raise RuntimeError(
+                "Lean accepted the proof, but immutable toolchain evidence could not be captured."
+            )
+        build = get_build_info()
+        original_imports = set(parse_explicit_import_modules(original_source))
+        imports = [
+            LeanImportEvidence(
+                module_name=module,
+                parser_version=LEAN_IMPORT_PARSER_VERSION,
+                ordinal=index,
+                present_in_original_source=module in original_imports,
+            )
+            for index, module in enumerate(parse_explicit_import_modules(checked_source))
+        ]
+        payload = {
+            "schema_version": LEAN_COMPILE_RECEIPT_VERSION,
+            "result": "accepted",
+            "checker_mode": checker_mode,
+            "verification_profile": verification_profile,
+            "verification_profile_version": LEAN_VERIFICATION_PROFILE_VERSION,
+            "source_transformation_version": LEAN_SOURCE_TRANSFORMATION_VERSION,
+            "source_transformations": transformations_between(original_source, checked_source),
+            "original_source_sha256": source_sha256(original_source),
+            "original_source_byte_length": len(source_bytes(original_source)),
+            "checked_source_sha256": source_sha256(checked_source),
+            "checked_source_byte_length": len(source_bytes(checked_source)),
+            "checked_source_artifact": "",
+            "lean_version": lean_version,
+            "mathlib_revision": mathlib_revision,
+            "moto_version": build.version,
+            "moto_build_commit": build.build_commit,
+            "moto_api_contract_version": build.api_contract_version,
+            "timeout_seconds": int(timeout),
+            "completed_at": datetime.now(timezone.utc),
+            "explicit_imports": [item.model_dump(mode="json") for item in imports],
+            "migration_kind": "original_verification",
+            "receipt_digest": "0" * 64,
+        }
+        return seal_receipt(LeanCompileReceipt.model_validate(payload))
+
+    async def _attach_success_evidence(
+        self,
+        result: Lean4Result,
+        *,
+        original_source: str,
+        checked_source: str,
+        checker_mode: Literal["subprocess", "lsp"],
+        timeout: int,
+        verification_profile: str,
+    ) -> Lean4Result:
+        if not result.success:
+            return result
+        result.checked_source = checked_source
+        result.compile_receipt = await self._build_compile_receipt(
+            original_source=original_source,
+            checked_source=checked_source,
+            checker_mode=checker_mode,
+            timeout=timeout,
+            verification_profile=verification_profile,
+        )
+        return result
 
     def get_cached_version(self) -> str:
         """Return the version observed by bootstrap without invoking Lean."""
@@ -590,6 +865,9 @@ class Lean4Client:
 
     async def _ensure_workspace_locked(self) -> bool:
         """Create a reusable Mathlib-enabled workspace while holding the workspace lock."""
+        if self._latched_path_problem() is not None:
+            logger.warning("Lean 4 workspace not prepared: %s", self._workspace_unhealthy_error)
+            return False
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
         lean_toolchain_path = self.workspace_dir / "lean-toolchain"
@@ -651,7 +929,7 @@ class Lean4Client:
                         cwd=self.workspace_dir,
                     )
                 if update_rc != 0:
-                    self._mark_workspace_unhealthy(update_stderr or update_stdout)
+                    await self._record_workspace_setup_failure(update_stderr or update_stdout)
                     logger.warning(
                         "Lean 4 workspace update failed: %s",
                         (update_stderr or update_stdout).strip(),
@@ -676,7 +954,7 @@ class Lean4Client:
                     cwd=self.workspace_dir,
                 )
                 if update_rc != 0:
-                    self._mark_workspace_unhealthy(update_stderr or update_stdout)
+                    await self._record_workspace_setup_failure(update_stderr or update_stdout)
                     logger.warning(
                         "Lean 4 workspace update after toolchain alignment failed: %s",
                         (update_stderr or update_stdout).strip(),
@@ -688,7 +966,7 @@ class Lean4Client:
                 cwd=self.workspace_dir,
             )
             if cache_rc != 0:
-                self._mark_workspace_unhealthy(cache_stderr or cache_stdout)
+                await self._record_workspace_setup_failure(cache_stderr or cache_stdout)
                 logger.error(
                     "Lean 4 Mathlib cache fetch failed; proof checking would hit "
                     "'object file' errors. Details: %s",
@@ -742,6 +1020,10 @@ class Lean4Client:
             return cache_rc, cache_stdout, cache_stderr
 
         failed_output = "\n".join(part for part in (cache_stdout, cache_stderr) if part).strip()
+        if await self._diagnose_path_failure(failed_output) is not None:
+            # The archives are intact; Windows cannot unpack them under this
+            # path. Deleting or refetching them would only waste the download.
+            return cache_rc, cache_stdout, cache_stderr
         removed_archives = self._remove_failed_mathlib_cache_archives(failed_output)
         if removed_archives:
             logger.warning(
@@ -991,6 +1273,22 @@ class Lean4Client:
         return code, adjusted_ranges
 
     @staticmethod
+    def _compose_tactic_source_for_evidence(
+        theorem_header: str,
+        tactic_list: list[str],
+    ) -> str:
+        """Serialize caller tactic input before checker normalization."""
+        header = (theorem_header or "").strip()
+        if header and ":= by" not in header and not header.rstrip().endswith("by"):
+            header = f"{header} := by"
+        lines = [header] if header else []
+        for tactic in tactic_list:
+            stripped = str(tactic or "").rstrip()
+            if stripped:
+                lines.extend(f"  {line.rstrip()}" for line in stripped.splitlines())
+        return "\n".join(lines)
+
+    @staticmethod
     def _extract_tactic_error_slice(
         combined_output: str,
         temp_filename: str,
@@ -1093,13 +1391,33 @@ class Lean4Client:
         positive_pass = lean_exited_cleanly and not has_error_diagnostic and (allow_placeholders or not has_sorry_warning)
 
         if positive_pass:
-            return Lean4Result(
+            result = Lean4Result(
                 success=True,
                 error_output="",
                 diagnostic_output=combined_output,
                 goal_states=goal_states,
                 raw_stderr=stderr.strip(),
             )
+            try:
+                return await self._attach_success_evidence(
+                    result,
+                    original_source=lean_code,
+                    checked_source=prepared_code,
+                    checker_mode="subprocess",
+                    timeout=timeout,
+                    verification_profile=(
+                        "partial_scaffold" if allow_placeholders else "full_proof"
+                    ),
+                )
+            except Exception as exc:
+                logger.error("Lean proof evidence capture failed after acceptance: %s", exc)
+                return Lean4Result(
+                    success=False,
+                    error_output=(
+                        "LEAN 4 EVIDENCE ERROR: Lean accepted the source, but immutable "
+                        "proof-time evidence could not be captured. The proof was not registered."
+                    ),
+                )
 
         if has_sorry_warning and not has_error_diagnostic and lean_exited_cleanly:
             rejection = _format_placeholder_rejection("sorry", from_lean_diagnostic=True)
@@ -1255,7 +1573,7 @@ class Lean4Client:
         )
 
         if positive_pass:
-            return Lean4Result(
+            result = Lean4Result(
                 success=True,
                 error_output="",
                 diagnostic_output=combined_output,
@@ -1264,6 +1582,27 @@ class Lean4Client:
                 tactic_error_slice="",
                 failing_tactic_index=-1,
             )
+            try:
+                return await self._attach_success_evidence(
+                    result,
+                    original_source=self._compose_tactic_source_for_evidence(
+                        theorem_header, tactic_list
+                    ),
+                    checked_source=prepared_code,
+                    checker_mode="subprocess",
+                    timeout=timeout,
+                    verification_profile="tactic_script",
+                )
+            except Exception as exc:
+                logger.error("Lean tactic evidence capture failed after acceptance: %s", exc)
+                return Lean4Result(
+                    success=False,
+                    error_output=(
+                        "LEAN 4 EVIDENCE ERROR: Lean accepted the tactic script, but immutable "
+                        "proof-time evidence could not be captured. The proof was not registered."
+                    ),
+                    tactic_error_slice="Immutable proof-time evidence capture failed.",
+                )
 
         if has_sorry_warning and not has_error_diagnostic and lean_exited_cleanly:
             rejection = _format_placeholder_rejection("sorry", from_lean_diagnostic=True)
@@ -1828,6 +2167,25 @@ class Lean4LspClient(Lean4Client):
                 if self._is_workspace_infrastructure_error(result.error_output):
                     await self._mark_unhealthy(result.error_output)
                     return await self._subprocess_fallback.check_proof(lean_code, timeout=timeout)
+                if result.success:
+                    try:
+                        return await self._attach_success_evidence(
+                            result,
+                            original_source=lean_code,
+                            checked_source=prepared_code,
+                            checker_mode="lsp",
+                            timeout=timeout,
+                            verification_profile="full_proof",
+                        )
+                    except Exception as exc:
+                        logger.error("Lean LSP evidence capture failed after acceptance: %s", exc)
+                        return Lean4Result(
+                            success=False,
+                            error_output=(
+                                "LEAN 4 EVIDENCE ERROR: Lean accepted the source, but immutable "
+                                "proof-time evidence could not be captured. The proof was not registered."
+                            ),
+                        )
                 return result
             except Exception as exc:
                 await self._mark_unhealthy(str(exc))
@@ -1943,6 +2301,28 @@ class Lean4LspClient(Lean4Client):
                         tactic_list=tactic_list,
                         timeout=timeout,
                     )
+                if result.success:
+                    try:
+                        return await self._attach_success_evidence(
+                            result,
+                            original_source=self._compose_tactic_source_for_evidence(
+                                theorem_header, tactic_list
+                            ),
+                            checked_source=prepared_code,
+                            checker_mode="lsp",
+                            timeout=timeout,
+                            verification_profile="tactic_script",
+                        )
+                    except Exception as exc:
+                        logger.error("Lean LSP tactic evidence capture failed after acceptance: %s", exc)
+                        return Lean4Result(
+                            success=False,
+                            error_output=(
+                                "LEAN 4 EVIDENCE ERROR: Lean accepted the tactic script, but "
+                                "immutable proof-time evidence could not be captured."
+                            ),
+                            tactic_error_slice="Immutable proof-time evidence capture failed.",
+                        )
                 return result
             except Exception as exc:
                 await self._mark_unhealthy(str(exc))
@@ -1996,6 +2376,38 @@ def get_lean4_client() -> Lean4Client:
 def start_lean4_workspace_bootstrap() -> asyncio.Task[bool]:
     """Lazily start the singleton workspace bootstrap without awaiting it."""
     return get_lean4_client().start_workspace_bootstrap()
+
+
+def require_lean_workspace(client: Any = None) -> None:
+    """Raise ``LeanWorkspaceRepairRequiredError`` when Lean is known to be unusable.
+
+    ``client`` is the checker the caller will run Lean with (the singleton by
+    default); a checker without workspace management needs no guard.
+    """
+    checker = get_lean4_client() if client is None else client
+    require = getattr(checker, "require_workspace", None)
+    if require is not None:
+        require()
+
+
+async def recover_lean_workspace(client: Any = None) -> None:
+    """Like ``require_lean_workspace``, after one fresh attempt at a failed setup.
+
+    Used once per proof round, rigor cycle, or final-solver attempt, so a brief
+    failure (such as a network blip during setup) does not stop a long run.
+    """
+    checker = get_lean4_client() if client is None else client
+    retry = getattr(checker, "retry_failed_workspace", None)
+    if retry is not None:
+        await retry()
+    require_lean_workspace(checker)
+
+
+def raise_for_lean_workspace_failure(result: Optional[Lean4Result]) -> None:
+    """Turn a workspace-failure Lean result into the typed repair error."""
+    if result is None or result.success or not is_lean_workspace_error_text(result.error_output):
+        return
+    raise get_lean4_client().workspace_repair_required_error(result.error_output)
 
 
 async def close_lean4_client() -> None:

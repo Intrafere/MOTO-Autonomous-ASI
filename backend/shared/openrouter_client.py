@@ -20,6 +20,7 @@ from backend.shared.provider_errors import (
     ProviderRouteError,
     ProviderRouteIdentity,
 )
+from backend.shared.provider_recovery.runtime import assured_retry_wait
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +30,130 @@ _PROVIDER_SECRET_PATTERNS = (
     re.compile(r'("(?:api[_-]?key|appid|authorization|token|access[_-]?token|refresh[_-]?token|id[_-]?token|secret)"\s*:\s*)"[^"]*"', re.IGNORECASE),
     re.compile(r"((?:api[_-]?key|appid|authorization|token|access[_-]?token|refresh[_-]?token|id[_-]?token|secret)\s*[=:]\s*)[^\s,&}]+", re.IGNORECASE),
 )
+_PROVIDER_REQUEST_BODY_KEYS = {"input", "messages", "prompt"}
+
+
+def _redact_provider_json(value: Any, *, key: str = "") -> Any:
+    """Remove request content and obvious secrets from a parsed provider error."""
+    normalized_key = key.strip().lower().replace("-", "_")
+    if normalized_key in _PROVIDER_REQUEST_BODY_KEYS:
+        return "[redacted]"
+    if any(
+        marker in normalized_key
+        for marker in (
+            "api_key",
+            "apikey",
+            "authorization",
+            "password",
+            "secret",
+            "token",
+        )
+    ):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            str(child_key): _redact_provider_json(child_value, key=str(child_key))
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_provider_json(item) for item in value]
+    return value
 
 
 def sanitize_provider_error_text(value: Any, max_chars: int = 500) -> str:
     """Return a capped provider error preview with obvious secrets/body fields redacted."""
     text = str(value or "")
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        parsed = None
+    if isinstance(parsed, (dict, list)):
+        text = json.dumps(
+            _redact_provider_json(parsed),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     for pattern in _PROVIDER_SECRET_PATTERNS:
         text = pattern.sub(lambda match: f"{match.group(1) if match.lastindex else 'Bearer '}[redacted]", text)
 
     # Provider error pages occasionally echo request JSON. Drop large message
     # arrays rather than persisting prompt/user-file content in local logs.
+    text = re.sub(r'("input"\s*:\s*)\[[\s\S]*?\]', r'\1[redacted]', text, flags=re.IGNORECASE)
+    text = re.sub(r'("input"\s*:\s*)"[\s\S]*?"', r'\1"[redacted]"', text, flags=re.IGNORECASE)
     text = re.sub(r'("messages"\s*:\s*)\[[\s\S]*?\]', r'\1[redacted]', text, flags=re.IGNORECASE)
     text = re.sub(r'("prompt"\s*:\s*)"[\s\S]*?"', r'\1"[redacted]"', text, flags=re.IGNORECASE)
 
     return redact_log_text(text, max_chars)
+
+
+def _empty_upstream() -> Dict[str, str]:
+    return {
+        "upstream_host": "",
+        "upstream_error_code": "",
+        "upstream_error_message": "",
+        "request_id": "",
+    }
+
+
+def _reported_upstream(data: Any) -> Dict[str, str]:
+    """Return the upstream host, error and request id OpenRouter reported, if any.
+
+    The host comes from ``error.metadata.provider_name``, else a top-level
+    ``provider`` string. Values are redacted and bounded; any unexpected shape
+    yields empty strings rather than an exception.
+    """
+    reported = _empty_upstream()
+    try:
+        if not isinstance(data, dict):
+            return reported
+        error = data.get("error")
+        if isinstance(error, dict):
+            metadata = error.get("metadata")
+            if isinstance(metadata, dict):
+                host = metadata.get("provider_name")
+                if isinstance(host, str):
+                    reported["upstream_host"] = redact_log_text(host, 80).strip()
+            code = error.get("code")
+            if isinstance(code, (int, str)) and not isinstance(code, bool):
+                reported["upstream_error_code"] = redact_log_text(str(code), 40).strip()
+            message = error.get("message")
+            if isinstance(message, str):
+                reported["upstream_error_message"] = sanitize_provider_error_text(
+                    message,
+                    max_chars=240,
+                ).strip()
+        if not reported["upstream_host"]:
+            host = data.get("provider")
+            if isinstance(host, str):
+                reported["upstream_host"] = redact_log_text(host, 80).strip()
+        request_id = data.get("id")
+        if isinstance(request_id, str):
+            reported["request_id"] = redact_log_text(request_id, 80).strip()
+    except Exception:
+        return _empty_upstream()
+    return reported
+
+
+def _upstream_error_detail(upstream: Dict[str, str]) -> str:
+    """Render the reported upstream error as ``upstream <code>: <message>``."""
+    code = upstream.get("upstream_error_code", "")
+    message = upstream.get("upstream_error_message", "")
+    if code and message:
+        return f"upstream {code}: {message}"
+    if code:
+        return f"upstream {code}"
+    if message:
+        return f"upstream: {message}"
+    return ""
+
+
+def _safe_error_json(response: Any) -> Dict[str, Any]:
+    """Parse a provider response body as a JSON object, or return ``{}``."""
+    try:
+        parsed = response.json()
+    except (AttributeError, TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class OpenRouterClient:
@@ -177,6 +288,18 @@ class OpenRouterClient:
             "HTTP-Referer": self.APP_URL,
             "X-Title": self.APP_TITLE
         }
+
+    async def get_current_api_key(self) -> Dict[str, Any]:
+        """Validate this credential through OpenRouter's authenticated key endpoint."""
+        response = await self.client.get(
+            f"{self.BASE_URL}/key",
+            headers=self._get_headers(),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+            raise ValueError("OpenRouter returned an invalid API key response")
+        return payload["data"]
     
     async def list_models(self, free_only: bool = False, raise_on_error: bool = False) -> List[Dict[str, Any]]:
         """
@@ -575,19 +698,48 @@ class OpenRouterClient:
         # or natural completion. The json_parser handles any trailing garbage/padding.
         
         # Retry logic for transient errors (but NOT credit exhaustion)
-        async def wait_before_retry(attempt: int, reason: str) -> None:
+        async def wait_before_retry(
+            attempt: int,
+            reason: str,
+            error_summary: str = "",
+            upstream: Optional[Dict[str, str]] = None,
+        ) -> None:
             delay = self.RETRY_DELAY * (attempt + 1)
+            reported = upstream or {}
+            # Host fields are structured route identity only; the pinned host
+            # is "" under auto routing and survives an auto-fallback as its origin.
+            retry_payload = {
+                "provider": "openrouter",
+                "provider_label": "OpenRouter",
+                "model": model,
+                "configured_host_provider": provider_auto_fallback_from or provider or "",
+                "upstream_host_provider": reported.get("upstream_host", ""),
+                "auto_fallback_from_host": provider_auto_fallback_from or "",
+                "provider_request_id": reported.get("request_id", ""),
+                "retry_attempt": attempt + 1,
+                "max_attempts": self.MAX_RETRIES,
+                "retry_after_seconds": delay,
+                "reason": reason,
+                "error_summary": sanitize_provider_error_text(
+                    error_summary,
+                    max_chars=1000,
+                ),
+            }
             if retry_callback is not None:
-                await retry_callback({
-                    "provider": "openrouter",
-                    "provider_label": "OpenRouter",
-                    "model": model,
-                    "retry_attempt": attempt + 1,
-                    "max_attempts": self.MAX_RETRIES,
-                    "retry_after_seconds": delay,
-                    "reason": reason,
-                })
-            await asyncio.sleep(delay)
+                await retry_callback(retry_payload)
+            else:
+                await assured_retry_wait(retry_payload, role_id="openrouter_direct")
+
+        def current_route(upstream: Optional[Dict[str, str]] = None) -> ProviderRouteIdentity:
+            reported = upstream or {}
+            return ProviderRouteIdentity(
+                provider="openrouter",
+                model=model,
+                host_provider=provider or "",
+                upstream_host_provider=reported.get("upstream_host", ""),
+                auto_fallback_from_host=provider_auto_fallback_from or "",
+                provider_request_id=reported.get("request_id", ""),
+            )
 
         for attempt in range(self.MAX_RETRIES):
             try:
@@ -614,6 +766,50 @@ class OpenRouterClient:
                 response.raise_for_status()
                 try:
                     data = response.json()
+                    choices = data.get("choices") if isinstance(data, dict) else None
+                    if not isinstance(choices, list) or not choices:
+                        response_keys = (
+                            sorted(str(key) for key in data.keys())[:12]
+                            if isinstance(data, dict)
+                            else []
+                        )
+                        upstream = _reported_upstream(data)
+                        logger.warning(
+                            "OpenRouter returned a successful JSON response without choices "
+                            "for model %s (attempt %s/%s, response_type=%s, keys=%s, "
+                            "upstream_host=%s, upstream_code=%s).",
+                            redact_log_text(model, 160),
+                            attempt + 1,
+                            self.MAX_RETRIES,
+                            type(data).__name__,
+                            response_keys,
+                            upstream["upstream_host"] or "unreported",
+                            upstream["upstream_error_code"] or "none",
+                        )
+                        if attempt < self.MAX_RETRIES - 1:
+                            upstream_detail = _upstream_error_detail(upstream)
+                            await wait_before_retry(
+                                attempt,
+                                "invalid_response",
+                                (
+                                    "OpenRouter returned a successful response without "
+                                    f"completion choices ({upstream_detail})."
+                                    if upstream_detail
+                                    else "OpenRouter returned a successful response "
+                                    "without completion choices."
+                                ),
+                                upstream,
+                            )
+                            continue
+                        raise ProviderRouteError(
+                            "OpenRouter returned no completion choices after "
+                            f"{self.MAX_RETRIES} attempts.",
+                            route=current_route(upstream),
+                            cause=httpx.ReadError(
+                                "OpenRouter upstream response omitted completion choices",
+                                request=response.request,
+                            ),
+                        )
                     if provider_auto_fallback_from and isinstance(data, dict):
                         data["_moto_openrouter_provider_auto_fallback"] = {
                             "from_provider": provider_auto_fallback_from,
@@ -637,7 +833,14 @@ class OpenRouterClient:
                     )
                     # Retry on transient malformed responses
                     if attempt < self.MAX_RETRIES - 1:
-                        await wait_before_retry(attempt, "invalid_response")
+                        await wait_before_retry(
+                            attempt,
+                            "invalid_response",
+                            body_preview or (
+                                f"OpenRouter returned a non-JSON response "
+                                f"(HTTP {response.status_code}, content type {content_type or 'unknown'})."
+                            ),
+                        )
                         continue
                     raise OpenRouterInvalidResponseError(
                         f"OpenRouter returned non-JSON body after {self.MAX_RETRIES} attempts "
@@ -663,7 +866,9 @@ class OpenRouterClient:
             except httpx.HTTPStatusError as e:
                 error_detail = sanitize_provider_error_text(e.response.text if hasattr(e.response, 'text') else str(e))
                 error_detail_lower = error_detail.lower()
-                
+                error_json = _safe_error_json(e.response)
+                upstream = _reported_upstream(error_json)
+
                 # Check for rate limit (429 Too Many Requests)
                 if e.response.status_code == 429:
                     if self._is_free_model(model):
@@ -682,7 +887,12 @@ class OpenRouterClient:
                         # Paid model hit rate limit - treat as transient error
                         logger.warning(f"OpenRouter rate limit (429) for paid model '{model}': {error_detail}")
                         if attempt < self.MAX_RETRIES - 1:
-                            await wait_before_retry(attempt, "rate_limited")
+                            await wait_before_retry(
+                                attempt,
+                                "rate_limited",
+                                error_detail,
+                                upstream,
+                            )
                             continue
                         raise ValueError(f"OpenRouter rate limit: {error_detail}")
                 
@@ -742,10 +952,7 @@ class OpenRouterClient:
                 # privacy/no-endpoint/model errors retain their dedicated hard paths.
                 opaque_upstream_404 = False
                 if e.response.status_code == 404:
-                    try:
-                        error_payload = e.response.json().get("error", {})
-                    except (AttributeError, TypeError, ValueError):
-                        error_payload = {}
+                    error_payload = error_json.get("error", {})
                     metadata = (
                         error_payload.get("metadata", {})
                         if isinstance(error_payload, dict)
@@ -768,16 +975,23 @@ class OpenRouterClient:
                         self.MAX_RETRIES,
                     )
                     if attempt < self.MAX_RETRIES - 1:
-                        await wait_before_retry(attempt, "upstream_provider_error")
+                        await wait_before_retry(
+                            attempt,
+                            "upstream_provider_error",
+                            (
+                                "OpenRouter upstream provider returned an opaque HTTP 404"
+                                + (
+                                    f" ({metadata.get('provider_name')})"
+                                    if metadata.get("provider_name")
+                                    else ""
+                                )
+                            ),
+                            upstream,
+                        )
                         continue
-                    route = ProviderRouteIdentity(
-                        provider="openrouter",
-                        model=model,
-                        host_provider=provider or "",
-                    )
                     raise ProviderRouteError(
                         "OpenRouter upstream provider temporarily could not serve the request.",
-                        route=route,
+                        route=current_route(upstream),
                         cause=httpx.ReadError(
                             "OpenRouter upstream provider returned an opaque 404",
                             request=e.request,
@@ -792,11 +1006,7 @@ class OpenRouterClient:
                         f"Falling back to LM Studio."
                     )
 
-                route = ProviderRouteIdentity(
-                    provider="openrouter",
-                    model=model,
-                    host_provider=provider or "",
-                )
+                route = current_route(upstream)
                 if any(
                     marker in error_detail_lower
                     for marker in (
@@ -822,7 +1032,7 @@ class OpenRouterClient:
                 
                 # Retry on transient errors
                 if attempt < self.MAX_RETRIES - 1:
-                    await wait_before_retry(attempt, "http_error")
+                    await wait_before_retry(attempt, "http_error", error_detail, upstream)
                     continue
                 
                 raise ProviderRouteError(
@@ -845,15 +1055,15 @@ class OpenRouterClient:
                     f"[{error_type}] {error_detail}"
                 )
                 if attempt < self.MAX_RETRIES - 1:
-                    await wait_before_retry(attempt, "connection_error")
+                    await wait_before_retry(
+                        attempt,
+                        "connection_error",
+                        f"[{error_type}] {error_detail}",
+                    )
                     continue
                 raise ProviderRouteError(
                     f"OpenRouter connection failed after {self.MAX_RETRIES} attempts: [{error_type}] {error_detail}",
-                    route=ProviderRouteIdentity(
-                        provider="openrouter",
-                        model=model,
-                        host_provider=provider or "",
-                    ),
+                    route=current_route(),
                     cause=e,
                 ) from e
                 
@@ -1104,7 +1314,26 @@ class RateLimitError(Exception):
 class FreeModelExhaustedError(Exception):
     """
     Raised when all free model options are exhausted (looping + auto-selector + fallback).
+
+    The keyword arguments are structured route identity for Live Activity only;
+    they never become part of the exception text.
     """
-    def __init__(self, message: str):
+    def __init__(
+        self,
+        message: str,
+        *,
+        role_id: str = "",
+        model: str = "",
+        provider: str = "",
+        route_kind: str = "",
+        task_id: str = "",
+        configured_host_provider: Optional[str] = None,
+    ):
+        self.role_id = role_id
+        self.model = model
+        self.provider = provider
+        self.route_kind = route_kind
+        self.task_id = task_id
+        self.configured_host_provider = configured_host_provider
         super().__init__(message)
 

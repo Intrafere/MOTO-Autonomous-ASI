@@ -1,10 +1,17 @@
 {
-  "adapter": "real_coordinator",
+  "adapter": "focused_production",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_pruning.no_prune_is_valid"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "no_prune_outcome",
     "no_mutation"
+  ],
+  "faked_dependencies": [
+    "proof pruning review service"
   ],
   "fields": [
     "proof_pruning",
@@ -13,11 +20,20 @@
   "invariants": [
     "proof_pruning.no_prune_is_valid"
   ],
+  "observed_transition": "scheduled review returns no_prune without changing proof revision or records",
+  "real_components": [
+    "backend/autonomous/core/proof_pruning_coordinator.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_no_prune_is_valid_non_mutating_result",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/unit/test_proof_pruning_coordinator.py"
+  "source_identity": "workflow-source-v1:56e025112cd31e36896daed75378247820c94af02bdb805e2d5203b2fc3e1c36",
+  "test_file": "tests/unit/test_proof_pruning_coordinator.py",
+  "test_selectors": [
+    "tests/unit/test_proof_pruning_coordinator.py::ProofPruningCoordinatorTests::test_third_eligible_registration_schedules_without_blocking"
+  ]
 }

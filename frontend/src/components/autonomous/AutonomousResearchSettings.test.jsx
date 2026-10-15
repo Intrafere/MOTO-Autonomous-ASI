@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import AutonomousResearchSettings from './AutonomousResearchSettings';
 import { persistAutonomousSettings } from '../../utils/autonomousProfiles';
 import { api, autonomousAPI, cloudAccessAPI, openRouterAPI } from '../../services/api';
@@ -15,8 +15,10 @@ vi.mock('../../services/api', () => ({
   cloudAccessAPI: {
     getOpenAICodexStatus: vi.fn(),
     getXAIGrokStatus: vi.fn(),
+    getSakanaFuguStatus: vi.fn(),
     getOpenAICodexModels: vi.fn(),
     getXAIGrokModels: vi.fn(),
+    getSakanaFuguModels: vi.fn(),
   },
   openRouterAPI: {
     getApiKeyStatus: vi.fn(),
@@ -60,11 +62,13 @@ function renderSettings({
   lmStudioEnabled = true,
   memoryEnabled = true,
   isRunning = false,
+  onConfigChange = vi.fn(),
 } = {}) {
-  return render(
+  return {
+    ...render(
     <AutonomousResearchSettings
       config={config}
-      onConfigChange={vi.fn()}
+      onConfigChange={onConfigChange}
       models={[{ id: 'lm-validator' }]}
       capabilities={{ lmStudioEnabled, genericMode: !lmStudioEnabled }}
       connectivityStatus={{
@@ -76,7 +80,9 @@ function renderSettings({
       }}
       isRunning={isRunning}
     />
-  );
+    ),
+    onConfigChange,
+  };
 }
 
 test.each([false, true])('Codex effort covers all Autonomous roles with running=%s', async isRunning => {
@@ -88,6 +94,17 @@ test.each([false, true])('Codex effort covers all Autonomous roles with running=
   await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' })).toHaveLength(5));
   expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.value === 'max')).toBe(true);
   await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.disabled === isRunning)).toBe(true));
+});
+
+test.each([false, true])('xAI effort covers all Autonomous roles with running=%s', async isRunning => {
+  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: true } });
+  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [{ id: 'grok-4.3' }] });
+  const config = { ...baseConfig, submitter_configs: [{ ...baseConfig.submitter_configs[0], provider: 'xai_grok_oauth', modelId: 'grok-4.3', openrouterReasoningEffort: 'medium' }] };
+  for (const prefix of ['validator', 'assistant', 'writer', 'high_param']) Object.assign(config, { [`${prefix}_provider`]: 'xai_grok_oauth', [`${prefix}_model`]: 'grok-4.3', [`${prefix}_openrouter_reasoning_effort`]: 'medium' });
+  renderSettings({ config, isRunning });
+  const controls = await screen.findAllByRole('combobox', { name: 'xAI Reasoning Effort' });
+  expect(controls).toHaveLength(5);
+  expect(controls.every(node => node.value === 'medium' && node.disabled === isRunning)).toBe(true);
 });
 
 beforeEach(() => {
@@ -112,7 +129,7 @@ beforeEach(() => {
   autonomousAPI.getProofStatus.mockResolvedValue({
     lean4_enabled: false,
     lean4_path: '',
-    lean4_proof_timeout: 900,
+    lean4_proof_timeout: 2000,
     lean4_lsp_enabled: false,
     proof_max_parallel_candidates: 6,
     smt_enabled: false,
@@ -125,8 +142,10 @@ beforeEach(() => {
   });
   cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: false } });
   cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: false } });
+  cloudAccessAPI.getSakanaFuguStatus.mockResolvedValue({ status: { configured: false } });
   cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [] });
   cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [] });
+  cloudAccessAPI.getSakanaFuguModels.mockResolvedValue({ models: [] });
 });
 
 test('renders Assistant role and greys it out when Session History Memory is disabled', async () => {
@@ -223,12 +242,178 @@ test('does not invent extra submitters or LM Studio providers for incomplete sav
   renderSettings({ config: incompleteConfig });
 
   await waitFor(() => {
-    const countLabel = screen.getByText('Number of Submitters');
-    expect(countLabel.parentElement.querySelector('input').value).toBe('1');
+    expect(screen.getByRole('combobox', { name: 'Number of Submitters' })).toHaveValue('1');
   });
   expect(screen.queryByText(/Submitter 2/i)).not.toBeInTheDocument();
   const lmStudioButtons = screen.getAllByRole('button', { name: 'LM Studio' });
   expect(lmStudioButtons[0].className).not.toContain('active-lm');
+});
+
+test('keeps an increased submitter count when the new submitter role is edited', async () => {
+  const submitterConfigs = [1, 2, 3].map(submitterId => ({
+    ...baseConfig.submitter_configs[0],
+    submitterId,
+  }));
+  persistAutonomousSettings({
+    numSubmitters: 3,
+    submitterConfigs,
+    localConfig: {
+      validator_provider: baseConfig.validator_provider,
+      validator_model: baseConfig.validator_model,
+      validator_context_window: baseConfig.validator_context_window,
+      validator_max_tokens: baseConfig.validator_max_tokens,
+      assistant_provider: baseConfig.assistant_provider,
+      assistant_model: baseConfig.assistant_model,
+      assistant_context_window: baseConfig.assistant_context_window,
+      assistant_max_tokens: baseConfig.assistant_max_tokens,
+      writer_provider: baseConfig.writer_provider,
+      writer_model: baseConfig.writer_model,
+      writer_context_window: baseConfig.writer_context_window,
+      writer_max_tokens: baseConfig.writer_max_tokens,
+      high_param_provider: baseConfig.high_param_provider,
+      high_param_model: baseConfig.high_param_model,
+      high_param_context_window: baseConfig.high_param_context_window,
+      high_param_max_tokens: baseConfig.high_param_max_tokens,
+    },
+  });
+  const onConfigChange = vi.fn();
+  renderSettings({
+    config: { ...baseConfig, num_submitters: 3, submitter_configs: submitterConfigs },
+    onConfigChange,
+  });
+
+  const countInput = await screen.findByRole('combobox', { name: 'Number of Submitters' });
+  fireEvent.change(countInput, { target: { value: '4' } });
+
+  const submitterFour = await screen.findByText('Submitter 4');
+  const submitterFourCard = submitterFour.closest('.submitter-config-section');
+  fireEvent.click(within(submitterFourCard).getByRole('button', { name: 'LM Studio' }));
+
+  await waitFor(() => {
+    const latestConfig = onConfigChange.mock.calls.at(-1)[0];
+    expect(latestConfig.num_submitters).toBe(4);
+    expect(latestConfig.submitter_configs).toHaveLength(4);
+    expect(latestConfig.submitter_configs[3].provider).toBe('lm_studio');
+  });
+
+  fireEvent.change(countInput, { target: { value: '2' } });
+
+  await waitFor(() => {
+    const saved = JSON.parse(localStorage.getItem('autonomous_research_settings'));
+    expect(saved.numSubmitters).toBe(2);
+    expect(saved.submitterConfigs).toHaveLength(2);
+  });
+});
+
+test('publishes a changed submitter count immediately', async () => {
+  const submitterConfigs = [1, 2, 3].map(submitterId => ({
+    ...baseConfig.submitter_configs[0],
+    submitterId,
+  }));
+  const onConfigChange = vi.fn();
+  const { unmount } = renderSettings({
+    config: { ...baseConfig, num_submitters: 3, submitter_configs: submitterConfigs },
+    onConfigChange,
+  });
+
+  const countInput = await screen.findByRole('combobox', { name: 'Number of Submitters' });
+  fireEvent.change(countInput, { target: { value: '4' } });
+
+  await waitFor(() => {
+    const latestConfig = onConfigChange.mock.calls.at(-1)[0];
+    expect(latestConfig.num_submitters).toBe(4);
+    expect(latestConfig.submitter_configs).toHaveLength(4);
+  });
+  unmount();
+});
+
+test('does not let delayed model auto-fill restore an older submitter count', async () => {
+  let resolveProviders;
+  openRouterAPI.getProviders.mockImplementation(() => new Promise(resolve => {
+    resolveProviders = resolve;
+  }));
+  const submitterConfigs = [1, 2, 3].map(submitterId => ({
+    ...baseConfig.submitter_configs[0],
+    submitterId,
+  }));
+  const onConfigChange = vi.fn();
+  renderSettings({
+    config: { ...baseConfig, num_submitters: 3, submitter_configs: submitterConfigs },
+    onConfigChange,
+  });
+
+  const firstSubmitter = (await screen.findByText('Submitter 1 (Main Submitter)'))
+    .closest('.submitter-config-section');
+  const modelSelect = within(firstSubmitter).getAllByRole('combobox')[0];
+  fireEvent.change(modelSelect, { target: { value: 'openrouter/assistant' } });
+
+  const countInput = screen.getByRole('combobox', { name: 'Number of Submitters' });
+  fireEvent.change(countInput, { target: { value: '4' } });
+  resolveProviders({ providers: [], endpoints: [] });
+
+  await waitFor(() => {
+    const latestConfig = onConfigChange.mock.calls.at(-1)[0];
+    expect(latestConfig.num_submitters).toBe(4);
+    expect(latestConfig.submitter_configs).toHaveLength(4);
+  });
+});
+
+test('discards delayed submitter auto-fill after the selected model changes', async () => {
+  let resolveProviders;
+  openRouterAPI.getProviders.mockImplementation(() => new Promise(resolve => {
+    resolveProviders = resolve;
+  }));
+  const onConfigChange = vi.fn();
+  renderSettings({ onConfigChange });
+
+  const firstSubmitter = (await screen.findByText('Submitter 1 (Main Submitter)'))
+    .closest('.submitter-config-section');
+  const modelSelect = within(firstSubmitter).getAllByRole('combobox')[0];
+  fireEvent.change(modelSelect, { target: { value: 'openrouter/assistant' } });
+  fireEvent.click(within(firstSubmitter).getByRole('button', { name: 'LM Studio' }));
+  resolveProviders({
+    providers: [],
+    endpoints: [{ context_length: 12345, max_completion_tokens: 1234 }],
+  });
+
+  await waitFor(() => {
+    const latestConfig = onConfigChange.mock.calls.at(-1)[0];
+    expect(latestConfig.submitter_configs[0].provider).toBe('lm_studio');
+    expect(latestConfig.submitter_configs[0].modelId).toBe('');
+    expect(latestConfig.submitter_configs[0].contextWindow).not.toBe(12345);
+  });
+});
+
+test('does not let delayed Validator auto-fill restore an older submitter count', async () => {
+  let resolveProviders;
+  openRouterAPI.getProviders.mockImplementation(() => new Promise(resolve => {
+    resolveProviders = resolve;
+  }));
+  const submitterConfigs = [1, 2, 3].map(submitterId => ({
+    ...baseConfig.submitter_configs[0],
+    submitterId,
+  }));
+  const onConfigChange = vi.fn();
+  renderSettings({
+    config: { ...baseConfig, num_submitters: 3, submitter_configs: submitterConfigs },
+    onConfigChange,
+  });
+
+  const validatorHeading = await screen.findByText('Validator (Single Instance)');
+  const validatorCard = validatorHeading.parentElement.querySelector('.submitter-config-section');
+  fireEvent.change(within(validatorCard).getAllByRole('combobox')[0], {
+    target: { value: 'openrouter/assistant' },
+  });
+  fireEvent.change(screen.getByRole('combobox', { name: 'Number of Submitters' }), {
+    target: { value: '4' },
+  });
+  resolveProviders({ providers: [], endpoints: [] });
+
+  await waitFor(() => {
+    const latestConfig = onConfigChange.mock.calls.at(-1)[0];
+    expect(latestConfig.num_submitters).toBe(4);
+    expect(latestConfig.submitter_configs).toHaveLength(4);
+  });
 });
 
 test('applies a recommended profile even when OpenRouter model list is empty', async () => {

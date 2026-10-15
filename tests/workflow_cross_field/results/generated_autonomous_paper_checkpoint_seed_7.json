@@ -9,6 +9,10 @@
   ],
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {
     "final_mode": "autonomous",
     "final_phase": "topic_exploration"
@@ -20,6 +24,9 @@
   ],
   "exercised_invariants": [
     "runtime.single_active_workflow"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
   ],
   "fields": [
     "runtime_exclusivity",
@@ -39,6 +46,8 @@
     "websocket_api_contracts",
     "workflow_filesystem_state"
   ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
   "replay": [
     "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
     "start_manual_compiler()",
@@ -49,9 +58,14 @@
     "complete_autonomous_paper_checkpoint()"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "generated_autonomous_paper_checkpoint_seed_7",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 7,
+  "source_identity": "workflow-source-v1:9223cdfb006b1e6c03855776abb2e436a812e02134d51021d3c008a2e71767d4",
   "target_artifact": "targets/generated_autonomous_paper_checkpoint.json",
-  "target_id": "generated_autonomous_paper_checkpoint"
+  "target_id": "generated_autonomous_paper_checkpoint",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
 }

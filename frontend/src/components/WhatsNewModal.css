@@ -40,6 +40,10 @@
 .whats-new-section ul { padding-left: 20px; margin: 0; }
 .whats-new-section li { padding-left: 4px; margin-top: 10px; line-height: 1.68; font-size: 1.02rem; }
 .whats-new-section li strong { color: #fff; font-weight: 800; }
+.whats-new-section li a { color: #9bb5ff; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+.whats-new-section li a:hover { color: #c3d2ff; }
+.whats-new-section--warning { background: rgba(255, 184, 0, 0.08); border-color: rgba(255, 184, 0, 0.45); }
+.whats-new-section--warning h3 { color: #ffd166; }
 .whats-new-footer { padding-top: 0.5rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
 .whats-new-footer a { color: #f4f5ff; background: rgba(255, 255, 255, 0.075); border: 1px solid rgba(255, 255, 255, 0.18); padding: 0.58rem 1.05rem; border-radius: 999px; font-weight: 800; text-decoration: none; box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22); }
 .whats-new-done { background: rgba(30, 255, 28, 0.08); color: #1eff1c; font: inherit; font-weight: 800; border: 1px solid rgba(30, 255, 28, 0.38); border-radius: 999px; padding: 0.58rem 1.5rem; cursor: pointer; }

@@ -26,5 +26,8 @@ describe('WolframAlphaAccessModal', () => {
     expect(screen.getByText('Checking Wolfram Alpha App ID status...')).toBeInTheDocument();
     expect(screen.queryByText('No Wolfram Alpha App ID is configured.')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Clear App ID' })).toBeDisabled();
+    const input = screen.getByLabelText('Wolfram Alpha App ID');
+    expect(input).toHaveAttribute('name', 'moto-wolfram-alpha-app-id');
+    expect(input).toHaveAttribute('autocomplete', 'new-password');
   });
 });

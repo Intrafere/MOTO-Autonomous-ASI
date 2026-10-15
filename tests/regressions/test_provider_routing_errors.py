@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 
 import backend.shared.api_client_manager as api_manager_module
 from backend.shared.api_client_manager import (
@@ -25,7 +26,11 @@ from backend.shared.openai_codex_client import (
     OpenAICodexAuthError,
     OpenAICodexRequestError,
 )
-from backend.shared.openrouter_client import OpenRouterClient
+from backend.shared.openrouter_client import (
+    OpenRouterClient,
+    _reported_upstream,
+    _safe_error_json,
+)
 from backend.shared.provider_errors import (
     ProviderContextLengthError,
     ProviderRepairRequiredError,
@@ -33,6 +38,12 @@ from backend.shared.provider_errors import (
     ProviderRouteIdentity,
 )
 from backend.shared.sakana_fugu_client import SakanaFuguEntitlementError
+
+
+@pytest.fixture(autouse=True)
+def _isolated_provider_notification_root(tmp_path, monkeypatch):
+    """Keep direct-call retry notifications out of the real backend/data store."""
+    monkeypatch.setattr(system_config, "data_dir", str(tmp_path))
 
 
 class ProviderErrorUtilityTests(unittest.TestCase):
@@ -161,6 +172,105 @@ class ProviderErrorUtilityTests(unittest.TestCase):
                 self.assertNotIn("secret-value", str(error))
 
 
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+UPSTREAM_ERROR_BODY = {
+    "id": "gen-test-0001",
+    "error": {
+        "code": 429,
+        "message": "TestHost is temporarily rate-limited upstream",
+        "metadata": {"provider_name": "TestHost"},
+    },
+}
+
+
+def _openrouter_response(status_code, **kwargs):
+    return httpx.Response(
+        status_code,
+        request=httpx.Request("POST", OPENROUTER_URL),
+        **kwargs,
+    )
+
+
+def _success_response():
+    return _openrouter_response(
+        200,
+        json={"choices": [{"message": {"content": "recovered"}}]},
+    )
+
+
+class OpenRouterUpstreamReportTests(unittest.TestCase):
+    def test_safe_error_json_ignores_html_gateway_body(self):
+        response = _openrouter_response(
+            502,
+            text="<html><body>502 Bad Gateway</body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+        self.assertEqual(_safe_error_json(response), {})
+
+    def test_safe_error_json_ignores_json_list_body(self):
+        response = _openrouter_response(500, json=[{"error": {"message": "x"}}])
+
+        self.assertEqual(_safe_error_json(response), {})
+
+    def test_safe_error_json_returns_object_body_and_tolerates_missing_json(self):
+        response = _openrouter_response(503, json=UPSTREAM_ERROR_BODY)
+
+        self.assertEqual(_safe_error_json(response), UPSTREAM_ERROR_BODY)
+        self.assertEqual(_safe_error_json(object()), {})
+
+    def test_reported_upstream_prefers_error_metadata_provider_name(self):
+        reported = _reported_upstream({**UPSTREAM_ERROR_BODY, "provider": "OtherHost"})
+
+        self.assertEqual(
+            reported,
+            {
+                "upstream_host": "TestHost",
+                "upstream_error_code": "429",
+                "upstream_error_message": "TestHost is temporarily rate-limited upstream",
+                "request_id": "gen-test-0001",
+            },
+        )
+
+    def test_reported_upstream_falls_back_to_top_level_provider(self):
+        reported = _reported_upstream({"id": "gen-test-0002", "provider": "TestHost"})
+
+        self.assertEqual(reported["upstream_host"], "TestHost")
+        self.assertEqual(reported["request_id"], "gen-test-0002")
+        self.assertEqual(reported["upstream_error_code"], "")
+        self.assertEqual(reported["upstream_error_message"], "")
+
+    def test_reported_upstream_is_total_for_missing_or_malformed_shapes(self):
+        empty = {
+            "upstream_host": "",
+            "upstream_error_code": "",
+            "upstream_error_message": "",
+            "request_id": "",
+        }
+        for data in (
+            None,
+            [],
+            "text body",
+            {},
+            {"error": "plain string", "id": 7, "provider": {"name": "TestHost"}},
+            {"error": {"metadata": ["TestHost"], "code": True, "message": None}},
+        ):
+            with self.subTest(data=data):
+                self.assertEqual(_reported_upstream(data), empty)
+
+    def test_reported_upstream_redacts_and_bounds_upstream_message(self):
+        reported = _reported_upstream({
+            "error": {
+                "code": "upstream_error",
+                "message": "Bearer secret-value " + ("x" * 2000),
+            },
+        })
+
+        self.assertNotIn("secret-value", reported["upstream_error_message"])
+        self.assertLess(len(reported["upstream_error_message"]), 300)
+        self.assertEqual(reported["upstream_error_code"], "upstream_error")
+
+
 class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
     async def test_openrouter_context_rejection_is_typed(self):
         client = OpenRouterClient("test-key")
@@ -201,6 +311,357 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
 
+    async def test_openrouter_missing_choices_retries_inside_provider_adapter(self):
+        client = OpenRouterClient("test-key")
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        responses = [
+            httpx.Response(
+                200,
+                request=request,
+                json={"error": {"message": "upstream provider timeout"}},
+            ),
+            httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": "recovered"}}]},
+            ),
+        ]
+        client.client.post = AsyncMock(side_effect=responses)
+        client.MAX_RETRIES = 3
+        retry_callback = AsyncMock()
+        try:
+            response = await client.generate_completion(
+                model="nvidia/model:free",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=10,
+                retry_callback=retry_callback,
+            )
+            self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+            self.assertEqual(client.client.post.await_count, 2)
+            retry_callback.assert_awaited_once()
+            self.assertEqual(
+                retry_callback.await_args.args[0]["reason"],
+                "invalid_response",
+            )
+        finally:
+            await client.close()
+
+    async def test_openrouter_missing_choices_exhaustion_is_typed_transient(self):
+        client = OpenRouterClient("test-key")
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        response = httpx.Response(
+            200,
+            request=request,
+            json={"error": {"message": "upstream provider timeout"}},
+        )
+        client.client.post = AsyncMock(return_value=response)
+        client.MAX_RETRIES = 3
+        retry_callback = AsyncMock()
+        try:
+            with self.assertRaises(ProviderRouteError) as raised:
+                await client.generate_completion(
+                    model="nvidia/model:free",
+                    messages=[{"role": "user", "content": "hello"}],
+                    max_tokens=10,
+                    retry_callback=retry_callback,
+                )
+            self.assertEqual(client.client.post.await_count, 3)
+            self.assertEqual(retry_callback.await_count, 2)
+            self.assertTrue(is_transient_model_call_error(raised.exception))
+            self.assertFalse(is_non_retryable_model_error(raised.exception))
+            self.assertNotIn("upstream provider timeout", str(raised.exception))
+        finally:
+            await client.close()
+
+    async def test_openrouter_malformed_choices_type_uses_invalid_response_retry(self):
+        client = OpenRouterClient("test-key")
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        responses = [
+            httpx.Response(
+                200,
+                request=request,
+                json={"choices": {"message": {"content": "wrong shape"}}},
+            ),
+            httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": "recovered"}}]},
+            ),
+        ]
+        client.client.post = AsyncMock(side_effect=responses)
+        retry_callback = AsyncMock()
+        try:
+            response = await client.generate_completion(
+                model="vendor/model",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=10,
+                retry_callback=retry_callback,
+            )
+            self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+            self.assertEqual(client.client.post.await_count, 2)
+            retry_callback.assert_awaited_once()
+            self.assertEqual(
+                retry_callback.await_args.args[0]["reason"],
+                "invalid_response",
+            )
+        finally:
+            await client.close()
+
+    async def test_openrouter_empty_choices_retry_payload_reports_auto_upstream_route(self):
+        client = OpenRouterClient("test-key")
+        client.client.post = AsyncMock(side_effect=[
+            _openrouter_response(200, json=UPSTREAM_ERROR_BODY),
+            _success_response(),
+        ])
+        retry_callback = AsyncMock()
+        try:
+            await client.generate_completion(
+                model="vendor/test-free:free",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=10,
+                retry_callback=retry_callback,
+            )
+            payload = retry_callback.await_args.args[0]
+            self.assertEqual(payload["provider"], "openrouter")
+            self.assertEqual(payload["model"], "vendor/test-free:free")
+            self.assertEqual(payload["configured_host_provider"], "")
+            self.assertEqual(payload["upstream_host_provider"], "TestHost")
+            self.assertEqual(payload["auto_fallback_from_host"], "")
+            self.assertEqual(payload["provider_request_id"], "gen-test-0001")
+            self.assertEqual(
+                payload["error_summary"],
+                "OpenRouter returned a successful response without completion choices "
+                "(upstream 429: TestHost is temporarily rate-limited upstream).",
+            )
+        finally:
+            await client.close()
+
+    async def test_openrouter_empty_choices_retry_payload_reports_pinned_host(self):
+        client = OpenRouterClient("test-key")
+        client.client.post = AsyncMock(side_effect=[
+            _openrouter_response(200, json={"id": "gen-test-0002"}),
+            _success_response(),
+        ])
+        retry_callback = AsyncMock()
+        try:
+            await client.generate_completion(
+                model="vendor/test-free:free",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=10,
+                provider="TestHost",
+                retry_callback=retry_callback,
+            )
+            payload = retry_callback.await_args.args[0]
+            self.assertEqual(payload["configured_host_provider"], "TestHost")
+            self.assertEqual(payload["upstream_host_provider"], "")
+            self.assertEqual(payload["auto_fallback_from_host"], "")
+            self.assertEqual(payload["provider_request_id"], "gen-test-0002")
+            self.assertEqual(
+                payload["error_summary"],
+                "OpenRouter returned a successful response without completion choices.",
+            )
+        finally:
+            await client.close()
+
+    async def test_openrouter_empty_choices_exhaustion_route_carries_upstream_host(self):
+        client = OpenRouterClient("test-key")
+        client.client.post = AsyncMock(
+            return_value=_openrouter_response(200, json=UPSTREAM_ERROR_BODY)
+        )
+        client.MAX_RETRIES = 2
+        try:
+            with self.assertRaises(ProviderRouteError) as raised:
+                await client.generate_completion(
+                    model="vendor/test-free:free",
+                    messages=[{"role": "user", "content": "hello"}],
+                    max_tokens=10,
+                    retry_callback=AsyncMock(),
+                )
+            route = raised.exception.route
+            self.assertEqual(route.host_provider, "")
+            self.assertEqual(route.upstream_host_provider, "TestHost")
+            self.assertEqual(route.provider_request_id, "gen-test-0001")
+            self.assertEqual(route.auto_fallback_from_host, "")
+            self.assertEqual(
+                str(raised.exception),
+                "OpenRouter returned no completion choices after 2 attempts. "
+                "(provider=openrouter, model=vendor/test-free:free, route=primary)",
+            )
+            self.assertTrue(is_transient_model_call_error(raised.exception))
+        finally:
+            await client.close()
+
+    async def test_openrouter_auto_fallback_marks_subsequent_retry_payloads(self):
+        client = OpenRouterClient("test-key")
+        client.client.post = AsyncMock(side_effect=[
+            _openrouter_response(
+                404,
+                json={"error": {"code": 404, "message": "No endpoints found for vendor/test-free:free."}},
+            ),
+            _openrouter_response(200, json={"id": "gen-test-0003", "provider": "TestHost"}),
+            _success_response(),
+        ])
+        retry_callback = AsyncMock()
+        try:
+            response = await client.generate_completion(
+                model="vendor/test-free:free",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=10,
+                provider="PinnedHost",
+                allow_provider_auto_fallback=True,
+                retry_callback=retry_callback,
+            )
+            self.assertEqual(
+                response["_moto_openrouter_provider_auto_fallback"],
+                {"from_provider": "PinnedHost"},
+            )
+            retry_callback.assert_awaited_once()
+            payload = retry_callback.await_args.args[0]
+            self.assertEqual(payload["auto_fallback_from_host"], "PinnedHost")
+            self.assertEqual(payload["configured_host_provider"], "PinnedHost")
+            self.assertEqual(payload["upstream_host_provider"], "TestHost")
+            self.assertEqual(payload["provider_request_id"], "gen-test-0003")
+        finally:
+            await client.close()
+
+    async def test_openrouter_auto_fallback_exhaustion_route_keeps_fallback_origin(self):
+        client = OpenRouterClient("test-key")
+        client.client.post = AsyncMock(side_effect=[
+            _openrouter_response(
+                404,
+                json={"error": {"code": 404, "message": "No endpoints found for vendor/test-free:free."}},
+            ),
+            _openrouter_response(200, json=UPSTREAM_ERROR_BODY),
+        ])
+        client.MAX_RETRIES = 2
+        try:
+            with self.assertRaises(ProviderRouteError) as raised:
+                await client.generate_completion(
+                    model="vendor/test-free:free",
+                    messages=[{"role": "user", "content": "hello"}],
+                    max_tokens=10,
+                    provider="PinnedHost",
+                    allow_provider_auto_fallback=True,
+                    retry_callback=AsyncMock(),
+                )
+            route = raised.exception.route
+            self.assertEqual(route.host_provider, "")
+            self.assertEqual(route.auto_fallback_from_host, "PinnedHost")
+            self.assertEqual(route.upstream_host_provider, "TestHost")
+            self.assertNotIn("PinnedHost", str(raised.exception))
+            self.assertNotIn("TestHost", str(raised.exception))
+        finally:
+            await client.close()
+
+    async def test_openrouter_non_json_retry_reports_no_upstream_host(self):
+        client = OpenRouterClient("test-key")
+        client.client.post = AsyncMock(side_effect=[
+            _openrouter_response(
+                200,
+                text="<html>gateway hiccup</html>",
+                headers={"content-type": "text/html"},
+            ),
+            _success_response(),
+        ])
+        retry_callback = AsyncMock()
+        try:
+            await client.generate_completion(
+                model="vendor/test-model",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=10,
+                retry_callback=retry_callback,
+            )
+            payload = retry_callback.await_args.args[0]
+            self.assertEqual(payload["reason"], "invalid_response")
+            self.assertEqual(payload["configured_host_provider"], "")
+            self.assertEqual(payload["upstream_host_provider"], "")
+            self.assertEqual(payload["provider_request_id"], "")
+        finally:
+            await client.close()
+
+    async def test_openrouter_http_error_retry_and_route_report_upstream_host(self):
+        client = OpenRouterClient("test-key")
+        client.client.post = AsyncMock(return_value=_openrouter_response(
+            503,
+            json={
+                "id": "gen-test-0004",
+                "error": {
+                    "code": 503,
+                    "message": "upstream unavailable",
+                    "metadata": {"provider_name": "TestHost"},
+                },
+            },
+        ))
+        client.MAX_RETRIES = 2
+        retry_callback = AsyncMock()
+        try:
+            with self.assertRaises(ProviderRouteError) as raised:
+                await client.generate_completion(
+                    model="vendor/test-model",
+                    messages=[{"role": "user", "content": "hello"}],
+                    max_tokens=10,
+                    provider="TestHost",
+                    retry_callback=retry_callback,
+                )
+            payload = retry_callback.await_args.args[0]
+            self.assertEqual(payload["reason"], "http_error")
+            self.assertEqual(payload["configured_host_provider"], "TestHost")
+            self.assertEqual(payload["upstream_host_provider"], "TestHost")
+            self.assertEqual(payload["provider_request_id"], "gen-test-0004")
+            route = raised.exception.route
+            self.assertEqual(route.host_provider, "TestHost")
+            self.assertEqual(route.upstream_host_provider, "TestHost")
+            self.assertEqual(route.provider_request_id, "gen-test-0004")
+        finally:
+            await client.close()
+
+    async def test_openrouter_paid_rate_limit_retry_reports_upstream_host(self):
+        client = OpenRouterClient("test-key")
+        client.client.post = AsyncMock(side_effect=[
+            _openrouter_response(429, json=UPSTREAM_ERROR_BODY),
+            _success_response(),
+        ])
+        retry_callback = AsyncMock()
+        try:
+            await client.generate_completion(
+                model="vendor/test-paid",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=10,
+                retry_callback=retry_callback,
+            )
+            payload = retry_callback.await_args.args[0]
+            self.assertEqual(payload["reason"], "rate_limited")
+            self.assertEqual(payload["upstream_host_provider"], "TestHost")
+            self.assertEqual(payload["provider_request_id"], "gen-test-0001")
+        finally:
+            await client.close()
+
+    async def test_openrouter_direct_retry_wait_receives_same_route_payload(self):
+        client = OpenRouterClient("test-key")
+        client.client.post = AsyncMock(side_effect=[
+            _openrouter_response(200, json=UPSTREAM_ERROR_BODY),
+            _success_response(),
+        ])
+        try:
+            with patch(
+                "backend.shared.openrouter_client.assured_retry_wait",
+                new=AsyncMock(return_value=True),
+            ) as retry_wait:
+                await client.generate_completion(
+                    model="vendor/test-free:free",
+                    messages=[{"role": "user", "content": "hello"}],
+                    max_tokens=10,
+                )
+            retry_wait.assert_awaited_once()
+            payload = retry_wait.await_args.args[0]
+            self.assertEqual(retry_wait.await_args.kwargs["role_id"], "openrouter_direct")
+            self.assertEqual(payload["configured_host_provider"], "")
+            self.assertEqual(payload["upstream_host_provider"], "TestHost")
+            self.assertEqual(payload["provider_request_id"], "gen-test-0001")
+            self.assertIn("upstream 429:", payload["error_summary"])
+        finally:
+            await client.close()
+
     async def test_openrouter_opaque_upstream_404_is_transient_after_internal_retries(self):
         client = OpenRouterClient("test-key")
         request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
@@ -236,8 +697,66 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                 retry_callback.await_args_list[0].args[0]["reason"],
                 "upstream_provider_error",
             )
+            self.assertIn(
+                "opaque HTTP 404",
+                retry_callback.await_args_list[0].args[0]["error_summary"],
+            )
+            self.assertIn(
+                "Nvidia",
+                retry_callback.await_args_list[0].args[0]["error_summary"],
+            )
+            self.assertEqual(
+                retry_callback.await_args_list[0].args[0]["upstream_host_provider"],
+                "Nvidia",
+            )
+            self.assertEqual(raised.exception.route.upstream_host_provider, "Nvidia")
             self.assertTrue(is_transient_model_call_error(raised.exception))
             self.assertFalse(is_non_retryable_model_error(raised.exception))
+        finally:
+            await client.close()
+
+    async def test_openrouter_retry_callback_exposes_redacted_http_error(self):
+        client = OpenRouterClient("test-key")
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        response = httpx.Response(
+            503,
+            request=request,
+            json={
+                "error": {
+                    "message": "upstream unavailable",
+                    "authorization": "Bearer secret-value",
+                    "metadata": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "private prompt ] still private",
+                            }
+                        ]
+                    },
+                }
+            },
+        )
+        client.client.post = AsyncMock(return_value=response)
+        client.MAX_RETRIES = 2
+        retry_callback = AsyncMock()
+        try:
+            with patch(
+                "backend.shared.openrouter_client.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                with self.assertRaises(ProviderRouteError):
+                    await client.generate_completion(
+                        model="vendor/model",
+                        messages=[{"role": "user", "content": "hello"}],
+                        max_tokens=10,
+                        retry_callback=retry_callback,
+                    )
+            retry_payload = retry_callback.await_args_list[0].args[0]
+            self.assertEqual(retry_payload["reason"], "http_error")
+            self.assertIn("upstream unavailable", retry_payload["error_summary"])
+            self.assertNotIn("secret-value", retry_payload["error_summary"])
+            self.assertNotIn("private prompt", retry_payload["error_summary"])
+            self.assertIn("[redacted]", retry_payload["error_summary"])
         finally:
             await client.close()
 

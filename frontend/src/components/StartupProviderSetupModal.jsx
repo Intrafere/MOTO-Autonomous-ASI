@@ -1,5 +1,7 @@
 import React from 'react';
 import './settings-common.css';
+import './StartupModals.css';
+import useOverflowAssist from '../hooks/useOverflowAssist';
 
 export default function StartupProviderSetupModal({
   isOpen,
@@ -14,6 +16,12 @@ export default function StartupProviderSetupModal({
   onChooseOpenRouter,
   onConfirmLmStudio,
 }) {
+  const {
+    scrollRef,
+    hasOverflow,
+    isAtEnd,
+  } = useOverflowAssist(isOpen);
+
   if (!isOpen) return null;
 
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
@@ -21,25 +29,28 @@ export default function StartupProviderSetupModal({
 
   return (
     <div
-      className="inline-modal-overlay"
+      className="inline-modal-overlay startup-modal-overlay"
       style={{ zIndex: 10000 }}
       onClick={(e) => e.stopPropagation()}
     >
       <div
-        className="inline-modal-content"
-        style={{
-          width: '760px',
-          maxWidth: '92vw',
-          backgroundColor: '#141426',
-          borderRadius: '14px',
-        }}
+        className="inline-modal-content startup-modal-shell startup-provider-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="startup-provider-title"
       >
-        <div className="settings-header-row" style={{ marginBottom: '1rem' }}>
-          <h2 style={{ margin: 0, color: '#fff', fontSize: '1.45rem' }}>
+        <div className="settings-header-row startup-modal-header">
+          <h2 id="startup-provider-title" style={{ margin: 0, color: '#fff' }}>
             Choose Your Startup Setup
           </h2>
         </div>
 
+        <div className="startup-modal-scroll-shell">
+          <div
+            ref={scrollRef}
+            className="startup-modal-scroll-region"
+          >
+            <div className="startup-modal-scroll-content">
         <p style={{ color: '#ddd', lineHeight: '1.6', marginBottom: '0.9rem' }}>
           {lmStudioEnabled ? (
             <>
@@ -78,7 +89,7 @@ export default function StartupProviderSetupModal({
           )}
         </div>
 
-        <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
+        <div className="startup-provider-grid">
           <div
             style={{
               padding: '1rem',
@@ -227,6 +238,18 @@ export default function StartupProviderSetupModal({
           After setup, open <strong>Autonomous Model Selection &amp; Settings</strong> to pick your saved team
           profile or switch to any built-in default profile.
         </p>
+            </div>
+          </div>
+          {hasOverflow && !isAtEnd && (
+            <div className="startup-modal-overflow-fade" aria-hidden="true" />
+          )}
+        </div>
+        {hasOverflow && !isAtEnd && (
+          <div className="startup-modal-more-indicator" aria-hidden="true">
+            <span>More below</span>
+            <span className="startup-modal-more-arrow">↓</span>
+          </div>
+        )}
       </div>
     </div>
   );

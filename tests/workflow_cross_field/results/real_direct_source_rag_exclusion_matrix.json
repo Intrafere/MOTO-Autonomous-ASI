@@ -1,12 +1,19 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "prompt.direct_sources_excluded_from_rag"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "aggregator_direct_and_offloaded_sources",
     "compiler_construction_exclusions",
     "compiler_rigor_exclusions",
     "offloaded_source_retrievable"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "prompt_context",
@@ -15,11 +22,24 @@
   "invariants": [
     "prompt.direct_sources_excluded_from_rag"
   ],
+  "observed_transition": "aggregator_direct_and_offloaded_sources; compiler_construction_exclusions; compiler_rigor_exclusions; offloaded_source_retrievable",
+  "real_components": [
+    "backend/aggregator/core/context_allocator.py",
+    "backend/compiler/core/compiler_rag_manager.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_direct_source_rag_exclusion_matrix",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_e_rag_prompt_context.py"
+  "source_identity": "workflow-source-v1:1850f397c978c01980b223bdf2de787a7892751cedd78056297087017ceacf27",
+  "test_file": "tests/workflow_real_adapters/test_build_e_rag_prompt_context.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_e_rag_prompt_context.py::test_build_e_aggregator_mixed_direct_and_offloaded_sources_are_excluded",
+    "tests/workflow_real_adapters/test_build_e_rag_prompt_context.py::test_build_e_aggregator_source_becomes_retrievable_when_offloaded",
+    "tests/workflow_real_adapters/test_build_e_rag_prompt_context.py::test_build_e_compiler_construction_excludes_direct_sources_and_keeps_references",
+    "tests/workflow_real_adapters/test_build_e_rag_prompt_context.py::test_build_e_compiler_rigor_excludes_direct_outline_and_paper"
+  ]
 }

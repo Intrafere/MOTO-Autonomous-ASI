@@ -1,10 +1,19 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_loop.automatic_round_policy_preserved"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
-    "first_zero_exits",
-    "proofs_only_up_to_four"
+    "proofs_only_max_4",
+    "combined_brainstorm_max_2",
+    "completed_paper_max_1",
+    "first_zero_exit"
+  ],
+  "faked_dependencies": [
+    "provider and Lean proof-stage boundary"
   ],
   "fields": [
     "continuous_proof_loop",
@@ -14,11 +23,21 @@
   "invariants": [
     "proof_loop.automatic_round_policy_preserved"
   ],
+  "observed_transition": "real Autonomous caller selects 4/2/1 round maxima by output/source policy and exits on the first valid zero-candidate result",
+  "real_components": [
+    "backend/autonomous/core/autonomous_coordinator.py",
+    "backend/autonomous/core/proof_round_driver.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_automatic_round_caller_count_policy_preserved",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/unit/test_autonomous_proof_rounds.py"
+  "source_identity": "workflow-source-v1:adf7eb184370e91c5a7daf25642e873f0c092288ef1aa62fcad776c4df3f2a51",
+  "test_file": "tests/workflow_real_adapters/test_build_07_proof_loop_lifecycle.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_07_proof_loop_lifecycle.py::test_real_autonomous_automatic_round_policy_matrix"
+  ]
 }

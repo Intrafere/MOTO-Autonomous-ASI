@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
 import logging
+import httpx
 
 from backend.shared.config import rag_config, system_config
 from backend.shared.models import BoostConfig
@@ -27,6 +28,26 @@ logger = logging.getLogger(__name__)
 class BoostNextCountRequest(BaseModel):
     """Request body for setting boost next count."""
     count: int
+
+
+def _raise_boost_key_validation_error(exc: Exception) -> None:
+    """Map credential rejection separately from provider reachability failures."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code if exc.response is not None else 0
+        if status_code in (401, 403):
+            raise HTTPException(
+                status_code=400,
+                detail="OpenRouter rejected the Boost API key.",
+            ) from exc
+    if isinstance(exc, (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException)):
+        raise HTTPException(
+            status_code=502,
+            detail="Could not reach OpenRouter to validate the Boost API key.",
+        ) from exc
+    raise HTTPException(
+        status_code=502,
+        detail="OpenRouter could not validate the Boost API key.",
+    ) from exc
 
 
 def _resolve_boost_api_key(api_key: Optional[str], *, allow_current_override: bool = False) -> str:
@@ -67,13 +88,10 @@ async def enable_boost(config: BoostConfig) -> Dict[str, Any]:
         
         client = OpenRouterClient(effective_api_key)
         try:
-            models = await client.list_models()
-            
-            if not models:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Failed to connect to OpenRouter. Please check your API key."
-                )
+            try:
+                await client.get_current_api_key()
+            except Exception as exc:
+                _raise_boost_key_validation_error(exc)
         finally:
             await client.close()
 
@@ -141,13 +159,10 @@ async def update_boost_model(config: BoostConfig) -> Dict[str, Any]:
         
         client = OpenRouterClient(effective_api_key)
         try:
-            models = await client.list_models()
-            
-            if not models:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Failed to connect to OpenRouter. Please check your API key."
-                )
+            try:
+                await client.get_current_api_key()
+            except Exception as exc:
+                _raise_boost_key_validation_error(exc)
         finally:
             await client.close()
 

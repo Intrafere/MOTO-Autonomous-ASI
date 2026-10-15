@@ -19,10 +19,18 @@ from backend.autonomous.core.proof_verification_stage import ProofVerificationSt
 from backend.autonomous.agents.proof_candidate_list_validator import (
     ProofCandidateListValidator,
 )
-from backend.autonomous.memory.brainstorm_memory import BrainstormMemory
+from backend.autonomous.memory.brainstorm_memory import (
+    BrainstormMemory,
+    project_brainstorm_content_for_model,
+)
 from backend.autonomous.memory.paper_library import PaperLibrary
 from backend.autonomous.memory.proof_database import ProofDatabase
-from backend.autonomous.prompts.proof_prompts import build_proof_formalization_prompt
+from backend.autonomous.prompts.proof_prompts import (
+    build_proof_formalization_prompt,
+    build_proof_identification_prompt,
+    build_proof_novelty_prompt,
+    build_proof_tactic_script_prompt,
+)
 from backend.aggregator.memory.shared_training import (
     clear_manual_aggregator_prompt,
     load_manual_aggregator_prompt,
@@ -78,6 +86,89 @@ class _FakeActiveProofDatabase:
 
 
 class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
+    def test_inline_brainstorm_proof_projection_is_owner_run_scoped(self):
+        separator = "=" * 80
+        canonical = (
+            f"{separator}\nSUBMISSION #1 | Accepted: now\n{separator}\n"
+            "ordinary sentinel\n\n"
+            f"{separator}\nSUBMISSION #2 | Accepted: now\n{separator}\n"
+            "[LEAN 4 VERIFIED BRAINSTORM PROOF]\npruned inline sentinel\n\n"
+            f"{separator}\nSUBMISSION #3 | Accepted: now\n{separator}\n"
+            "[LEAN 4 VERIFIED BRAINSTORM PROOF]\nactive inline sentinel\n"
+        )
+        proofs = [
+            {
+                "source_type": "brainstorm",
+                "source_id": "topic_001",
+                "theorem_id": "brainstorm_submission_2",
+                "live_context_status": "pruned",
+                "live_context_owner_run_id": "run_owner",
+            },
+            {
+                "source_type": "brainstorm",
+                "source_id": "topic_001",
+                "theorem_id": "brainstorm_submission_3",
+                "live_context_status": "active",
+            },
+        ]
+
+        owner_projection = project_brainstorm_content_for_model(
+            canonical,
+            proofs=proofs,
+            requesting_run_id="run_owner",
+            source_id="topic_001",
+        )
+        future_projection = project_brainstorm_content_for_model(
+            canonical,
+            proofs=proofs,
+            requesting_run_id="future_run",
+            source_id="topic_001",
+        )
+
+        self.assertIn("ordinary sentinel", owner_projection)
+        self.assertNotIn("pruned inline sentinel", owner_projection)
+        self.assertNotIn("SUBMISSION #2", owner_projection)
+        self.assertIn("active inline sentinel", owner_projection)
+        self.assertIn("pruned inline sentinel", future_projection)
+        self.assertIn("pruned inline sentinel", canonical)
+
+    async def test_brainstorm_model_context_strips_appendix_and_linked_pruned_submission(self):
+        separator = "=" * 80
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory = BrainstormMemory()
+            memory._base_dir = Path(tmpdir)
+            memory._get_database_path("topic_001").write_text(
+                (
+                    f"{separator}\nSUBMISSION #4 | Accepted: now\n{separator}\n"
+                    "[LEAN 4 VERIFIED BRAINSTORM PROOF]\npruned source sentinel\n\n"
+                    "=== PROOFS GENERATED FROM THIS BRAINSTORM (Lean 4 Verified) ===\n"
+                    "appendix sentinel\n"
+                ),
+                encoding="utf-8",
+            )
+            database = mock.AsyncMock()
+            database.get_all_proofs.return_value = [
+                {
+                    "source_type": "brainstorm",
+                    "source_id": "topic_001",
+                    "theorem_id": "brainstorm_submission_4",
+                    "live_context_status": "pruned",
+                    "live_context_owner_run_id": "run_owner",
+                }
+            ]
+
+            projected = await memory.get_model_context_content(
+                "topic_001",
+                proof_database=database,
+                requesting_run_id="run_owner",
+            )
+            canonical = await memory.get_database_content("topic_001")
+
+        self.assertNotIn("pruned source sentinel", projected)
+        self.assertNotIn("appendix sentinel", projected)
+        self.assertIn("pruned source sentinel", canonical)
+        self.assertIn("appendix sentinel", canonical)
+
     async def asyncSetUp(self):
         await super().asyncSetUp()
 
@@ -101,6 +192,102 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
         self._candidate_list_validator_patch.start()
         self.addAsyncCleanup(self._candidate_list_validator_patch.stop)
+
+    async def test_group_novelty_injection_is_atomic_and_not_standalone(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            database = ProofDatabase()
+            database._base_dir = Path(tmp_dir)
+            database._root_relative_default = None
+            database._index_data = {
+                "proofs": [
+                    {
+                        "proof_id": "proof_001",
+                        "run_id": "run-group",
+                        "novel": True,
+                        "novelty_tier": "mathematical_discovery",
+                        "novelty_scope": "standalone",
+                        "theorem_statement": "theorem member_one : True",
+                        "lean_code": "theorem member_one : True := by trivial",
+                    },
+                    {
+                        "proof_id": "proof_002",
+                        "run_id": "run-group",
+                        "novel": True,
+                        "novelty_tier": "mathematical_discovery",
+                        "novelty_scope": "group",
+                        "novelty_group_claim": "Together the two declarations establish the ranked claim.",
+                        "novelty_group_proof_ids": ["proof_001", "proof_002"],
+                        "theorem_statement": "theorem member_two : True",
+                        "lean_code": "theorem member_two : True := by trivial",
+                    },
+                ]
+            }
+
+            context = database.get_novel_proofs_for_injection("run-group")
+
+        self.assertIn("PROOF GROUP", context)
+        self.assertIn("Together the two declarations establish the ranked claim.", context)
+        self.assertIn("Member proof IDs: proof_001, proof_002", context)
+        self.assertIn("This tier applies only to the finite verified group", context)
+        self.assertNotIn(
+            "PROOF 2 [Mathematical Discovery]: theorem member_two",
+            context,
+        )
+
+    def test_group_membership_projection_preserves_member_standalone_rank(self):
+        proofs = [
+            ProofRecord(
+                proof_id="proof_member",
+                theorem_statement="Member theorem.",
+                source_type="paper",
+                source_id="paper_001",
+                run_id="run-group",
+                lean_code="theorem member : True := by trivial",
+                novelty_scope="standalone",
+            ),
+            ProofRecord(
+                proof_id="proof_anchor",
+                theorem_statement="Anchor theorem.",
+                source_type="paper",
+                source_id="paper_001",
+                run_id="run-group",
+                lean_code="theorem anchor : True := by trivial",
+                novelty_scope="group",
+                novelty_group_claim="Together the pair establishes the claim.",
+                novelty_group_proof_ids=["proof_member", "proof_anchor"],
+            ),
+        ]
+
+        projected = proofs_route._annotate_novelty_group_memberships(proofs)
+        member = next(proof for proof in projected if proof["proof_id"] == "proof_member")
+        resolved = proofs_route._resolve_novelty_group_anchor(projected, "proof_member")
+
+        self.assertEqual(member["novelty_scope"], "standalone")
+        self.assertEqual(member["novelty_group_anchor_proof_ids"], ["proof_anchor"])
+        self.assertEqual(resolved["proof_id"], "proof_anchor")
+
+    async def test_incomplete_group_injection_returns_no_marker_block(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            database = ProofDatabase()
+            database._base_dir = Path(tmp_dir)
+            database._root_relative_default = None
+            database._index_data = {
+                "proofs": [{
+                    "proof_id": "proof_group_anchor",
+                    "run_id": "run-group",
+                    "novel": True,
+                    "novelty_tier": "mathematical_discovery",
+                    "novelty_scope": "group",
+                    "novelty_group_claim": "Requires a missing member.",
+                    "novelty_group_proof_ids": ["proof_missing", "proof_group_anchor"],
+                    "theorem_statement": "theorem anchor : True",
+                    "lean_code": "theorem anchor : True := by trivial",
+                }]
+            }
+
+            context = database.get_novel_proofs_for_injection("run-group")
+
+        self.assertEqual(context, "")
 
     async def test_manual_aggregator_runtime_prefers_active_manual_config_over_stale_request_snapshot(self):
         previous_state = {
@@ -485,6 +672,164 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(events[0][1]["is_novel"])
         self.assertEqual(events[0][1]["novelty_tier"], "duplicate_novel")
 
+    async def test_group_novelty_broadcast_preserves_popup_and_activity_metadata(self):
+        events = []
+        record = ProofRecord(
+            proof_id="proof_group_anchor",
+            theorem_statement="Second verified branch.",
+            source_type="paper",
+            source_id="paper_001",
+            lean_code="theorem second_verified_branch : True := by trivial",
+            novel=True,
+            novelty_tier="mathematical_discovery",
+            novelty_reasoning="The finite pair establishes the result.",
+            novelty_scope="group",
+            novelty_group_claim="Together the two declarations cover both branches.",
+            novelty_group_proof_ids=["proof_group_first"],
+        )
+
+        async def broadcast(event_type, payload):
+            events.append((event_type, payload))
+
+        await proof_registration_module._broadcast_registered_proof(
+            broadcast_fn=broadcast,
+            record=record,
+            base_event={"source_type": "paper"},
+        )
+
+        self.assertEqual(events[0][0], "novel_proof_discovered")
+        self.assertEqual(events[0][1]["novelty_scope"], "group")
+        self.assertEqual(
+            events[0][1]["novelty_group_proof_ids"],
+            ["proof_group_first"],
+        )
+        self.assertIn("both branches", events[0][1]["novelty_group_claim"])
+
+    def test_proof_novelty_prompt_ranks_actual_lean_result_not_claimed_target(self):
+        prompt = build_proof_novelty_prompt(
+            user_prompt="Resolve the major open target.",
+            theorem_statement="The major open target is resolved.",
+            lean_code=(
+                "theorem narrow_verified_lemma (n : Nat) : n + 0 = n := by\n"
+                "  simp"
+            ),
+            existing_novel_proofs="",
+            verified_group_candidates=(
+                "- proof_id: proof_prior\n"
+                "  theorem_name: prior_branch\n"
+                "  theorem_statement: A separate verified branch."
+            ),
+        )
+
+        self.assertIn("already been accepted by Lean 4 without errors", prompt)
+        self.assertIn("Treat the LEAN 4 CODE as authoritative for what was proved", prompt)
+        self.assertIn("If any description overstates or differs from the code, follow the code", prompt)
+        self.assertIn(
+            "Never transfer the ambition or importance of an unproved target",
+            prompt,
+        )
+        self.assertIn(
+            'Use "standalone" when the novelty tier is justified by the current LEAN 4 CODE',
+            prompt,
+        )
+        self.assertIn(
+            "derive the combined claim solely from the current verified Lean declarations",
+            prompt,
+        )
+        self.assertIn("proof_prior", prompt)
+        self.assertIn("identify the concrete result established by the Lean code", prompt)
+        self.assertNotIn("prompt-critical", prompt)
+        self.assertIn("prompt-relevant (directly or indirectly)", prompt)
+
+    async def test_novelty_assessment_start_precedes_result_and_preserves_result_payload(self):
+        prior_record = ProofRecord(
+            proof_id="proof_prior",
+            theorem_statement="First verified branch.",
+            source_type="paper",
+            source_id="paper_001",
+            run_id="current-run",
+            lean_code="theorem first_verified_branch : True := by trivial",
+            novel=True,
+            novelty_tier="novel_variant",
+        )
+
+        class FakeProofDb:
+            def __init__(self):
+                self.records = [prior_record]
+
+            async def get_all_proofs(self):
+                return list(self.records)
+
+            async def add_proof_occurrence(self, record):
+                stored = record.model_copy(update={"proof_id": "proof_current"})
+                self.records.append(stored)
+                return stored
+
+        events = []
+
+        async def broadcast(event_type, payload):
+            events.append((event_type, payload))
+
+        async def assess_group(**kwargs):
+            self.assertIn("proof_prior", kwargs["allowed_group_proof_ids"])
+            return proof_novelty_module.ProofNoveltyAssessment(
+                novelty_tier="mathematical_discovery",
+                reasoning="The verified pair establishes both branches.",
+                novelty_scope="group",
+                group_claim="Together the verified declarations establish both branches.",
+                group_proof_ids=("proof_prior",),
+            )
+
+        old_assess = proof_registration_module.assess_proof_novelty
+        proof_registration_module.assess_proof_novelty = assess_group
+        try:
+            await proof_registration_module.register_verified_lean_proof(
+                proof_database=FakeProofDb(),
+                user_prompt="Prove both branches.",
+                theorem_statement="Second verified branch.",
+                lean_code="theorem second_verified_branch : True := by trivial",
+                validator_model="validator",
+                validator_context=4000,
+                validator_max_tokens=1000,
+                task_id="proof_novelty_event_test",
+                role_id="autonomous_proof_novelty",
+                source_type="paper",
+                source_id="paper_001",
+                theorem_id="candidate_second",
+                theorem_name="second_verified_branch",
+                run_id="current-run",
+                broadcast_fn=broadcast,
+                base_event={"trigger": "automatic"},
+                proof_label="B",
+            )
+        finally:
+            proof_registration_module.assess_proof_novelty = old_assess
+
+        self.assertEqual(
+            [event_type for event_type, _payload in events],
+            ["proof_novelty_assessment_started", "novel_proof_discovered"],
+        )
+        start_payload = events[0][1]
+        self.assertTrue(start_payload["lean_verified"])
+        self.assertTrue(start_payload["verified_group_candidates_available"])
+        self.assertEqual(start_payload["theorem_statement"], "Second verified branch.")
+        self.assertEqual(start_payload["run_id"], "current-run")
+        self.assertNotIn("lean_code", start_payload)
+        self.assertNotIn("user_prompt", start_payload)
+
+        result_payload = events[1][1]
+        self.assertEqual(result_payload["novelty_tier"], "mathematical_discovery")
+        self.assertEqual(
+            result_payload["novelty_reasoning"],
+            "The verified pair establishes both branches.",
+        )
+        self.assertEqual(result_payload["novelty_scope"], "group")
+        self.assertEqual(
+            result_payload["novelty_group_claim"],
+            "Together the verified declarations establish both branches.",
+        )
+        self.assertEqual(result_payload["novelty_group_proof_ids"], ["proof_prior"])
+
     async def test_proof_library_novel_category_uses_prompt_injection_tiers(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = ProofDatabase()
@@ -692,6 +1037,65 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("valid tier", reasoning)
         self.assertEqual(len(fake_api_client_manager.calls), 2)
 
+    async def test_proof_novelty_group_scope_requires_supplied_verified_ids(self):
+        class FakeApiClientManager:
+            async def generate_completion(self, **kwargs):
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "novelty_tier": "mathematical_discovery",
+                                        "reasoning": "The finite pair establishes the combined claim.",
+                                        "novelty_scope": "group",
+                                        "group_claim": "Together the two verified declarations cover both cases.",
+                                        "group_proof_ids": ["proof_001"],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+
+        old_api_client_manager = proof_novelty_module.api_client_manager
+        proof_novelty_module.api_client_manager = FakeApiClientManager()
+        try:
+            assessment = await proof_novelty_module.assess_proof_novelty(
+                user_prompt="Solve the prompt.",
+                theorem_statement="The second verified case.",
+                lean_code="theorem proof_002 : True := by trivial",
+                validator_model="validator",
+                validator_context=8000,
+                validator_max_tokens=1000,
+                existing_novel_proofs="",
+                verified_group_candidates=(
+                    "- proof_id: proof_001\n"
+                    "  theorem_name: first_case\n"
+                    "  theorem_statement: The first verified case."
+                ),
+                allowed_group_proof_ids=frozenset({"proof_001"}),
+                task_id="proof_novelty_group",
+            )
+        finally:
+            proof_novelty_module.api_client_manager = old_api_client_manager
+
+        self.assertEqual(assessment.novelty_scope, "group")
+        self.assertEqual(assessment.group_proof_ids, ("proof_001",))
+        self.assertIn("both cases", assessment.group_claim)
+
+    async def test_proof_novelty_legacy_payload_defaults_to_standalone(self):
+        assessment = proof_novelty_module._parse_novelty_payload(
+            json.dumps(
+                {
+                    "novelty_tier": "novel_variant",
+                    "reasoning": "The accepted declaration has standalone value.",
+                }
+            )
+        )
+        self.assertEqual(assessment.novelty_scope, "standalone")
+        self.assertEqual(assessment.group_proof_ids, ())
+
     async def test_proof_novelty_model_cannot_assign_duplicate_overlay(self):
         class FakeApiClientManager:
             def __init__(self):
@@ -884,6 +1288,39 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("retrieved_pattern", retrieved_section)
         self.assertIn("Use retrieved proofs only as optional proof-pattern", retrieved_section)
+
+    def test_formalization_prompts_keep_faithful_selected_target_without_contradiction(self):
+        kwargs = {
+            "user_prompt": "Solve the actual user prompt.",
+            "source_type": "brainstorm",
+            "theorem_statement": "Target theorem.",
+            "formal_sketch": "Use the source.",
+            "full_source_content": "Brainstorm body.",
+            "source_excerpt": "Local target excerpt.",
+            "prior_attempts": [],
+        }
+
+        for prompt in (
+            build_proof_formalization_prompt(**kwargs),
+            build_proof_tactic_script_prompt(**kwargs),
+        ):
+            self.assertNotIn("If you narrow an", prompt)
+            self.assertNotIn("high-impact target", prompt)
+            self.assertIn("choose the precise formal reading", prompt)
+            self.assertIn("do NOT replace it with a narrower", prompt)
+            self.assertIn("faithful attempt at the selected target", prompt)
+
+    def test_identification_prompt_does_not_promise_downstream_narrowing(self):
+        prompt = build_proof_identification_prompt(
+            user_prompt="Solve the actual user prompt.",
+            source_type="brainstorm",
+            source_id="topic_001",
+            source_content="Brainstorm body.",
+        )
+
+        self.assertNotIn("handle narrowing", prompt)
+        self.assertIn("will not narrow a selected statement", prompt)
+        self.assertIn("will not narrow or weaken the statement", prompt)
 
     async def test_manual_aggregator_prompt_falls_back_to_persisted_prompt(self):
         old_data_dir = system_config.data_dir
@@ -1692,6 +2129,166 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("stored_proof_sentinel", twice)
 
+    async def test_refresh_injected_proof_context_replaces_stale_block(self):
+        db = ProofDatabase()
+        db._index_data = {
+            "next_proof_id": 3,
+            "proof_set_revision": 7,
+            "proofs": [
+                {
+                    "proof_id": "proof_active",
+                    "theorem_statement": "Active theorem sentinel.",
+                    "source_type": "paper",
+                    "source_id": "paper_001",
+                    "lean_code": "theorem refreshed_active_sentinel : True := by trivial",
+                    "novel": True,
+                    "novelty_tier": "mathematical_discovery",
+                    "live_context_status": "active",
+                },
+                {
+                    "proof_id": "proof_pruned",
+                    "theorem_statement": "Pruned theorem sentinel.",
+                    "source_type": "paper",
+                    "source_id": "paper_001",
+                    "lean_code": "theorem stale_pruned_sentinel : True := by trivial",
+                    "novel": True,
+                    "novelty_tier": "mathematical_discovery",
+                    "live_context_status": "active",
+                },
+            ],
+        }
+        stale_prompt = db.inject_into_prompt("User prompt sentinel.", "run_owner")
+        db._index_data["proofs"][1].update(
+            live_context_status="pruned",
+            live_context_owner_run_id="run_owner",
+        )
+        db._index_data["proof_set_revision"] = 8
+
+        refreshed, revision = await db.refresh_injected_proof_context(
+            stale_prompt,
+            requesting_run_id="run_owner",
+        )
+
+        self.assertEqual(revision, 8)
+        self.assertIn("User prompt sentinel.", refreshed)
+        self.assertIn("refreshed_active_sentinel", refreshed)
+        self.assertNotIn("stale_pruned_sentinel", refreshed)
+        self.assertEqual(
+            refreshed.count("=== VERIFIED NOVEL MATHEMATICAL PROOFS (Lean 4 Verified) ==="),
+            1,
+        )
+
+    async def test_refresh_injected_proof_context_preserves_future_run_visibility(self):
+        db = ProofDatabase()
+        db._index_data = {
+            "next_proof_id": 2,
+            "proof_set_revision": 4,
+            "proofs": [
+                {
+                    "proof_id": "proof_pruned",
+                    "theorem_statement": "Pruned theorem sentinel.",
+                    "source_type": "paper",
+                    "source_id": "paper_001",
+                    "lean_code": "theorem future_run_sentinel : True := by trivial",
+                    "novel": True,
+                    "novelty_tier": "mathematical_discovery",
+                    "live_context_status": "pruned",
+                    "live_context_owner_run_id": "run_owner",
+                },
+            ],
+        }
+        stale_prompt = (
+            "=== VERIFIED NOVEL MATHEMATICAL PROOFS (Lean 4 Verified) ===\n"
+            "stale block\n"
+            "=== END VERIFIED PROOFS ===\n\n"
+            "User prompt sentinel."
+        )
+
+        owning_prompt, _ = await db.refresh_injected_proof_context(
+            stale_prompt,
+            requesting_run_id="run_owner",
+        )
+        future_prompt, _ = await db.refresh_injected_proof_context(
+            stale_prompt,
+            requesting_run_id="run_future",
+        )
+
+        self.assertEqual(owning_prompt, "User prompt sentinel.")
+        self.assertIn("future_run_sentinel", future_prompt)
+        self.assertIn("User prompt sentinel.", future_prompt)
+
+    async def test_stage_refreshes_stale_context_before_checkpoint_candidate_phase_a(self):
+        old_lean4_enabled = system_config.lean4_enabled
+        system_config.lean4_enabled = True
+        stage = ProofVerificationStage()
+        prompts_seen: list[str] = []
+        candidate = ProofCandidate(
+            theorem_id="checkpoint_candidate",
+            statement="Checkpoint theorem.",
+            expected_novelty_tier="mathematical_discovery",
+            prompt_relevance_rationale="Directly relevant.",
+            novelty_rationale="New.",
+            why_not_standard_known_result="Not standard.",
+        )
+
+        class RefreshingDatabase:
+            async def refresh_injected_proof_context(self, prompt, requesting_run_id=""):
+                self.requesting_run_id = requesting_run_id
+                return (
+                    prompt.replace("stale_pruned_sentinel", "fresh_active_sentinel"),
+                    12,
+                )
+
+        database = RefreshingDatabase()
+
+        async def fake_pipeline(**kwargs):
+            prompts_seen.append(kwargs["user_prompt"])
+            return SimpleNamespace(
+                candidate=kwargs["theorem_candidate"],
+                proof_label=kwargs["proof_label"],
+                success=False,
+                theorem_name="",
+                lean_code="",
+                attempts=[],
+                context_overflow_payload={},
+                competition_winner={},
+            )
+
+        async def fake_prepare_candidate(**kwargs):
+            return kwargs["theorem_candidate"]
+
+        async def broadcast(_event_type, _payload):
+            return None
+
+        stage._prepare_candidate = fake_prepare_candidate
+        stage._run_lean_pipeline_for_candidate = fake_pipeline
+        try:
+            await stage.run(
+                content="source",
+                source_type="brainstorm",
+                source_id="topic_001",
+                user_prompt="stale_pruned_sentinel\nUser prompt.",
+                canonical_user_prompt="User prompt.",
+                run_id="run_owner",
+                submitter_model="model",
+                submitter_context=4000,
+                submitter_max_tokens=1000,
+                validator_model="validator",
+                validator_context=4000,
+                validator_max_tokens=1000,
+                broadcast_fn=broadcast,
+                novel_proofs_db=database,
+                theorem_candidates=[candidate],
+                trigger="manual",
+            )
+        finally:
+            system_config.lean4_enabled = old_lean4_enabled
+
+        self.assertEqual(database.requesting_run_id, "run_owner")
+        self.assertEqual(len(prompts_seen), 1)
+        self.assertIn("fresh_active_sentinel", prompts_seen[0])
+        self.assertNotIn("stale_pruned_sentinel", prompts_seen[0])
+
     def test_owning_run_prune_filters_model_context_but_not_canonical_records(self):
         db = ProofDatabase()
         db._index_data = {
@@ -1831,6 +2428,7 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
                         "prompt_relevance_rationale": "This directly solves the user prompt.",
                         "novelty_rationale": "Novel.",
                         "why_not_standard_known_result": "Not standard.",
+                        "retry_open_target_id": " manual_aggregator:thm_1 ",
                     },
                 ]
                 if self.calls > 1:
@@ -1872,6 +2470,7 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(has_candidates)
         self.assertEqual(fake_api_client_manager.calls, 2)
         self.assertEqual([candidate.theorem_id for candidate in candidates], ["valid"])
+        self.assertEqual(candidates[0].retry_open_target_id, "manual_aggregator:thm_1")
 
     async def test_proof_identification_retries_codex_max_output_truncation(self):
         class FakeApiClientManager:

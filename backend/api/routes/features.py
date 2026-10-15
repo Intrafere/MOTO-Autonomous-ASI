@@ -6,13 +6,15 @@ import json
 import logging
 from pathlib import Path
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
 from backend.shared.build_info import get_build_info
 from backend.shared.config import system_config
+from backend.shared.syntheticlib_product import get_syntheticlib_product_state
+from backend.shared.trade_data_boundary import redact_trade_text
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -33,6 +35,11 @@ class FeaturesResponse(BaseModel):
     openai_codex_oauth_available: bool
     xai_grok_oauth_available: bool
     sakana_fugu_available: bool
+    syntheticlib_product_state: Literal[
+        "coming_soon",
+        "developer_preview",
+        "launched",
+    ]
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -66,6 +73,7 @@ async def get_features() -> Dict[str, Any]:
             "openai_codex_oauth_available": not is_generic,
             "xai_grok_oauth_available": not is_generic,
             "sakana_fugu_available": not is_generic,
+            "syntheticlib_product_state": get_syntheticlib_product_state().value,
         }
     )
 
@@ -115,4 +123,4 @@ async def _refresh_runtime_update_notice_if_due() -> None:
             )
             await asyncio.to_thread(write_update_notice, result)
         except Exception as exc:
-            logger.warning("Runtime update notice refresh failed: %s", exc)
+            logger.warning("Runtime update notice refresh failed: %s", redact_trade_text(exc))

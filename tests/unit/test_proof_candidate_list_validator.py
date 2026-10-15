@@ -6,6 +6,9 @@ from backend.autonomous.agents.proof_candidate_list_validator import (
     ProofCandidateListContractError,
     ProofCandidateListValidator,
 )
+from backend.autonomous.prompts.proof_prompts import (
+    build_proof_candidate_list_validation_prompt,
+)
 from backend.shared.models import ProofCandidate
 
 
@@ -16,23 +19,27 @@ class ProofCandidateListValidatorContractTests(unittest.TestCase):
             for index in range(1, 5)
         ]
 
-    def test_exactly_seventy_five_percent_is_accepted(self):
-        self.assertTrue(
-            ProofCandidateListValidator.threshold_met(
-                approved_count=3,
-                proposed_count=4,
-            )
+    def test_prompt_approves_novel_indirect_steps_and_rejects_known_results(self):
+        prompt = build_proof_candidate_list_validation_prompt(
+            user_prompt="Solve the problem.",
+            source_type="brainstorm",
+            source_id="topic_001",
+            source_title="Topic",
+            candidates_json="[]",
         )
 
-    def test_below_seventy_five_percent_is_rejected(self):
-        self.assertFalse(
-            ProofCandidateListValidator.threshold_met(
-                approved_count=2,
-                proposed_count=4,
-            )
-        )
+        self.assertIn("may eventually lead, directly or indirectly", prompt)
+        self.assertIn("Novel intermediate or stepping-stone results qualify", prompt)
+        self.assertIn("Reject standard results, routine helpers", prompt)
+        self.assertNotIn("directly solves or substantially advances", prompt)
 
-    def test_all_novel_is_accepted_and_only_approved_candidates_forward(self):
+    def test_single_approved_candidate_accepts_the_list(self):
+        self.assertTrue(ProofCandidateListValidator.list_accepted(approved_count=1))
+
+    def test_zero_approved_candidates_rejects_the_list(self):
+        self.assertFalse(ProofCandidateListValidator.list_accepted(approved_count=0))
+
+    def test_partially_novel_list_is_accepted_and_only_approved_candidates_forward(self):
         validation = ProofCandidateListValidator.parse_response(
             json.dumps(
                 {
@@ -40,15 +47,15 @@ class ProofCandidateListValidatorContractTests(unittest.TestCase):
                         {
                             "theorem_id": candidate.theorem_id,
                             "decision": (
-                                "reject_not_novel"
-                                if candidate.theorem_id == "thm_4"
-                                else "approve_novel"
+                                "approve_novel"
+                                if candidate.theorem_id == "thm_2"
+                                else "reject_not_novel"
                             ),
                             "reasoning": "Independent novelty assessment.",
                         }
                         for candidate in self.candidates
                     ],
-                    "feedback": "Replace the standard fourth target.",
+                    "feedback": "Only the second target is novel.",
                 }
             ),
             expected_candidate_ids=[candidate.theorem_id for candidate in self.candidates],
@@ -59,13 +66,10 @@ class ProofCandidateListValidatorContractTests(unittest.TestCase):
         )
         self.assertEqual(
             [candidate.theorem_id for candidate in approved],
-            ["thm_1", "thm_2", "thm_3"],
+            ["thm_2"],
         )
         self.assertTrue(
-            ProofCandidateListValidator.threshold_met(
-                approved_count=len(approved),
-                proposed_count=len(self.candidates),
-            )
+            ProofCandidateListValidator.list_accepted(approved_count=len(approved))
         )
 
     def test_duplicate_missing_or_reordered_results_are_rejected(self):

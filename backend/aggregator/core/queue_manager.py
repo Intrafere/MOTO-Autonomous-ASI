@@ -28,6 +28,18 @@ class QueueManager:
         async with self._lock:
             self.queue.append(submission)
             logger.debug(f"Enqueued submission {submission.submission_id}. Queue size: {len(self.queue)}")
+
+    async def prepend_batch(self, submissions: List[Submission]) -> None:
+        """Restore an in-flight batch to the front while preserving FIFO order."""
+        if not submissions:
+            return
+        async with self._lock:
+            self.queue.extendleft(reversed(submissions))
+            logger.debug(
+                "Restored %s in-flight submissions. Queue size: %s",
+                len(submissions),
+                len(self.queue),
+            )
     
     async def size(self) -> int:
         """Get current queue size."""

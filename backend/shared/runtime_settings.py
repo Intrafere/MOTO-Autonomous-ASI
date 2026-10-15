@@ -25,7 +25,6 @@ class RuntimeSettingsError(RuntimeError):
     """Raised when non-secret runtime settings cannot be persisted."""
 
 _PROOF_BOOL_FIELDS = {
-    "lean4_enabled",
     "lean4_lsp_enabled",
     "smt_enabled",
 }
@@ -37,7 +36,9 @@ _PROOF_INT_FIELDS = {
     "smt_timeout": (1, 600),
 }
 
-_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT = 600
+# Previously shipped defaults; a persisted value equal to one of these was never
+# user-chosen, so it follows the current default instead.
+_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUTS = frozenset({"600", "900"})
 _LEGACY_DEFAULT_SMT_TIMEOUT = 30
 
 _CONNECTIVITY_BOOL_FIELDS = {
@@ -116,7 +117,7 @@ def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
 
 def _proof_settings_from_config() -> Dict[str, Any]:
     return {
-        "lean4_enabled": bool(system_config.lean4_enabled),
+        "lean4_user_enabled": bool(system_config.lean4_user_enabled),
         "lean4_lsp_enabled": bool(system_config.lean4_lsp_enabled),
         "lean4_proof_timeout": int(system_config.lean4_proof_timeout),
         "lean4_lsp_idle_timeout": int(system_config.lean4_lsp_idle_timeout),
@@ -124,6 +125,19 @@ def _proof_settings_from_config() -> Dict[str, Any]:
         "smt_enabled": bool(system_config.smt_enabled),
         "smt_timeout": int(system_config.smt_timeout),
     }
+
+
+def reconcile_lean4_runtime_state() -> None:
+    """Apply immutable process capability to the durable Lean user preference."""
+    if system_config.lean4_runtime_available is None:
+        system_config.lean4_runtime_available = bool(system_config.lean4_enabled)
+    if system_config.lean4_user_enabled is None:
+        system_config.lean4_user_enabled = bool(system_config.lean4_enabled)
+    system_config.lean4_enabled = bool(
+        system_config.lean4_runtime_available
+        and system_config.lean4_user_enabled
+        and not system_config.generic_mode
+    )
 
 
 def _free_model_settings_from_manager() -> Dict[str, Any]:
@@ -178,12 +192,19 @@ def get_persisted_connectivity_toggles() -> Dict[str, bool]:
 def apply_persisted_runtime_settings() -> None:
     """Apply persisted non-secret runtime settings to process globals."""
     payload = _read_settings()
-    if not payload:
-        return
 
     if not system_config.generic_mode:
         proof_settings = payload.get("proof_settings")
         if isinstance(proof_settings, dict):
+            preference_value = proof_settings.get(
+                "lean4_user_enabled",
+                proof_settings.get("lean4_enabled"),
+            )
+            if preference_value is not None:
+                system_config.lean4_user_enabled = _coerce_bool(
+                    preference_value,
+                    bool(system_config.lean4_enabled),
+                )
             for field in _PROOF_BOOL_FIELDS:
                 if field in proof_settings:
                     setattr(
@@ -196,8 +217,7 @@ def apply_persisted_runtime_settings() -> None:
                     default = int(getattr(system_config, field))
                     if (
                         field == "lean4_proof_timeout"
-                        and default != _LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT
-                        and str(proof_settings[field]).strip() == str(_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT)
+                        and str(proof_settings[field]).strip() in _LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUTS
                     ):
                         proof_settings[field] = default
                     if (
@@ -216,6 +236,8 @@ def apply_persisted_runtime_settings() -> None:
                             maximum,
                         ),
                     )
+
+    reconcile_lean4_runtime_state()
 
     free_model_settings = payload.get("free_model_settings")
     if isinstance(free_model_settings, dict):

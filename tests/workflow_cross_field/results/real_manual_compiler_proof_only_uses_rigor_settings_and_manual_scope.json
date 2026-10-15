@@ -1,10 +1,17 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_scope.manual_not_in_autonomous_current"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "manual_scope",
     "rigor_settings"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "allowed_outputs",
@@ -14,11 +21,22 @@
   "invariants": [
     "proof_scope.manual_not_in_autonomous_current"
   ],
+  "observed_transition": "manual_scope; rigor_settings",
+  "real_components": [
+    "backend/api/routes/compiler.py",
+    "backend/autonomous/core/autonomous_coordinator.py",
+    "backend/leanoj/core/leanoj_coordinator.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_manual_compiler_proof_only_uses_rigor_settings_and_manual_scope",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+  "source_identity": "workflow-source-v1:7e44bac22fc13c7dde85bf87337e38a1b44c5a77895f0a7e256953d346f95588",
+  "test_file": "tests/workflow_real_adapters/test_proof_routes.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_proof_routes.py::test_manual_compiler_proof_only_uses_rigor_settings_and_manual_scope"
+  ]
 }

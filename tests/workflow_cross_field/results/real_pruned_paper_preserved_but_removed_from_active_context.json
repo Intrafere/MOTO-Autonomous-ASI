@@ -1,6 +1,10 @@
 {
   "adapter": "real_route",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "state.pruned_papers_excluded_from_context"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "pruned_history_downloadable",
@@ -9,6 +13,9 @@
     "rag_source_removed",
     "temp_root"
   ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
+  ],
   "fields": [
     "workflow_filesystem_state",
     "prompt_context"
@@ -16,11 +23,21 @@
   "invariants": [
     "state.pruned_papers_excluded_from_context"
   ],
+  "observed_transition": "pruned_history_downloadable; active_enumeration_empty; brainstorm_reference_removed; rag_source_removed; temp_root",
+  "real_components": [
+    "backend/api/routes/proofs.py",
+    "backend/autonomous/memory/proof_database.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_pruned_paper_preserved_but_removed_from_active_context",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+  "source_identity": "workflow-source-v1:bb02df84f32c8c1bb80f94cf6063dce3dd72bf2d0c3fe6b8639073c04d56379e",
+  "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py::test_pruned_paper_moves_to_temp_history_and_route_excludes_active_file"
+  ]
 }

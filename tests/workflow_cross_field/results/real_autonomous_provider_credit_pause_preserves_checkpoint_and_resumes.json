@@ -1,10 +1,17 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "provider.pause_preserves_checkpoint"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "provider_pause",
     "checkpoint_resume"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "provider_pause_resume",
@@ -14,11 +21,22 @@
   "invariants": [
     "provider.pause_preserves_checkpoint"
   ],
+  "observed_transition": "provider_pause; checkpoint_resume",
+  "real_components": [
+    "backend/api/routes/compiler.py",
+    "backend/autonomous/core/autonomous_coordinator.py",
+    "backend/leanoj/core/leanoj_coordinator.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+  "source_identity": "workflow-source-v1:6cba3baf005ea309233dff5bef6a2bd70b7fc344860936a0073ccb91aaf4cca0",
+  "test_file": "tests/workflow_real_adapters/test_proof_routes.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_proof_routes.py::test_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes"
+  ]
 }

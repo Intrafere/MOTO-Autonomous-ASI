@@ -62,6 +62,18 @@ test.each([false, true])('Codex effort survives saved settings and honors runnin
   await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.disabled === isRunning)).toBe(true));
 });
 
+test.each([false, true])('xAI effort survives saved settings and honors running=%s for all compiler roles', async isRunning => {
+  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: true } });
+  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [{ id: 'grok-4.3' }] });
+  const settings = {};
+  for (const prefix of ['validator', 'assistant', 'writer', 'highParam']) Object.assign(settings, { [`${prefix}Provider`]: 'xai_grok_oauth', [`${prefix}Model`]: 'grok-4.3', [`${prefix}OpenrouterReasoningEffort`]: 'low' });
+  localStorage.setItem('compiler_settings', JSON.stringify(settings));
+  renderSettings({ isRunning });
+  const controls = await screen.findAllByRole('combobox', { name: 'xAI Reasoning Effort' });
+  expect(controls).toHaveLength(4);
+  expect(controls.every(node => node.value === 'low' && node.disabled === isRunning)).toBe(true);
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();

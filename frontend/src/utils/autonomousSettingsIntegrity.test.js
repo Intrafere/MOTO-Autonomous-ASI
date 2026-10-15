@@ -83,6 +83,22 @@ describe('Autonomous settings integrity', () => {
     expect(() => validateAutonomousConfig(config)).toThrow('Submitter count does not match configured roles');
   });
 
+  it('canonicalizes persisted submitter identities from role order', () => {
+    const settings = getStoredAutonomousSettings();
+    const restored = getStoredAutonomousSettings();
+    persistAutonomousSettings({
+      ...settings,
+      numSubmitters: 2,
+      submitterConfigs: [
+        { ...settings.submitterConfigs[0], submitterId: 7 },
+        { ...settings.submitterConfigs[0], submitterId: 7 },
+      ],
+    });
+    const config = settingsToAutonomousConfig(getStoredAutonomousSettings());
+    expect(config.submitter_configs.map(role => role.submitterId)).toEqual([1, 2]);
+    expect(restored.submitterConfigs[0].submitterId).toBe(1);
+  });
+
   it('applies LM Studio startup defaults only on recommended first-launch routes', () => {
     const firstLaunch = applyLmStudioStartupDefaults('local-chat');
     expect(firstLaunch.config.writer_model).toBe('local-chat');

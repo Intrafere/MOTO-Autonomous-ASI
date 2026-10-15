@@ -1,6 +1,8 @@
 import unittest
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from backend.compiler.core import compiler_coordinator as coordinator_module
 from backend.compiler.core.compiler_coordinator import CompilerCoordinator
@@ -19,7 +21,10 @@ from backend.compiler.memory.paper_memory import (
     paper_memory,
 )
 from backend.compiler.validation.compiler_validator import CompilerValidator
+from backend.shared.api_client_manager import RetryableProviderError
 from backend.shared.models import CompilerSubmission, CompilerValidationResult
+from backend.shared.openrouter_client import OpenRouterInvalidResponseError
+from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
 
 
 class CompilerMarkerVisibilityTests(unittest.TestCase):
@@ -112,6 +117,144 @@ class CompilerRigorLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, coordinator_module.MAX_RIGOR_CYCLES_PER_LOOP)
         self.assertFalse(coordinator.rigor_cycle_active)
+
+
+class CompilerProviderFailurePropagationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _retryable_error() -> RetryableProviderError:
+        return RetryableProviderError(
+            provider="openrouter",
+            provider_label="OpenRouter",
+            role_id="compiler_writer",
+            model="vendor/model",
+            reason="transient_provider_error",
+            message="OpenRouter transient provider failure",
+        )
+
+    async def test_outline_creation_propagates_retryable_provider_failure(self) -> None:
+        coordinator = CompilerCoordinator()
+        coordinator.is_running = True
+        coordinator.writer_submitter = SimpleNamespace(
+            submit_outline_create=AsyncMock(side_effect=self._retryable_error())
+        )
+
+        with patch.object(
+            coordinator_module.api_client_manager,
+            "emit_and_wait_for_retry",
+            new=AsyncMock(),
+        ) as generic_retry:
+            with self.assertRaises(RetryableProviderError):
+                await coordinator._outline_creation_loop()
+
+        generic_retry.assert_not_awaited()
+
+    async def test_initial_construction_propagates_retryable_provider_failure(self) -> None:
+        coordinator = CompilerCoordinator()
+        coordinator.is_running = True
+        coordinator.writer_submitter = SimpleNamespace(
+            submit_construction=AsyncMock(side_effect=self._retryable_error())
+        )
+
+        with patch.object(
+            coordinator_module.api_client_manager,
+            "emit_and_wait_for_retry",
+            new=AsyncMock(),
+        ) as generic_retry:
+            with self.assertRaises(RetryableProviderError):
+                await coordinator._initial_paper_loop()
+
+        generic_retry.assert_not_awaited()
+
+    async def _assert_raw_invalid_response_is_retried_in_loop(
+        self,
+        submit_method: str,
+        run_loop,
+        retry_reason: str,
+    ) -> None:
+        coordinator = CompilerCoordinator()
+        coordinator.is_running = True
+        invalid = OpenRouterInvalidResponseError(
+            "OpenRouter returned a non-JSON response body",
+            status_code=200,
+            content_type="text/html",
+            body_preview="",
+        )
+        attempts = []
+        running_on_retry = []
+
+        async def fail_once_then_stop(**_kwargs):
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise invalid
+            running_on_retry.append(coordinator.is_running)
+            coordinator.is_running = False
+            return None
+
+        submit = AsyncMock(side_effect=fail_once_then_stop)
+        coordinator.writer_submitter = SimpleNamespace(**{submit_method: submit})
+        events = []
+
+        async def broadcast(event, payload):
+            events.append(event)
+
+        with patch.object(coordinator, "_broadcast", new=broadcast), patch.object(
+            coordinator_module.compiler_rejection_log,
+            "add_rejection",
+            new=AsyncMock(),
+        ), patch.object(
+            coordinator_module.api_client_manager,
+            "emit_and_wait_for_retry",
+            new=AsyncMock(),
+        ) as retry:
+            await run_loop(coordinator)
+
+        self.assertEqual(submit.await_count, 2)
+        self.assertEqual(running_on_retry, [True])
+        first_retry = retry.await_args_list[0]
+        self.assertEqual(first_retry.args[0]["reason"], retry_reason)
+        self.assertIs(first_retry.kwargs["error"], invalid)
+        self.assertNotIn("compiler_error", events)
+
+    async def test_outline_creation_retries_raw_invalid_provider_response(self) -> None:
+        await self._assert_raw_invalid_response_is_retried_in_loop(
+            "submit_outline_create",
+            lambda coordinator: coordinator._outline_creation_loop(),
+            "outline_generation_retry",
+        )
+
+    async def test_initial_construction_retries_raw_invalid_provider_response(self) -> None:
+        await self._assert_raw_invalid_response_is_retried_in_loop(
+            "submit_construction",
+            lambda coordinator: coordinator._initial_paper_loop(),
+            "construction_retry",
+        )
+
+    async def test_outline_context_failure_uses_context_overflow_lifecycle(self) -> None:
+        coordinator = CompilerCoordinator()
+        coordinator.is_running = True
+        coordinator.writer_submitter = SimpleNamespace(
+            submit_outline_create=AsyncMock(
+                side_effect=ProviderContextLengthError(
+                    "Provider context limit exceeded.",
+                    route=ProviderRouteIdentity(
+                        provider="openrouter",
+                        model="vendor/model",
+                    ),
+                )
+            )
+        )
+
+        async def stop_after_context_overflow(*args, **kwargs) -> None:
+            coordinator.is_running = False
+
+        with patch.object(
+            coordinator,
+            "_handle_context_overflow",
+            new=AsyncMock(side_effect=stop_after_context_overflow),
+        ) as context_overflow:
+            await coordinator._outline_creation_loop()
+
+        context_overflow.assert_awaited_once()
 
 
 class CompilerCoordinatorMarkerTests(unittest.IsolatedAsyncioTestCase):

@@ -46,6 +46,7 @@ from backend.leanoj.prompts import (
 )
 from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
 from backend.autonomous.memory.proof_database import proof_database
+from backend.shared.activity import fill_missing_activity_metadata
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verify_brainstorm_proof_candidate
 from backend.shared.config import rag_config, system_config
@@ -57,7 +58,14 @@ from backend.shared.context_overflow import (
 )
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
-from backend.shared.lean4_client import Lean4Result, get_lean4_client
+from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+    Lean4Result,
+    LeanWorkspaceRepairRequiredError,
+    get_lean4_client,
+    raise_for_lean_workspace_failure,
+    recover_lean_workspace,
+)
 from backend.shared.lean_proof_integrity import strip_lean_comments_and_strings, validate_lean_proof_integrity
 from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.models import (
@@ -77,6 +85,11 @@ from backend.shared.provider_pause import (
     wait_for_provider_resume,
 )
 from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
+from backend.shared.provider_route_identity import (
+    is_placeholder_provider,
+    merge_route_identity,
+    with_route_identity,
+)
 from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback_async
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
@@ -161,6 +174,14 @@ _LEANOJ_ACTIVE_PLAN_CONTEXT_TERMS = (
     "next obligation",
 )
 _LEANOJ_PROOF_SEARCH_MAX_TOKENS = 3500
+# Route identity fields that describe one provider; they are not merged into a
+# payload that already names a different provider.
+_PROVIDER_SPECIFIC_ROUTE_FIELDS = (
+    "provider_label",
+    "configured_host_provider",
+    "effective_host_provider",
+    "host_routing",
+)
 
 _SOLUTION_PATH_SEMANTIC_VALIDATOR_TASKS = {
     "leanoj_topic_val",
@@ -200,6 +221,10 @@ class LeanOJConfigurationError(RuntimeError):
         super().__init__(message)
         self.route = route
         self.role_id = role_id or (route.role_id if route else "")
+
+
+class LeanOJBatchValidationContractError(RuntimeError):
+    """A batch validator response could not be matched to every input item."""
 
 
 _BrainstormSubmission = tuple[int, str, dict[str, Any]]
@@ -359,7 +384,43 @@ class LeanOJCoordinator:
 
     async def _broadcast(self, event: str, data: Optional[dict[str, Any]] = None) -> None:
         if self._broadcast_callback:
-            await self._broadcast_callback(event, data or {})
+            payload = data or {}
+            semantic = any(
+                marker in event
+                for marker in ("validated", "accepted", "rejected", "declined")
+            ) and "contract" not in event
+            operational = any(
+                marker in event
+                for marker in ("failed", "error", "overflow", "provider", "contract", "stopped")
+            )
+            await self._broadcast_callback(
+                event,
+                fill_missing_activity_metadata(
+                    payload,
+                    workflow="leanoj",
+                    run_id=self._state.session_id,
+                    generation=self._control_generation,
+                    source_type="leanoj",
+                    source_id=self._state.session_id,
+                    role_id=str(payload.get("role_id") or payload.get("submitter_id") or ""),
+                    phase=str(payload.get("phase") or self._state.phase),
+                    classification=(
+                        "semantic" if semantic else "operational" if operational else "informational"
+                    ),
+                    category="validator" if semantic else "workflow",
+                    outcome=(
+                        "rejected"
+                        if "rejected" in event or "declined" in event
+                        else "error"
+                        if operational
+                        else "success"
+                        if "accepted" in event or "validated" in event or "complete" in event
+                        else "info"
+                    ),
+                    feedback=payload.get("validator_feedback") or payload.get("validator_reasoning"),
+                    detail=payload.get("error_summary") or payload.get("message"),
+                ),
+            )
 
     @staticmethod
     def _is_context_overflow_exception(exc: BaseException) -> bool:
@@ -406,6 +467,22 @@ class LeanOJCoordinator:
             "context_overflow_error",
             overflow_payload,
         )
+
+    async def _handle_lean_workspace_stop(self, exc: LeanWorkspaceRepairRequiredError) -> None:
+        """Stop without counting an attempt: Lean never checked the proof."""
+        if self._fatal_stop_reason == LEAN_WORKSPACE_REPAIR_REQUIRED_REASON:
+            return
+        payload = {
+            **exc.to_repair_event(workflow_mode="leanoj", stopped_subject="Proof Solver"),
+            "phase": self._state.phase,
+        }
+        self._fatal_stop_reason = LEAN_WORKSPACE_REPAIR_REQUIRED_REASON
+        self._fatal_stop_message = payload["message"]
+        self._fatal_stop_payload = payload
+        self._state.phase = "stopped"
+        self._state.last_error = f"{payload['message']} {exc.terminal_guidance}"
+        self._stop_event.set()
+        await self._persist_and_broadcast(LEAN_WORKSPACE_REPAIR_REQUIRED_REASON, payload)
 
     def get_state(self) -> LeanOJState:
         return self._state
@@ -700,12 +777,15 @@ class LeanOJCoordinator:
             self._enable_api_logging()
             await self._persist_and_broadcast("leanoj_started")
             if self._state.provider_paused:
-                pause_payload = {
-                    "reason": self._state.provider_pause_reason,
-                    "role_id": self._state.provider_pause_role_id,
-                    "message": self._state.provider_pause_message,
-                    "phase": self._state.phase,
-                }
+                pause_payload = self._route_identity_payload(
+                    {
+                        "reason": self._state.provider_pause_reason,
+                        "role_id": self._state.provider_pause_role_id,
+                        "message": self._state.provider_pause_message,
+                        "phase": self._state.phase,
+                    },
+                    self._state.provider_pause_role_id,
+                )
                 mark_provider_paused()
                 await self._persist_and_broadcast("leanoj_provider_paused", pause_payload)
                 await wait_for_provider_resume(self._should_stop)
@@ -720,6 +800,9 @@ class LeanOJCoordinator:
             await self._run_workflow(self._request)
         except asyncio.CancelledError:
             raise
+        except LeanWorkspaceRepairRequiredError as exc:
+            logger.error("LeanOJ stopped because Lean 4 needs repair: %s", exc)
+            await self._handle_lean_workspace_stop(exc)
         except LeanOJConfigurationError as exc:
             if self._is_context_overflow_exception(exc):
                 logger.error("LeanOJ stopped for context overflow: %s", exc)
@@ -731,7 +814,7 @@ class LeanOJCoordinator:
                 logger.exception("LeanOJ workflow failed")
                 self._state.phase = "error"
                 self._state.last_error = str(exc)
-                await self._persist_and_broadcast("leanoj_error", {"message": str(exc)})
+                await self._persist_and_broadcast("leanoj_error", self._error_event_payload(exc))
         except Exception as exc:
             if self._is_context_overflow_exception(exc):
                 logger.error("LeanOJ stopped for context overflow: %s", exc)
@@ -743,7 +826,7 @@ class LeanOJCoordinator:
                 logger.exception("LeanOJ workflow failed")
                 self._state.phase = "error"
                 self._state.last_error = str(exc)
-                await self._persist_and_broadcast("leanoj_error", {"message": str(exc)})
+                await self._persist_and_broadcast("leanoj_error", self._error_event_payload(exc))
         finally:
             self._running = False
             self._state.is_running = False
@@ -1032,26 +1115,39 @@ class LeanOJCoordinator:
         )
         decisions = raw.get("decisions")
         if not isinstance(decisions, list) or len(decisions) != len(topics):
-            logger.warning(
-                "LeanOJ topic batch validator returned %s decisions for %s topics",
-                len(decisions) if isinstance(decisions, list) else "non-list",
-                len(topics),
+            raise LeanOJBatchValidationContractError(
+                "LeanOJ topic batch validator did not return one ordered decision per topic "
+                f"(received {len(decisions) if isinstance(decisions, list) else 'non-list'} "
+                f"for {len(topics)} topics)."
             )
-            return [False for _ in topics]
 
         accepted: list[bool] = []
+        validation_decisions: list[dict[str, Any]] = []
         for expected_number, decision_payload in enumerate(decisions, start=1):
             if not isinstance(decision_payload, dict):
-                accepted.append(False)
-                continue
-            if decision_payload.get("topic_number") != expected_number:
-                logger.warning(
-                    "LeanOJ topic batch validator returned out-of-order decision: expected %s, got %s",
-                    expected_number,
-                    decision_payload.get("topic_number"),
+                raise LeanOJBatchValidationContractError(
+                    f"LeanOJ topic batch decision {expected_number} was not an object."
                 )
-                return [False for _ in topics]
-            accepted.append(str(decision_payload.get("decision") or "").strip().lower() == "accept")
+            if decision_payload.get("topic_number") != expected_number:
+                raise LeanOJBatchValidationContractError(
+                    "LeanOJ topic batch validator returned out-of-order decisions "
+                    f"(expected {expected_number}, got {decision_payload.get('topic_number')})."
+                )
+            decision = str(decision_payload.get("decision") or "").strip().lower()
+            if decision not in {"accept", "reject"}:
+                raise LeanOJBatchValidationContractError(
+                    f"LeanOJ topic batch decision {expected_number} had invalid decision {decision!r}."
+                )
+            is_accepted = decision == "accept"
+            accepted.append(is_accepted)
+            validation_decisions.append(
+                {
+                    "accepted": is_accepted,
+                    "reasoning": str(decision_payload.get("reasoning") or "").strip(),
+                    "summary": str(decision_payload.get("summary") or "").strip(),
+                }
+            )
+        self._last_brainstorm_validation_decisions = validation_decisions
         return accepted
 
     async def _collect_initial_topics(self, request: LeanOJStartRequest, *, target_topics: int) -> bool:
@@ -1122,19 +1218,43 @@ class LeanOJCoordinator:
                         "target_topics": target_topics,
                     },
                 )
-                decisions = await self._validate_topic_batch(
-                    request,
-                    topics,
-                    accepted_topics=list(self._validated_topics),
-                )
-                for (submitter_index, topic, metadata), accepted in zip(batch, decisions):
+                try:
+                    decisions = await self._validate_topic_batch(
+                        request,
+                        topics,
+                        accepted_topics=list(self._validated_topics),
+                    )
+                except LeanOJBatchValidationContractError as exc:
+                    await self._broadcast(
+                        "leanoj_topic_batch_validation_failed",
+                        {
+                            "validation_stage": "parse_error",
+                            "batch_size": len(batch),
+                            "message": str(exc),
+                        },
+                    )
+                    for item in batch:
+                        await topic_queue.put(item)
+                    continue
+                validation_decisions = list(self._last_brainstorm_validation_decisions)
+                for batch_index, ((submitter_index, topic, metadata), accepted) in enumerate(
+                    zip(batch, decisions)
+                ):
                     submitter_config = request.brainstorm_submitters[submitter_index - 1]
                     creativity_emphasized = bool((metadata or {}).get("creativity_emphasized"))
+                    validation_feedback = (
+                        validation_decisions[batch_index]
+                        if batch_index < len(validation_decisions)
+                        else {}
+                    )
                     if accepted:
                         self._validated_topics.append(topic)
                         await self._persist_and_broadcast(
                             "leanoj_topic_validated",
                             {
+                                "decision": "accept",
+                                "validator_feedback": validation_feedback.get("reasoning", ""),
+                                "validator_summary": validation_feedback.get("summary", ""),
                                 "topic": topic,
                                 "submitter": submitter_index,
                                 "submitter_id": submitter_index,
@@ -1149,6 +1269,9 @@ class LeanOJCoordinator:
                         await self._broadcast(
                             "leanoj_topic_rejected",
                             {
+                                "decision": "reject",
+                                "validator_feedback": validation_feedback.get("reasoning", ""),
+                                "validator_summary": validation_feedback.get("summary", ""),
                                 "topic": topic,
                                 "submitter": submitter_index,
                                 "submitter_id": submitter_index,
@@ -1264,13 +1387,34 @@ class LeanOJCoordinator:
                 logger.warning("LeanOJ topic submitter %s failed: %s", submitter_index, exc)
                 await self._broadcast(
                     "leanoj_topic_submitter_failed",
-                    {
-                        "submitter": submitter_index,
-                        "submitter_id": submitter_index,
-                        "message": str(exc),
-                    },
+                    self._route_identity_payload(
+                        {
+                            "submitter": submitter_index,
+                            "submitter_id": submitter_index,
+                            "message": str(exc),
+                        },
+                        role_id,
+                        error=exc,
+                    ),
                 )
-                await asyncio.sleep(2)
+                await api_client_manager.emit_and_wait_for_retry(
+                    self._route_identity_payload(
+                        {
+                            "provider": "unknown",
+                            "provider_label": "LeanOJ topic submitter",
+                            "role_id": role_id,
+                            "retry_attempt": attempt,
+                            "retry_after_seconds": 2,
+                            "reason": "workflow_retry",
+                            "error_summary": str(exc),
+                        },
+                        role_id,
+                        error=exc,
+                    ),
+                    role_id=role_id,
+                    should_stop=self._should_stop,
+                    error=exc,
+                )
 
     async def _initial_brainstorm_phase(self, request: LeanOJStartRequest) -> None:
         self._state.phase = "initial_brainstorm"
@@ -1472,7 +1616,21 @@ class LeanOJCoordinator:
                     },
                 )
                 validation_generation = self._control_generation
-                decisions = await self._validate_brainstorm_batch(request, submissions)
+                try:
+                    decisions = await self._validate_brainstorm_batch(request, submissions)
+                except LeanOJBatchValidationContractError as exc:
+                    await self._broadcast(
+                        "leanoj_brainstorm_batch_validation_failed",
+                        {
+                            "validation_stage": "parse_error",
+                            "phase": phase_key,
+                            "batch_size": len(batch),
+                            "message": str(exc),
+                        },
+                    )
+                    for item in batch:
+                        await submission_queue.put(item)
+                    continue
                 if not self._owns_control_generation(validation_generation):
                     return
                 validation_decisions = list(self._last_brainstorm_validation_decisions)
@@ -1528,6 +1686,9 @@ class LeanOJCoordinator:
                         await self._persist_and_broadcast(
                             "leanoj_brainstorm_accepted",
                             {
+                                "decision": "accept",
+                                "validator_feedback": validation_feedback.get("reasoning", ""),
+                                "validator_summary": validation_feedback.get("summary", ""),
                                 "submitter": submitter_index,
                                 "submitter_id": submitter_index,
                                 "submitter_model": submitter_config.model_id,
@@ -1592,6 +1753,8 @@ class LeanOJCoordinator:
                         await self._persist_and_broadcast(
                             "leanoj_brainstorm_rejected",
                             {
+                                "decision": "reject",
+                                "validator_feedback": validation_feedback.get("reasoning", ""),
                                 "submitter": submitter_index,
                                 "submitter_id": submitter_index,
                                 "submitter_model": submitter_config.model_id,
@@ -1730,9 +1893,11 @@ class LeanOJCoordinator:
     ) -> None:
         task_prefix = f"leanoj_brainstorm_sub{submitter_index}"
         role_id = f"leanoj_brainstorm_submitter_{submitter_index}"
+        attempt = 0
         queued_count = 0
         while not self._should_stop():
             try:
+                attempt += 1
                 submission_generation = self._control_generation
                 await self._wait_for_brainstorm_queue_turn(submission_queue, submitter_index)
                 if self._should_stop() or not self._owns_control_generation(submission_generation):
@@ -1880,6 +2045,11 @@ class LeanOJCoordinator:
                             for attempt in (gate_result.attempts or [])
                         ],
                         "attempt_count": len(gate_result.attempts or []),
+                        "compile_receipt": (
+                            gate_result.compile_receipt.model_dump(mode="json")
+                            if gate_result.compile_receipt
+                            else None
+                        ),
                     }
                 submission = str(raw.get("submission") or "").strip()
                 if submission:
@@ -1913,6 +2083,9 @@ class LeanOJCoordinator:
                     )
             except asyncio.CancelledError:
                 raise
+            except LeanWorkspaceRepairRequiredError as exc:
+                await self._handle_lean_workspace_stop(exc)
+                return
             except LeanOJConfigurationError as exc:
                 if self._is_context_overflow_exception(exc):
                     await self._handle_context_overflow_stop(exc, role_id=role_id)
@@ -1922,9 +2095,30 @@ class LeanOJCoordinator:
                 logger.warning("LeanOJ brainstorm submitter %s failed: %s", submitter_index, exc)
                 await self._broadcast(
                     "leanoj_brainstorm_submitter_failed",
-                    {"submitter": submitter_index, "message": str(exc)},
+                    self._route_identity_payload(
+                        {"submitter": submitter_index, "message": str(exc)},
+                        role_id,
+                        error=exc,
+                    ),
                 )
-                await asyncio.sleep(2)
+                await api_client_manager.emit_and_wait_for_retry(
+                    self._route_identity_payload(
+                        {
+                            "provider": "unknown",
+                            "provider_label": "LeanOJ brainstorm submitter",
+                            "role_id": role_id,
+                            "retry_attempt": attempt,
+                            "retry_after_seconds": 2,
+                            "reason": "workflow_retry",
+                            "error_summary": str(exc),
+                        },
+                        role_id,
+                        error=exc,
+                    ),
+                    role_id=role_id,
+                    should_stop=self._should_stop,
+                    error=exc,
+                )
 
     async def _dequeue_brainstorm_batch(
         self,
@@ -2015,6 +2209,9 @@ class LeanOJCoordinator:
                     or "Proof Solver verified this brainstorm subproof with Lean 4 and template/device checks."
                 ),
                 attempts=proof_attempts,
+                compile_receipt=(
+                    proof_attempts[-1].compile_receipt if proof_attempts else None
+                ),
                 control_generation=control_generation,
             )
         except Exception as exc:
@@ -2043,6 +2240,11 @@ class LeanOJCoordinator:
             novel=proof_record.novel if proof_record else False,
             novelty_tier=proof_record.novelty_tier if proof_record else "not_novel",
             novelty_reasoning=proof_record.novelty_reasoning if proof_record else "",
+            novelty_scope=proof_record.novelty_scope if proof_record else "standalone",
+            novelty_group_claim=proof_record.novelty_group_claim if proof_record else "",
+            novelty_group_proof_ids=(
+                list(proof_record.novelty_group_proof_ids) if proof_record else []
+            ),
         )
         self._state.verified_subproofs.append(record)
         await self._persist_and_broadcast(
@@ -2111,50 +2313,30 @@ class LeanOJCoordinator:
         )
         decisions = raw.get("decisions")
         if not isinstance(decisions, list) or len(decisions) != len(submissions):
-            logger.warning(
-                "LeanOJ brainstorm batch validator returned %s decisions for %s submissions",
-                len(decisions) if isinstance(decisions, list) else "non-list",
-                len(submissions),
+            raise LeanOJBatchValidationContractError(
+                "LeanOJ brainstorm batch validator did not return one ordered decision per submission "
+                f"(received {len(decisions) if isinstance(decisions, list) else 'non-list'} "
+                f"for {len(submissions)} submissions)."
             )
-            self._last_brainstorm_validation_decisions = [
-                {
-                    "accepted": False,
-                    "reasoning": "Brainstorm validator returned malformed decision payload.",
-                    "summary": "Validator did not return one ordered decision per submission.",
-                }
-                for _ in submissions
-            ]
-            return [False for _ in submissions]
 
         accepted: list[bool] = []
         validation_decisions: list[dict[str, Any]] = []
         for expected_number, decision_payload in enumerate(decisions, start=1):
             if not isinstance(decision_payload, dict):
-                accepted.append(False)
-                validation_decisions.append(
-                    {
-                        "accepted": False,
-                        "reasoning": "Decision payload was not an object.",
-                        "summary": "Validator returned a malformed decision entry.",
-                    }
+                raise LeanOJBatchValidationContractError(
+                    f"LeanOJ brainstorm batch decision {expected_number} was not an object."
                 )
-                continue
             if decision_payload.get("submission_number") != expected_number:
-                logger.warning(
-                    "LeanOJ brainstorm batch validator returned out-of-order decision: expected %s, got %s",
-                    expected_number,
-                    decision_payload.get("submission_number"),
+                raise LeanOJBatchValidationContractError(
+                    "LeanOJ brainstorm batch validator returned out-of-order decisions "
+                    f"(expected {expected_number}, got {decision_payload.get('submission_number')})."
                 )
-                self._last_brainstorm_validation_decisions = [
-                    {
-                        "accepted": False,
-                        "reasoning": "Brainstorm validator returned out-of-order decisions.",
-                        "summary": "Validator decisions could not be matched to submissions.",
-                    }
-                    for _ in submissions
-                ]
-                return [False for _ in submissions]
-            is_accepted = str(decision_payload.get("decision") or "").strip().lower() == "accept"
+            decision = str(decision_payload.get("decision") or "").strip().lower()
+            if decision not in {"accept", "reject"}:
+                raise LeanOJBatchValidationContractError(
+                    f"LeanOJ brainstorm batch decision {expected_number} had invalid decision {decision!r}."
+                )
+            is_accepted = decision == "accept"
             accepted.append(is_accepted)
             validation_decisions.append(
                 {
@@ -2674,6 +2856,7 @@ class LeanOJCoordinator:
         source_title: str = "",
         verification_notes: str = "",
         attempts: Optional[list[ProofAttemptFeedback]] = None,
+        compile_receipt=None,
         control_generation: Optional[int] = None,
     ) -> Optional[ProofRecord]:
         """Register a Proof Solver verified proof in the shared proof database."""
@@ -2692,6 +2875,9 @@ class LeanOJCoordinator:
             # Lazy import avoids pulling autonomous coordinator into LeanOJ module load.
             from backend.autonomous.core.proof_registration import register_verified_lean_proof
 
+            resolved_receipt = compile_receipt or (
+                attempts[-1].compile_receipt if attempts else None
+            )
             registration = await register_verified_lean_proof(
                 proof_database=proof_database,
                 user_prompt=request.user_prompt,
@@ -2715,6 +2901,7 @@ class LeanOJCoordinator:
                 ),
                 attempt_count=attempt_count,
                 attempts=attempts,
+                compile_receipt=resolved_receipt,
                 run_id=self._state.session_id,
                 broadcast_fn=self._broadcast,
                 base_event={
@@ -2751,13 +2938,19 @@ class LeanOJCoordinator:
     ) -> Lean4Result:
         placeholder_tokens = self._placeholder_tokens(lean_code)
         if not placeholder_tokens:
-            return await get_lean4_client().check_proof(lean_code, timeout=system_config.lean4_proof_timeout)
+            lean_result = await get_lean4_client().check_proof(
+                lean_code,
+                timeout=system_config.lean4_proof_timeout,
+            )
+            raise_for_lean_workspace_failure(lean_result)
+            return lean_result
 
         lean_result = await get_lean4_client().check_proof(
             lean_code,
             timeout=system_config.lean4_proof_timeout,
             allow_placeholders=True,
         )
+        raise_for_lean_workspace_failure(lean_result)
         if not lean_result.success:
             return lean_result
 
@@ -3964,6 +4157,7 @@ class LeanOJCoordinator:
                 timeout=system_config.lean4_proof_timeout,
                 allow_placeholders=True,
             )
+            raise_for_lean_workspace_failure(lean_result)
             if not self._owns_control_generation(control_generation):
                 return lean_result, ""
             lean_pass_feedback = self._format_lean_success_feedback(lean_result) if lean_result.success else ""
@@ -4101,6 +4295,9 @@ class LeanOJCoordinator:
             if not self._owns_control_generation(attempt_generation):
                 return
             self._set_master_proof_metadata(current_master_proof)
+            # A known-broken Lean workspace stops the run before the final
+            # solver spends a model call on an edit nobody can check.
+            await recover_lean_workspace(get_lean4_client())
             final_prompt_feedback = self._final_prompt_feedback_entries()
             await self._broadcast(
                 "leanoj_master_proof_edit_started",
@@ -4609,6 +4806,7 @@ class LeanOJCoordinator:
                     formal_sketch="Final Proof Solver solution for the user's template.",
                     theorem_id=f"{self._state.session_id}_final",
                     source_title=self._state.selected_topic or request.user_prompt,
+                    compile_receipt=getattr(lean_result, "compile_receipt", None),
                     control_generation=attempt_generation,
                 )
             except Exception as exc:
@@ -4634,6 +4832,11 @@ class LeanOJCoordinator:
                 self._state.final_novel = proof_record.novel if proof_record else False
                 self._state.final_novelty_tier = proof_record.novelty_tier if proof_record else "not_novel"
                 self._state.final_novelty_reasoning = proof_record.novelty_reasoning if proof_record else ""
+                self._state.final_novelty_scope = proof_record.novelty_scope if proof_record else "standalone"
+                self._state.final_novelty_group_claim = proof_record.novelty_group_claim if proof_record else ""
+                self._state.final_novelty_group_proof_ids = (
+                    list(proof_record.novelty_group_proof_ids) if proof_record else []
+                )
                 self._current_final_cycle_packet = None
                 self._current_working_proof_attempt = None
                 await self._persist_and_broadcast(
@@ -5109,6 +5312,53 @@ class LeanOJCoordinator:
         keys = ", ".join(sorted(str(key) for key in parsed.keys())[:8])
         return f"{role_id or task_id} returned JSON fields: {keys or 'none'}"
 
+    @staticmethod
+    def _route_identity_payload(
+        payload: dict[str, Any],
+        role_id: str,
+        *,
+        error: Optional[BaseException] = None,
+    ) -> dict[str, Any]:
+        """Add Live Activity route identity to a LeanOJ provider-event payload.
+
+        Identity comes from the typed ``error``, else the role's configured route,
+        and only fills keys the producer did not supply. The display message is
+        left unchanged.
+        """
+        fields = dict(api_client_manager.route_identity_for_role(
+            role_id,
+            workflow_mode="leanoj",
+            error=error,
+        ))
+        producer_provider = str(payload.get("provider") or "")
+        if (
+            fields.get("provider")
+            and not is_placeholder_provider(producer_provider)
+            and producer_provider != fields["provider"]
+        ):
+            for key in _PROVIDER_SPECIFIC_ROUTE_FIELDS:
+                fields.pop(key, None)
+        merged = merge_route_identity(payload, fields)
+        if merged.get("configured_host_provider") is None and "configured_host_provider" in fields:
+            # An empty configured host means OpenRouter auto routing.
+            merged["configured_host_provider"] = fields["configured_host_provider"]
+        return merged
+
+    @classmethod
+    def _error_event_payload(cls, exc: BaseException) -> dict[str, Any]:
+        """Build a ``leanoj_error`` payload, naming the provider route when ``exc`` has one."""
+        payload: dict[str, Any] = {"message": str(exc)}
+        route = getattr(exc, "route", None)
+        if route is None:
+            return payload
+        payload = cls._route_identity_payload(
+            payload,
+            str(getattr(exc, "role_id", "") or getattr(route, "role_id", "") or ""),
+            error=exc,
+        )
+        payload["message"] = with_route_identity(payload["message"], payload)
+        return payload
+
     async def _pause_for_provider_credits(
         self,
         *,
@@ -5116,15 +5366,20 @@ class LeanOJCoordinator:
         call_payload: dict[str, Any],
         message: str,
         duration_ms: int,
+        error: Optional[BaseException] = None,
     ) -> None:
         mark_provider_paused()
-        pause_payload = {
-            **call_payload,
-            "duration_ms": duration_ms,
-            "retryable": True,
-            "reason": "openrouter_credit_exhaustion",
-            "message": message,
-        }
+        pause_payload = self._route_identity_payload(
+            {
+                **call_payload,
+                "duration_ms": duration_ms,
+                "retryable": True,
+                "reason": "openrouter_credit_exhaustion",
+                "message": message,
+            },
+            role_id,
+            error=error,
+        )
         self._state.provider_paused = True
         self._state.provider_pause_reason = "openrouter_credit_exhaustion"
         self._state.provider_pause_role_id = role_id
@@ -5309,13 +5564,17 @@ class LeanOJCoordinator:
                 )
                 await self._broadcast(
                     "leanoj_model_call_failed",
-                    {
-                        **call_payload,
-                        "duration_ms": duration_ms,
-                        "retryable": True,
-                        "reason": exc.reason or "transient_provider_error",
-                        "message": message,
-                    },
+                    self._route_identity_payload(
+                        {
+                            **call_payload,
+                            "duration_ms": duration_ms,
+                            "retryable": True,
+                            "reason": exc.reason or "transient_provider_error",
+                            "message": message,
+                        },
+                        role_id,
+                        error=exc,
+                    ),
                 )
                 await api_client_manager.wait_for_retryable_provider_error(
                     exc,
@@ -5352,19 +5611,24 @@ class LeanOJCoordinator:
                     )
                     await self._broadcast(
                         "leanoj_model_call_failed",
-                        {
-                            **call_payload,
-                            "duration_ms": duration_ms,
-                            "retryable": True,
-                            "reason": "openrouter_credit_exhaustion",
-                            "message": message,
-                        },
+                        self._route_identity_payload(
+                            {
+                                **call_payload,
+                                "duration_ms": duration_ms,
+                                "retryable": True,
+                                "reason": "openrouter_credit_exhaustion",
+                                "message": message,
+                            },
+                            role_id,
+                            error=exc,
+                        ),
                     )
                     await self._pause_for_provider_credits(
                         role_id=role_id,
                         call_payload=call_payload,
                         message=message,
                         duration_ms=duration_ms,
+                        error=exc,
                     )
                     current_prompt = (
                         with_validator_hook(prompt, self.solution_path_manager)
@@ -5383,12 +5647,16 @@ class LeanOJCoordinator:
                     )
                     await self._broadcast(
                         "leanoj_model_call_failed",
-                        {
-                            **call_payload,
-                            "duration_ms": duration_ms,
-                            "retryable": False,
-                            "message": self._summarize_error(str(exc), limit=700),
-                        },
+                        self._route_identity_payload(
+                            {
+                                **call_payload,
+                                "duration_ms": duration_ms,
+                                "retryable": False,
+                                "message": self._summarize_error(str(exc), limit=700),
+                            },
+                            role_id,
+                            error=exc,
+                        ),
                     )
                     raise LeanOJConfigurationError(
                         str(exc),
@@ -5409,12 +5677,16 @@ class LeanOJCoordinator:
                 )
                 await self._broadcast(
                     "leanoj_model_call_failed",
-                    {
-                        **call_payload,
-                        "duration_ms": duration_ms,
-                        "retryable": True,
-                        "message": error_summary,
-                    },
+                    self._route_identity_payload(
+                        {
+                            **call_payload,
+                            "duration_ms": duration_ms,
+                            "retryable": True,
+                            "message": error_summary,
+                        },
+                        role_id,
+                        error=exc,
+                    ),
                 )
                 if attempt_index == 1 or attempt_index % 3 == 0:
                     self._failed_feedback.append(
@@ -5455,7 +5727,28 @@ class LeanOJCoordinator:
                     f"{self._json_retry_schema_hint(role_id)}"
                 )
                 if attempt_index % 3 == 0:
-                    await asyncio.sleep(min(5.0, 0.5 * (attempt_index // 3)))
+                    await api_client_manager.emit_and_wait_for_retry(
+                        {
+                            # The role's resolved route reflects an active LM Studio
+                            # fallback, unlike its configured cloud route.
+                            **api_client_manager.route_identity_for_role(
+                                role_id,
+                                workflow_mode="leanoj",
+                                task_id=task_id,
+                                error=exc,
+                            ),
+                            "retry_attempt": attempt_index,
+                            "retry_after_seconds": min(
+                                5.0,
+                                0.5 * (attempt_index // 3),
+                            ),
+                            "reason": "invalid_json_retry",
+                            "error_summary": error_summary,
+                        },
+                        role_id=role_id,
+                        should_stop=lambda: not self._running or self._stop_event.is_set(),
+                        error=exc,
+                    )
             finally:
                 self.current_task_id = None
                 self._refresh_workflow_tasks(task_prefix, role_id)

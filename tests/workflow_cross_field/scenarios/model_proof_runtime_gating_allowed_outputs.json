@@ -7,7 +7,18 @@
   ],
   "adapter": "model",
   "artifact_type": "scenario",
+  "asserted_invariants": [
+    "outputs.at_least_one_output_enabled",
+    "outputs.papers_only_skips_proof_work",
+    "proof_runtime.no_lean_when_disabled",
+    "proof_runtime.no_smt_when_disabled"
+  ],
+  "blocked_dependencies": [],
+  "coverage_classification": "deterministic_model_evidence",
   "expected_result": "passed",
+  "faked_dependencies": [
+    "workflow executable state model"
+  ],
   "fields": [
     "proof_runtime_gating",
     "allowed_outputs"
@@ -22,6 +33,13 @@
     "no_outputs_rejected",
     "papers_only"
   ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
+  "runner": "pytest",
   "scenario_id": "model_proof_runtime_gating_allowed_outputs",
-  "schema_version": 1
+  "schema_version": 2,
+  "source_identity": "workflow-source-v1:34d95f3c19ddd4672fe01113eac92d5902ffb8d86acd7c0fb0922f5a60416775",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
 }

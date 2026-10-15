@@ -203,6 +203,35 @@ def test_topic_system_prompts_are_direct_novel_math_aware_and_non_fabricating(
     )
 
 
+def test_topic_routes_allow_novel_incremental_and_indirect_progress() -> None:
+    selection = get_topic_selection_system_prompt()
+    validator = get_topic_validator_system_prompt()
+    exploration = build_exploration_user_prompt(ENGINEERING_GOAL, [], [])
+
+    for prompt in (selection, exploration):
+        assert "no partial solutions" not in prompt
+        assert "genuinely novel incremental or indirect route" in prompt
+    assert "only when they target a necessary piece" not in selection
+    assert "at least as direct a route" not in validator
+    assert "unjustifiably ignored" not in validator
+    assert "no plausible path, direct or indirect" in validator
+
+
+def test_completion_and_continuation_keep_novel_indirect_progress() -> None:
+    prompts = (
+        get_completion_review_system_prompt(),
+        get_completion_self_validation_system_prompt(),
+        get_continuation_decision_system_prompt(),
+        get_continuation_validator_system_prompt(),
+    )
+
+    for prompt in prompts:
+        assert "too indirect" not in prompt
+        assert "indirect leftover" not in prompt
+        assert "a necessary piece of it" not in prompt
+        assert "novel" in prompt
+
+
 def test_topic_builders_preserve_goal_candidates_feedback_and_phase_context() -> None:
     brainstorms = [
         {

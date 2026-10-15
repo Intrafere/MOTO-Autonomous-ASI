@@ -96,7 +96,7 @@ class AutonomousRAGManager:
         Returns:
             Tuple of (content string, used_rag boolean)
         """
-        content = await brainstorm_memory.get_database_content(topic_id, strip_proofs=True)
+        content = await brainstorm_memory.get_model_context_content(topic_id)
         
         if not content:
             return "", False
@@ -175,7 +175,10 @@ class AutonomousRAGManager:
         Returns:
             Summary of brainstorm content
         """
-        submissions = await brainstorm_memory.get_submissions_list(topic_id)
+        submissions = await brainstorm_memory.get_submissions_list(
+            topic_id,
+            model_context=True,
+        )
         
         if not submissions:
             return "No submissions yet."

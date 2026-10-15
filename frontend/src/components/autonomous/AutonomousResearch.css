@@ -1472,6 +1472,20 @@
   word-break: break-word;
 }
 
+.known-models-sidebar .model-item-title {
+  min-width: 0;
+}
+
+.known-models-sidebar .model-item-title .model-item-name {
+  margin-bottom: 0;
+}
+
+.known-models-sidebar .model-item-subtitle {
+  color: var(--text-secondary, #9a9a9a);
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
 .known-models-sidebar .model-item-badge {
   background: linear-gradient(135deg, rgba(76, 175, 80, 0.95), rgba(110, 208, 129, 0.88));
   color: #ffffff;
@@ -1769,13 +1783,14 @@
   font-size: 0.85rem;
   margin-bottom: 1rem;
   line-height: 1.4;
+  font-style: normal;
 }
 
 .settings-hint {
   color: var(--text-secondary, #666);
   font-size: 0.8rem;
   margin: 0 0 0.75rem 0;
-  font-style: italic;
+  font-style: normal;
 }
 
 /* Per-submitter config section */

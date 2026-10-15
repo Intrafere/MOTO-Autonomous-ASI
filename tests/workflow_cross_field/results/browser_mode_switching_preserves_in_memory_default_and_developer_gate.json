@@ -1,6 +1,10 @@
 {
   "adapter": "browser_smoke",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "autonomous_default_mode",
@@ -9,6 +13,7 @@
     "leanoj_visible_after_developer_gate",
     "reload_restores_autonomous_mode"
   ],
+  "faked_dependencies": [],
   "fields": [
     "runtime_exclusivity",
     "workflow_filesystem_state",
@@ -17,11 +22,18 @@
   "invariants": [
     "runtime.single_active_workflow"
   ],
+  "observed_transition": null,
+  "real_components": [],
   "replay": [],
   "result": "passed",
+  "runner": "playwright",
   "scenario_id": "browser_mode_switching_preserves_in_memory_default_and_developer_gate",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "browser_smoke",
-  "test_file": "tests/workflow_browser_smoke/mode-switching.spec.js"
+  "source_identity": "workflow-source-v1:f96d2f55ba78d6677f80d9805c108aa5cf13e0319a153635f098327484c470fb",
+  "test_file": "tests/workflow_browser_smoke/mode-switching.spec.js",
+  "test_selectors": [
+    "tests/workflow_browser_smoke/mode-switching.spec.js::mode switching is in-memory and LeanOJ remains developer gated"
+  ]
 }

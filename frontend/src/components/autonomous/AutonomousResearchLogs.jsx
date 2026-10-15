@@ -7,10 +7,14 @@ import React, { useRef, useEffect, useMemo, useState } from 'react';
 import { autonomousAPI } from '../../services/api';
 import ApiCallLogs from '../ApiCallLogs';
 import ProofCompetitionBenchmarkReport from './ProofCompetitionBenchmarkReport';
+import { getNoveltyGroupSize } from '../../utils/proofPresentation';
 import {
   formatEmptyProofDiscoveryMessage,
+  formatHungConnectionMessage,
   formatProofRunEventMessage,
+  withRouteIdentity,
 } from '../../utils/activityStyles';
+import { DEFAULT_EMPTY_PROOF_FEEDBACK, formatProofLeanResponse } from '../../utils/proofLeanResponse';
 import './AutonomousResearch.css';
 
 const AutonomousResearchLogs = ({ stats, events }) => {
@@ -101,23 +105,9 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       if (maxRounds <= 1) return '';
       return `Proof round ${round}/${maxRounds}`;
     };
-    const proofLeanResponse = () => {
-      if (data.lean_response) {
-        let response = data.lean_response;
-        if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
-          response = `${response} You can change this timeout in Advanced Settings.`;
-        }
-        return response;
-      }
-      if (data.proof_verified === true) return 'Lean 4 response: proof verified.';
-      let error = data.error_summary || data.error_output || data.reason || '';
-      if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
-        error = `${error} You can change this timeout in Advanced Settings.`;
-      }
-      return error
-        ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
-        : 'Lean 4 proof-attempt feedback (not a MOTO system error): proof not verified. The model uses these diagnostics if another attempt follows.';
-    };
+    const proofLeanResponse = () => formatProofLeanResponse(data, {
+      emptyFallback: DEFAULT_EMPTY_PROOF_FEEDBACK,
+    });
     const formatProofNoveltyTier = (tier) => {
       switch (tier) {
         case 'major_mathematical_discovery':
@@ -141,7 +131,18 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       const duplicateNote = data.duplicate ? ' (duplicate proof reused)' : '';
       const rawReason = String(data.novelty_reasoning || data.reasoning || '').replace(/\s+/g, ' ').trim();
       const reason = rawReason.length > 240 ? `${rawReason.slice(0, 240)}...` : rawReason;
-      return `${proofName} Lean 4 novelty validator rating: ${tierLabel}${duplicateNote}${reason ? ` - ${reason}` : ''}${proofTarget ? ` (${proofTarget})` : ''}`;
+      const isGroup = data.novelty_scope === 'group';
+      const groupSize = getNoveltyGroupSize(data);
+      const scopeLabel = isGroup
+        ? `finite verified group${groupSize ? ` of ${groupSize} proofs` : ''}`
+        : 'accepted Lean statement alone';
+      const rawGroupClaim = isGroup
+        ? String(data.novelty_group_claim || '').replace(/\s+/g, ' ').trim()
+        : '';
+      const groupClaim = rawGroupClaim.length > 240
+        ? `${rawGroupClaim.slice(0, 240)}...`
+        : rawGroupClaim;
+      return `${proofName} Lean 4 novelty validator rating (${scopeLabel}): ${tierLabel}${duplicateNote}${reason ? ` - ${reason}` : ''}${groupClaim ? ` Combined claim: ${groupClaim}` : ''}${proofTarget ? ` (${proofTarget})` : ''}`;
     };
     
     switch (event.event) {
@@ -180,7 +181,12 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'submission_rejected': {
         const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : '';
         const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-        return `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED WITH FEEDBACK (total: ${data.total_rejections})`;
+        const feedback = event.validatorFeedback
+          || data.activity_feedback
+          || data.validator_feedback
+          || data.reasoning
+          || '';
+        return `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED (total: ${data.total_rejections})${feedback ? ` — Validator feedback: ${feedback}` : ''}`;
       }
       case 'completion_review_started':
         return `[${data.topic_id}] Completion review at ${data.submission_count} submissions`;
@@ -209,9 +215,9 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         }
         return `${proofRoundLabel() || 'Proof check'} started for ${data.source_type} ${data.source_id}`;
       case 'proof_retry_scheduled':
-        return `Scheduled ${data.count || 0} proof retry candidate(s) for paper ${data.source_id}`;
+        return data.message || `Scheduled ${data.count || 0} proof retry candidate(s) for paper ${data.source_id}`;
       case 'proof_retry_started':
-        return `Retrying ${data.count || 0} failed proof candidate(s) against paper ${data.source_id}`;
+        return data.message || `Retrying ${data.count || 0} failed proof candidate(s) against paper ${data.source_id}`;
       case 'proof_check_no_candidates':
         return formatEmptyProofDiscoveryMessage(
           proofRoundLabel() ? `${proofRoundLabel()} discovery` : 'Proof discovery',
@@ -227,7 +233,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'proof_candidate_list_review_accepted':
         return `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`;
       case 'proof_candidate_list_review_rejected':
-        return `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (75% required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`;
+        return `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (at least one novel candidate required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`;
       case 'proof_candidate_list_review_interrupted':
         return data.message || `Validator proof-list review attempt ${data.list_attempt || 1} was interrupted without a semantic decision.`;
       case 'proof_candidate_list_regeneration_started':
@@ -250,6 +256,8 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         return `${proofName} terminated: proof attempts exhausted for ${proofTarget}`;
       case 'proof_truncation_recovery_exhausted':
         return data.message || `${proofName} exhausted output-truncation recovery.`;
+      case 'proof_novelty_assessment_started':
+        return `${proofName} novelty assessment started: ranking the mathematical result actually established by Lean-verified code.${data.verified_group_candidates_available ? ' Verified same-run group evidence is available if it establishes a stronger combined claim.' : ''}${proofTarget ? ` (${proofTarget})` : ''}`;
       case 'novel_proof_discovered':
         return proofNoveltyMessage();
       case 'known_proof_verified':
@@ -284,19 +292,24 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'proof_prune_applied':
         return `Proof-context prune applied to ${data.proof_id || 'one occurrence'}`;
       case 'proof_prune_provider_paused':
-        return data.message || 'Proof-context pruning paused for provider credits; proof solving continues';
+        return withRouteIdentity(
+          data.message || 'Proof-context pruning paused for provider credits; proof solving continues',
+          data,
+        );
       case 'proof_prune_repair_required':
-        return `Proof-context pruning needs settings repair${data.message ? `: ${data.message}` : ''}`;
+        return withRouteIdentity(
+          `Proof-context pruning needs settings repair${data.message ? `: ${data.message}` : ''}`,
+          data,
+        );
       case 'proof_prune_error':
-        return data.message || 'Proof-context pruning failed without changing proof context';
-      case 'hung_connection_alert': {
-        const model = data.model || 'model';
-        const provider = data.provider || 'provider';
-        const elapsed = data.elapsed_minutes || 15;
-        return `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`;
-      }
+        return withRouteIdentity(
+          data.message || 'Proof-context pruning failed without changing proof context',
+          data,
+        );
+      case 'hung_connection_alert':
+        return formatHungConnectionMessage(data);
       default:
-        return event.event;
+        return event.message || event.event;
     }
   };
 
@@ -336,6 +349,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
     if (
       eventName === 'proof_framing_decided' ||
       eventName === 'proof_check_started' ||
+      eventName === 'proof_novelty_assessment_started' ||
       eventName === 'proof_retry_scheduled' ||
       eventName === 'proof_retry_started' ||
       eventName === 'proof_check_no_candidates' ||

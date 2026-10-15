@@ -1,11 +1,15 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
-  "diagnostics": {},
-  "evidence": [
-    "target_rechecked",
-    "stale_target_rejected"
+  "asserted_invariants": [],
+  "blocked_dependencies": [
+    "lifecycle generation interleaving"
   ],
+  "diagnostics": {
+    "reason": "The focused snapshot test proves target/revision rechecks, but not the lifecycle-generation fence included in the invariant."
+  },
+  "evidence": [],
+  "faked_dependencies": [],
   "fields": [
     "proof_pruning",
     "runtime_exclusivity",
@@ -14,11 +18,19 @@
   "invariants": [
     "proof_pruning.commit_lifecycle_fenced"
   ],
+  "observed_transition": null,
+  "real_components": [
+    "backend/autonomous/core/proof_pruning_coordinator.py",
+    "backend/autonomous/memory/proof_database.py"
+  ],
   "replay": [],
-  "result": "passed",
+  "result": "blocked",
+  "runner": null,
   "scenario_id": "real_prune_commit_rechecks_lifecycle_and_revision",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/unit/test_proof_pruning_snapshot.py"
+  "source_identity": "workflow-source-v1:2f653745309381f01a73825865bd3f17ec7df3af6f5a05278af30f770513ce98",
+  "test_file": "tests/workflow_real_adapters/test_build_07_source_mappings.py",
+  "test_selectors": []
 }

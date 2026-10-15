@@ -1,0 +1,620 @@
+---
+description: Project directory map, runtime roots, and purpose summaries for major source files
+---
+
+## LM Studio Server Information (Default Mode Only)
+LM Studio and its pre-loaded models can be reached at "http://127.0.0.1:1234" (overridable via `MOTO_LM_STUDIO_BASE_URL`).
+**NOTE:** The system works without LM Studio. If LM Studio is unavailable, users can configure OpenRouter for all roles. In generic mode (`generic_mode=True`), workflow inference paths bypass LM Studio — embeddings use FastEmbed and configured roles normalize to OpenRouter, while hidden legacy diagnostics should not be used by hosted UI.
+
+## Runtime Root Note
+
+`backend/data/` and `backend/logs/` are the **default desktop roots**, not immutable global paths.
+
+- The Lean workspace is `<data root>/lean4_workspace`, except on Windows when that path is too long for Mathlib: it is then a per-data-root derived cache under `%LOCALAPPDATA%\MOTO\lean\<key>`, the only path `bind_runtime_roots()` allows outside the data root.
+- The active backend instance may override mutable roots with `MOTO_DATA_ROOT` and `MOTO_LOG_ROOT`
+- Exactly one backend process may own a data root at a time; an OS-backed lifespan lease is authoritative even for direct launches and explicit overrides. Windows leases use unbuffered non-append descriptors and hold a bounded zero-anchored migration range for their lifetime; launcher recovery detects legacy misplaced byte locks before port selection and terminates only a root/port/health/process/parent-or-launcher-state-verified orphan. Chroma is derived cache state: Windows desktop replaces prior-process native state before first open, while hosted Linux retains persistence.
+- Runtime root changes after import must use the atomic `bind_runtime_roots()` contract, which re-derives the complete mutable path graph; long-lived stores resolve against the active root and RAG opens Chroma lazily.
+- Secret persistence may be isolated per instance with `MOTO_SECRET_NAMESPACE`
+- Frontend browser persistence may be isolated on shared origins with `VITE_MOTO_STORAGE_PREFIX`; launch/control-plane config may supply `MOTO_FRONTEND_STORAGE_PREFIX` and project it into the frontend env
+- Hosted protected request size may be capped with `MOTO_GENERIC_MAX_REQUEST_BYTES` / `GENERIC_MAX_REQUEST_BYTES` (default 16 MiB)
+- Additional local launches may create generated instance folders such as `.moto_instances/{instance_id}/data` and `.moto_instances/{instance_id}/logs`
+
+## Autonomous Competition Source Map
+
+- `backend/autonomous/core/proof_competition.py` owns scoped ordered formalization fallback; `proof_competition_reporting.py` maps safe execution metadata to benchmark records.
+- `backend/autonomous/memory/proof_competition_benchmarks.py` persists session-owned, idempotent competition outcomes independently of API logs; the matching API route module exposes typed paginated reports.
+- `ProofCompetitionBenchmarkReport.jsx` is shared by current Autonomous logs and the fourth Completed Works Benchmarks tab. Autonomous profiles persist ordered secondary routes without duplicating the primary mirror.
+
+## Current High-Level Project Directory Structure and File Descriptions
+
+This is a maintained source-map for important directories and files, not a strict exhaustive inventory of every generated artifact or test helper.
+project-root/
+├── .github/                            # GitHub community health files
+│   ├── ISSUE_TEMPLATE/                 # Public issue forms + security contact routing
+│   ├── codeql/                         # CodeQL analysis configuration
+│   ├── workflows/                      # GitHub Actions workflows, including CodeQL
+│   └── pull_request_template.md        # Default pull request template
+├── .moto_instances/                    # Generated local multi-instance runtime roots (not source-controlled)
+│   └── {instance_id}/
+│       ├── data/                       # Instance-specific mutable data root
+│       └── logs/                       # Instance-specific mutable log root
+├── backend/
+│   ├── shared/                          # SHARED RESOURCES
+│   │   ├── __init__.py                  # Package initialization
+│   │   ├── config.py                    # RAGConfig, SystemConfig (instance runtime contract, ports, data/log roots, secret namespace, generic_mode)
+│   │   ├── prompt_feedback_budget.py    # Pure whole-entry newest-suffix model-feedback fitter
+│   │   ├── models.py                    # Pydantic models (includes ModelConfig with per-role supercharge_enabled, BoostConfig, WorkflowTask)
+│   │   ├── lm_studio_client.py          # LM Studio HTTP API client + same-base numeric :# instance sharing
+│   │   ├── openrouter_client.py         # OpenRouter HTTP API client (credit exhaustion, transient malformed-completion retries, and model/endpoint metadata)
+│   │   ├── openai_codex_client.py       # Desktop-only OpenAI Codex/ChatGPT OAuth client, Codex backend adapter (Responses WebSocket transport first, HTTP/SSE fallback), and Codex model metadata normalizer
+│   │   ├── xai_grok_client.py           # Desktop-only xAI Grok/SuperGrok OAuth client; splits untimed spending limits from timed 429 usage windows
+│   │   ├── sakana_fugu_client.py        # Desktop-only Sakana client (Responses/chat fallback, model metadata, typed quota/entitlement classification)
+│   │   ├── api_client_manager.py        # Unified API router (exact configured-role enforcement, Supercharge, OpenRouter/OAuth/LM Studio fallback, boost)
+│   │   ├── provider_errors.py            # Typed safe provider-route, context-limit, and operator-repair-required errors
+│   │   ├── provider_route_identity.py    # Provider/API-error route identity fields and the composed Live Activity display prefix
+│   │   ├── provider_recovery/            # Shared recovery models/events for timed-cooldown vs hard-repair classification
+│   │   ├── boost_manager.py             # Singleton boost manager (tracks boost modes: next-count, always-prefer, category; aliases absorbed LeanOJ path-decision tasks into Final Solver boost category)
+│   │   ├── boost_logger.py              # Boost API call logger (persists redacted/default-safe entries to boost_api_log.txt)
+│   │   ├── workflow_predictor.py        # Legacy/shared workflow prediction helper; active coordinators maintain their own workflow_tasks
+│   │   ├── workflow_start_guard.py       # Process-wide async guard and committed owner for atomic mutually-exclusive workflow starts
+│   │   ├── runtime_root_lock.py          # Cross-process OS-backed lease enforcing one backend owner per active data root
+│   │   ├── sleep_inhibitor.py            # Owner-based Windows system/execution Power Requests for active top-level workflows and independently queued manual proof checks
+│   │   ├── free_model_manager.py        # Free model rotation/cooldown singleton (looping + auto-selector backup)
+│   │   ├── model_error_utils.py         # Shared helpers for non-retryable provider/config failures; only recoverable credit exhaustion should pause workflows
+│   │   ├── provider_pause.py            # Process-local provider-credit pause/resume signal used by proof workflows and OpenRouter reset
+│   │   ├── rag_lock.py                  # Global RAG operation lock (prevents Aggregator/Compiler collision)
+│   │   ├── token_tracker.py             # Cumulative input/output token tracker singleton with per-model breakdown and research timer
+│   │   ├── wolfram_alpha_client.py      # Wolfram Alpha API client (logs redacted metadata, not raw query/result text)
+│   │   ├── utils.py                     # Common utilities
+│   │   ├── json_parser.py               # JSON parsing with sanitization for LLM quirks
+│   │   ├── response_extraction.py        # Central OpenAI-compatible assistant text extraction with content-first reasoning/thinking fallback policy
+│   │   ├── critique_memory.py           # Paper critique persistence (saves up to 10 validator critiques per paper)
+│   │   ├── critique_prompts.py          # Default critique prompt and builder function for validator critiques
+│   │   ├── secret_store.py              # Secure credential persistence via OS keyring (OpenRouter, desktop OAuth tokens, Wolfram Alpha); bypassed in generic mode
+│   │   ├── runtime_settings.py          # Non-secret runtime setting persistence under the active data root (free-model knobs, desktop/default proof knobs, and connectivity toggles)
+│   │   ├── credential_locks.py          # Process-local per-provider serialization for credential mutation transactions
+│   │   ├── provider_notification_store.py # Bounded non-secret provider notifications with workflow ownership, stable recovery keys, and explicit degraded-persistence status
+│   │   ├── activity.py                  # Additive normalized Live Activity event-instance identity/classification and bounded secret-redacted payload projection
+│   │   ├── log_redaction.py             # Lowest idempotent redaction layer: credential shapes plus installation/root/batch/selection IDs
+│   │   ├── trade_data_boundary.py       # Central proof-trade data exclusion boundary (prohibited-field registry, trade text/payload redaction, assert_trade_safe gate, type-only errors, process log-record boundary)
+│   │   ├── atomic_json.py               # Shared unique-temp/fsync/replace JSON writer for small durable state files
+│   │   ├── proof_trade_ledger.py        # Versioned metadata-only crash-safe local proof-trade ledger: root-bound selection snapshots, terminal reconciliation, reserved contract fields, archive/reset
+│   │   ├── proof_trade_authorization.py # Contract-independent proof-trade authorization scaffold: exact scope set, client+installation keyring record naming, metadata-only fail-closed readiness (authorization always disabled prelaunch)
+│   │   ├── oauth_pkce.py                # Shared S256-only PKCE pair/challenge and constant-time OAuth state helpers used by Codex, xAI, and future proof-trade login
+│   │   ├── build_info.py                # Build identity resolver (manifest + git HEAD/ZIP stamp + env overrides)
+│   │   ├── syntheticlib_trade_compatibility.py # Independent credential-free proof-trade evidence verification, exact unpublished-state semantics, interruption-restoring canonical publication, diagnostic attestation, and clean-source release evidence
+│   │   ├── syntheticlib_trade_eligibility.py # Revision-consistent single-store and installation-wide canonical evidence auditor; rejects unsafe/ambiguous artifacts and cross-store copies, applies source policy, and remains metadata-only/unconditionally ineligible until the rank mapping and frozen service contract exist
+│   │   ├── syntheticlib_source_selection.py # Pure frozen `moto-trade-source-selection-v2` category/inclusion policy (v2 reads legacy-port ranks) for future proof trade; never an eligibility verdict
+│   │   ├── path_safety.py               # Safe path resolution helpers (realpath/normpath containment checks)
+│   │   ├── syntheticlib4_client.py       # Contract-first SyntheticLib4 local-snapshot client for release/status/retrieve/account-proof work and API-key scaffolding; inactive runtime has zero records, while explicit fixtures remain test-only
+│   │   ├── syntheticlib_product.py       # Central fail-closed product lifecycle normalization plus independent runtime, developer-tooling, and corpus-access authority
+│   │   ├── proof_identity.py             # `moto-proof-identity-v1`: canonical theorem whitespace + Lean newline/outer-whitespace hashes, separate from publisher integrity hashes
+│   │   ├── installation_identity.py      # Desktop-only stable random installation identity plus explicit data-root binding/move/adoption/reset policy; generic mode unavailable
+│   │   ├── proof_locator.py              # Opaque proof/store/batch ID primitives and versioned canonical proof-occurrence locator/digest helpers
+│   │   ├── proof_search/                 # Typed records/normalizers; schema-versioned atomic SQLite index; composite exact neighborhoods; freshness/hydration/tool service; policy-versioned at-most-64→21→7 run-safe Assistant selection
+│   │   ├── solution_path/                # Typed run-scoped Progressive Solution Path state, durable serial proposal review engine, and prompt integration helpers
+│   │   ├── fastembed_provider.py         # FastEmbed embedding wrapper (generic mode only, lazy-imported)
+│   │   ├── lean4_client.py              # Lean 4 checker; successful subprocess/LSP and repaired-tactic checks emit immutable exact-source/toolchain receipts; typed Lean workspace repair stop and guards
+│   │   ├── lean_workspace_paths.py      # Stdlib-only Windows path-length limits and per-user Lean workspace relocation (shared with the launcher)
+│   │   ├── lean_source_evidence.py      # Versioned checked-source hashing, import parsing, receipt canonicalization, and privacy guards
+│   │   ├── local_novelty_receipt.py     # Canonical digest/finalization for internal MOTO novelty-assessment receipts; no SyntheticLib rank mapping or eligibility authority
+│   │   ├── legacy_port_receipt.py       # Digest/finalize for the legacy-port receipt that marks migrated released-build proofs (stored rank, no invented evidence)
+│   │   ├── syntheticlib_legacy_port.py  # Explicit one-time legacy-proof migration across every canonical store: read-only dry run, active-run refusal, path-free counts
+│   │   ├── lean_proof_integrity.py       # Shared post-Lean integrity gate (rejects fake axiom/constant/opaque devices and validates theorem-statement alignment)
+│   │   ├── brainstorm_proof_gate.py      # Shared Lean 4 gate for optional brainstorm proof candidates before normal validation; rejects missing novelty/rationale metadata before Lean cost and preserves Lean-accepted real artifacts for novelty/validator review
+│   │   └── smt_client.py                # Z3/SMT launcher-managed subprocess wrapper (gated on `smt_enabled`; never authoritative on its own)
+│   ├── aggregator/                      # AGGREGATOR 
+│   │   ├── __init__.py
+│   │   ├── core/
+│   │   │   ├── __init__.py
+│   │   │   ├── rag_manager.py           # 4-stage RAG pipeline orchestrator (ChromaDB calls and heavy retrieval scoring are offloaded/snapshot-based to keep GUI/API routes responsive)
+│   │   │   ├── coordinator.py           # Manages 1-10 submitters + 1 validator (default 3, configurable per-submitter)
+│   │   │   ├── queue_manager.py         # Submission queue FIFO/batch/count/clear helper; coordinator owns submitter pause decisions
+│   │   │   └── context_allocator.py     # Direct injection vs RAG routing (tries direct first, offloads to RAG only when doesn't fit). Includes allocate_cleanup_review_context() which NEVER skips due to size - uses RAG when database too large.
+│   │   ├── ingestion/
+│   │   │   ├── __init__.py
+│   │   │   ├── chunker.py               # Multi-config chunking (256/512/768/1024)
+│   │   │   ├── pipeline.py              # Document ingestion pipeline
+│   │   │   ├── normalizer.py            # Text normalization
+│   │   │   └── metadata_extractor.py    # Extract metadata from chunks
+│   │   ├── validation/
+│   │   │   ├── __init__.py
+│   │   │   ├── contradiction_checker.py # Detect contradictions
+│   │   │   └── json_validator.py        # Validate JSON responses
+│   │   ├── memory/
+│   │   │   ├── __init__.py
+│   │   │   ├── shared_training.py       # Validator-distributed database (accepted submissions)
+│   │   │   ├── local_training.py        # Per-submitter rejection logs (last 5)
+│   │   │   └── event_log.py             # Persistent event log (acceptances, rejections, cleanup removals)
+│   │   ├── agents/
+│   │   │   ├── __init__.py
+│   │   │   ├── submitter.py             # Submitter agent (parallel, cyclic chunk sizes)
+│   │   │   └── validator.py             # Validator agent (sequential validation)
+│   │   └── prompts/
+│   │       ├── __init__.py
+│   │       ├── submitter_prompts.py     # Submitter system prompts + JSON schemas
+│   │       └── validator_prompts.py     # Validator system prompts + JSON schemas
+│   │
+│   ├── compiler/                        # COMPILER (Phase 2)
+│   │   ├── __init__.py                  # Package initialization
+│   │   ├── core/
+│   │   │   ├── __init__.py              # Package initialization
+│   │   │   ├── compiler_coordinator.py  # Orchestrates sequential Markov chain workflow
+│   │   │   └── compiler_rag_manager.py  # Compiler-specific RAG wrapper (user-configurable context per role)
+│   │   ├── agents/
+│   │   │   ├── __init__.py              # Package initialization
+│   │   │   ├── writer_submitter.py # 3 modes: construction, outline, review
+│   │   │   └── high_param_submitter.py   # Rigor & Proofs role (rigor/proof/critique generation)
+│   │   ├── validation/
+│   │   │   ├── __init__.py              # Package initialization
+│   │   │   └── compiler_validator.py    # Validates coherence, rigor, placement (plus rigor_lean_placement mode for Lean-4 theorem placement)
+│   │   ├── prompts/
+│   │   │   ├── __init__.py              # Package initialization
+│   │   │   ├── outline_prompts.py       # Outline generation & update prompts
+│   │   │   ├── construction_prompts.py  # Paper construction prompts
+│   │   │   ├── review_prompts.py        # Paper review/cleanup prompts
+│   │   │   └── rigor_prompts.py         # Rigor theorem-discovery + placement prompts (Lean-4-verified flow)
+│   │   └── memory/
+│   │       ├── __init__.py              # Package initialization
+│   │       ├── outline_memory.py        # Current outline state (direct inject/RAG)
+│   │       ├── paper_memory.py          # Current paper state (direct inject/RAG). Skeleton markers: ABSTRACT_PLACEHOLDER, INTRO_PLACEHOLDER, CONCLUSION_PLACEHOLDER, THEOREMS_APPENDIX_START/END (wraps Lean-4-verified theorem entries), PAPER_ANCHOR.
+│   │       ├── critique_memory.py       # Accepted critiques database for peer review phase
+│   │       ├── critique_rejection_memory.py # Last 5 critique rejection feedback logs
+│   │       └── compiler_rejection_log.py # Last 10 rejections & acceptances
+│   │
+│   ├── autonomous/                      # AUTONOMOUS RESEARCH (Phase 3)
+│   │   ├── __init__.py                  # Package initialization
+│   │   ├── proof_pruning_evidence.py    # Pure deterministic semantic-pruning evidence ranking, projection, token estimation, and evidence/dependency/descriptor fingerprints
+│   │   ├── core/
+│   │   │   ├── __init__.py              # Package initialization
+│   │   │   ├── autonomous_coordinator.py # Orchestrates the Tier 1 → Tier 2 → Tier 3 autonomous workflow (invokes proof verification checkpoints after brainstorm/Tier 2 paper completion when `lean4_enabled`)
+│   │   │   ├── autonomous_rag_manager.py # Autonomous-specific RAG wrapper
+│   │   │   ├── proof_round_driver.py # Shared one-round, bounded automatic multi-round, and unbounded continuous-pruning policies; candidate and Lean execution stay in ProofVerificationStage
+│   │   │   ├── proof_verification_stage.py # Orchestrates impact-first identification → Lean attempts (3 full + 2 tactic) → integrity/downshift → post-Lean novelty/storage; optional SMT/Mathlib; per-source lock
+│   │   │   ├── proof_run_manager.py # Owns one-round and continuous manual proof-run lifecycle/status, Stop, terminal cleanup, source reservations, and sleep ownership
+│   │   │   ├── proof_pruning_coordinator.py # Run-scoped bounded semantic review scheduling, generation-safe coalescing, durable migration, stale-fenced commit, and lifecycle drain
+│   │   │   ├── proof_novelty.py       # Shared proof novelty assessment helper used by autonomous proof verification and compiler rigor
+│   │   │   ├── proof_registration.py     # Shared registration helper for verified Lean proofs from autonomous, compiler, aggregator, and LeanOJ flows
+│   │   │   └── proof_dependency_extractor.py # Extracts local graph edges plus path-free canonical-locator/pinned-Mathlib portable dependencies
+│   │   ├── agents/
+│   │   │   ├── __init__.py              # Package initialization
+│   │   │   ├── topic_selector.py        # Topic selection submitter (new/continue)
+│   │   │   ├── topic_validator.py       # Topic selection validator
+│   │   │   ├── completion_reviewer.py   # Brainstorm completion review (SPECIAL SELF-VALIDATION)
+│   │   │   ├── reference_selector.py    # Reference paper selection workflow
+│   │   │   ├── paper_title_selector.py  # Paper title selection
+│   │   │   ├── proof_identification_agent.py # Extracts impact-first theorem candidates with expected novelty/prompt-relevance/anti-known-result rationale; skips not_novel or missing-tier candidates before Lean cost
+│   │   │   ├── proof_candidate_list_validator.py # Independent identity-complete pre-Lean Validator for whole candidate lists and the at-least-one-novel acceptance gate
+│   │   │   ├── proof_formalization_agent.py  # Generates Lean 4 proof scripts for candidates with mandatory full source context plus novelty metadata, Mathlib hints, and SMT hints when enabled
+│   │   │   ├── proof_pruning_agent.py # Fail-closed semantic proposer/Validator over bounded candidate-centered or conservatively arbitrated section evidence; returns fenced non-mutating commit intent
+│   │   │   ├── lemma_search_agent.py    # Mathlib lemma search agent (Build 2) — surfaces relevant existing lemmas for formalization prompts
+│   │   │   └── final_answer/            # TIER 3 - Final Answer Generation Agents
+│   │   │       ├── __init__.py          # Package initialization
+│   │   │       ├── certainty_assessor.py  # Assesses "known certainties" from Tier 2 papers
+│   │   │       ├── answer_format_selector.py # Selects short-form vs long-form answer
+│   │   │       └── volume_organizer.py  # Organizes volume structure (long-form)
+│   │   ├── validation/
+│   │   │   ├── __init__.py              # Package initialization
+│   │   │   └── paper_redundancy_checker.py # Paper library redundancy review
+│   │   ├── prompts/
+│   │   │   ├── __init__.py              # Package initialization
+│   │   │   ├── topic_prompts.py         # Topic selection & validation prompts
+│   │   │   ├── topic_exploration_prompts.py # Builds aggregator user prompt for topic exploration phase
+│   │   │   ├── completion_prompts.py    # Completion review & self-validation prompts
+│   │   │   ├── paper_reference_prompts.py # Reference selection prompts
+│   │   │   ├── paper_title_exploration_prompts.py # Builds aggregator user prompt for paper title exploration phase
+│   │   │   ├── paper_title_prompts.py   # Paper title selection prompts
+│   │   │   ├── paper_redundancy_prompts.py # Paper redundancy review prompts
+│   │   │   ├── paper_continuation_prompts.py # Brainstorm multi-paper continuation decision prompts
+│   │   │   ├── proof_prompts.py         # Proof identification/formalization/statement-alignment/novelty prompts + failure-hint direct injection helper
+│   │   │   ├── proof_pruning_prompts.py # Isolated proposer/Validator/repair contracts for proof live-context pruning
+│   │   │   └── final_answer_prompts.py  # TIER 3 - Final answer assessment/selection/volume prompts
+│   │   └── memory/
+│   │       ├── __init__.py              # Package initialization
+│   │       ├── brainstorm_memory.py     # Per-brainstorm database management (includes retroactive edit/remove/add during paper compilation)
+│   │       ├── paper_library.py         # Paper library management (Tier 2)
+│   │       ├── research_metadata.py     # Research metadata (brainstorms + papers associations, proof runtime config snapshot)
+│   │       ├── autonomous_rejection_logs.py # Topic selection & completion feedback logs
+│   │       ├── topic_exploration_memory.py # In-memory candidate DB for topic exploration phase
+│   │       ├── paper_model_tracker.py   # Per-paper model usage tracking and author attribution
+│   │       ├── autonomous_api_logger.py # Autonomous API call logger singleton
+│   │       ├── proof_database.py        # Session-aware Lean 4 verified-proof storage (records, Lean sources, standalone/group novelty provenance and atomic context injection, reverse-dependency indexes, active-context-run pruning state, revisioned pruning snapshots); cross-session library access via `list_proof_library()` and `get_library_proof()`
+│   │       ├── final_answer_memory.py   # TIER 3 - Final answer state & volume management
+│   │       ├── session_write_authority.py # Canonical-path, task-owned shared serialization for autonomous session writes
+│   │       └── session_manager.py       # Prompt-based session folder organization
+│   │
+│   ├── leanoj/                          # LEANOJ PROOF SOLVER (proof-only top-level mode; no paper writing)
+│   │   ├── __init__.py
+│   │   ├── prompts.py                   # LeanOJ topic/batched-topic/brainstorm/prune/path/final-solver JSON prompts; brainstorm validation assigns final-context roles; prune review conservatively asks whether outdated/redundant memory should be removed, updated, or supplemented with one compact corrective idea; final solver edits single-route durable master proofs and reviews Lean-accepted final code before stop
+│   │   └── core/
+│   │       ├── __init__.py
+│   │       ├── leanoj_context.py         # LeanOJ full artifact persistence, direct-first allocation, final-context routing (verified helpers + active plans direct; refuted constructions separated as compact warnings), session-scoped RAG indexing/retrieval, final-cycle packets, and clear/resume cleanup
+│   │       └── leanoj_coordinator.py     # Parallel topic + brainstorm submitters, batch validators, resumable persistence, partial proof capture, context-role classification, single-route durable master_proof.lean editing, watchdog, final Lean verification, and semantic final-solver review
+│   │
+│   ├── scripts/                         # Utility scripts
+│   │   ├── cache_openrouter_models.py   # Caches OpenRouter models with mapping display_name -> api_id
+│   │   └── startup/                     # Legacy/internal startup helper scripts kept out of repo root
+│   │
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── main.py                      # FastAPI app entry point (lifespan reads generic_mode, fail-closes hosted auth env, ensures desktop API token, skips LM Studio test in generic mode)
+│   │   ├── middleware.py                # CORS, error handling, desktop token/origin checks, proxy auth validation, hosted body-size cap + actual-body hash check
+│   │   ├── proxy_auth.py                # Shared generic-mode proxy auth helpers (allowlist + HMAC over method/path/query/verified body hash for REST/WebSocket)
+│   │   └── routes/
+│   │       ├── __init__.py
+│   │       ├── aggregator.py            # Aggregator API endpoints (includes /events)
+│   │       ├── compiler.py              # Compiler API endpoints
+│   │       ├── autonomous.py            # Autonomous Research API endpoints
+│   │       ├── leanoj.py                # LeanOJ Proof Solver API endpoints (`/api/leanoj/*`: start with matching-progress resume, stop, status, master-proof draft/edit summaries, current-run proofs, cross-session library, skip-brainstorm, force-brainstorm, clear)
+│   │       ├── boost.py                 # Boost API endpoints (enable/disable/toggle/status + OpenRouter provider endpoint metadata)
+│   │       ├── workflow.py              # Workflow predictions plus typed Progressive Solution Path snapshot and generation-fenced repair-resume endpoints
+│   │       ├── update.py                # Update/check endpoints for launcher/updater state (`POST /api/update/pull`, `GET /api/update/pull-status`)
+│   │       ├── download.py              # PDF generation endpoint via Playwright (desktop only; sanitize/block external requests; returns 501 in generic mode)
+│   │       ├── openrouter.py            # OpenRouter API endpoints (global key, models/providers via header/body keys only, LM Studio availability, model cache, reset exhaustion)
+│   │       ├── cloud_access.py          # OpenRouter/OAuth support endpoints including desktop OAuth login/model listing and durable, typed, route-identified provider notification/recovery events
+│   │       ├── websocket.py             # WebSocket for real-time updates (generic proxy auth or desktop one-time tickets before accept)
+│   │       ├── features.py              # GET /api/features — shared build identity plus stable capability flags; GET /api/update-notice — launcher/runtime-refreshed update notice
+│   │       ├── proofs.py                # Proof runtime/certificate, proof-run control, and revision-fenced mutation routes
+│   │       ├── proof_search.py          # Unified overview/search/reindex, bounded detail hydration (`session_id`/`search_id`/`run_id`), latest Assistant pack, and paginated support-lineage routes; public search caps at 7
+│   │       ├── syntheticlib4.py         # SyntheticLib4 corpus status/release/refresh/safe local import/reindex/retrieve-batch/account-proof routes plus production OAuth placeholders; public retrieve-batch is capped at 7 records; authority-gated developer trade-evidence audit, trade-authorization readiness, and trade-ledger status/controls
+│   │       ├── connectivity.py          # Non-secret grouped connectivity status/toggle routes for inference providers and optional skills
+│   │       └── health.py                # GET /api/health — readiness/liveness probe with slim instance/build metadata
+│   │
+│   ├── data/                            # Persistent data storage
+│   │   ├── user_uploads/                # User-uploaded files
+│   │   ├── model_cache.json             # **Auto-generated by cache script** - Maps display names to OpenRouter API IDs for profile system
+│   │   ├── rag_shared_training.txt      # Accepted submissions (aggregator output)
+│   │   ├── aggregator_event_log.txt     # Persistent event log (key events survive restarts)
+│   │   ├── aggregator_stats.json        # Persistent stats (acceptances, rejections, cleanup stats)
+│   │   ├── compiler_outline.txt         # Current paper outline
+│   │   ├── compiler_paper.txt           # Current paper being constructed
+│   │   ├── compiler_last_10_rejections.txt  # Last 10 compiler rejections
+│   │   ├── compiler_last_10_acceptances.txt # Last 10 compiler acceptances
+│   │   ├── Summary_Of_Last_5_Validator_Rejections_For_Submitter_*.txt  # Aggregator submitter rejections (1-10, dynamically created per submitter)
+│   │   ├── auto_brainstorms/            # Autonomous Research - Tier 1 (Brainstorm databases)
+│   │   │   ├── brainstorm_{topic_id}.txt                  # Per-brainstorm accepted submissions
+│   │   │   ├── brainstorm_{topic_id}_metadata.json        # Brainstorm metadata
+│   │   │   ├── brainstorm_{topic_id}_submitter_1_rejections.txt  # Per-brainstorm submitter rejections
+│   │   │   ├── brainstorm_{topic_id}_submitter_2_rejections.txt
+│   │   │   ├── brainstorm_{topic_id}_submitter_3_rejections.txt
+│   │   │   └── completion_feedback_{topic_id}.txt         # Completion review feedback (last 5)
+│   │   ├── auto_papers/                 # Autonomous Research - Tier 2 (Finished papers)
+│   │   │   ├── paper_{paper_id}.txt                       # Full paper content
+│   │   │   ├── paper_{paper_id}_abstract.txt              # Abstract only
+│   │   │   ├── paper_{paper_id}_source_brainstorm.txt     # Cached brainstorm database
+│   │   │   ├── paper_{paper_id}_last_10_rejections.txt    # Compiler rejections for this paper
+│   │   │   ├── pruned/                                    # Pruned papers preserved for user download, excluded from model context
+│   │   │   │   ├── pruned_paper_{paper_id}.txt            # Pruned full paper with top-of-file PRUNED PAPER banner
+│   │   │   │   └── pruned_paper_{paper_id}_metadata.json  # Pruned metadata/reason
+│   │   │   └── archive/                                   # Legacy archived (redundant) papers, treated as pruned history
+│   │   │       └── paper_{paper_id}.txt
+│   │   ├── auto_final_answer/           # Autonomous Research - Tier 3 (LEGACY - replaced by auto_sessions)
+│   │   │   ├── final_answer_state.json                    # Tier 3 state (crash recovery)
+│   │   │   ├── volume_organization.json                   # Volume structure (long-form)
+│   │   │   ├── tier3_rejections.txt                       # Tier 3 rejection log (last 10)
+│   │   │   ├── chapter_{index}_paper.txt                  # Gap/intro/conclusion papers
+│   │   │   ├── chapter_{index}_outline.txt                # Chapter outlines
+│   │   │   └── final_volume.txt                           # Assembled volume (long-form)
+│   │   ├── auto_sessions/               # Autonomous Research - Session-based folder organization
+│   │   │   └── {sanitized_prompt}_{timestamp}/            # Per-session folder
+│   │   │       ├── brainstorms/                           # Tier 1 brainstorm databases
+│   │   │       ├── papers/                                # Tier 2 completed papers plus pruned/ preserved context-excluded papers
+│   │   │       ├── final_answer/                          # Tier 3 final answer data
+│   │   │       ├── proofs/                                # Lean 4 verified-proof records (`proofs_index.json`, `proof_{proof_id}.json`, `proof_{proof_id}_lean.lean`; generated IDs currently include the `proof_` prefix)
+│   │   │       ├── session_metadata.json                  # Session info (prompt, created_at, status)
+│   │   │       ├── session_stats.json                     # Session statistics
+│   │   │       └── workflow_state.json                    # Workflow state for crash recovery
+│   │   ├── proofs/                      # Legacy (non-session) Lean 4 proof storage (mirrors per-session proofs/ layout)
+│   │   ├── manual_proofs/               # Active manual Aggregator/Compiler proof storage; archived/cleared on manual run reset so old proofs do not enter new manual prompts
+│   │   ├── manual_proof_runs/           # Archived manual proof runs for history/library viewing only, never active prompt context
+│   │   ├── proof_search/                # Derived schema/identity-versioned SQLite/FTS index, atomically rebuildable from canonical proof sources
+│   │   ├── syntheticlib4/               # Planned authorized SyntheticLib4 local snapshots/status/cache under the active data root
+│   │   ├── syntheticlib_trade/          # Local metadata-only proof-trade ledger (`proof_trade_ledger.json`) plus `archive/` of explicitly reset ledgers
+│   │   ├── leanoj_sessions/             # LeanOJ run state (state.json, master_proof.lean, master_proof_edits.jsonl, master_proof_snapshots.jsonl, phase counters, proof fragments, attempts, verified final Lean code; stop/crash resumes unless cleared)
+│   │   ├── leanoj_partial_proofs/        # LeanOJ partial/supporting proof scaffold JSONL store, keyed by session
+│   │   ├── leanoj_artifacts/            # LeanOJ full-memory artifact logs (accepted ideas with context_role metadata, verified/partial/failed proof fragments, final attempts, final-cycle packets) used for direct-first RAG allocation
+│   │   ├── auto_research_metadata.json  # Autonomous Research metadata (LEGACY - now in session folders)
+│   │   ├── auto_research_stats.json     # Autonomous Research statistics (LEGACY - now in session folders)
+│   │   ├── auto_workflow_state.json     # Autonomous Research workflow state (LEGACY - now in session folders)
+│   │   ├── auto_research_topic_rejections.txt  # Topic selection rejections (last 5)
+│   │   └── chroma_db/                   # ChromaDB persistent storage
+│   │
+│   └── logs/                            # Application logs
+│
+├── syntheticlib-trade/compatibility/   # Publishable credential-free MOTO proof-trade compatibility evidence (gitignore-allowlisted members only)
+├── scripts/
+│   ├── check_syntheticlib_trade_contract.py # Explicitly generates or read-only verifies the closed MOTO compatibility evidence set
+│   └── run_local_syntheticlib_compatibility_ci.py # Runs deterministic release-generation parity from allowlisted implementation/orchestration inputs without mutating the real repository or partially replacing retained output
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── aggregator/              # AGGREGATOR
+│   │   │   │   ├── AggregatorInterface.jsx  # User prompt, file upload, start/stop, developer-gated Creativity Emphasis Boost
+│   │   │   │   ├── AggregatorSettings.jsx   # Model selection, context sizes, capability-gated LM/OpenRouter UI
+│   │   │   │   ├── AggregatorLogs.jsx       # Metrics, acceptance rates, queue; loads persisted events on mount
+│   │   │   │   └── LiveResults.jsx          # Real-time accepted submissions view
+│   │   │   │
+│   │   │   ├── compiler/                # COMPILER
+│   │   │   │   ├── CompilerInterface.jsx    # Manual Compiler prompt, allowed-output controls, start/stop, and status
+│   │   │   │   ├── CompilerSettings.jsx     # Compiler role selections (Validator, Writing, Rigor & Proofs, Assistant), capability-gated LM/OpenRouter UI; deprecated critique fields mirror Rigor & Proofs
+│   │   │   │   ├── CompilerLogs.jsx         # Metrics: construction vs rigor, miniscule edits
+│   │   │   │   └── LivePaper.jsx            # Real-time rendered/raw paper viewing, collapsible proofs, split metrics, save draft
+│   │   │   │
+│   │   │   ├── autonomous/              # AUTONOMOUS RESEARCH
+│   │   │       ├── AutonomousResearchInterface.jsx  # Main control: research prompt, start/stop, current tier, developer-gated Creativity Emphasis Boost
+│   │   │       ├── AutonomousResearch.css     # Autonomous research styles
+│   │   │       ├── BrainstormList.jsx       # List all brainstorm topics with status
+│   │   │       ├── PaperLibrary.jsx         # Completed-paper grid/detail view with collapsible proofs, split metrics, and bulk prune selection
+│   │   │       ├── PaperBatchPruneControls.jsx # Shared visible-paper selection toolbar and bulk prune confirmation for current/history lists
+│   │   │       ├── AutonomousResearchSettings.jsx  # Autonomous settings: models/providers/profiles, free-model controls, Tier 3 toggle, Wolfram, Lean/SMT proof runtime, developer-only raw/Supercharge UI
+│   │   │       ├── AutonomousResearchLogs.jsx      # Metrics/per-submitter stats, event log, combined API call logs
+│   │   │       ├── LivePaperProgress.jsx    # Real-time Tier 2 paper display (embedded in interface)
+│   │   │       ├── LiveTier3Progress.jsx    # Real-time Tier 3 final answer display (embedded in interface)
+│   │   │       ├── FinalAnswerView.jsx      # TIER 3 - Final answer tab (separate tab for completed answers)
+│   │   │       ├── FinalAnswerLibrary.jsx   # All sessions final answer library viewer
+│   │   │       ├── FinalAnswerLibrary.css   # Final answer library styles
+│   │   │       ├── ArchiveViewerModal.jsx   # Research lineage archive viewer (papers + brainstorms)
+│   │   │       ├── ArchiveViewerModal.css   # Archive viewer styles
+│   │   │       ├── MathematicalProofs.jsx   # Flat live-session per-proof tab reused by Autonomous and Manual modes; shared run controls plus readable owning-run prune status/actions, dependency graph, and scoped exports
+│   │   │       ├── MathematicalProofs.css   # Proof library styles
+│   │   │       ├── ProofCheckModeModal.jsx  # Accessible shared one-round/continuous proof-check chooser used by all six check entry points
+│   │   │       ├── ProofRunStatusControls.jsx # Shared source/run round, pruning, Stop, and terminal status controls
+│   │   │       ├── ProofGraph.jsx           # Hand-rolled SVG proof dependency graph view
+│   │   │       ├── ProofGraph.css           # Proof graph styles
+│   │   │       ├── ProofNotificationStack.jsx # Persistent popup notifications for novel proof discoveries
+│   │   │       ├── ProofLibrary.jsx         # Historical proof library with novelty filter, collapsed run/prompt groups, full expanded proof content, and read-only persisted live-context prune provenance
+│   │   │       ├── SyntheticLibOfferPanel.jsx # Presentation-gated "Offer proofs for SyntheticLib access" panel: explicit eligibility check, eligible-only confirmed local selection, required disclosures (no upload prelaunch)
+│   │   │       ├── ProofLibrary.css         # Proof library viewer styles
+│   │   │       ├── Stage2PaperHistory.jsx   # Tier 2 paper history list (grouped per research run; sub-tab inside CompletedWorksLibrary)
+│   │   │       └── Stage2PaperHistory.css   # Tier 2 paper history styles
+│   │   │
+│   │   │   └── leanoj/                  # LEANOJ PROOF SOLVER UI
+│   │   │       ├── LeanOJInterface.jsx  # Prompt/template input, start/resume, stop, skip/force brainstorm, clear progress, live status, developer-gated Creativity Emphasis Boost, verified Lean output
+│   │   │       ├── LeanOJSettings.jsx   # LeanOJ-specific model profiles/settings; grouped UI controls map user-facing roles to the underlying LeanOJ request role keys
+│   │   │       ├── LeanOJBrainstorms.jsx # LeanOJ accepted ideas/recursive brainstorm memory viewer
+│   │   │       ├── LeanOJLogs.jsx       # LeanOJ API-call log wrapper; live event stream and proof fragments are shown in the interface/proof tabs
+│   │   │       ├── LeanOJMasterProof.jsx # Master proof draft tab (on-demand draft, metadata, edit history, download)
+│   │   │       ├── LeanOJMasterProof.css # Master proof draft tab styles
+│   │   │       ├── LeanOJMathematicalProofs.jsx # Flat current-run proof viewer with standalone/group novelty provenance and separate Lean/group downloads
+│   │   │       ├── LeanOJProofLibrary.jsx # Historical completed-run proof library with standalone/group provenance and downloads; excludes the current run
+│   │   │       └── index.js             # LeanOJ component exports
+│   │   │
+│   │   ├── StartupProviderSetupModal.jsx # Viewport-bounded post-disclaimer startup chooser for OpenRouter or LM Studio setup; desktop OAuth remains an after-startup add-on
+│   │   ├── StartupDisclaimerModal.jsx   # Viewport-bounded legal acknowledgement/quickstart dialog with an always-visible acknowledgement footer
+│   │   ├── StartupModals.css            # Shared responsive startup-dialog shells, internal overflow affordance, and provider-card breakpoints
+│   │   ├── ConnectivityPanel.jsx        # Grouped top-right connectivity launcher for inference providers and optional skills
+│   │   ├── OpenRouterApiKeyModal.jsx    # OpenRouter/OAuth modal for OpenRouter API key and desktop OAuth logins
+│   │   ├── SecretInput.jsx              # Shared masked, provider-unique, autofill-safe credential input
+│   │   ├── SyntheticLib4AccessModal.jsx # SyntheticLib4 coming-soon proof-corpus explainer
+│   │   ├── SyntheticLib4DeveloperWorkspace.jsx # Developer-only prelaunch lifecycle/privacy-boundary workspace with explicit-click authority-gated local evidence audit, authorization-readiness check, trade-ledger check, and confirmed local ledger controls (no upload)
+│   │   ├── WolframAlphaAccessModal.jsx  # Wolfram Alpha App ID and enable/disable modal
+│   │   ├── LMStudioConnectivityModal.jsx # LM Studio status/setup modal
+│   │   ├── AgentConversationMemoryModal.jsx # User-facing stored-proof memory toggle/status modal
+│   │   ├── PaperCritiqueModal.jsx       # Modal for displaying validator paper critiques (ratings, feedback, history)
+│   │   ├── CritiqueNotificationStack.jsx # Persistent popup notifications for high-scoring critiques (≥6.25 avg)
+│   │   ├── CreditExhaustionNotificationStack.jsx # Persistent red notifications for OpenRouter credit exhaustion with "Retry OpenRouter" reset button
+│   │   ├── CodexOAuthNotificationStack.jsx # Persistent desktop Codex OAuth/provider-repair notifications
+│   │   ├── ModelErrorNotificationStack.jsx # Durable workflow-scoped model/configuration repair notifications
+│   │   ├── OpenRouterFreeModelsControl.jsx # Shared free-model filter, looping, and auto-selector controls
+│   │   ├── ApiCallLogs.jsx              # Shared combined API-call log viewer
+│   │   ├── BoostControlModal.jsx        # Modal for boost configuration (next-X, category, always-prefer) with mode-aware copy
+│   │   ├── BoostControlModal.css        # Boost control modal styles
+│   │   ├── WorkflowPanel.jsx            # Boost/token/Assistant panel plus activation-gated, stale-fenced Progressive Solution Path card and lifecycle refresh
+│   │   ├── WorkflowPanel.css            # Boost controls panel and Assistant Memory Bank styles
+│   │   ├── SolutionPathModal.jsx         # Advisory route viewer with repair guidance, settings routing, retry, focus restoration, and accessible status
+│   │   ├── SolutionPathModal.css         # Progressive Solution Path modal styles
+│   │   ├── TextFileUploader.jsx         # User file upload component
+│   │   ├── TextFileUploader.css         # File uploader styles
+│   │   ├── OpenRouterPrivacyWarningModal.jsx # Privacy policy error modal (OpenRouter data sharing, capability-aware alternatives)
+│   │   ├── HelpTooltip.jsx              # Shared portal-based help tooltip component (used across settings/interfaces)
+│   │   ├── ProofStrengthBadge.jsx       # Shared PS badge/tooltip for highlighted proof-strength models and primary proof-creation roles
+│   │   ├── settings-common.css          # Shared settings panel styles
+│   │   ├── critique-modal.css           # Paper critique modal styles
+│   │   │
+│   │   ├── services/
+│   │   │   ├── api.js                   # Backend API calls (includes openRouterAPI, `/api/features`, proof routes, LeanOJ API, and cross-session proof library helpers)
+│   │   │   └── websocket.js             # WebSocket connection 
+│   │   │
+│   │   ├── hooks/
+│   │   │   ├── useOverflowAssist.js     # Measured, reduced-motion-aware, user-cancellable one-time overflow assistance for startup dialogs
+│   │   │   ├── useExplicitRequest.js    # Generation-fenced one-click request state; inactive/unmount resets, ignores late responses, and passes `isCurrent` so multi-step requests stop
+│   │   │   ├── useModalDialogFocus.js   # Shared modal focus contract: initial focus, inert background, Tab wrap, Escape, focus restore
+│   │   │   ├── useSyntheticLibPrivateSurface.js # SyntheticLib connectivity surface state; closes the developer workspace when its gate is lost
+│   │   │   ├── useDeveloperModeShortcut.js # Shift + Z + X developer-mode chord, ignored while typing in editable fields
+│   │   │   └── useProofCheckRuntime.js  # Shared source-keyed proof-run controller: readiness, queueing, discovery/reload reconciliation, lifecycle events, and generation-fenced controls
+│   │   │
+│   │   ├── utils/
+│   │   │   ├── latexChunking.js         # Source-preserving math-aware rendering boundaries
+│   │   │   ├── latexConverter.js        # DOM-free shared KaTeX conversion; output requires sanitization
+│   │   │   ├── latexRender.worker.js    # Dedicated conversion worker
+│   │   │   ├── latexRenderService.js    # Bounded cancellable worker scheduling and yielding main-thread publication
+│   │   │   ├── downloadHelpers.js       # Complete asynchronous PDF preparation and raw downloads
+│   │   │   ├── modelCache.js            # Frontend model cache utilities (display_name → api_id lookup)
+│   │   │   ├── openRouterSelection.js   # Shared OpenRouter selector auto-fill helpers (context/output from model + host metadata)
+│   │   │   ├── autonomousProfiles.js    # Shared autonomous recommended-profile definitions and persistence helpers
+│   │   │   ├── leanojProfiles.js        # LeanOJ-specific recommended/user profile definitions, persistence helpers, and request builder (topic generation uses all submitters; legacy topic_generator/selector is sourced from Brainstorm Submitter 1; legacy path_decider request field is derived from Final Proof Solver)
+│   │   │   ├── safeStorage.js           # Defensive browser-storage readers for small UI preferences
+│   │   │   ├── activityStyles.js        # Shared live-activity formatting/styling helpers
+│   │   │   ├── activityPersistence.js   # Bounded activity persistence helpers
+│   │   │   ├── liveActivityPersistence.js # Instance-prefixed durable live-activity storage and recovery
+│   │   │   ├── workflowLifecycle.js     # Workflow lifecycle identity and stale-event reconciliation helpers
+│   │   │   ├── proofPresentation.js     # Live-context prune classification, risk warnings, and revision/identity-fenced mutation payloads
+│   │   │   ├── proofRunActivityRecovery.js # Per-tab proof-run activity sequence cursor, live duplicate gate, and reconnect/resume replay
+│   │   │   ├── manualProofSources.js    # Manual proof-source identity and lookup helpers
+│   │   │   ├── manualLogRouting.js      # Manual workflow proof/activity routing helpers
+│   │   │   ├── solutionPathPresentation.js # Progressive Solution Path UI state and stale-safe presentation helpers
+│   │   │   ├── credentialProviderRefresh.js # Mounted-settings credential/provider refresh coordination
+│   │   │   ├── promptDraftStorage.js    # Durable prompt-draft storage with large-value offload
+│   │   │   ├── oauthProviders.js        # Shared desktop OAuth/subscription provider registry helpers
+│   │   │   ├── runtimeConfig.js         # Frontend runtime helpers (instance storage prefix, active data-root display, instance ID)
+│   │   │   ├── researchRunHistory.js    # Groups Tier 2 papers + final answers into per-run history entries for Stage2PaperHistory/FinalAnswerLibrary
+│   │   │   └── disclaimerHelper.js      # Frontend-only disclaimer injection for brainstorm/paper views
+│   │   │
+│   │   ├── App.jsx                      # Main shell, capabilities/mode routing, global solution-path modal/settings ownership, workflow-scoped path activity dispatch, and workflow/source-scoped provider-activity feed routing
+│   │   ├── index.css                    # Styles
+│   │   └── index.jsx                    # React entry point
+│   │
+│   ├── package.json
+│   └── vite.config.js
+│
+├── tests/                                # Regression/security tests for launcher, update, API hardening, proof/compiler behavior, and orchestration helpers
+│   └── test_*.py                         # Pytest modules; keep focused on behavior and path/security regressions
+│
+├── requirements.txt                     # Python dependencies (default mode)
+├── requirements-generic.txt             # Additive deps for generic mode (-r requirements.txt + fastembed + onnxruntime)
+├── Dockerfile                           # Canonical hosted generic-mode container contract (`python:3.12-slim`, API-only backend image)
+├── .dockerignore                        # Hosted image build-context exclusions (desktop/frontend/dev artifacts stay out of the container)
+├── docker/
+│   └── entrypoint.sh                    # Hosted backend startup wrapper (defaults hosted envs, creates runtime dirs, delegates to `backend.api.main`)
+├── package.json                         # Root scripts
+├── moto-update-manifest.json            # Build 0 updater/build identity manifest committed on main
+├── SECURITY.md                          # Security policy and private vulnerability reporting
+├── Click To Launch MOTO.bat             # The authoritative Windows launcher entrypoint (bootstraps Python 3.10+ via winget when missing, refreshes/relaunches if needed, then delegates to moto_launcher.py)
+├── linux-ubuntu-launcher.sh             # Linux/Ubuntu launcher entrypoint (thin bash wrapper that delegates to moto_launcher.py)
+├── launcher_https.py                    # Shared verified launcher/updater HTTPS context with native Windows trust support
+├── moto_launcher.py                     # Internal Python launcher orchestration (update check, runtime resolution, dependency install, service startup)
+├── moto_updater.py                      # Build 1 updater helper (manifest fetch, install classification, ZIP/git apply flow, launcher state tracking)
+└── .moto_launcher_state.json            # Gitignored local launcher state (tracks active service-window PIDs and runtime roots to block unsafe update-apply)
+
+## SyntheticLib4 / Unified Proof Search
+
+- MOTO-side SyntheticLib4 work provides a shared client for authorized corpus status, local snapshot handling, bounded retrieve-batch calls, user proof browsing/search, and usage attestations. Secrets follow the existing default-mode keyring and generic-mode in-memory/env split; snapshot files and runtime settings remain non-secret.
+- Proof trade is a separate future transfer/credit surface from proof search and usage attestation. The tracked MOTO compatibility evidence under `syntheticlib-trade/compatibility/` (the only publishable members of that plan root; `PLANS/` stays private) is credential-free and fail-closed: it binds exact package/build/API identity to a canonical matrix, independently reproduced preflight result, normalized receipt/digest, frozen-asset inventory, diagnostic attestation, and complete evidence-bundle digest. Separate clean-source release evidence binds immutable source/execution provenance; the isolated deterministic local runner verifies workflow parity without mutating the real repository and does not satisfy the independently controlled release gate. Neither path establishes live SyntheticLib compatibility or trade eligibility.
+- Unified proof/history search is shared infrastructure over canonical MOTO `ProofRecord` stores, selected LeanOJ proof artifacts, manual proof history, and authorized SyntheticLib4 snapshots. It provides compact corpus overviews, dedupe/provenance, bounded retrieval, a shared AI-facing tool adapter, and usage-attestation support without changing proof validation semantics.
+- SyntheticLib4 access and proof-search routes are additive to existing proof routes. Auth, membership, quota, schema, or index errors are corpus-search status, not Lean proof failures. Public proof-search/retrieve-batch route schemas expose their 7-result caps, while internal Assistant candidate-pool retrieval may gather a wider bounded pool before producing a final up-to-7 support pack.
+- Local SyntheticLib4 cache data lives under the active data root and activates only after manifest/hash/index checks pass. A failed refresh leaves the previous active snapshot usable.
+
+## File Purpose Descriptions
+
+### Launcher and Updater
+
+- `Click To Launch MOTO.bat`: The only Windows consumer entrypoint. It bootstraps a usable Python 3.10+ interpreter on fresh Windows installs when `winget` is available, refreshes/relaunches once if the current console cannot see the new runtime, then delegates to the Python launcher.
+- `linux-ubuntu-launcher.sh`: The Linux/Ubuntu consumer entrypoint. Same thin-wrapper contract as the `.bat`; delegates to `moto_launcher.py`.
+- `launcher_https.py`: Shared fail-closed HTTPS helper for launcher and updater downloads. It preserves hostname/certificate verification, honors explicit operator CA configuration, and uses native Windows trust when available with a verified standard-library fallback.
+- `moto_launcher.py`: Orchestrates the launcher flow in order: update check, runtime resolution, dependency install, LM Studio detection, detached backend/frontend startup, and browser launch. Windows directly launches the titled backend console so the launcher tracks the actual backend PID while dual console/file logging preserves live and durable diagnostics; it reconciles the authoritative data-root lease before port selection, preserves active/ambiguous owners even when the frontend has exited, safely replaces only an evidence-proven legacy orphan, and rolls back partial service starts. Launcher/updater HTTPS preserves hostname/certificate verification and bootstraps native Windows certificate-chain validation before update checks, retaining explicit operator CA configuration and a verified stdlib fallback. Windows Node.js bootstrap uses bounded `winget` source/package/scope fallbacks, then refreshes/prepends Node paths so npm child scripts can resolve `node` immediately. Lean/Mathlib setup verifies Git, uses bounded `Git.Git` winget scope fallbacks on Windows, propagates the verified executable path to child services, and disables optional proof support with repair guidance if Git remains unavailable or, on Windows, the Lean workspace path is too long for Mathlib and cannot be relocated to the short per-user folder (`lean_workspace_path_too_long`); after relocating, it deletes the unusable in-root MOTO workspace. After Python dependency installation, Windows probes ChromaDB's native binding in a clean child interpreter and, when needed, uses winget to install the Microsoft Visual C++ runtime matching the Python architecture (x64, x86, or ARM64). The post-repair import probe is authoritative regardless of installer exit status; persistent failure stops before backend startup with bounded loader diagnostics and architecture-specific repair guidance.
+- Lean runtime state separates launcher-established Git/Lean/Lake availability, durable user preference, and their effective conjunction; persisted settings and runtime APIs cannot override unavailable process capability.
+- `moto_updater.py`: Owns Build 1 updater behavior, including GitHub REST contents metadata + branch-HEAD resolution, install-state classification, clean-git fast-forward apply, ZIP overlay apply with post-apply manifest stamping, rollback-aware relaunch, and launcher-managed instance safety checks.
+- `.moto_launcher_state.json`: Local-only state written by the launcher so future launches can detect still-open backend/frontend windows from the same install and skip update-apply until those windows are closed.
+
+### Hosted Runtime
+
+- `Dockerfile`: Canonical hosted generic-mode image definition. Uses the Debian/glibc `python:3.12-slim` baseline, installs `requirements-generic.txt`, preloads the FastEmbed model, and starts the API-only backend contract.
+- `.dockerignore`: Keeps desktop launchers, frontend assets, tests, local runtime data/logs, and dev-only metadata out of the hosted image build context.
+- `docker/entrypoint.sh`: Minimal hosted startup wrapper. Defaults `MOTO_GENERIC_MODE=true`, `HOST=0.0.0.0`, `PORT=8000`, `MOTO_DATA_ROOT=/app/backend/data`, creates runtime directories, and then delegates to `python -m backend.api.main`.
+
+### Shared Resources
+
+- `config.py`: RAGConfig, SystemConfig (context windows, chunk sizes, max output tokens, `generic_mode` flag)
+- `models.py`: Pydantic models (ModelConfig with per-role `supercharge_enabled`, BoostConfig, WorkflowTask, ModelUsageTracker, FinalAnswerState)
+- `lm_studio_client.py`: LM Studio HTTP client (completions, embeddings, model listing, same-base numeric `:#` instance sharing for independent calls); generic-mode inference and embeddings bypass it, though shared legacy diagnostics may still exist
+- `openrouter_client.py`: OpenRouter HTTP client (credit exhaustion detection, bounded transient/missing-choices retries, fallback, model/provider endpoint metadata, and redacted upstream host/request-id reporting into route identity, with upstream error detail added to no-choices retry text)
+- `openai_codex_client.py`: Desktop-only OpenAI Codex/ChatGPT OAuth token lifecycle, incrementally consumed Responses stream adapter (WebSocket transport first, HTTP/SSE fallback) with strict terminal-state validation (and unsupported output-limit/temperature knob removal), plus Codex model context/output metadata normalization; not the regular OpenAI API-key billing path
+- `xai_grok_client.py`: Desktop-only xAI Grok/SuperGrok OAuth client; untimed spending/subscription limits stay repair-required, while timed 429 usage windows use JSON body reset or Retry-After and other transients remain retryable
+- `sakana_fugu_client.py`: Desktop-only Sakana Fugu subscription API client; stores the key in keyring, prefers `/responses`, supports tool-turn chat completions, normalizes responses/model metadata, and separates timed usage windows from transient throttling and hard entitlement failures before retry
+- `api_client_manager.py`: Unified API router (exact configured-role fail-closed enforcement, optional per-role Supercharge, OpenRouter/desktop OAuth/LM Studio fallback, boost, model tracking, and the atomic route-identified retry-activity/stop-aware-wait seam, plus a run-scoped role→source registry that tags manual proof-check retry activity with its source); persisted LM Studio fallback state uses the configured fallback model ID, and generic mode early-returns FastEmbed for embeddings
+- `boost_manager.py`: Singleton boost manager (next-count, always-prefer, category, and per-task boost routing; broadcasts events)
+- `boost_logger.py`: Boost API call logger (persists boost-routed calls for the combined API log view)
+- `workflow_predictor.py`: Legacy/shared prediction helper; active coordinators expose their own `workflow_tasks` for internal boost/workflow routing
+- `free_model_manager.py`: Free model rotation/cooldown singleton (looping, auto-selector `openrouter/free`, account exhaustion detection)
+- `model_error_utils.py`: Shared non-retryable provider/config error detection; callers pause recoverable credit exhaustion, while hard config/privacy/missing-key errors fail visibly with a user-repair path instead of becoming proof or validation failures.
+- `provider_pause.py`: Process-local provider-credit pause/resume event. LeanOJ and autonomous proof checkpoints preserve durable workflow state separately; `/api/openrouter/reset-exhaustion` wakes currently waiting in-process proof workflows.
+- `brainstorm_proof_gate.py`: Shared Lean 4 gate for optional proof-candidate brainstorm submissions before normal validation; rejects missing novelty/rationale metadata before Lean cost and preserves Lean-accepted real artifacts for novelty/validator review.
+- `wolfram_alpha_client.py`: Wolfram Alpha API client. Exposed to the WritingSubmitter.submit_construction loop as the `wolfram_alpha_query` tool (up to 20 calls per construction submission); logs/broadcasts must redact raw query/result text.
+- `rag_lock.py`: Global RAG operation lock (prevents collision, retry logic for reads); embedding lock skip in generic mode (FastEmbed is in-process/thread-safe)
+- `token_tracker.py`: Cumulative input/output token tracker singleton with per-model breakdown and research timer. Reset on session start, timer start/stop tied to coordinator lifecycle. Stats broadcast via `token_usage_updated` WebSocket event after each successful LLM call.
+- `utils.py`: Token counting, text compression, file I/O
+- `json_parser.py`: JSON parsing with sanitization for LLM responses; sanitizes reasoning tokens, markdown blocks, control tokens, LaTeX escapes, control characters; **rejects truncated JSON** (raises ValueError with diagnostics) to prevent corrupted content from passing validation; also provides `sanitize_model_output_for_retry_context()` so retries/memory/RAG can preserve visible failed-output excerpts without replaying known private thought/channel/control tokens or corrupting visible Lean/math syntax such as `<|`; retry-facing parser exceptions must not include raw response excerpts
+- `response_extraction.py`: Central assistant text extraction for OpenAI-compatible responses. It prefers `message.content` and falls back to compatibility fields such as `reasoning`/`thinking` only when content is empty so reasoning-only local endpoints still work under one policy.
+- `critique_memory.py`: Paper critique persistence (ratings, feedback, history, session-aware)
+- `critique_prompts.py`: Default critique prompt and builder function
+- `secret_store.py`: Secure credential persistence via OS keyring; bypassed in generic mode (keys are env-injected/in-memory only)
+- `runtime_settings.py`: Persists non-secret process settings such as free-model looping, desktop/default-mode proof runtime flags/timeouts, and connectivity feature toggles under the active data root
+- `credential_locks.py`: Serializes each provider's credential validation, durable commit/clear, and runtime publication transaction.
+- `provider_errors.py`: Defines typed safe provider-route, context-limit, and operator-repair-required errors; route identity carries structured-only upstream host/request id.
+- `provider_route_identity.py`: Pure provider/API-error route identity (workflow mode, role label, model, provider, route kind, OpenRouter configured/upstream host) and the composed idempotent `route_identity` display prefix; never feeds exception, classification, backoff, or dedupe-key text.
+- `provider_recovery/`: Shared recovery event helpers and typed retry/cooldown/repair models. Live adapters still classify locally; timed usage windows and untimed spending/entitlement share one stop-aware cooldown/repair contract.
+- `provider_notification_store.py`: Persists bounded non-secret provider notifications with workflow ownership, route identity, manual proof-check source/run fields, and stable keys for missed-popup and Live Activity recovery; failed writes keep live delivery but mark durability degraded.
+- `activity.py`: Normalizes additive Live Activity event-instance identity, workflow/run
+  scope, category/severity/outcome, validator feedback, and bounded secret-redacted
+  normalized and legacy diagnostic fields before WebSocket delivery or durable
+  projection; its producer helper fills known metadata without overwriting producer
+  semantics.
+- `build_info.py`: Build identity helper that reads the committed manifest contract, resolves git HEAD or ZIP-stamped build commits, and applies optional env overrides for runtime version/build stamping
+- `syntheticlib_trade_compatibility.py`: Pure credential-free proof-trade evidence contract. It independently verifies advertised package/build/API identity, exact fail-closed unpublished-state semantics, canonical matrix/receipt bytes, restores the prior generation before propagating publication failures or interruptions, rejects non-file evidence members, binds the complete hashed evidence bundle, and keeps live SyntheticLib compatibility fail-closed.
+- `syntheticlib_trade_eligibility.py`: Read-only projection over canonical proof occurrence files and proof-set revisions, per store and across every canonical store in a data root. It validates local identity/receipt/import/dependency/source evidence independently of proof-search indexes, rejects non-regular/orphaned/ambiguous artifacts and cross-store copies, fences each store projection to one durable revision, resolves identical content to its earliest occurrence, and exposes path-free metadata-safe occurrence/store reason codes; before the SyntheticLib rank mapping and service contract, every result remains ineligible.
+- `syntheticlib_source_selection.py`: Pure frozen MOTO source-selection policy deciding which canonical occurrence categories could ever be offered; it never grants eligibility.
+- `proof_identity.py`: Defines `moto-proof-identity-v1` canonical theorem/Lean hashes for internal exact matching; publisher hashes remain separate integrity metadata.
+- `installation_identity.py`: Owns the desktop installation-global random identity and non-secret per-data-root binding markers. Populated copied roots and path changes fail closed until explicit adoption/relocation; reset is explicit and generic mode has no authority.
+- `proof_locator.py`: Defines stable store IDs, opaque client proof/batch/selection-snapshot IDs, and `moto-proof-locator-v1` construction/digests. Canonical persistence mints occurrence identity; archives preserve it and derived API/search projections only consume it.
+- `trade_data_boundary.py`: Central proof-trade exclusion boundary. Logs, workflow/updater diagnostics, uncaught errors, and future exports/telemetry route through it; trade-namespace logs drop paths, local identity, occurrence IDs, and tracebacks.
+- `oauth_pkce.py` / `proof_trade_authorization.py`: Shared S256-only PKCE and constant-time state primitives, plus plan-fixed proof-trade scope validation, client+installation keyring record naming, and metadata-only readiness. No login, listener, token exchange, or credential write exists until the registered client profile and frozen contract arrive.
+- `proof_trade_ledger.py`: Metadata-only, root-bound, crash-safe ledger of explicit selection snapshots and local batches. Reconciliation against the canonical projection is terminal on any identity/hash/evidence change; unreadable ledgers fail closed until explicit archive/reset, and contract-owned fields stay null until the frozen contract.
+- `proof_search/indexer.py` / `models.py` / source normalizers: Derived schema-versioned SQLite index with canonical and standalone/group novelty provenance columns, schema+identity compatibility validation, atomic sibling publication, and composite `(corpus, run_id, session_id, source_type, source_id)` occurrence joins; explicit tool results retain group scope, claim, and member IDs.
+- `proof_search/assistant_coordinator.py` / `assistant_ranker.py` / `assistant_cache.py` / `assistant_models.py`: Non-blocking up-to-7 verified Lean proof-history support selection with deterministic lanes, two-receiver reuse, requesting-run/session filtering on fresh and every cached/stale reuse path, and pre-selection exclusion of group-scoped anchors until complete-group hydration is supported. Supports are optional and cannot redirect or mathematically reinterpret an unrelated parent goal.
+- `solution_path/models.py` / `engine.py` / `integration.py` / `registry.py` / `reviewer.py`: One durable Progressive Solution Path per top-level run, absent before five parent-owned accepted brainstorm events. Only semantic validators may enqueue material optional updates; separately parsed malformed path data cannot affect primary decisions. `reviewer.py` owns the production Main Submitter 1 prompt and bounded sanitized JSON retry. Review is non-blocking, serial, transactional, and generation-fenced; immediate hard failures and repeated invalid/unknown failures use explicit repair/retry. Only the bounded approved plan is advisory context; Stop/crash preserves work and Clear/new-run is the only reset.
+- `fastembed_provider.py`: FastEmbed embedding wrapper (generic mode only); lazy-imported so default installs are unaffected
+- `lean4_client.py`: Lean 4 checker with lazy single-flight workspace bootstrap. A failed workspace raises `LeanWorkspaceRepairRequiredError` through `require_lean_workspace` / `raise_for_lean_workspace_failure`; a Windows path too long for Mathlib is latched before any `lake` work. Successful subprocess/LSP checks emit immutable receipts bound to exact checked bytes, actual checker route, proof-time toolchain/build, timeout/profile, and parsed imports. Never bundled into the hosted image.
+- `lean_source_evidence.py`: Pure versioned source hashing/import parsing and receipt canonicalization; contains no workspace or persistence authority.
+- `local_novelty_receipt.py`: Finalizes digest-bound internal MOTO novelty-assessment provenance after canonical locator assignment, preserving independent rank, assessment origin, group binding, and duplicate overlay without mapping a SyntheticLib trade rank or authorizing selection.
+- `smt_client.py`: Optional Z3/SMT launcher-managed subprocess wrapper. When `smt_enabled=False`, SMT checks return explicit disabled/error results rather than invoking Z3. SMT results are hint-only; Lean 4 remains authoritative. Never bundled into the hosted image.
+
+### Compiler Components
+
+- Ordinary outline, construction, review, post-body critique, and semantic validation are domain-general and exact-objective-directed, with rigor matched to the domain and claim type. Mathematics, theorems, proofs, and LaTeX are first-class when relevant; dedicated theorem discovery/formalization, Lean placement/checks, markers, and Wolfram paths retain their specialized behavior.
+- `compiler_coordinator.py`: Orchestrates Markov chain workflow, mode switching
+- `compiler_rag_manager.py`: Per-role context windows, direct→RAG priority
+- `outline_memory.py`, `paper_memory.py`, `compiler_rejection_log.py`: File I/O and logging
+- `critique_memory.py`: Accepted critiques database for peer review aggregation phase
+- `critique_rejection_memory.py`: Last 5 critique rejection feedback logs (helps Rigor & Proofs critique generation learn during the compatibility period)
+- `writer_submitter.py`, `high_param_submitter.py`: Submitter agents; Rigor & Proofs owns rigor, proof, and critique generation
+- `compiler_validator.py`: Validates coherence, rigor, placement
+- Prompts: `outline_prompts.py`, `construction_prompts.py`, `review_prompts.py`, `rigor_prompts.py`, `critique_prompts.py`
+
+### Autonomous Research Components
+
+- Ordinary strategy prompts (`topic_exploration`, topic selection, completion, references, titles, and continuation) are domain-general, aggressively solution-directed, and use domain-/claim-appropriate rigor. Tier 3 certainty/format/volume synthesis follows the same standard: it preserves evidence status, organizes by actual solution dependencies, and permits proof, mechanism, implementation, evidence, validation, safety, and risk components without changing schemas or control flow. When Mathematical Proofs is allowed, mathematics remains first-class under the eager startup proof-framing emphasis when useful; when disabled in Allowed Outputs, that gateway and emphasis injection are skipped. Positive framing is emphasis rather than a hard mathematical admission gate for ordinary contributions.
+- `autonomous_coordinator.py`: Three-tier workflow orchestrator (Tier 1→2→3, triggers, crash recovery, invokes `ProofVerificationStage` after brainstorm/Tier 2 paper completion when `lean4_enabled`)
+- `autonomous_rag_manager.py`: Autonomous RAG wrapper
+- `proof_round_driver.py`: Shared policy-driven round orchestration for one-round, bounded automatic multi-round, and unbounded continuous-pruning calls, including trigger naming, bounded prior-round summaries, no-candidate policy, and token-owned source reservation. `ProofVerificationStage.run()` retains candidate, Lean, Phase A/B, registration, checkpoint, and recovery execution. The public proof-check route selects policy through explicit `run_mode`, with `one_round` remaining the compatibility default.
+- `proof_candidate_list_validator.py`: Independent identity-complete pre-Lean whole-list review; accepts any list with at least one approved novel candidate and forwards only approved entries.
+- `proof_verification_stage.py`: Proof pipeline orchestrator — prompt-relevant candidate identification → per-candidate Phase A (Mathlib lemma search → optional SMT early-exit → 3 full-script plus 2 tactic-script Lean attempts) with `proof_max_parallel_candidates` batching → serialized Phase B (post-Lean novelty → storage → dependencies → source append). Per-source locking and checkpoint identity fences prevent duplicate or stale work; provider interruptions preserve valid cumulative state. Compiler rigor remains a separate serial loop.
+- `proof_run_manager.py`: Scope-neutral lifecycle owner for one-round and continuous pruning-loop proof checks. Manual runs are process-local, expose Stop, and automatically continue until ten consecutive valid rounds discover no candidates; a discovered candidate resets the streak. Stop, normal no-discovery completion, backend shutdown, or hard repair ends the run and requires a fresh later request; no durable idle/restart-resume/next-round state exists. Provider reset may still wake an in-process pause. It owns stable identity, reservation/sleep cleanup, bounded status, detailed per-round lifecycle events, the bounded numbered activity journal used for tab-recovery replay, and terminal cleanup.
+- `proof_pruning_coordinator.py`: Run-scoped asynchronous owner for three-prompt-novel or proof-memory-attributable overflow review. It bounds and conservatively arbitrates candidate-centered semantic evidence, preserves newer trigger generations, migrates compatible durable counters/pressure/queued state, protects retained-support provenance, fences commits against snapshot/run/source/lifecycle/evidence/dependency facts, and drains on terminal ownership cleanup.
+- `proof_novelty.py`: Shared novelty classifier for Lean-verified proofs, used by autonomous proof verification and compiler rigor persistence.
+- `proof_registration.py`: Shared verified-proof registration that preserves independent public/current-context novelty, stores every current occurrence, then adds silent cross-run canonical duplicate provenance/overlay across enabled history.
+- `proof_dependency_extractor.py`: Parses verified Lean 4 code into `ProofDependency` records (imports, Mathlib lemmas, MOTO-origin proof ancestry).
+- Agents: `topic_selector.py`, `topic_validator.py`, `completion_reviewer.py`, `reference_selector.py`, `paper_title_selector.py`, `proof_identification_agent.py`, `proof_formalization_agent.py`, `lemma_search_agent.py`
+- Tier 3 Agents: `certainty_assessor.py`, `answer_format_selector.py`, `volume_organizer.py`
+- `paper_redundancy_checker.py`: Library quality maintenance (every 3 papers)
+- Prompts: `topic_prompts.py`, `topic_exploration_prompts.py`, `completion_prompts.py`, `paper_reference_prompts.py`, `paper_title_exploration_prompts.py`, `paper_title_prompts.py`, `paper_redundancy_prompts.py`, `paper_continuation_prompts.py`, `proof_prompts.py`, `final_answer_prompts.py`
+- `proof_pruning_evidence.py`: Pure deterministic projection layer for bounded semantic pruning evidence. It computes stable semantic ranking signals, context estimates, and decision-relevant evidence/dependency/descriptor fingerprints without importing proof stores or authorizing mutation.
+- Memory: `brainstorm_memory.py`, `paper_library.py`, `research_metadata.py` (also stores the proof runtime config snapshot), `session_manager.py`, `autonomous_rejection_logs.py`, `topic_exploration_memory.py` (in-memory candidate DB), `paper_model_tracker.py` (per-paper model usage tracking and author attribution), `autonomous_api_logger.py` (API call logging singleton), `proof_database.py` (session-aware occurrence-preserving Lean proof storage, active-context-run pruning state separate from occurrence identity, bounded revisioned semantic-pruning snapshots and commit fences, prompt-novel injection filtering, novelty/reverse-Mathlib indexes, and cross-session access), `final_answer_memory.py` (model tracking, archival)
+
+### LeanOJ Components
+
+- `leanoj_coordinator.py`: Runs the proof-only LeanOJ state machine. It uses parallel submitters plus batch validators for broad initial foundation topics and brainstorms; classifies accepted brainstorm context as `active_plan`, `verified_hint`, `refuted_construction`, or `scratch`; keeps ordinary partial `sorry` scaffolds and failed final attempts out of master-proof seeding unless explicitly elevated; persists accepted-idea `context_role`, chronological occurrence metadata, and standalone/group novelty provenance; stores full proof memory independently from trimmed UI/status lists; rejects fake proof devices; persists final-cycle failure packets; emits LeanOJ progress events; routes prompt memory through allocated context blocks; passes the most recent 5 final attempts plus optional metadata-only `search_lean_proofs` results as compact final-solver execution/context guidance; and requires Final Proof Solver semantic review before a Lean-passing final proof stops as verified.
+- `leanoj_context.py`: Owns LeanOJ artifact JSONL persistence under the active data root, direct-first allocation, final-solver context routing (verified proof fragments + `active_plan` notes direct, refuted constructions only as compact warnings, ordinary partial scaffolds excluded from final direct proof context), source-name generation, RAG indexing, session-scoped retrieval with `include_source_prefixes`, direct-source exclusion, resume reload support, and Clear Progress cleanup for LeanOJ RAG sources.
+- `prompts.py`: LeanOJ prompt builders for topic, brainstorm, prune review, path/final-solver editing, and final semantic review roles. These consume prepared context blocks (`direct_proof_context`, `rag_evidence_context`, `refuted_construction_warnings`, `capped_rejection_feedback`, `current_final_cycle_packet`) instead of owning persistence or truncation policy; prune prompts may conservatively remove, update, or add one compact corrective memory item without forcing deletion; final-solver prompts must keep `master_proof.lean` to the current chosen proof route, include only compact recent-attempt execution feedback, and avoid accumulating explored/refuted routes.
+
+### API Routes
+
+- `compiler.py`: Compiler control (start/stop/status), paper/outline access, critique management
+- `autonomous.py`: Autonomous research control (start/stop/clear/status), brainstorm/paper access, pruned/history paper routes, Tier 3/final-answer library routes, critique/API-log helpers, and current-paper recovery actions
+- `proofs.py`: Owns current/history proof and persisted-receipt certificates, proof-run controls (registering each manual run's role activity source for the run's lifetime), and revision-fenced mutations; reads remain Lean-free.
+- `syntheticlib4.py`: SyntheticLib4 corpus access/status routes for local snapshot status, release listing, safe local snapshot import, refresh/reindex, retrieve-batch, account-proof browsing/search, and production OAuth placeholders. API keys use the active mode's secret path while live validation remains pending; normal runtime reports zero SyntheticLib4 proofs until an authorized data-root snapshot is active, and explicit fixtures are test-only. Authority-gated developer routes expose the read-only trade-evidence audit and authorization readiness plus metadata-only trade-ledger status, listing, and local snapshot/batch/archive-reset controls that never upload.
+- `connectivity.py`: Non-secret grouped status and toggle routes (`/api/connectivity/status`, `/api/connectivity/toggles`) for OpenRouter/OAuth, LM Studio, SyntheticLib4, local proof-history Session History Memory, Wolfram Alpha, and Boost state. Toggle changes never clear credentials, snapshots, indexes, or history.
+- `leanoj.py`: LeanOJ proof-solver routes for start (including matching saved-progress resume), stop, status, clear, skip-brainstorm, force-brainstorm, current proof listing and same-run novelty-group export via `/api/leanoj/proofs*`, historical completed-run library/group export via `/api/leanoj/library*` (excluding the currently loaded run), plus read-only `GET /api/leanoj/master-proof` and `/api/leanoj/master-proof/edits` for the durable master proof draft and compact edit-history summaries.
+
+### Frontend Components
+
+- `App.jsx`: Top-level GUI shell. Default mode is `Autonomous S.T.E.M. ASI` for Part 3 screens; `Advanced Manual S.T.E.M. ASI` contains the manual Part 1 Aggregator + Part 2 Compiler workspace; `LeanOJ Proof Solver` is a developer-mode-only proof mode. Shared utility controls (ConnectivityPanel, WorkflowPanel, and BoostControlModal from the panel) remain global, and Build 3C bootstraps `/api/features` here so hosted mode can hide LM Studio/desktop-OAuth UI and copy. Shift + Z + X toggles persisted developer-mode settings, LeanOJ mode, raw JSON editors, and Supercharge controls. Supercharge request payloads must be forced off unless developer mode is active. Active app mode and tab state are in-memory only; a fresh frontend mount starts on the autonomous main interface. **Autonomous tab groups**: main tabs (interface, brainstorms, papers, proofs, optional final-answer) + settings group (Completed Works Library, API Call Logs, Settings). The "Completed Works Library" tab hosts four sub-tabs rendered inside its content area: Stage 2 Papers History, Stage 3 Final Answers History, Proof Library, and Benchmarks (`ProofCompetitionBenchmarkReport`).
+- `WhatsNewModal.jsx` and `utils/releaseNotes.js` provide curated version-keyed release highlights after waiver acknowledgement, once per version in instance-scoped browser storage. The top-right version button reopens them and the dialog links to GitHub. Backend capabilities supply runtime version identity; update curated highlights with each release, without showing another version's notes.
+- Live activity feeds keep long bounded histories (thousands of entries) and persist in browser storage across tab reloads, backend restarts, stop/start cycles, and crashes; explicit mode clear/reset actions are the user-facing reset point.
+- **Aggregator**: `AggregatorInterface.jsx`, `AggregatorSettings.jsx`, `AggregatorLogs.jsx`, `LiveResults.jsx`
+- **Compiler**: `CompilerInterface.jsx`, `CompilerSettings.jsx`, `CompilerLogs.jsx`, `LivePaper.jsx`
+- **Autonomous/Manual proofs**: `MathematicalProofs.jsx` is the flat current-run view for both scopes and never groups by/displays the user prompt. `ProofLibrary.jsx` is historical-only, groups by run/prompt with bounded prompt previews, and keeps expanded proof material complete; Autonomous hosts it in Completed Works and Manual mode uses a separate Completed Proof Works tab.
+- **LeanOJ**: `LeanOJInterface.jsx`, `LeanOJBrainstorms.jsx`, `LeanOJLogs.jsx`, `LeanOJMasterProof.jsx`, `LeanOJMathematicalProofs.jsx`, `LeanOJProofLibrary.jsx`, `LeanOJSettings.jsx`
+- **Shared**: `StartupProviderSetupModal.jsx`, `StartupDisclaimerModal.jsx`, `StartupModals.css`, `ConnectivityPanel.jsx`, `OpenRouterApiKeyModal.jsx`, `SyntheticLib4AccessModal.jsx`, `WolframAlphaAccessModal.jsx`, `LMStudioConnectivityModal.jsx`, `AgentConversationMemoryModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `CreditExhaustionNotificationStack.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `UpdateNotificationBanner.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
+- **Hooks**: `useOverflowAssist.js` owns measured, interaction-cancellable startup-dialog scroll assistance; `useExplicitRequest.js` fences explicit one-click requests against close/unmount; `useModalDialogFocus.js` owns the shared modal focus/inert/Escape contract; `useSyntheticLibPrivateSurface.js` closes the SyntheticLib developer workspace when developer mode or its gate is lost; `useProofCheckRuntime.js` is the shared source-keyed readiness, queueing, run-discovery/reload reconciliation, lifecycle-event, and generation-fenced proof-run controller.
+- **Utils**: `downloadHelpers.js` (PDF/raw download), `modelCache.js` (display_name → api_id lookup), `openRouterSelection.js` (shared OpenRouter selector auto-fill helpers using model context and provider endpoint caps), `autonomousProfiles.js` (shared recommended-profile definitions + persistence helpers; when editing a preset, anchor to the exact profile block and exact nested role such as `validator` or `writer`, never to a shared literal alone, then verify the diff only touched that intended profile/role), `leanojProfiles.js` (LeanOJ profile helpers), `safeStorage.js` (defensive localStorage reads), `activityStyles.js` (live-activity messages/classes; prefixes backend `route_identity` once), `activityNormalization.js` (normalized activity identity/outcome, bounded detail, duplicate suppression), `proofPresentation.js` (live-context status/risk/fenced mutation helpers), `runtimeConfig.js`, `researchRunHistory.js`, `disclaimerHelper.js`, `api.js`, `websocket.js`

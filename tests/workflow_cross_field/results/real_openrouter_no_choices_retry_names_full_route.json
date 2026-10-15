@@ -1,0 +1,50 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "live_activity.provider_error_route_identity"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "workflow_mode_and_role_label",
+    "model_and_provider",
+    "auto_host_routing_with_upstream_host",
+    "provider_request_id",
+    "route_identity_message_prefix",
+    "identity_absent_from_exception_and_backoff_key"
+  ],
+  "faked_dependencies": [
+    "synthetic OpenRouter HTTP 200 error-body response shapes",
+    "stop-aware sleep",
+    "WebSocket broadcaster",
+    "temporary data root"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "provider_routing",
+    "provider_pause_resume"
+  ],
+  "invariants": [
+    "live_activity.provider_error_route_identity"
+  ],
+  "observed_transition": "two adapter retries and the 60-second workflow backoff for an OpenRouter no-choices body each name the Autonomous mode, Submitter 2, its model, OpenRouter, and the auto-routed upstream host in fields and the rendered message",
+  "real_components": [
+    "backend/shared/api_client_manager.py",
+    "backend/shared/openrouter_client.py",
+    "backend/shared/provider_route_identity.py",
+    "backend/shared/provider_notification_store.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "real_openrouter_no_choices_retry_names_full_route",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:17de099b1de497650e137fe5fbc19efa6a0d1e00c3be84878df3b53eb70cf336",
+  "test_file": "tests/integration/test_provider_error_route_identity.py",
+  "test_selectors": [
+    "tests/integration/test_provider_error_route_identity.py::ProviderErrorRouteIdentityTests::test_openrouter_no_choices_retries_carry_mode_role_model_and_upstream_host"
+  ]
+}

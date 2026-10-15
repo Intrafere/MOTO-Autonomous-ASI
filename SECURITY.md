@@ -86,7 +86,7 @@ Third-party policies can change. Review the current sources before handling sens
 - All LaTeX-rendered content is sanitized before display
 - Prevents malicious script injection in generated papers
 - Configuration blocks: `<script>`, `<iframe>`, `<form>`, event handlers
-- See `.cursor/rules/latex-renderer.mdc` for details
+- See `.claude/rules/latex-renderer.md` for details
 
 **Status**: ✅ Fixed (DOMPurify v3.2.4+ includes CVE-2025-26791 fix)
 

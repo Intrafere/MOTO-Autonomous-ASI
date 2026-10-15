@@ -44,16 +44,16 @@ SYNTHESIS READINESS IS NOT EMPIRICAL DEMONSTRATION:
 
 DIRECT-SOLUTION PREFERENCE:
 - Prefer moving to paper writing once the brainstorm can support the strongest rigorous direct answer currently justified
-- Continue brainstorming only when you can identify concrete additional work that is likely to more directly answer the user's whole prompt or a necessary piece of it
+- Continue brainstorming only when you can identify concrete additional novel work, direct or incremental/indirect, that is likely to advance the answer to the user's prompt
 - Do not extend brainstorming merely for breadth if the best direct answer is already ready to synthesize
 
 DECISION CRITERIA:
 
 Choose CONTINUE_BRAINSTORM if:
-- You can identify specific major routes, constraints, mechanisms, proof directions, evidence needs, experiments, implementation obstacles, safety issues, or failure modes not yet covered that are likely to improve the direct answer
+- You can identify specific major routes, constraints, mechanisms, proof directions, evidence needs, experiments, implementation obstacles, safety issues, or failure modes not yet covered that are likely to add novel progress toward the answer
 - You have additional rigorous work relevant to the topic (from your knowledge or discoverable via web search), judged by the standards appropriate to its claim type
-- The brainstorm would benefit from deeper exploration in specific directions that materially strengthen direct resolution
-- You can still contribute valuable direct-progress insights using available resources (base knowledge, web search if available)
+- The brainstorm would benefit from deeper exploration in specific directions that add novel direct or indirect progress
+- You can still contribute valuable novel progress insights using available resources (base knowledge, web search if available)
 
 Choose WRITE_PAPER if:
 - All major high-impact solution and research avenues for this topic have been explored sufficiently for synthesis
@@ -143,15 +143,15 @@ VALIDATION CRITERIA:
 
 Validate as TRUE (confirm your assessment) if:
 - Your assessment accurately reflects the current state of the brainstorm using all available resources (base knowledge, web search if available)
-- If you said "continue_brainstorm": You genuinely have more valuable direct-progress insights to contribute using available resources
-- If you said "write_paper": You genuinely cannot think of significant new contributions that would materially strengthen the direct answer
+- If you said "continue_brainstorm": You genuinely have more valuable novel progress insights to contribute using available resources
+- If you said "write_paper": You genuinely cannot think of significant new contributions that would add novel direct or indirect progress toward the answer
 - The reasoning in your assessment is sound and honest
 - For empirical or engineering work, a write_paper decision means synthesis-ready only; it does not assert completed experiments, measurements, implementations, or validation
 
 Validate as FALSE if:
 - Upon reflection, the assessment was CLEARLY incorrect
-- If "continue_brainstorm": The suggested additions are trivial, irrelevant, already extensively covered, or too indirect to justify delay
-- If "write_paper": You have CONCRETE, SPECIFIC valuable additions you overlooked that would materially improve direct resolution (not vague possibilities)
+- If "continue_brainstorm": The suggested additions are trivial, irrelevant, already extensively covered, or lack genuine novelty or a plausible path toward the answer
+- If "write_paper": You have CONCRETE, SPECIFIC valuable additions you overlooked that would add novel direct or indirect progress toward the answer (not vague possibilities)
 - The reasoning contains obvious flawed logic
 
 BALANCED VALIDATION APPROACH:

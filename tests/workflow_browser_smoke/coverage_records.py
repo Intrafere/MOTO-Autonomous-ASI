@@ -107,4 +107,57 @@ BROWSER_SMOKE_COVERAGE = (
             "tests/workflow_browser_smoke/overflow-activity.spec.js::overflow activity attributes routes, keeps proof overflow nonfatal, dedupes stop, and persists",
         ),
     ),
+    InteractionCoverage(
+        scenario_id="browser_provider_retry_activity_persists_distinct_attempts",
+        fields=(
+            "websocket_api_contracts",
+            "workflow_filesystem_state",
+            "provider_pause_resume",
+            "provider_routing",
+        ),
+        invariants=(
+            "live_activity.provider_retry_each_wait_visible",
+            "live_activity.provider_retry_persists_reload",
+        ),
+        adapter="browser_smoke",
+        result="passed",
+        test_file="tests/workflow_browser_smoke/provider-retry-activity.spec.js",
+        evidence=(
+            "two_retry_attempts_visible",
+            "provider_label_wait_and_attempt_visible",
+            "activity_restored_after_reload",
+        ),
+        runner="playwright",
+        asserted_invariants=(
+            "live_activity.provider_retry_each_wait_visible",
+            "live_activity.provider_retry_persists_reload",
+        ),
+        test_selectors=(
+            "tests/workflow_browser_smoke/provider-retry-activity.spec.js::provider retry attempts remain distinct, attributed, secret-safe, and reloadable",
+        ),
+    ),
+    InteractionCoverage(
+        scenario_id="browser_provider_error_route_identity_persists_and_hydrates_once",
+        fields=(
+            "websocket_api_contracts",
+            "provider_routing",
+            "provider_pause_resume",
+            "workflow_filesystem_state",
+        ),
+        invariants=("live_activity.provider_error_route_identity",),
+        adapter="browser_smoke",
+        result="passed",
+        test_file="tests/workflow_browser_smoke/provider-error-route-identity.spec.js",
+        evidence=(
+            "mode_role_model_provider_host_visible",
+            "backend_and_formatter_lines_prefixed_once",
+            "identity_rows_restored_after_reload",
+            "reconnect_hydration_deduplicates_and_keeps_identity",
+        ),
+        runner="playwright",
+        asserted_invariants=("live_activity.provider_error_route_identity",),
+        test_selectors=(
+            "tests/workflow_browser_smoke/provider-error-route-identity.spec.js::provider error lines show mode role model provider and host across reload and hydration",
+        ),
+    ),
 )

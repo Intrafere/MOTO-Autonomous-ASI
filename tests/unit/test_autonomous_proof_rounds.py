@@ -11,7 +11,10 @@ from backend.autonomous.core.autonomous_coordinator import (
     _proof_recovery_config_fingerprint,
     AutonomousCoordinator,
 )
-from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
+from backend.autonomous.core.proof_verification_stage import (
+    LEAN_WORKSPACE_BLOCKED_STATUS,
+    ProofVerificationStage,
+)
 from backend.autonomous.core.proof_verification_stage import (
     _candidate_fingerprint,
     _truncation_chain_exhausted,
@@ -19,11 +22,16 @@ from backend.autonomous.core.proof_verification_stage import (
 from backend.autonomous.prompts.proof_prompts import (
     PROOF_FRAMING_CONTEXT,
     build_proof_identification_prompt,
+    format_failure_hints_for_injection,
 )
 from backend.autonomous.prompts.topic_exploration_prompts import (
     build_exploration_user_prompt,
 )
 from backend.shared.config import system_config
+from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_PATH_TOO_LONG,
+    LeanWorkspaceRepairRequiredError,
+)
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.models import (
     ModelConfig,
@@ -299,15 +307,10 @@ class _FakeResearchMetadata:
 class _FakeProofDatabase:
     def __init__(self):
         self.inject_count = 0
-        self.pending_retry_calls = []
 
     def inject_into_prompt(self, prompt, requesting_run_id=""):
         self.inject_count += 1
         return f"proof_context_{self.inject_count}::{prompt}"
-
-    async def get_pending_retries(self, *args, **kwargs):
-        self.pending_retry_calls.append((args, kwargs))
-        return []
 
 
 class _FakeAPIClientManager:
@@ -438,6 +441,53 @@ class _DeferredThenCompleteProofStage:
             total_candidates=1,
             verified_count=1,
         )
+
+class _LeanBlockedThenCompleteProofStage:
+    """First run: Lean cannot run, so the round is saved unprocessed and stops."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def run(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            candidates = [
+                ProofCandidate(theorem_id="first", statement="First theorem."),
+                ProofCandidate(theorem_id="second", statement="Second theorem."),
+            ]
+            await kwargs["checkpoint_callback"](
+                {
+                    "source_type": kwargs["source_type"],
+                    "source_id": kwargs["source_id"],
+                    "source_title": kwargs["source_title"],
+                    "trigger": kwargs["trigger"],
+                    "status": LEAN_WORKSPACE_BLOCKED_STATUS,
+                    "candidates": [
+                        {"index": index, "candidate": candidate.model_dump(mode="json")}
+                        for index, candidate in enumerate(candidates, start=1)
+                    ],
+                    "processed_candidate_ids": [],
+                    "deferred_candidate_ids": [],
+                    "attempts_by_candidate": {},
+                    "theorem_names_by_candidate": {},
+                    "results": [],
+                    "total_candidates": 2,
+                    "fatal_stop_reason": "",
+                    "fatal_stop_payload": {},
+                }
+            )
+            raise LeanWorkspaceRepairRequiredError(
+                failure_kind=LEAN_WORKSPACE_PATH_TOO_LONG,
+                message="MOTO's folder path is too long for Lean on Windows.",
+                terminal_guidance="Move MOTO to a short folder, then press Start again.",
+            )
+        return ProofStageResult(
+            source_type=kwargs["source_type"],
+            source_id=kwargs["source_id"],
+            total_candidates=2,
+            verified_count=2,
+        )
+
 
 def _configured_coordinator(fake_stage, *, allow_research_papers=True):
     coordinator = AutonomousCoordinator()
@@ -571,16 +621,15 @@ class AutonomousProofFramingBoundaryTests(unittest.IsolatedAsyncioTestCase):
         persisted = coordinator_module.research_metadata.proof_framing_states[-1]
         self.assertTrue(persisted["active"])
         self.assertEqual(persisted["context"], PROOF_FRAMING_CONTEXT)
+        event_type, event_payload = events[-1]
+        self.assertEqual(event_type, "proof_framing_decided")
+        self.assertTrue(event_payload["is_proof_amenable"])
         self.assertEqual(
-            events[-1],
-            (
-                "proof_framing_decided",
-                {
-                    "is_proof_amenable": True,
-                    "reasoning": "Formal bounds directly serve the goal.",
-                },
-            ),
+            event_payload["reasoning"],
+            "Formal bounds directly serve the goal.",
         )
+        self.assertEqual(event_payload["activity_workflow"], "autonomous")
+        self.assertIn("lifecycle_generation", event_payload)
         self.assertEqual(len(fake_api.calls), 1)
         call = fake_api.calls[0]
         self.assertEqual(call["task_id"], "proof_framing_gate_000")
@@ -843,12 +892,248 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn(
-            "Are there any proofs here to solve that directly solve the users prompt, "
-            "or get us substantially closer to solving the users prompt.",
+            "Are there any novel proofs here to solve that directly solve the users prompt, "
+            "get us substantially closer to solving it, or plausibly advance toward "
+            "solving it, directly or indirectly?",
             prompt,
         )
         self.assertIn("Return TRUE only if the answer is yes.", prompt)
+        self.assertIn("already verified", prompt)
+        self.assertNotIn("loosely adjacent", prompt)
         self.assertIn("Round 1: 1/1 candidates verified, 1 novel.", prompt)
+
+    def test_identification_allows_novel_incremental_and_indirect_candidates(self):
+        prompt = build_proof_identification_prompt(
+            user_prompt="Solve the problem.",
+            source_type="brainstorm",
+            source_id="topic_001",
+            source_content="Source content.",
+        )
+
+        self.assertNotIn("Do not extract supporting subgoals", prompt)
+        self.assertNotIn("high-impact prompt-solving theorem", prompt)
+        self.assertIn(
+            "genuinely novel intermediate, incremental, or indirect results",
+            prompt,
+        )
+        self.assertIn("including incremental or indirect steps", prompt)
+        self.assertIn("Seek the most impactful new or novel proof targets possible", prompt)
+        self.assertIn("Do not choose tiny safe targets merely because they are easy", prompt)
+        self.assertIn("NEVER valid proof targets", prompt)
+        self.assertIn("NOT a known-knowledge-base construction task", prompt)
+        self.assertIn("supporting lemmas without new mathematical content", prompt)
+
+    def test_identification_prioritizes_direct_targets_with_reasonable_chance(self):
+        prompt = build_proof_identification_prompt(
+            user_prompt="Solve the problem.",
+            source_type="brainstorm",
+            source_id="topic_001",
+            source_content="Source content.",
+        )
+
+        self.assertIn(
+            "5 Lean 4 attempts (3 complete-proof attempts, then 2 "
+            "tactic-script attempts)",
+            prompt,
+        )
+        self.assertIn(
+            "Direct solutions take priority whenever they have a reasonable chance "
+            "of being fully proved within that budget",
+            prompt,
+        )
+        self.assertIn("select its strongest genuinely novel piece", prompt)
+        self.assertIn("Provability never lowers the novelty bar", prompt)
+        self.assertIn("indirect result that moves toward the full solution", prompt)
+        self.assertNotIn("multiple Lean 4 attempts", prompt)
+        self.assertNotIn("handle narrowing", prompt)
+
+    def test_follow_up_prompt_redirects_failed_targets_to_provable_pieces(self):
+        follow_up = build_proof_identification_prompt(
+            user_prompt="Solve the problem.",
+            source_type="brainstorm",
+            source_id="topic_001",
+            source_content="Source content.",
+            proof_round_index=2,
+            proof_max_rounds=0,
+            prior_round_results="Round 1: 0/1 candidates verified, 0 novel.\n- failed: Big target.",
+        )
+        first_round = build_proof_identification_prompt(
+            user_prompt="Solve the problem.",
+            source_type="brainstorm",
+            source_id="topic_001",
+            source_content="Source content.",
+        )
+
+        self.assertIn("Do not propose it again unchanged", follow_up)
+        self.assertIn("materially different formalization", follow_up)
+        self.assertNotIn("Do not propose it again unchanged", first_round)
+
+    def test_identification_prompt_places_open_targets_before_source(self):
+        hints = format_failure_hints_for_injection(
+            [
+                {
+                    "theorem_statement": "Exhausted standard-Borel lifting target.",
+                    "error_summary": "exact? could not close the goal.",
+                    "expected_novelty_tier": "novel_variant",
+                    "novelty_rationale": "Range-sensitive lifting.",
+                }
+            ]
+        )
+        prompt = build_proof_identification_prompt(
+            user_prompt="Solve the problem.",
+            source_type="brainstorm",
+            source_id="topic_002",
+            source_content="SOURCE SENTINEL",
+            open_proof_targets=hints,
+        )
+        without_targets = build_proof_identification_prompt(
+            user_prompt="Solve the problem.",
+            source_type="brainstorm",
+            source_id="topic_002",
+            source_content="SOURCE SENTINEL",
+        )
+
+        self.assertIn("Exhausted standard-Borel lifting target.", prompt)
+        self.assertIn('"retry_open_target_id": ""', prompt)
+        self.assertIn("set retry_open_target_id to that target's Target ID", prompt)
+        self.assertLess(
+            prompt.index("=== OPEN PROOF TARGETS LEAN 4 COULD NOT YET CLOSE ==="),
+            prompt.index("SOURCE SENTINEL"),
+        )
+        self.assertNotIn("OPEN PROOF TARGETS", without_targets)
+
+    async def test_discovery_receives_open_targets_and_binds_valid_retry_links(self):
+        class FakeProofDatabase:
+            def __init__(self):
+                self.calls = []
+
+            async def get_recent_failure_hints(self, source_id, *, limit=5):
+                self.calls.append((source_id, limit))
+                return [
+                    {
+                        "source_brainstorm_id": source_id,
+                        "theorem_id": "thm_1",
+                        "theorem_statement": f"Exhausted lifting target from {source_id}.",
+                        "error_summary": "Lean error.",
+                    }
+                ]
+
+        class FakeIdentificationAgent:
+            def __init__(self):
+                self.kwargs = None
+
+            async def identify_candidates(self, **kwargs):
+                self.kwargs = kwargs
+                return True, [
+                    ProofCandidate(
+                        theorem_id="thm_1",
+                        statement="Retry with a new formalization.",
+                        retry_open_target_id="topic_002:thm_1",
+                    ),
+                    ProofCandidate(
+                        theorem_id="thm_2",
+                        statement="Unknown link is dropped.",
+                        retry_open_target_id="topic_999:thm_7",
+                    ),
+                    ProofCandidate(theorem_id="thm_3", statement="Fresh target."),
+                ]
+
+        stage = ProofVerificationStage()
+        database = FakeProofDatabase()
+        block, target_sources = await stage._load_open_proof_targets(
+            database,
+            ["topic_002", "topic_003", "topic_002"],
+        )
+        fake_identifier = FakeIdentificationAgent()
+        candidates = await stage._resolve_candidates(
+            theorem_candidates=None,
+            identification_agent=fake_identifier,
+            user_prompt="Solve the problem.",
+            source_type="paper",
+            source_id="paper_001",
+            source_title="Paper",
+            content="Source.",
+            open_proof_targets=block,
+            open_target_sources=target_sources,
+        )
+
+        self.assertEqual(database.calls, [("topic_002", 5), ("topic_003", 5)])
+        self.assertIn("Target ID: topic_002:thm_1", block)
+        self.assertIn("Target ID: topic_003:thm_1", block)
+        self.assertEqual(
+            target_sources,
+            {"topic_002:thm_1": "topic_002", "topic_003:thm_1": "topic_003"},
+        )
+        self.assertEqual(fake_identifier.kwargs["open_proof_targets"], block)
+        self.assertEqual(candidates[0].origin_source_id, "topic_002")
+        self.assertEqual(stage._linked_failed_theorem_id(candidates[0]), "thm_1")
+        self.assertEqual(candidates[1].retry_open_target_id, "")
+        self.assertEqual(candidates[1].origin_source_id, "")
+        self.assertEqual(stage._linked_failed_theorem_id(candidates[2]), "")
+        self.assertEqual(await stage._load_open_proof_targets(object(), ["topic_002"]), ("", {}))
+
+    async def test_failed_targets_record_against_original_open_target(self):
+        class RecordingProofDatabase:
+            def __init__(self):
+                self.records = []
+
+            async def record_failed_candidate(
+                self,
+                source_brainstorm_id,
+                candidate,
+                error_summary,
+                suggested_lemma_targets=None,
+            ):
+                self.records.append((source_brainstorm_id, candidate.theorem_id))
+
+        stage = ProofVerificationStage()
+        database = RecordingProofDatabase()
+        linked_retry = ProofCandidate(
+            theorem_id="thm_9",
+            statement="Retry.",
+            retry_open_target_id="topic_002:thm_1",
+            origin_source_id="topic_002",
+        )
+        fresh_paper_candidate = ProofCandidate(theorem_id="thm_4", statement="Fresh.")
+
+        for source_type, source_id, candidate in (
+            ("paper", "paper_001", linked_retry),
+            ("paper", "paper_001", fresh_paper_candidate),
+            ("brainstorm", "topic_002", fresh_paper_candidate),
+        ):
+            await stage._record_failed_target(
+                database,
+                source_type=source_type,
+                source_id=source_id,
+                candidate=candidate,
+                error_summary="Lean error.",
+                suggested_lemma_targets=[],
+            )
+
+        self.assertEqual(
+            database.records,
+            [("topic_002", "thm_1"), ("topic_002", "thm_4")],
+        )
+
+    def test_failure_hints_allow_novel_intermediate_blocker_results(self):
+        hints = format_failure_hints_for_injection(
+            [
+                {
+                    "theorem_statement": "Target theorem.",
+                    "error_summary": "PROOF REJECTED: PLACEHOLDER USED in the attempt.",
+                    "expected_novelty_tier": "mathematical_discovery",
+                    "novelty_rationale": "New bound.",
+                }
+            ]
+        )
+
+        self.assertNotIn("Use them only to repair", hints)
+        self.assertNotIn("merely supporting lemma", hints)
+        self.assertNotIn("high-impact", hints)
+        self.assertIn("genuinely novel intermediate result", hints)
+        self.assertIn("reasonable chance of success", hints)
+        self.assertIn("Do NOT downshift to routine helpers", hints)
+        self.assertNotIn("Target ID:", hints)
 
     def test_follow_up_prompt_describes_unbounded_continuous_round(self):
         prompt = build_proof_identification_prompt(
@@ -913,8 +1198,8 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             "goal_supporting_lemma",
         ])
 
-    async def test_proofs_only_brainstorm_rounds_continue_until_no_candidates(self):
-        fake_stage = _FakeProofStage([1, 1, 0, 1])
+    async def test_proofs_only_brainstorm_rounds_run_all_rounds_after_empty_round(self):
+        fake_stage = _FakeProofStage([0, 1, 0, 1])
         coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
 
         await coordinator._run_proof_verification(
@@ -924,14 +1209,14 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             source_title="Topic title",
         )
 
-        self.assertEqual(len(fake_stage.calls), 3)
+        self.assertEqual(len(fake_stage.calls), 4)
         self.assertEqual(
             [call["proof_round_index"] for call in fake_stage.calls],
-            [1, 2, 3],
+            [1, 2, 3, 4],
         )
         self.assertEqual(
             [call["trigger"] for call in fake_stage.calls],
-            ["automatic", "automatic_round_2", "automatic_round_3"],
+            ["automatic", "automatic_round_2", "automatic_round_3", "automatic_round_4"],
         )
 
     async def test_proofs_only_paper_rounds_cap_at_four(self):
@@ -1014,7 +1299,7 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             source_title="Paper title",
         )
 
-        self.assertEqual(len(fake_stage.calls), 2)
+        self.assertEqual(len(fake_stage.calls), 4)
         self.assertTrue(fake_stage.calls[0]["user_prompt"].startswith("proof_context_1::"))
         self.assertTrue(fake_stage.calls[1]["user_prompt"].startswith("proof_context_2::"))
 
@@ -1054,8 +1339,10 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             source_title="Paper title",
         )
 
-        self.assertEqual(len(fake_stage.calls), 1)
-        self.assertEqual(fake_stage.calls[0]["trigger"], "automatic_round_2")
+        self.assertEqual(
+            [call["trigger"] for call in fake_stage.calls],
+            ["automatic_round_2", "automatic_round_3", "automatic_round_4"],
+        )
         self.assertEqual(
             fake_stage.calls[0]["theorem_candidates"][0].theorem_id,
             "resume_target",
@@ -1117,7 +1404,7 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             source_title="Paper title",
         )
 
-        self.assertEqual(fake_stage.reserved_during_calls, [True, True])
+        self.assertEqual(fake_stage.reserved_during_calls, [True, True, True, True])
         self.assertTrue(all(call["source_reserved"] for call in fake_stage.calls))
         self.assertTrue(all(not call["release_source_on_exit"] for call in fake_stage.calls))
         self.assertFalse(
@@ -1160,6 +1447,44 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             coordinator._terminal_event.role_id,
             "autonomous_proof_formalization_paper",
         )
+
+    async def test_lean_workspace_stop_is_durable_and_resumes_with_unchanged_settings(self):
+        fake_stage = _LeanBlockedThenCompleteProofStage()
+        coordinator = _configured_coordinator(fake_stage)
+        coordinator._run_id = "autonomous-run"
+        fake_metadata = coordinator_module.research_metadata
+
+        first_status = await coordinator._run_proof_verification(
+            content="Paper source.",
+            source_type="paper",
+            source_id="paper_lean_blocked",
+            source_title="Paper title",
+        )
+
+        self.assertEqual(first_status, "fatal_stop")
+        self.assertTrue(coordinator._stop_event.is_set())
+        self.assertEqual(coordinator._terminal_event.reason, "lean_workspace_repair_required")
+        self.assertEqual(
+            coordinator._terminal_event.terminal_guidance,
+            "Move MOTO to a short folder, then press Start again.",
+        )
+        self.assertEqual(fake_metadata.checkpoint["status"], LEAN_WORKSPACE_BLOCKED_STATUS)
+        self.assertEqual(fake_metadata.mark_calls, [])
+
+        # The user repairs Lean and presses Start; proof model settings are unchanged.
+        coordinator._stop_event.clear()
+        coordinator._terminal_event = None
+        second_status = await coordinator._run_proof_verification(
+            content="Paper source.",
+            source_type="paper",
+            source_id="paper_lean_blocked",
+            source_title="Paper title",
+        )
+
+        self.assertEqual(second_status, "complete")
+        resumed = fake_stage.calls[1]["theorem_candidates"]
+        self.assertEqual([candidate.theorem_id for candidate in resumed], ["first", "second"])
+        self.assertEqual(fake_metadata.mark_calls, ["automatic"])
 
     async def test_changed_context_route_retries_fatal_checkpoint_without_stale_overflow_attempt(self):
         coordinator = _configured_coordinator(_FakeProofStage([1]))
@@ -1426,7 +1751,7 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "stopped")
         self.assertTrue(coordinator._stop_event.is_set())
         self.assertEqual(fake_metadata.clear_calls, [])
-        self.assertEqual(coordinator_module.proof_database.pending_retry_calls, [])
+        self.assertEqual(len(fake_stage.calls), 1)
 
     async def test_completed_paper_proof_check_strips_existing_proof_appendix(self):
         fake_stage = _FakeProofStage([0])
@@ -1448,27 +1773,22 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Paper body sentinel.", fake_stage.calls[0]["content"])
         self.assertNotIn("autonomous_paper_duplicate", fake_stage.calls[0]["content"])
 
-    async def test_retry_trigger_remains_single_round(self):
+    async def test_completed_paper_discovery_receives_source_brainstorm_open_targets(self):
         fake_stage = _FakeProofStage([1, 1, 1])
         coordinator = _configured_coordinator(fake_stage)
-        retry_candidate = ProofCandidate(
-            theorem_id="retry_target",
-            statement="Retry theorem.",
-            expected_novelty_tier="mathematical_discovery",
-        )
 
-        await coordinator._run_proof_verification(
+        status = await coordinator._run_completed_paper_proof_checks(
+            paper_id="paper_001",
+            title="Paper title",
             content="Paper source.",
-            source_type="paper",
-            source_id="paper_001",
-            source_title="Paper title",
-            theorem_candidates=[retry_candidate],
-            trigger="retry",
+            source_brainstorm_ids=["topic_002"],
         )
 
+        self.assertEqual(status, "complete")
         self.assertEqual(len(fake_stage.calls), 1)
-        self.assertEqual(fake_stage.calls[0]["trigger"], "retry")
-        self.assertEqual(fake_stage.calls[0]["proof_max_rounds"], 1)
+        self.assertEqual(fake_stage.calls[0]["trigger"], "automatic")
+        self.assertIsNone(fake_stage.calls[0]["theorem_candidates"])
+        self.assertEqual(fake_stage.calls[0]["open_target_source_ids"], ["topic_002"])
 
     async def test_manual_stage_wrapper_remains_single_round(self):
         class CaptureStage(ProofVerificationStage):

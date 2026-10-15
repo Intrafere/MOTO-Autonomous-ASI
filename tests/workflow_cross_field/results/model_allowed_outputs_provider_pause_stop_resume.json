@@ -1,12 +1,20 @@
 {
   "adapter": "model",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "outputs.proofs_only_no_paper_phase",
+    "provider.pause_preserves_checkpoint",
+    "provider.stop_resume_preserves_pause",
+    "provider.reset_wakes_without_corrupting_checkpoint"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "provider_pause",
     "stop_resume",
     "reset_credit"
   ],
+  "faked_dependencies": [],
   "fields": [
     "allowed_outputs",
     "provider_pause_resume",
@@ -18,6 +26,8 @@
     "provider.stop_resume_preserves_pause",
     "provider.reset_wakes_without_corrupting_checkpoint"
   ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
   "replay": [
     "start_autonomous_proofs_only",
     "complete_topic_exploration",
@@ -28,9 +38,14 @@
     "reset_credit"
   ],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "model_allowed_outputs_provider_pause_stop_resume",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "curated",
-  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+  "source_identity": "workflow-source-v1:fcad8ca2c4f7f5332cbd08b846d5f7732699e5f832497e4d7ac35020852db4e2",
+  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
 }

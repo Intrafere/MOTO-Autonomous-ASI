@@ -305,6 +305,9 @@ def _record_to_tool_result(record: UnifiedProofSearchRecord) -> dict[str, Any]:
         "source_path": record.source_path,
         "novelty_tier": record.novelty_tier,
         "novelty_reasoning": record.novelty_reasoning,
+        "novelty_scope": record.novelty_scope,
+        "novelty_group_claim": record.novelty_group_claim,
+        "novelty_group_proof_ids": list(record.novelty_group_proof_ids),
         "lean_code": record.lean_code,
         "theorem_statement_hash": record.theorem_statement_hash,
         "lean_code_hash": record.lean_code_hash,
@@ -350,16 +353,8 @@ def _normalize_corpora(value: Any) -> list[ProofSearchCorpus]:
     corpora = [_normalize_corpus(item) for item in _string_list(value)]
     valid = [corpus for corpus in corpora if corpus]
     if valid:
-        from backend.shared.config import system_config
-
-        return [
-            corpus
-            for corpus in valid
-            if (
-                (corpus == "syntheticlib4" and system_config.syntheticlib4_enabled)
-                or (corpus != "syntheticlib4" and system_config.agent_conversation_memory_enabled)
-            )
-        ]
+        enabled = set(default_proof_search_corpora())
+        return [corpus for corpus in valid if corpus in enabled]
     return default_proof_search_corpora()
 
 

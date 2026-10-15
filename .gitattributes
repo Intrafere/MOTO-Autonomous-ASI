@@ -15,3 +15,4 @@
 .git_archival.txt text eol=lf export-subst
 
 *.sh text eol=lf
+*.sha256 text eol=lf

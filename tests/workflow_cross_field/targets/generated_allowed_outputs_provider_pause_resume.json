@@ -21,6 +21,6 @@
     "generated_allowed_outputs_provider_pause_resume_seed_7",
     "generated_allowed_outputs_provider_pause_resume_seed_29"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "target_id": "generated_allowed_outputs_provider_pause_resume"
 }

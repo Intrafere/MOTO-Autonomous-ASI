@@ -12,10 +12,12 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config, system_config
+from backend.shared.credential_locks import sakana_credential_mutation
+from backend.shared.oauth_pkce import generate_oauth_state
 from backend.shared.openai_codex_client import OpenAICodexAuthError, openai_codex_client
 from backend.shared.provider_notification_store import list_provider_notifications
 from backend.shared.sakana_fugu_client import SakanaFuguAuthError, SakanaFuguError, sakana_fugu_client
@@ -27,6 +29,8 @@ logger = logging.getLogger(__name__)
 _PENDING_CODEX_OAUTH: Dict[str, Dict[str, Any]] = {}
 _PENDING_XAI_GROK_OAUTH: Dict[str, Dict[str, Any]] = {}
 _PENDING_TTL_SECONDS = 15 * 60
+_OAUTH_CALLBACK_INPUT_MAX_LENGTH = 8192
+_OAUTH_EXPIRY_TASKS: set[asyncio.Task] = set()
 
 
 async def _safe_oauth_status(provider_label: str, status_coro) -> Dict[str, Any]:
@@ -78,9 +82,9 @@ class CodexOAuthStartRequest(BaseModel):
 
 
 class CodexOAuthExchangeRequest(BaseModel):
-    code: str = ""
-    state: str = ""
-    redirect_url: str = ""
+    code: str = Field(default="", max_length=_OAUTH_CALLBACK_INPUT_MAX_LENGTH)
+    state: str = Field(default="", max_length=512)
+    redirect_url: str = Field(default="", max_length=_OAUTH_CALLBACK_INPUT_MAX_LENGTH)
     redirect_uri: Optional[str] = None
 
 
@@ -89,14 +93,76 @@ class XAIGrokOAuthStartRequest(BaseModel):
 
 
 class XAIGrokOAuthExchangeRequest(BaseModel):
-    code: str = ""
-    state: str = ""
-    redirect_url: str = ""
+    code: str = Field(default="", max_length=_OAUTH_CALLBACK_INPUT_MAX_LENGTH)
+    state: str = Field(default="", max_length=512)
+    redirect_url: str = Field(default="", max_length=_OAUTH_CALLBACK_INPUT_MAX_LENGTH)
     redirect_uri: Optional[str] = None
 
 
 class SakanaFuguApiKeyRequest(BaseModel):
     api_key: str
+
+
+class ProviderNotificationRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    notification_key: str
+    event_type: str
+    legacy_event_type: str = ""
+    contract_version: int = 1
+    created_at: str
+    provider: str
+    provider_label: str = ""
+    role_id: str
+    model: str = ""
+    model_role_id: Optional[str] = None
+    role_label: Optional[str] = None
+    route_kind: Optional[str] = None
+    configured_host_provider: Optional[str] = None
+    effective_host_provider: Optional[str] = None
+    host_routing: Optional[str] = None
+    provider_request_id: Optional[str] = None
+    route_identity: Optional[str] = None
+    reason: str
+    recoverable: bool = False
+    message: str = ""
+    error_summary: str = ""
+    oauth_error_message: str = ""
+    notification_kind: str = "provider"
+    workflow_mode: str = ""
+    run_id: str = ""
+    title: str = ""
+    terminal_guidance: str = ""
+    resets_at: Optional[int] = None
+    resets_in_seconds: Optional[int] = None
+    cooldown_until: Optional[int] = None
+    fallback_model: str = ""
+    plan_type: str = ""
+    event_id: str = ""
+    correlation_id: str = ""
+    task_id: str = ""
+    retry_layer: str = ""
+    recovery_action: str = ""
+    retry_attempt: Optional[int] = None
+    max_attempts: Optional[int] = None
+    retry_after_seconds: Optional[int] = None
+    configured_provider: str = ""
+    configured_model: str = ""
+    effective_provider: str = ""
+    effective_model: str = ""
+    fallback_provider: str = ""
+    source_type: str = ""
+    source_id: str = ""
+    proof_run_id: str = ""
+    persistence_status: str = ""
+    persistence_degraded: bool = False
+    persistence_detail: str = ""
+
+
+class ProviderNotificationsResponse(BaseModel):
+    success: bool
+    notifications: list[ProviderNotificationRecord]
 
 
 def _ensure_desktop_codex_allowed() -> None:
@@ -205,6 +271,17 @@ async def _prune_pending() -> None:
     await _stop_xai_grok_callback_server_if_idle()
 
 
+async def _expire_pending_after_ttl() -> None:
+    await asyncio.sleep(_PENDING_TTL_SECONDS)
+    await _prune_pending()
+
+
+def _schedule_pending_expiry() -> None:
+    task = asyncio.create_task(_expire_pending_after_ttl())
+    _OAUTH_EXPIRY_TASKS.add(task)
+    task.add_done_callback(_OAUTH_EXPIRY_TASKS.discard)
+
+
 async def _write_http_response(writer: asyncio.StreamWriter, status: str, body: str) -> None:
     payload = body.encode("utf-8", errors="replace")
     writer.write(
@@ -242,7 +319,7 @@ async def _handle_codex_callback(reader: asyncio.StreamReader, writer: asyncio.S
             await _stop_codex_callback_server_if_idle()
             return
 
-        pending = _PENDING_CODEX_OAUTH.pop(state, None)
+        pending = _PENDING_CODEX_OAUTH.get(state)
         if not state or not pending or not code:
             await _write_http_response(
                 writer,
@@ -257,6 +334,7 @@ async def _handle_codex_callback(reader: asyncio.StreamReader, writer: asyncio.S
             code_verifier=pending["code_verifier"],
             redirect_uri=pending["redirect_uri"],
         )
+        _PENDING_CODEX_OAUTH.pop(state, None)
         await _write_http_response(
             writer,
             "200 OK",
@@ -297,7 +375,7 @@ async def _handle_xai_grok_callback(reader: asyncio.StreamReader, writer: asynci
             await _stop_xai_grok_callback_server_if_idle()
             return
 
-        pending = _PENDING_XAI_GROK_OAUTH.pop(state, None)
+        pending = _PENDING_XAI_GROK_OAUTH.get(state)
         if not state or not pending or not code:
             await _write_http_response(
                 writer,
@@ -313,6 +391,7 @@ async def _handle_xai_grok_callback(reader: asyncio.StreamReader, writer: asynci
             code_challenge=pending["code_challenge"],
             redirect_uri=pending["redirect_uri"],
         )
+        _PENDING_XAI_GROK_OAUTH.pop(state, None)
         await _write_http_response(
             writer,
             "200 OK",
@@ -340,8 +419,9 @@ async def _ensure_codex_callback_server() -> bool:
         try:
             _CODEX_CALLBACK_SERVER_STATE.server = await asyncio.start_server(
                 _handle_codex_callback,
-            host="localhost",
+                host="localhost",
                 port=1455,
+                limit=_OAUTH_CALLBACK_INPUT_MAX_LENGTH,
             )
         except OSError:
             _CODEX_CALLBACK_SERVER_STATE.server = None
@@ -361,6 +441,7 @@ async def _ensure_xai_grok_callback_server() -> bool:
                 _handle_xai_grok_callback,
                 host=host,
                 port=port,
+                limit=_OAUTH_CALLBACK_INPUT_MAX_LENGTH,
             )
         except OSError:
             _XAI_GROK_CALLBACK_SERVER_STATE.server = None
@@ -411,13 +492,25 @@ async def get_cloud_access_status() -> Dict[str, Any]:
     }
 
 
-@router.get("/provider-notifications")
-async def get_provider_notifications() -> Dict[str, Any]:
+@router.get(
+    "/provider-notifications",
+    response_model=ProviderNotificationsResponse,
+)
+async def get_provider_notifications() -> ProviderNotificationsResponse:
     """Return recent non-secret provider/OAuth notifications missed by live WebSocket clients."""
     return {
         "success": True,
         "notifications": await asyncio.to_thread(list_provider_notifications),
     }
+
+
+@router.get(
+    "/provider-recovery/events",
+    response_model=ProviderNotificationsResponse,
+)
+async def get_provider_recovery_events() -> ProviderNotificationsResponse:
+    """Provider-neutral alias for durable retry/cooldown/repair recovery events."""
+    return await get_provider_notifications()
 
 
 @router.post("/openai-codex/oauth/start")
@@ -427,13 +520,14 @@ async def start_openai_codex_oauth(request: CodexOAuthStartRequest) -> Dict[str,
     await _prune_pending()
     callback_available = await _ensure_codex_callback_server()
     code_verifier, code_challenge = openai_codex_client.generate_pkce_pair()
-    state = secrets.token_urlsafe(32)
+    state = generate_oauth_state()
     redirect_uri = _resolve_codex_redirect_uri(request.redirect_uri)
     _PENDING_CODEX_OAUTH[state] = {
         "code_verifier": code_verifier,
         "redirect_uri": redirect_uri,
         "expires_at": time.time() + _PENDING_TTL_SECONDS,
     }
+    _schedule_pending_expiry()
     return {
         "success": True,
         "authorization_url": openai_codex_client.build_authorization_url(
@@ -459,7 +553,7 @@ async def exchange_openai_codex_oauth(request: CodexOAuthExchangeRequest) -> Dic
         redirect_url=request.redirect_url,
     )
     state = request.state or parsed_state
-    pending = _PENDING_CODEX_OAUTH.pop(state, None)
+    pending = _PENDING_CODEX_OAUTH.get(state)
     if not state or not pending:
         raise HTTPException(status_code=400, detail="OAuth state is missing or expired. Please start login again.")
     if not code:
@@ -473,8 +567,10 @@ async def exchange_openai_codex_oauth(request: CodexOAuthExchangeRequest) -> Dic
             redirect_uri=redirect_uri,
         )
     except OpenAICodexAuthError as exc:
+        _PENDING_CODEX_OAUTH.pop(state, None)
         await _stop_codex_callback_server_if_idle()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _PENDING_CODEX_OAUTH.pop(state, None)
     await _stop_codex_callback_server_if_idle()
     await api_client_manager.reset_provider_fallbacks("openai_codex_oauth")
     return {
@@ -518,7 +614,7 @@ async def start_xai_grok_oauth(request: XAIGrokOAuthStartRequest) -> Dict[str, A
     await _prune_pending()
     callback_available = await _ensure_xai_grok_callback_server()
     code_verifier, code_challenge = xai_grok_client.generate_pkce_pair()
-    state = secrets.token_urlsafe(32)
+    state = generate_oauth_state()
     nonce = secrets.token_urlsafe(32)
     redirect_uri = _resolve_xai_grok_redirect_uri(request.redirect_uri)
     _PENDING_XAI_GROK_OAUTH[state] = {
@@ -528,6 +624,7 @@ async def start_xai_grok_oauth(request: XAIGrokOAuthStartRequest) -> Dict[str, A
         "nonce": nonce,
         "expires_at": time.time() + _PENDING_TTL_SECONDS,
     }
+    _schedule_pending_expiry()
     return {
         "success": True,
         "authorization_url": xai_grok_client.build_authorization_url(
@@ -554,7 +651,7 @@ async def exchange_xai_grok_oauth(request: XAIGrokOAuthExchangeRequest) -> Dict[
         redirect_url=request.redirect_url,
     )
     state = request.state or parsed_state
-    pending = _PENDING_XAI_GROK_OAUTH.pop(state, None)
+    pending = _PENDING_XAI_GROK_OAUTH.get(state)
     if not state or not pending:
         raise HTTPException(status_code=400, detail="OAuth state is missing or expired. Please start login again.")
     if not code:
@@ -569,8 +666,10 @@ async def exchange_xai_grok_oauth(request: XAIGrokOAuthExchangeRequest) -> Dict[
             redirect_uri=redirect_uri,
         )
     except XAIGrokAuthError as exc:
+        _PENDING_XAI_GROK_OAUTH.pop(state, None)
         await _stop_xai_grok_callback_server_if_idle()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _PENDING_XAI_GROK_OAUTH.pop(state, None)
     await _stop_xai_grok_callback_server_if_idle()
     await api_client_manager.reset_provider_fallbacks("xai_grok_oauth")
     return {
@@ -616,6 +715,7 @@ async def get_sakana_fugu_status() -> Dict[str, Any]:
 
 
 @router.post("/sakana-fugu/api-key")
+@sakana_credential_mutation
 async def set_sakana_fugu_api_key(request: SakanaFuguApiKeyRequest) -> Dict[str, Any]:
     """Store a Sakana Fugu API key in the desktop keyring."""
     _ensure_desktop_sakana_fugu_allowed()
@@ -646,6 +746,7 @@ async def get_sakana_fugu_models() -> Dict[str, Any]:
 
 
 @router.delete("/sakana-fugu")
+@sakana_credential_mutation
 async def clear_sakana_fugu_api_key() -> Dict[str, Any]:
     """Clear the stored Sakana Fugu API key."""
     _ensure_desktop_sakana_fugu_allowed()

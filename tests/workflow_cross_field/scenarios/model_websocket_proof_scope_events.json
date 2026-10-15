@@ -6,7 +6,17 @@
   ],
   "adapter": "model",
   "artifact_type": "scenario",
+  "asserted_invariants": [
+    "events.frontend_events_include_scope_phase",
+    "events.proof_verified_after_registration",
+    "proof_scope.autonomous_events_not_manual"
+  ],
+  "blocked_dependencies": [],
+  "coverage_classification": "deterministic_model_evidence",
   "expected_result": "passed",
+  "faked_dependencies": [
+    "workflow executable state model"
+  ],
   "fields": [
     "websocket_api_contracts",
     "proof_scope_isolation"
@@ -20,6 +30,13 @@
     "scoped_event",
     "registered_proof_event"
   ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
+  "runner": "pytest",
   "scenario_id": "model_websocket_proof_scope_events",
-  "schema_version": 1
+  "schema_version": 2,
+  "source_identity": "workflow-source-v1:a1763a504f6804df5015f82e137882aa86d51ff13a6a9ab6cb713609c6bcf952",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
 }

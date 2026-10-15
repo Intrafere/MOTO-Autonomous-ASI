@@ -20,6 +20,7 @@ from backend.autonomous.memory.proof_database import (
     is_prompt_injection_novel_tier,
 )
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
+from backend.shared.activity import fill_missing_activity_metadata
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
@@ -37,6 +38,7 @@ from backend.shared.provider_pause import (
     is_provider_credit_pause_error,
     wait_for_provider_reset,
 )
+from backend.shared.provider_route_identity import route_identity_from_error
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +159,23 @@ class ProofPruningCoordinator:
                     "Proof-pruning persistence ownership changed."
                 )
 
+    @property
+    def _workflow_mode(self) -> str:
+        return "autonomous" if self.scope == "autonomous" else "manual_proof_check"
+
+    def _failure_route_identity(self, exc: BaseException) -> dict[str, str]:
+        """Return Live Activity route identity for one failed pruning review.
+
+        The failing proposer or Validator role and its route come from the typed
+        provider error; an untyped failure names only the pruning workflow.
+        """
+        error_role = str(route_identity_from_error(exc).get("role_id") or "")
+        return api_client_manager.route_identity_for_role(
+            error_role if error_role and error_role != "unknown" else "proof_prune",
+            workflow_mode=self._workflow_mode,
+            error=exc,
+        )
+
     def _event_payload(self, **extra: Any) -> dict[str, Any]:
         payload = {
             "proof_run_id": self.proof_run_id,
@@ -176,7 +195,41 @@ class ProofPruningCoordinator:
 
     async def _broadcast(self, event: str, **extra: Any) -> None:
         if self.broadcast_fn:
-            await self.broadcast_fn(event, self._event_payload(**extra))
+            payload = self._event_payload(**extra)
+            semantic = event in {"proof_prune_rejected", "proof_prune_no_change"}
+            operational = event in {
+                "proof_prune_stale",
+                "proof_prune_provider_paused",
+                "proof_prune_repair_required",
+                "proof_prune_error",
+            }
+            await self.broadcast_fn(
+                event,
+                fill_missing_activity_metadata(
+                    payload,
+                    workflow="proof_pruning",
+                    run_id=self.proof_run_id or self.run_id,
+                    generation=self.lifecycle_generation,
+                    source_type=self.source_type,
+                    source_id=self.source_id,
+                    phase=self.state.status,
+                    classification=(
+                        "semantic" if semantic else "operational" if operational else "informational"
+                    ),
+                    category="validator" if semantic else "workflow",
+                    outcome=(
+                        "rejected"
+                        if event == "proof_prune_rejected"
+                        else "error"
+                        if operational
+                        else "success"
+                        if event == "proof_prune_applied"
+                        else "info"
+                    ),
+                    feedback=payload.get("reason"),
+                    detail=payload.get("message") or payload.get("reason"),
+                ),
+            )
 
     async def restore(self) -> None:
         """Restore compatible counters/pressure, never an unverifiable snapshot."""
@@ -648,6 +701,7 @@ class ProofPruningCoordinator:
             await self._broadcast(
                 "proof_prune_provider_paused",
                 message="Proof pruning paused for provider credits; proof solving continues.",
+                **self._failure_route_identity(exc),
             )
             await wait_for_provider_reset(
                 reset_generation,
@@ -667,18 +721,24 @@ class ProofPruningCoordinator:
                         exc,
                         role_id=exc.role_id or "proof_prune",
                         should_stop=lambda: not self._owns_lifecycle(),
+                        workflow_mode=self._workflow_mode,
                     )
                 else:
                     wait_seconds = min(30, 2 ** min(self.state.retry_count, 4))
-                    await api_client_manager.broadcast_retry_cooldown(
-                        provider="unknown",
-                        provider_label="Proof pruning provider",
+                    await api_client_manager.emit_and_wait_for_retry(
+                        {
+                            "workflow_mode": self._workflow_mode,
+                            "provider": "unknown",
+                            "provider_label": "Proof pruning provider",
+                            "role_id": "proof_prune",
+                            "retry_attempt": max(1, self.state.retry_count),
+                            "retry_after_seconds": wait_seconds,
+                            "reason": "transient_provider_error",
+                        },
                         role_id="proof_prune",
-                        retry_attempt=max(1, self.state.retry_count),
-                        retry_after_seconds=wait_seconds,
-                        reason="transient_provider_error",
+                        should_stop=lambda: not self._owns_lifecycle(),
+                        error=exc,
                     )
-                    await asyncio.sleep(wait_seconds)
             except asyncio.CancelledError:
                 return True
             return not self._owns_lifecycle()
@@ -687,7 +747,11 @@ class ProofPruningCoordinator:
             await self._broadcast("proof_prune_stale", reason=summary)
             return False
         if failure_kind == "repair":
-            await self._broadcast("proof_prune_repair_required", message=summary)
+            await self._broadcast(
+                "proof_prune_repair_required",
+                message=summary,
+                **self._failure_route_identity(exc),
+            )
             return True
 
         await self._broadcast(
@@ -698,6 +762,11 @@ class ProofPruningCoordinator:
             ),
             error_type=exc.__class__.__name__,
             error_summary=summary,
+            **(
+                self._failure_route_identity(exc)
+                if getattr(exc, "route", None) is not None
+                else {}
+            ),
         )
         # Unknown/contract failures must not hot-loop the same trigger. Preserve
         # durable diagnostics, but require a later proof registration, pressure

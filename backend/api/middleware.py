@@ -217,5 +217,17 @@ def setup_middleware(app: FastAPI) -> None:
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
         return await call_next(request)
+
+    @app.exception_handler(Exception)
+    async def uncaught_error_response(request: Request, exc: Exception):
+        """Return a generic 500; never echo exception text to the client.
+
+        The server-error middleware still logs the failure through the
+        process-wide trade-data log boundary.
+        """
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": "Internal server error"},
+        )
     
     logger.info("Middleware configured")

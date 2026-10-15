@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from backend.shared.config import system_config
+from backend.shared.activity import fill_missing_activity_metadata
 from backend.shared.json_parser import parse_json
 from backend.shared.proof_identity import canonical_proof_identity
 from backend.shared.proof_search.assistant_cache import AssistantCooldownState, AssistantRankCache, goal_hash_for_snapshot
@@ -663,9 +664,16 @@ class AssistantProofSearchCoordinator:
         except Exception as exc:
             error_message = _compact_for_assistant_selection(str(exc), 240)
             failure_warning = f"Assistant LLM selection failed: {error_message}"
+            route_fields = _assistant_failure_route_identity(
+                assistant_role_id,
+                workflow_mode=snapshot.workflow_mode,
+                task_id=task_id,
+                error=exc,
+            )
             await self._broadcast_event(
                 "assistant_proof_pack_failed",
                 {
+                    **route_fields,
                     "target_hash": snapshot.target_hash,
                     "workflow_mode": snapshot.workflow_mode,
                     "target_kind": snapshot.target_kind,
@@ -790,7 +798,32 @@ class AssistantProofSearchCoordinator:
     async def _broadcast_event(self, event_type: str, payload: dict[str, Any]) -> None:
         try:
             from backend.api.routes import websocket
-            await websocket.broadcast_event(event_type, payload)
+            operational = any(
+                marker in event_type
+                for marker in ("failed", "error", "cooldown", "shutdown", "stopped")
+            )
+            await websocket.broadcast_event(
+                event_type,
+                fill_missing_activity_metadata(
+                    payload,
+                    workflow="assistant_proof_memory",
+                    run_id=str(
+                        payload.get("proof_run_id")
+                        or payload.get("run_id")
+                        or payload.get("session_id")
+                        or ""
+                    ),
+                    generation=payload.get("lifecycle_generation", ""),
+                    source_type=str(payload.get("source_type") or ""),
+                    source_id=str(payload.get("source_id") or ""),
+                    role_id=str(payload.get("assistant_role_id") or ""),
+                    phase=str(payload.get("workflow_phase") or ""),
+                    classification="operational" if operational else "informational",
+                    category="provider" if "cooldown" in event_type else "workflow",
+                    outcome="error" if operational else "info",
+                    detail=payload.get("error_summary") or payload.get("message"),
+                ),
+            )
         except Exception:
             logger.debug("Assistant proof-search event broadcast failed", exc_info=True)
 
@@ -1046,6 +1079,26 @@ def _assistant_model_id(role_id: str) -> str:
     if config is None:
         return ""
     return config.openrouter_model_id or config.model_id
+
+
+def _assistant_failure_route_identity(
+    role_id: str,
+    *,
+    workflow_mode: str,
+    task_id: str,
+    error: BaseException,
+) -> dict[str, str]:
+    """Return provider route identity fields for an Assistant selection failure."""
+    try:
+        from backend.shared.api_client_manager import api_client_manager
+        return api_client_manager.route_identity_for_role(
+            role_id,
+            workflow_mode=workflow_mode,
+            task_id=task_id,
+            error=error,
+        )
+    except Exception:
+        return {}
 
 
 def _assistant_provider_key(role_id: str) -> str:

@@ -1,10 +1,17 @@
 {
   "adapter": "real_route",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "concurrent_start_race",
     "one_winner"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "runtime_exclusivity",
@@ -13,11 +20,22 @@
   "invariants": [
     "runtime.single_active_workflow"
   ],
+  "observed_transition": "concurrent_start_race; one_winner",
+  "real_components": [
+    "backend/api/routes/aggregator.py",
+    "backend/api/routes/compiler.py",
+    "backend/api/routes/leanoj.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_shared_start_guard_representative_race",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+  "source_identity": "workflow-source-v1:bc0ab7248b5dddc2536b2852e993b4831931b2f6400a4091606d9ddecf73c355",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_actual_compiler_and_aggregator_route_start_race_has_one_winner"
+  ]
 }

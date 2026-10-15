@@ -8,6 +8,7 @@ import {
   chooseDefaultCloudAccessProvider,
   getConfiguredCloudAccessProviders,
 } from '../utils/oauthProviders';
+import SecretInput from './SecretInput';
 import './settings-common.css';
 
 /**
@@ -255,6 +256,12 @@ export default function OpenRouterApiKeyModal({
   useEffect(() => {
     if (isOpen) {
       setApiKey('');
+      setCodexCallbackInput('');
+      setCodexState('');
+      setCodexRedirectUri('');
+      setXaiCallbackInput('');
+      setXaiState('');
+      setXaiRedirectUri('');
       setTestResult(null);
       setError('');
       setCodexMessage('');
@@ -354,6 +361,20 @@ export default function OpenRouterApiKeyModal({
     setHasStoredKey(false);
     return undefined;
   }, [isOpen]);
+
+  const handleClose = () => {
+    setApiKey('');
+    setTestResult(null);
+    setError('');
+    setCodexCallbackInput('');
+    setCodexState('');
+    setCodexRedirectUri('');
+    setXaiCallbackInput('');
+    setXaiState('');
+    setXaiRedirectUri('');
+    setSakanaApiKey('');
+    onClose();
+  };
 
   useEffect(() => {
     if (!isOpen || !codexState) return undefined;
@@ -465,10 +486,11 @@ export default function OpenRouterApiKeyModal({
 
       // Notify parent
       if (onKeySet) {
-        await onKeySet(apiKey.trim());
+        await onKeySet();
       }
 
-      onClose();
+      setApiKey('');
+      handleClose();
     } catch (err) {
       setError(err.message || 'Failed to save API key');
     } finally {
@@ -683,6 +705,7 @@ export default function OpenRouterApiKeyModal({
         }
       } else {
         const modelsReady = await verifySakanaFuguModels();
+        setSakanaApiKey('');
         setSakanaMessage(modelsReady
           ? 'Sakana Fugu API key saved and model list loaded.'
           : 'Sakana Fugu API key saved, but model loading needs attention.'
@@ -744,7 +767,7 @@ export default function OpenRouterApiKeyModal({
       style={{
         zIndex: 10000,
       }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
+      onClick={(e) => e.target === e.currentTarget && handleClose()}
     >
       <div 
         className="inline-modal-content"
@@ -760,7 +783,7 @@ export default function OpenRouterApiKeyModal({
             OpenRouter & Cloud Subscriptions
           </h2>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             style={{
               background: 'none',
               border: 'none',
@@ -784,11 +807,12 @@ export default function OpenRouterApiKeyModal({
             Use OpenRouter models across MOTO roles. This is the existing cloud-provider path and can still be reused by API Boost.
           </p>
           <div style={{ marginBottom: '1rem' }}>
-            <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
-              API Key
+            <label htmlFor="openrouter-api-key" style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+              New or replacement API key
             </label>
-            <input
-              type="password"
+            <SecretInput
+              id="openrouter-api-key"
+              name="moto-openrouter-api-key"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder="sk-or-v1-..."
@@ -814,7 +838,7 @@ export default function OpenRouterApiKeyModal({
             <div className="test-result-banner test-result-banner--success" style={{
               marginBottom: '1rem',
             }}>
-              Connection successful! {testResult.model_count} models available.
+              OpenRouter API key authenticated successfully.
             </div>
           )}
 
@@ -995,11 +1019,13 @@ export default function OpenRouterApiKeyModal({
 
           {codexState && (
             <div style={{ marginTop: '1rem' }}>
-              <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+              <label htmlFor="openai-codex-oauth-callback" style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
                 Callback URL or Authorization Code
               </label>
-              <input
-                type="password"
+              <SecretInput
+                id="openai-codex-oauth-callback"
+                name="moto-openai-codex-oauth-callback"
+                autoComplete="off"
                 value={codexCallbackInput}
                 onChange={(e) => setCodexCallbackInput(e.target.value)}
                 placeholder="Paste callback URL or code from OpenAI login"
@@ -1120,11 +1146,13 @@ export default function OpenRouterApiKeyModal({
 
               {xaiState && (
                 <div style={{ marginTop: '1rem' }}>
-                  <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+                  <label htmlFor="xai-grok-oauth-callback" style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
                     Callback URL or Authorization Code
                   </label>
-                  <input
-                    type="password"
+                  <SecretInput
+                    id="xai-grok-oauth-callback"
+                    name="moto-xai-grok-oauth-callback"
+                    autoComplete="off"
                     value={xaiCallbackInput}
                     onChange={(e) => setXaiCallbackInput(e.target.value)}
                     placeholder="Paste callback URL or code from xAI login"
@@ -1214,11 +1242,12 @@ export default function OpenRouterApiKeyModal({
               )}
 
               <div style={{ marginTop: '1rem' }}>
-                <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+                <label htmlFor="sakana-fugu-api-key" style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
                   Sakana Fugu API Key
                 </label>
-                <input
-                  type="password"
+                <SecretInput
+                  id="sakana-fugu-api-key"
+                  name="moto-sakana-fugu-api-key"
                   value={sakanaApiKey}
                   onChange={(e) => setSakanaApiKey(e.target.value)}
                   placeholder="Paste Sakana Fugu API key"

@@ -25,6 +25,7 @@ from backend.shared.provider_errors import (
     ProviderRouteError,
     ProviderRouteIdentity,
 )
+from backend.shared.provider_recovery.runtime import assured_retry_wait
 import logging
 
 logger = logging.getLogger(__name__)
@@ -587,8 +588,22 @@ class LMStudioClient:
                                 "max_attempts": max_retries + 1,
                                 "retry_after_seconds": delay,
                                 "reason": "transient_http_error",
+                                "error_summary": redact_log_text(error_detail, 1000),
                             })
-                        await asyncio.sleep(delay)
+                        else:
+                            await assured_retry_wait(
+                                {
+                                    "provider": "lm_studio",
+                                    "provider_label": "LM Studio",
+                                    "model": model,
+                                    "retry_attempt": attempt + 1,
+                                    "max_attempts": max_retries + 1,
+                                    "retry_after_seconds": delay,
+                                    "reason": "transient_http_error",
+                                    "error_summary": redact_log_text(error_detail, 1000),
+                                },
+                                role_id="lm_studio_direct",
+                            )
                         logger.info(f"Retrying after 400 error...")
                         continue
                     
@@ -634,8 +649,28 @@ class LMStudioClient:
                             "max_attempts": max_retries + 1,
                             "retry_after_seconds": delay,
                             "reason": "connection_error",
+                            "error_summary": redact_log_text(
+                                f"[{type(e).__name__}] {e}",
+                                1000,
+                            ),
                         })
-                    await asyncio.sleep(delay)
+                    else:
+                        await assured_retry_wait(
+                            {
+                                "provider": "lm_studio",
+                                "provider_label": "LM Studio",
+                                "model": model,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": max_retries + 1,
+                                "retry_after_seconds": delay,
+                                "reason": "connection_error",
+                                "error_summary": redact_log_text(
+                                    f"[{type(e).__name__}] {e}",
+                                    1000,
+                                ),
+                            },
+                            role_id="lm_studio_direct",
+                        )
                     continue
                 raise ProviderRouteError(
                     "LM Studio connection failed after internal retries.",
@@ -649,7 +684,13 @@ class LMStudioClient:
         
         raise RuntimeError("Completion generation failed after all retries")
     
-    async def get_embeddings(self, texts: List[str], model: str = None, quiet: bool = False) -> List[List[float]]:
+    async def get_embeddings(
+        self,
+        texts: List[str],
+        model: str = None,
+        quiet: bool = False,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> List[List[float]]:
         """
         Get embeddings using LM Studio API with rate limiting.
         Optimized with batching, retry logic, and performance metrics.
@@ -681,6 +722,7 @@ class LMStudioClient:
                         batch_texts,
                         embedding_model,
                         quiet=quiet,
+                        retry_callback=retry_callback,
                     )
                     all_embeddings.extend(batch_embeddings)
                 
@@ -708,6 +750,7 @@ class LMStudioClient:
         texts: List[str], 
         model: str,
         quiet: bool = False,
+        retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> List[List[float]]:
         """Get embeddings with retry logic for transient failures."""
         for attempt in range(1, self.MAX_RETRIES + 1):
@@ -738,7 +781,37 @@ class LMStudioClient:
                         f"Embedding attempt {attempt}/{self.MAX_RETRIES} failed: {e}. "
                         f"Retrying in {self.RETRY_DELAY}s..."
                     )
-                    await asyncio.sleep(self.RETRY_DELAY)
+                    if retry_callback is not None:
+                        await retry_callback({
+                            "provider": "lm_studio",
+                            "provider_label": "LM Studio",
+                            "model": model,
+                            "retry_attempt": attempt,
+                            "max_attempts": self.MAX_RETRIES,
+                            "retry_after_seconds": self.RETRY_DELAY,
+                            "reason": "embedding_retry",
+                            "error_summary": redact_log_text(
+                                f"[{type(e).__name__}] {e}",
+                                1000,
+                            ),
+                        })
+                    else:
+                        await assured_retry_wait(
+                            {
+                                "provider": "lm_studio",
+                                "provider_label": "LM Studio",
+                                "model": model,
+                                "retry_attempt": attempt,
+                                "max_attempts": self.MAX_RETRIES,
+                                "retry_after_seconds": self.RETRY_DELAY,
+                                "reason": "embedding_retry",
+                                "error_summary": redact_log_text(
+                                    f"[{type(e).__name__}] {e}",
+                                    1000,
+                                ),
+                            },
+                            role_id="embeddings",
+                        )
                 else:
                     log_method = logger.debug if quiet else logger.error
                     log_method(f"Embedding failed after {self.MAX_RETRIES} attempts: {e}")

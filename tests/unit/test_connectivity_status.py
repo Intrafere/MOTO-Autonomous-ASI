@@ -73,6 +73,35 @@ def test_syntheticlib4_future_access_timestamp_is_not_outdated() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prelaunch_connectivity_status_does_not_read_credentials() -> None:
+    previous = (
+        system_config.syntheticlib_product_state,
+        system_config.syntheticlib_developer_preview_authorized,
+        system_config.generic_mode,
+    )
+    system_config.syntheticlib_product_state = "coming_soon"
+    system_config.syntheticlib_developer_preview_authorized = False
+    system_config.generic_mode = False
+    try:
+        with mock.patch.object(
+            connectivity.syntheticlib4_client,
+            "get_status",
+            side_effect=AssertionError("credential status must not be read"),
+        ) as get_status:
+            result = await connectivity._syntheticlib4_status()
+    finally:
+        (
+            system_config.syntheticlib_product_state,
+            system_config.syntheticlib_developer_preview_authorized,
+            system_config.generic_mode,
+        ) = previous
+
+    assert result["status"] == "coming soon"
+    assert result["runtime_available"] is False
+    get_status.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_disabling_session_history_clears_live_and_durable_assistant_state() -> None:
     old_enabled = system_config.agent_conversation_memory_enabled
     try:

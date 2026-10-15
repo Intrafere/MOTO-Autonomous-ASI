@@ -10,10 +10,10 @@ from backend.shared.api_client_manager import RetryableProviderError, api_client
 from backend.shared.config import system_config
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
-from backend.shared.lean4_client import get_lean4_client
+from backend.shared.lean4_client import get_lean4_client, raise_for_lean_workspace_failure
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import is_non_retryable_model_error
-from backend.shared.models import ProofAttemptFeedback
+from backend.shared.models import LeanCompileReceipt, ProofAttemptFeedback
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class BrainstormProofGateResult:
     reasoning: str = ""
     lean_feedback: str = ""
     attempts: list[ProofAttemptFeedback] | None = None
+    compile_receipt: Optional[LeanCompileReceipt] = None
     failure_feedback: str = ""
 
 
@@ -108,14 +109,14 @@ def _candidate_metadata_rejection(
     if normalized_tier == "not_novel":
         return (
             "Lean proof candidate rejected before Lean cost: `expected_novelty_tier` was "
-            "`not_novel`. Supporting, routine, trivial, local, or known results must not "
-            "be submitted as proof targets."
+            "`not_novel`. Routine, trivial, local, known, or otherwise non-novel results "
+            "must not be submitted as proof targets."
         )
     if normalized_tier not in NOVEL_PROOF_TIERS:
         return (
             "Lean proof candidate rejected before Lean cost: missing or invalid "
-            "`expected_novelty_tier`. The proof route is only for high-impact "
-            "prompt-solving theorem targets."
+            "`expected_novelty_tier`. The proof route is only for novel "
+            "prompt-relevant theorem targets."
         )
     missing = [
         field_name
@@ -186,12 +187,12 @@ Respond with ONLY valid JSON:
 {{
   "theorem_name": "Lean declaration name, if named",
   "lean_code": "complete Lean 4 code",
-  "reasoning": "brief explanation of how this repairs the SAME intended high-impact theorem target without narrowing, weakening, or substituting a supporting lemma"
+  "reasoning": "brief explanation of how this repairs the SAME intended theorem target without narrowing, weakening, or substituting a supporting lemma"
 }}
 
 Do not change the intended theorem statement, novelty tier, prompt relevance rationale,
 novelty rationale, or anti-standard-result rationale. The repair budget is for
-fixing the Lean proof of the same high-impact target, not for replacing it with a
+fixing the Lean proof of the same intended target, not for replacing it with a
 narrower, easier, routine, trivial, local, or merely supporting lemma.
 """
 
@@ -360,6 +361,9 @@ async def verify_brainstorm_proof_candidate(
             lean_code,
             timeout=system_config.lean4_proof_timeout,
         )
+        # Lean never ran: stop the workflow instead of spending repair calls or
+        # recording a rejection for a proof nobody checked.
+        raise_for_lean_workspace_failure(lean_result)
         feedback = ProofAttemptFeedback(
             attempt=attempt_number,
             theorem_id="brainstorm_inline_proof",
@@ -371,6 +375,7 @@ async def verify_brainstorm_proof_candidate(
             raw_stderr=str(getattr(lean_result, "raw_stderr", "") or ""),
             strategy="full_script",
             success=lean_result.success,
+            compile_receipt=getattr(lean_result, "compile_receipt", None),
         )
 
         if lean_result.success:
@@ -424,7 +429,7 @@ async def verify_brainstorm_proof_candidate(
                         prompt_relevance_rationale=prompt_relevance_rationale,
                         novelty_rationale=novelty_rationale,
                         why_not_standard_known_result=why_not_standard_known_result,
-                        lean_code=lean_code,
+                        lean_code=getattr(lean_result, "checked_source", "") or lean_code,
                         reasoning=reasoning,
                         lean_feedback=lean_feedback,
                         attempts=attempts,
@@ -436,10 +441,11 @@ async def verify_brainstorm_proof_candidate(
                     prompt_relevance_rationale=prompt_relevance_rationale,
                     novelty_rationale=novelty_rationale,
                     why_not_standard_known_result=why_not_standard_known_result,
-                    lean_code=lean_code,
+                    lean_code=getattr(lean_result, "checked_source", "") or lean_code,
                     reasoning=reasoning,
                     lean_feedback=lean_feedback,
                     attempts=attempts,
+                    compile_receipt=getattr(lean_result, "compile_receipt", None),
                 )
 
             feedback.success = False

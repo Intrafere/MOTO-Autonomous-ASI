@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api, connectivityAPI } from '../services/api';
+import SecretInput from './SecretInput';
 import './settings-common.css';
 
 export default function WolframAlphaAccessModal({
@@ -96,6 +97,12 @@ export default function WolframAlphaAccessModal({
 
   if (!isOpen) return null;
 
+  const handleClose = () => {
+    setApiKey('');
+    setMessage('');
+    onClose();
+  };
+
   const wolframConnectivity = connectivityStatus?.skills?.wolfram_alpha;
   const hasStatusResponse = Boolean(status || wolframConnectivity);
   const hasStoredKey = Boolean(status?.has_key || wolframConnectivity?.has_key);
@@ -108,11 +115,11 @@ export default function WolframAlphaAccessModal({
     : 'Checking Wolfram Alpha App ID status...';
 
   return (
-    <div className="inline-modal-overlay" style={{ zIndex: 10000 }} onClick={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="inline-modal-overlay" style={{ zIndex: 10000 }} onClick={(event) => event.target === event.currentTarget && handleClose()}>
       <div className="inline-modal-content" style={{ width: '620px', maxWidth: '90vw', backgroundColor: '#1a1a2e', borderRadius: '12px' }}>
         <div className="settings-header-row" style={{ marginBottom: '1.5rem' }}>
           <h2 style={{ margin: 0, color: '#fff', fontSize: '1.4rem' }}>Wolfram Alpha Access</h2>
-          <button onClick={onClose} className="modal-close-btn" aria-label="Close Wolfram Alpha access">×</button>
+          <button onClick={handleClose} className="modal-close-btn" aria-label="Close Wolfram Alpha access">×</button>
         </div>
 
         <p className="settings-hint">
@@ -151,11 +158,12 @@ export default function WolframAlphaAccessModal({
         )}
 
         <div className="submitter-config-section">
-          <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+          <label htmlFor="wolfram-alpha-app-id" style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
             Wolfram Alpha App ID
           </label>
-          <input
-            type="password"
+          <SecretInput
+            id="wolfram-alpha-app-id"
+            name="moto-wolfram-alpha-app-id"
             value={apiKey}
             onChange={(event) => setApiKey(event.target.value)}
             placeholder={hasStoredKey ? 'Enter a new App ID to replace the stored one' : 'Paste Wolfram Alpha App ID'}

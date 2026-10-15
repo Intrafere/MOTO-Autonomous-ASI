@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api, cloudAccessAPI, openRouterAPI } from '../../services/api';
 import {
   computeCodexAutoSettings,
@@ -18,6 +18,7 @@ import {
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
   SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
+  XAI_GROK_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import { refreshCredentialProviderState } from '../../utils/credentialProviderRefresh';
 import {
@@ -216,6 +217,24 @@ function AggregatorModelSelector({
       )}
 
       {effectiveProvider === 'openai_codex_oauth' && modelId && <CodexReasoningControl model={models.find(item => item.id === modelId)} modelId={modelId} value={openrouterReasoningEffort} disabled={isRunning} onChange={onOpenrouterReasoningEffortChange} />}
+      {effectiveProvider === XAI_GROK_PROVIDER && modelId && (
+        <div className="settings-row">
+          <label>Reasoning Effort</label>
+          <select
+            aria-label="xAI Reasoning Effort"
+            value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort, XAI_GROK_PROVIDER)}
+            onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
+            disabled={isRunning}
+          >
+            {XAI_GROK_REASONING_EFFORT_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <small className="settings-hint">
+            Auto sends high reasoning effort; disabled omits the xAI reasoning setting.
+          </small>
+        </div>
+      )}
       {effectiveProvider === SAKANA_FUGU_PROVIDER && modelId && (
         <div className="settings-row">
           <label>Reasoning Effort</label>
@@ -284,6 +303,11 @@ export default function AggregatorSettings({
       { ...DEFAULT_SUBMITTER_CONFIG, submitterId: 3 }
     ]
   );
+  const submitterConfigsRef = useRef(submitterConfigs);
+
+  useEffect(() => {
+    submitterConfigsRef.current = submitterConfigs;
+  }, [submitterConfigs]);
   const [validatorMaxOutput, setValidatorMaxOutput] = useState(config.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
   
   // Validator OpenRouter state
@@ -340,10 +364,13 @@ export default function AggregatorSettings({
           // Restore all state variables
           if (settings.numSubmitters) setNumSubmitters(settings.numSubmitters);
           if (settings.submitterConfigs) {
-            setSubmitterConfigs(settings.submitterConfigs.map((item) => ({
+            const normalizedSubmitters = settings.submitterConfigs.map((item, index) => ({
               ...item,
+              submitterId: index + 1,
               openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(item.openrouterReasoningEffort, item.provider),
-            })));
+            }));
+            setSubmitterConfigs(normalizedSubmitters);
+            submitterConfigsRef.current = normalizedSubmitters;
           }
           if (settings.validatorProvider) setValidatorProvider(settings.validatorProvider);
           if (settings.validatorOpenrouterProvider) setValidatorOpenrouterProvider(settings.validatorOpenrouterProvider);
@@ -787,6 +814,7 @@ export default function AggregatorSettings({
         : c
     );
     setSubmitterConfigs(baseConfigs);
+    submitterConfigsRef.current = baseConfigs;
     setConfig(prev => ({ ...prev, submitterConfigs: baseConfigs }));
 
     const targetConfig = baseConfigs.find(c => c.submitterId === submitterId);
@@ -801,7 +829,17 @@ export default function AggregatorSettings({
       return;
     }
 
-    const nextConfigs = baseConfigs.map(c =>
+    const currentConfigs = submitterConfigsRef.current;
+    const currentTarget = currentConfigs.find(c => c.submitterId === submitterId);
+    if (
+      !currentTarget
+      || currentTarget.modelId !== modelId
+      || currentTarget.provider !== targetConfig.provider
+      || currentTarget.openrouterProvider !== null
+    ) {
+      return;
+    }
+    const nextConfigs = currentConfigs.map(c =>
       c.submitterId === submitterId
         ? {
             ...c,
@@ -811,6 +849,7 @@ export default function AggregatorSettings({
         : c
     );
     setSubmitterConfigs(nextConfigs);
+    submitterConfigsRef.current = nextConfigs;
     setConfig(prev => ({ ...prev, submitterConfigs: nextConfigs }));
   };
 
@@ -821,6 +860,7 @@ export default function AggregatorSettings({
         : c
     );
     setSubmitterConfigs(baseConfigs);
+    submitterConfigsRef.current = baseConfigs;
     setConfig(prev => ({ ...prev, submitterConfigs: baseConfigs }));
 
     const targetConfig = baseConfigs.find(c => c.submitterId === submitterId);
@@ -833,7 +873,17 @@ export default function AggregatorSettings({
       return;
     }
 
-    const nextConfigs = baseConfigs.map(c =>
+    const currentConfigs = submitterConfigsRef.current;
+    const currentTarget = currentConfigs.find(c => c.submitterId === submitterId);
+    if (
+      !currentTarget
+      || currentTarget.modelId !== targetConfig.modelId
+      || currentTarget.provider !== targetConfig.provider
+      || currentTarget.openrouterProvider !== providerName
+    ) {
+      return;
+    }
+    const nextConfigs = currentConfigs.map(c =>
       c.submitterId === submitterId
         ? {
             ...c,
@@ -843,6 +893,7 @@ export default function AggregatorSettings({
         : c
     );
     setSubmitterConfigs(nextConfigs);
+    submitterConfigsRef.current = nextConfigs;
     setConfig(prev => ({ ...prev, submitterConfigs: nextConfigs }));
   };
 
@@ -935,6 +986,7 @@ export default function AggregatorSettings({
       }
     }
     setSubmitterConfigs(newConfigs);
+    submitterConfigsRef.current = newConfigs;
     setConfig(prev => ({ ...prev, submitterConfigs: newConfigs }));
   };
 
@@ -960,6 +1012,7 @@ export default function AggregatorSettings({
           modelId: (s.provider === 'lm_studio' && !s.modelId) ? firstModelId : s.modelId
         }));
         setSubmitterConfigs(updatedConfigs);
+        submitterConfigsRef.current = updatedConfigs;
         
         setConfig(prev => ({
           ...prev,
@@ -1000,6 +1053,7 @@ export default function AggregatorSettings({
     });
     
     setSubmitterConfigs(newConfigs);
+    submitterConfigsRef.current = newConfigs;
     setConfig(prev => ({ ...prev, submitterConfigs: newConfigs }));
   };
 
@@ -1019,6 +1073,7 @@ export default function AggregatorSettings({
       superchargeEnabled: Boolean(source.superchargeEnabled)
     }));
     setSubmitterConfigs(newConfigs);
+    submitterConfigsRef.current = newConfigs;
     setConfig(prev => ({ ...prev, submitterConfigs: newConfigs }));
     setSaveMessage('Applied to all submitters ✓');
   };
@@ -1068,13 +1123,21 @@ export default function AggregatorSettings({
   });
 
   const applyAggregatorRawSettings = (rawSettings, { updateRawText = true } = {}) => {
-    const nextSubmitters = Array.isArray(rawSettings.submitterConfigs) && rawSettings.submitterConfigs.length > 0
-      ? rawSettings.submitterConfigs.map((item) => ({
+    if (!Array.isArray(rawSettings.submitterConfigs) || rawSettings.submitterConfigs.length < 1) {
+      throw new Error('submitterConfigs must contain 1-10 configured roles');
+    }
+    const nextNumSubmitters = Number(rawSettings.numSubmitters);
+    if (!Number.isInteger(nextNumSubmitters) || nextNumSubmitters < 1 || nextNumSubmitters > 10) {
+      throw new Error('numSubmitters must be an integer from 1 to 10');
+    }
+    if (rawSettings.submitterConfigs.length !== nextNumSubmitters) {
+      throw new Error('numSubmitters must match the number of submitterConfigs');
+    }
+    const nextSubmitters = rawSettings.submitterConfigs.map((item, index) => ({
           ...item,
+          submitterId: index + 1,
           openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(item.openrouterReasoningEffort, item.provider),
-        }))
-      : submitterConfigs;
-    const nextNumSubmitters = Number(rawSettings.numSubmitters || nextSubmitters.length || 3);
+        }));
     const nextValidatorProvider = rawSettings.validatorProvider || 'lm_studio';
     const nextValidatorOpenrouterProvider = rawSettings.validatorOpenrouterProvider || null;
     const nextValidatorOpenrouterReasoningEffort = normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort, rawSettings.validatorProvider);
@@ -1086,6 +1149,7 @@ export default function AggregatorSettings({
 
     setNumSubmitters(nextNumSubmitters);
     setSubmitterConfigs(nextSubmitters);
+    submitterConfigsRef.current = nextSubmitters;
     setValidatorProvider(nextValidatorProvider);
     setValidatorOpenrouterProvider(nextValidatorOpenrouterProvider);
     setValidatorOpenrouterReasoningEffort(nextValidatorOpenrouterReasoningEffort);
@@ -1261,14 +1325,15 @@ export default function AggregatorSettings({
               <label title="Number of parallel brainstorm submitters (1-10)">
                 Number of Submitters
               </label>
-              <input
-                type="number"
-                min={1}
-                max={10}
-                step={1}
+              <select
+                aria-label="Number of Submitters"
                 value={numSubmitters}
                 onChange={(e) => handleNumSubmittersChange(e.target.value)}
-              />
+              >
+                {Array.from({ length: 10 }, (_, index) => index + 1).map(count => (
+                  <option key={count} value={count}>{count}</option>
+                ))}
+              </select>
               {numSubmitters > 1 && (
                 <button
                   type="button"

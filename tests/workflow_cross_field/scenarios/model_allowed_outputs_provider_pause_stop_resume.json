@@ -10,7 +10,18 @@
   ],
   "adapter": "model",
   "artifact_type": "scenario",
+  "asserted_invariants": [
+    "outputs.proofs_only_no_paper_phase",
+    "provider.pause_preserves_checkpoint",
+    "provider.stop_resume_preserves_pause",
+    "provider.reset_wakes_without_corrupting_checkpoint"
+  ],
+  "blocked_dependencies": [],
+  "coverage_classification": "deterministic_model_evidence",
   "expected_result": "passed",
+  "faked_dependencies": [
+    "workflow executable state model"
+  ],
   "fields": [
     "allowed_outputs",
     "provider_pause_resume",
@@ -27,6 +38,13 @@
     "stop_resume",
     "reset_credit"
   ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
+  "runner": "pytest",
   "scenario_id": "model_allowed_outputs_provider_pause_stop_resume",
-  "schema_version": 1
+  "schema_version": 2,
+  "source_identity": "workflow-source-v1:fcad8ca2c4f7f5332cbd08b846d5f7732699e5f832497e4d7ac35020852db4e2",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
 }

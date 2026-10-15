@@ -13,7 +13,10 @@ import json
 import logging
 import re
 import time
+import uuid
 from typing import Dict, Any, Awaitable, List, Optional, Callable
+
+import httpx
 
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import (
@@ -24,11 +27,13 @@ from backend.shared.openrouter_client import (
     FreeModelExhaustedError,
     OpenRouterInvalidResponseError,
     OpenRouterNoEndpointsError,
+    sanitize_provider_error_text,
 )
 from backend.shared.openai_codex_client import (
     OpenAICodexAuthError,
     OpenAICodexError,
     OpenAICodexRequestError,
+    OpenAICodexUntimedUsageLimitError,
     OAuthUsageLimitError,
     openai_codex_client,
 )
@@ -41,6 +46,7 @@ from backend.shared.sakana_fugu_client import (
 from backend.shared.xai_grok_client import (
     XAIGrokError,
     XAIGrokSpendingLimitError,
+    XAIGrokUsageLimitError,
     xai_grok_client,
 )
 from backend.shared.boost_manager import boost_manager
@@ -57,11 +63,24 @@ from backend.shared.model_error_utils import (
     is_transient_model_call_error,
 )
 from backend.shared.provider_notification_store import record_provider_notification
+from backend.shared.provider_recovery.events import canonical_recovery_event
+from backend.shared.provider_recovery.runtime import provider_recovery_runtime
 from backend.shared.provider_errors import (
     ProviderContextLengthError,
     ProviderRepairRequiredError,
     ProviderRouteError,
     ProviderRouteIdentity,
+)
+from backend.shared.provider_route_identity import (
+    ROUTE_IDENTITY_FIELD_NAMES,
+    VALID_WORKFLOW_MODES,
+    is_model_provider,
+    is_placeholder_provider,
+    merge_route_identity,
+    provider_label as provider_display_label,
+    route_identity_fields,
+    route_identity_from_error,
+    with_route_identity,
 )
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
@@ -107,6 +126,8 @@ _HARD_CODEX_ERROR_CODES = {
 _RETRYABLE_CODEX_FAILURE_KINDS = {
     "empty_response",
     "empty_stream",
+    "invalid_terminal_state",
+    "terminal_missing",
     "stream_rejected",
     "transient_http_exhausted",
     "transient_stream_exhausted",
@@ -157,22 +178,38 @@ def _active_notification_workflow_mode() -> str:
     return {
         "manual_aggregator": "aggregator",
         "manual_compiler": "compiler",
+        "manual_compiler_proof_only": "manual_proof_check",
         "autonomous": "autonomous",
         "leanoj": "leanoj",
     }.get(str(workflow_start_guard.active_owner or ""), "")
 
 
+def _manual_proof_role_workflow_mode(role: str) -> str:
+    """Return the workflow a manual proof-check role belongs to, or ``""``.
+
+    Manual proof checks run beside whichever workflow owns the session, so their
+    roles name their own workflow: the ``manual_proof_*`` pseudo-roles and the
+    stage roles built with a ``manual_{source_type}`` suffix. The compiler
+    saved-paper check (``..._compiler_manual_paper``) is labelled compiler, as
+    ``ProofVerificationStage`` labels its ``manual_compiler_save`` trigger.
+    """
+    if role.startswith("manual_proof_"):
+        return "manual_proof_check"
+    if role.startswith("autonomous_proof_") and "_manual_" in role:
+        return "compiler" if "_compiler_manual_paper" in role else "manual_proof_check"
+    return ""
+
+
 def _retry_workflow_mode(role_id: str) -> str:
+    role = str(role_id or "").lower()
+    manual_proof_mode = _manual_proof_role_workflow_mode(role)
+    if manual_proof_mode:
+        return manual_proof_mode
     active_mode = _active_notification_workflow_mode()
     if active_mode:
         return active_mode
-    role = str(role_id or "").lower()
     if "leanoj" in role:
         return "leanoj"
-    if "manual_proof" in role or (
-        "autonomous_proof_" in role and "_manual_" in role
-    ):
-        return "manual_proof_check"
     if role.startswith(("comp_", "compiler_")) or "manual_compiler" in role:
         return "compiler"
     if role.startswith(("agg_", "aggregator_")) or "manual_aggregator" in role:
@@ -180,6 +217,98 @@ def _retry_workflow_mode(role_id: str) -> str:
     if "autonomous" in role:
         return "autonomous"
     return ""
+
+
+# Raw route inputs accepted by route_identity_fields(); composed fields such as
+# role_label, host_routing and route_identity are derived, never copied in.
+_ROUTE_IDENTITY_INPUT_KEYS = (
+    "model",
+    "provider",
+    "provider_label_text",
+    "route_kind",
+    "task_id",
+    "configured_model",
+    "configured_provider",
+    "configured_host_provider",
+    "upstream_host_provider",
+    "auto_fallback_from_host",
+    "provider_request_id",
+)
+# Identity fields that describe one role's call. A provider-wide cooldown payload
+# reused for another role drops them before that role's identity is merged.
+_ROLE_SCOPED_ROUTE_IDENTITY_KEYS = frozenset(ROUTE_IDENTITY_FIELD_NAMES) - {
+    "workflow_mode",
+    "role_id",
+    "model",
+    "provider",
+    "provider_label",
+}
+# Per-event identity of the role that first hit a provider-wide cooldown; a
+# reused cooldown payload rebuilds these for the role it is reported for.
+_COOLDOWN_EVENT_IDENTITY_KEYS = frozenset({
+    "event_id",
+    "correlation_id",
+    "activity_correlation_id",
+    "activity_id",
+    "notification_key",
+    "id",
+    "workflow_mode",
+})
+
+
+def _merge_route_fields(payload: Dict[str, Any], fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill missing route identity keys without overriding producer-supplied values.
+
+    A placeholder provider yields to a real one together with its label, and
+    ``configured_host_provider`` keeps ``""`` (OpenRouter auto routing) distinct
+    from ``None`` (unknown host), so only an absent or ``None`` host is filled.
+    """
+    merged = merge_route_identity(
+        payload,
+        {
+            key: value
+            for key, value in fields.items()
+            if key not in ("configured_host_provider", "provider_label")
+        },
+    )
+    provider = fields.get("provider")
+    label = fields.get("provider_label")
+    if provider and merged.get("provider") == provider:
+        if merged.get("provider") != payload.get("provider") or not merged.get("provider_label"):
+            merged["provider_label"] = label or provider_display_label(provider)
+    elif not provider and label and not merged.get("provider_label"):
+        merged["provider_label"] = label
+    host = fields.get("configured_host_provider")
+    if host is not None and merged.get("configured_host_provider") is None:
+        merged["configured_host_provider"] = host
+    return merged
+
+
+def _configured_role_model(config: ModelConfig) -> str:
+    """Return the model id a role is configured to call on its own provider."""
+    if config.provider == "openrouter":
+        return str(config.openrouter_model_id or config.model_id or "")
+    return str(config.model_id or "")
+
+
+def _role_route_model(config: ModelConfig, provider: str) -> str:
+    """Return the model a role calls on ``provider``: its own or its LM Studio fallback."""
+    if provider == config.provider:
+        return _configured_role_model(config)
+    if provider == "lm_studio":
+        return str(config.lm_studio_fallback_id or "")
+    return ""
+
+
+def _route_log_host(fields: Dict[str, Any]) -> str:
+    """Describe the host of a route for plain-text logs."""
+    routing = str(fields.get("host_routing") or "")
+    upstream = str(fields.get("effective_host_provider") or "")
+    if routing == "pinned":
+        return str(fields.get("configured_host_provider") or upstream or "pinned")
+    if routing in ("auto", "auto_fallback"):
+        return f"{routing} -> {upstream}" if upstream else routing
+    return routing or "n/a"
 
 
 def _cap_oauth_live_error_text(value: Any, max_chars: int = OAUTH_LIVE_ERROR_MAX_CHARS) -> str:
@@ -285,6 +414,15 @@ class RetryableProviderError(RuntimeError):
         reason: str,
         message: str,
         retry_after_seconds: Optional[int] = None,
+        error_summary: str = "",
+        route_kind: str = "",
+        task_id: str = "",
+        configured_provider: str = "",
+        configured_model: str = "",
+        configured_host_provider: Optional[str] = None,
+        upstream_host_provider: str = "",
+        auto_fallback_from_host: str = "",
+        provider_request_id: str = "",
     ) -> None:
         self.provider = provider
         self.provider_label = provider_label
@@ -292,7 +430,21 @@ class RetryableProviderError(RuntimeError):
         self.model = model
         self.reason = reason
         self.retry_after_seconds = retry_after_seconds
-        super().__init__(message)
+        self.error_summary = sanitize_provider_error_text(
+            error_summary or message,
+            max_chars=1000,
+        )
+        # Structured route identity for Live Activity only; never part of the
+        # exception text, error_summary, or backoff keys.
+        self.route_kind = route_kind
+        self.task_id = task_id
+        self.configured_provider = configured_provider
+        self.configured_model = configured_model
+        self.configured_host_provider = configured_host_provider
+        self.upstream_host_provider = upstream_host_provider
+        self.auto_fallback_from_host = auto_fallback_from_host
+        self.provider_request_id = provider_request_id
+        super().__init__(sanitize_provider_error_text(message, max_chars=1000))
 
 
 class ProviderCooldownError(RetryableProviderError):
@@ -309,6 +461,7 @@ class ProviderCooldownError(RetryableProviderError):
         resets_in_seconds: Optional[int],
         plan_type: str = "",
         message: str = "",
+        **route_identity: Any,
     ) -> None:
         self.resets_at = resets_at
         self.resets_in_seconds = resets_in_seconds
@@ -324,6 +477,7 @@ class ProviderCooldownError(RetryableProviderError):
             reason="usage_limit_reached",
             message=base,
             retry_after_seconds=resets_in_seconds,
+            **route_identity,
         )
 
 
@@ -455,6 +609,10 @@ class APIClientManager:
         # Top-level workflow owners may suppress proof-only Assistant memory for
         # a run without changing the user's persisted Session History setting.
         self._assistant_memory_suppression_owners: set[str] = set()
+
+        # User-visible source of calls made by run-scoped roles (manual proof
+        # checks), so their provider activity can be routed to the owning feed.
+        self._role_activity_sources: Dict[str, Dict[str, str]] = {}
         
         # Lock for thread-safe state updates
         self._state_lock = asyncio.Lock()
@@ -489,54 +647,305 @@ class APIClientManager:
         wait_seconds = max(0.0, float(payload.get("retry_after_seconds") or 0))
         provider_label = str(payload.get("provider_label") or payload.get("provider") or "Provider")
         retry_attempt = max(1, int(payload.get("retry_attempt") or 1))
-        event_payload = {
-            "event_type": "provider_retry_cooldown",
-            "workflow_mode": _retry_workflow_mode(str(payload.get("role_id") or role_id or "")),
+        reason = str(payload.get("reason") or "transient_provider_error")
+        error_summary = sanitize_provider_error_text(
+            str(payload.get("error_summary") or ""),
+            max_chars=1000,
+        ).strip()
+        supplied_message = sanitize_provider_error_text(
+            str(payload.get("message") or ""),
+            max_chars=1800,
+        )
+        error_label = (
+            "connection error"
+            if reason in {"connection_error", "stream_error"}
+            else "server-side error"
+            if reason in {
+                "http_error",
+                "invalid_response",
+                "transient_http_error",
+                "upstream_provider_error",
+            }
+            else "API error"
+        )
+        retry_message = (
+            f"{provider_label} API call will retry after a {wait_seconds:g}-second cooldown "
+            f"(retry {retry_attempt})."
+        )
+        display_role = str(payload.get("role_id") or role_id or "")
+        supplied_mode = str(payload.get("workflow_mode") or "").strip().lower()
+        workflow_mode = (
+            supplied_mode
+            if supplied_mode in VALID_WORKFLOW_MODES
+            else _retry_workflow_mode(display_role)
+        )
+        event_payload = canonical_recovery_event("provider_retry_cooldown", {
+            "workflow_mode": workflow_mode,
             "provider": str(payload.get("provider") or "unknown"),
             "provider_label": provider_label,
-            "role_id": str(payload.get("role_id") or role_id or ""),
+            "role_id": display_role,
             "model": str(payload.get("model") or ""),
             "retry_attempt": retry_attempt,
             "max_attempts": payload.get("max_attempts"),
             "retry_after_seconds": wait_seconds,
-            "reason": str(payload.get("reason") or "transient_provider_error"),
-            "message": (
-                f"{provider_label} API call will retry after a {wait_seconds:g}-second cooldown "
-                f"(retry {retry_attempt})."
+            "reason": reason,
+            "error_summary": error_summary,
+            "correlation_id": str(
+                payload.get("correlation_id")
+                or payload.get("activity_correlation_id")
+                or ""
             ),
-        }
-        await self._broadcast("provider_retry_cooldown", event_payload)
+            "message": supplied_message or (
+                f"{provider_label} {error_label}: {error_summary.rstrip('.')}."
+                f" {retry_message}"
+                if error_summary
+                else retry_message
+            ),
+        }, recovery_action="retry", retry_layer=str(payload.get("retry_layer") or "adapter"))
+        # Route identity joins the event after its correlation and event IDs are
+        # fixed, and prefixes only the display message.
+        if str(payload.get("route_identity") or "").strip():
+            fields = {
+                key: payload[key]
+                for key in ROUTE_IDENTITY_FIELD_NAMES
+                if payload.get(key) is not None
+                and (payload[key] != "" or key == "configured_host_provider")
+            }
+        else:
+            raw = {key: payload.get(key) for key in _ROUTE_IDENTITY_INPUT_KEYS}
+            raw["provider"] = str(payload.get("provider") or "unknown")
+            raw["provider_label_text"] = payload.get("provider_label")
+            fields = self._resolve_route_identity(
+                display_role,
+                raw,
+                workflow_mode=workflow_mode,
+                model_role_id=str(payload.get("model_role_id") or ""),
+            )
+        event_payload = _merge_route_fields(event_payload, fields)
+        event_payload["message"] = with_route_identity(event_payload["message"], fields)
+        source_fields = {
+            key: payload[key]
+            for key in ("source_type", "source_id", "proof_run_id")
+            if payload.get(key)
+        } or self._role_activity_source_fields(
+            str(payload.get("model_role_id") or ""),
+            display_role,
+        )
+        for key, value in source_fields.items():
+            event_payload.setdefault(key, value)
+        stored_payload = await asyncio.to_thread(
+            record_provider_notification,
+            "provider_retry_cooldown",
+            event_payload,
+        )
+        await self._broadcast("provider_retry_cooldown", stored_payload)
+
+    def _resolve_route_identity(
+        self,
+        role_id: str,
+        raw: Dict[str, Any],
+        *,
+        workflow_mode: str = "",
+        model_role_id: str = "",
+        error: Optional[BaseException] = None,
+    ) -> Dict[str, str]:
+        """Compose route identity from producer keys, a typed error and role settings.
+
+        Producer keys win over the error, and both win over role settings. Role
+        settings only describe primary routes of model providers, so non-model
+        workflow-loop or storage retries never gain a fabricated model or host.
+        """
+        display_role = str(role_id or "").strip()
+        model_role = str(model_role_id or "").strip()
+        identity: Dict[str, Any] = {}
+        for key in _ROUTE_IDENTITY_INPUT_KEYS:
+            value = raw.get(key)
+            if key == "configured_host_provider":
+                if value is not None:
+                    identity[key] = str(value)
+            elif value not in (None, "") and not (
+                key == "provider" and is_placeholder_provider(value)
+            ):
+                identity[key] = value
+        provider_hint = str(raw.get("provider") or "").strip()
+        if error is not None:
+            from_error = route_identity_from_error(error)
+            error_role = str(from_error.pop("role_id", "") or "")
+            error_label = from_error.pop("provider_label_text", "")
+            if "provider" not in identity and from_error.get("provider"):
+                # The producer's label described its placeholder provider.
+                identity.pop("provider_label_text", None)
+            for key, value in from_error.items():
+                identity.setdefault(key, value)
+            if (
+                error_label
+                and "provider_label_text" not in identity
+                and identity.get("provider") == from_error.get("provider")
+            ):
+                identity["provider_label_text"] = error_label
+            if error_role and not display_role:
+                display_role = error_role
+            elif error_role and error_role != display_role and not model_role:
+                model_role = error_role
+
+        config_role = model_role or display_role
+        config = self._role_model_configs.get(config_role) if config_role else None
+        provider = str(identity.get("provider") or "").strip().lower()
+        route_kind = str(identity.get("route_kind") or "").strip().lower()
+        if (
+            config is not None
+            and route_kind in ("", "primary")
+            and (is_model_provider(provider) or not (provider or provider_hint))
+        ):
+            configured_provider = str(config.provider or "")
+            identity.setdefault("configured_provider", configured_provider)
+            configured_model = _configured_role_model(config)
+            if configured_model:
+                identity.setdefault("configured_model", configured_model)
+            if not provider and is_model_provider(configured_provider):
+                fallback_state = self._role_fallback_state.get(config_role, configured_provider)
+                if (
+                    fallback_state == "lm_studio"
+                    and configured_provider != "lm_studio"
+                    and config.lm_studio_fallback_id
+                ):
+                    provider = "lm_studio"
+                    identity.setdefault("route_kind", "fallback")
+                else:
+                    provider = configured_provider
+                identity["provider"] = provider
+                identity.pop("provider_label_text", None)
+            if "model" not in identity:
+                route_model = _role_route_model(config, provider)
+                if route_model:
+                    identity["model"] = route_model
+            if (
+                "configured_host_provider" not in identity
+                and provider == "openrouter"
+                and configured_provider == "openrouter"
+            ):
+                identity["configured_host_provider"] = str(config.openrouter_provider or "")
+
+        mode = str(workflow_mode or "").strip().lower()
+        if mode not in VALID_WORKFLOW_MODES:
+            mode = _retry_workflow_mode(display_role)
+        return route_identity_fields(
+            workflow_mode=mode,
+            role_id=display_role,
+            model_role_id=model_role,
+            **identity,
+        )
+
+    def route_identity_for_role(
+        self,
+        role_id: str,
+        *,
+        workflow_mode: str = "",
+        error: Optional[BaseException] = None,
+        model: str = "",
+        provider: str = "",
+        route_kind: str = "",
+        task_id: str = "",
+        model_role_id: str = "",
+        configured_host_provider: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Return Live Activity route identity fields for one role's provider error.
+
+        Explicit arguments win over identity carried by ``error``, which wins over
+        the role's configured route. Unknown or pseudo roles get no settings
+        backfill, and a non-model provider such as ``unknown`` or ``chromadb``
+        keeps the result to workflow mode and role only.
+        """
+        return self._resolve_route_identity(
+            role_id,
+            {
+                "model": model,
+                "provider": provider,
+                "route_kind": route_kind,
+                "task_id": task_id,
+                "configured_host_provider": configured_host_provider,
+            },
+            workflow_mode=workflow_mode,
+            model_role_id=model_role_id,
+            error=error,
+        )
 
     def _provider_retry_callback(
         self,
         role_id: str,
+        *,
+        route_kind: str = "primary",
+        task_id: str = "",
+        configured_model: str = "",
+        configured_provider: str = "",
+        configured_host_provider: Optional[str] = None,
     ) -> Callable[[Dict[str, Any]], Awaitable[None]]:
+        correlation_id = f"provider-retry:{uuid.uuid4().hex}"
+        route_context = {
+            "route_kind": route_kind,
+            "task_id": task_id,
+            "configured_model": configured_model,
+            "configured_provider": configured_provider,
+            "configured_host_provider": configured_host_provider,
+        }
+
         async def callback(payload: Dict[str, Any]) -> None:
-            await self._broadcast_provider_retry_cooldown(payload, role_id=role_id)
+            retry_task = asyncio.current_task()
+            await self.emit_and_wait_for_retry(
+                {
+                    **_merge_route_fields(payload, route_context),
+                    "correlation_id": (
+                        payload.get("correlation_id")
+                        or payload.get("activity_correlation_id")
+                        or correlation_id
+                    ),
+                },
+                role_id=role_id,
+                should_stop=lambda: bool(
+                    retry_task is not None
+                    and retry_task.cancelling()
+                ),
+            )
 
         return callback
 
-    async def broadcast_retry_cooldown(
+    async def emit_and_wait_for_retry(
         self,
+        payload: Dict[str, Any],
         *,
-        provider: str,
-        provider_label: str,
-        role_id: str,
-        model: str = "",
-        retry_attempt: int = 1,
-        retry_after_seconds: float,
-        reason: str,
-    ) -> None:
-        """Expose the shared retry activity event to coordinator-owned cooldowns."""
-        await self._broadcast_provider_retry_cooldown({
-            "provider": provider,
-            "provider_label": provider_label,
-            "role_id": role_id,
-            "model": model,
-            "retry_attempt": retry_attempt,
-            "retry_after_seconds": retry_after_seconds,
-            "reason": reason,
-        })
+        role_id: str = "",
+        should_stop: Optional[Callable[[], bool]] = None,
+        error: Optional[BaseException] = None,
+    ) -> bool:
+        """Atomically publish a retry wait and perform its stop-aware delay.
+
+        ``error`` optionally supplies typed route identity for the activity item;
+        it only fills keys the producer did not provide.
+        """
+        wait_seconds = max(0.0, float(payload.get("retry_after_seconds") or 0))
+        event_payload = dict(payload)
+        if error is not None:
+            from_error = route_identity_from_error(error)
+            error_role = str(from_error.pop("role_id", "") or "")
+            error_label = from_error.pop("provider_label_text", "")
+            if error_label:
+                from_error["provider_label"] = error_label
+            event_payload = _merge_route_fields(event_payload, from_error)
+            display_role = str(event_payload.get("role_id") or role_id or "")
+            if error_role and not display_role:
+                event_payload["role_id"] = error_role
+            elif error_role and error_role != display_role and not event_payload.get("model_role_id"):
+                event_payload["model_role_id"] = error_role
+        if not (
+            event_payload.get("correlation_id")
+            or event_payload.get("activity_correlation_id")
+        ):
+            event_payload["correlation_id"] = f"provider-retry:{uuid.uuid4().hex}"
+        await self._broadcast_provider_retry_cooldown(event_payload, role_id=role_id)
+        return await self._sleep_with_optional_stop(
+            wait_seconds,
+            should_stop,
+        )
 
     async def _broadcast_unrecoverable_codex_error(
         self,
@@ -544,6 +953,7 @@ class APIClientManager:
         role_id: str,
         model: str,
         error: Exception,
+        task_id: str = "",
     ) -> None:
         """Notify the UI when a Codex role cannot recover through fallback."""
         notification_key = f"openai_codex_oauth:{role_id}:unrecoverable_codex_error:{model}"
@@ -557,7 +967,7 @@ class APIClientManager:
             "provider_label": "OpenAI Codex",
             "reason": "unrecoverable_codex_error",
             "recoverable": False,
-            "workflow_mode": _active_notification_workflow_mode(),
+            "workflow_mode": _retry_workflow_mode(role_id),
             "message": (
                 "OpenAI Codex failed and no LM Studio fallback is configured. "
                 "Please check your OpenAI Codex OAuth connection in OpenRouter/OAuth, "
@@ -566,6 +976,15 @@ class APIClientManager:
             "error_summary": redact_log_text(str(error), 700),
             "oauth_error_message": oauth_live_activity_error_message(error),
         }
+        payload = _merge_route_fields(payload, self.route_identity_for_role(
+            role_id,
+            workflow_mode=payload["workflow_mode"],
+            error=error,
+            model=model,
+            provider="openai_codex_oauth",
+            route_kind="primary",
+            task_id=task_id,
+        ))
         stored_payload = await asyncio.to_thread(
             record_provider_notification,
             "openai_codex_oauth_error",
@@ -579,6 +998,7 @@ class APIClientManager:
         role_id: str,
         model: str,
         error: Exception,
+        task_id: str = "",
     ) -> None:
         """Notify the UI when a Sakana Fugu role cannot recover through fallback."""
         notification_key = f"sakana_fugu:{role_id}:unrecoverable_sakana_fugu_error:{model}"
@@ -592,7 +1012,7 @@ class APIClientManager:
             "provider_label": "Sakana Fugu",
             "reason": "unrecoverable_sakana_fugu_error",
             "recoverable": False,
-            "workflow_mode": _active_notification_workflow_mode(),
+            "workflow_mode": _retry_workflow_mode(role_id),
             "message": (
                 "Sakana Fugu failed and no LM Studio fallback is configured. "
                 "Please check your Sakana Fugu API key in OpenRouter/OAuth and retry."
@@ -600,6 +1020,15 @@ class APIClientManager:
             "error_summary": redact_log_text(str(error), 700),
             "oauth_error_message": oauth_live_activity_error_message(error),
         }
+        payload = _merge_route_fields(payload, self.route_identity_for_role(
+            role_id,
+            workflow_mode=payload["workflow_mode"],
+            error=error,
+            model=model,
+            provider="sakana_fugu",
+            route_kind="primary",
+            task_id=task_id,
+        ))
         stored_payload = await asyncio.to_thread(
             record_provider_notification,
             "sakana_fugu_error",
@@ -613,6 +1042,7 @@ class APIClientManager:
         role_id: str,
         model: str,
         error: Exception,
+        task_id: str = "",
     ) -> None:
         """Notify the UI when a Grok OAuth role cannot recover through fallback."""
         reason = (
@@ -620,13 +1050,16 @@ class APIClientManager:
             if isinstance(error, ProviderRepairRequiredError)
             else "unrecoverable_xai_grok_error"
         )
-        workflow_mode = _active_notification_workflow_mode()
+        # The dedupe key keeps its original owner-mode composition so already
+        # notified alerts are not replayed; the payload names the role's workflow.
         notification_key = (
-            f"xai_grok_oauth:{workflow_mode or 'unknown'}:{role_id}:{reason}:{model}"
+            f"xai_grok_oauth:{_active_notification_workflow_mode() or 'unknown'}:"
+            f"{role_id}:{reason}:{model}"
         )
         if notification_key in self._oauth_error_notified:
             return
         self._oauth_error_notified.add(notification_key)
+        workflow_mode = _retry_workflow_mode(role_id)
         payload = {
             "role_id": role_id,
             "model": model,
@@ -653,6 +1086,16 @@ class APIClientManager:
                 else ""
             ),
         }
+        # A repair error contributes its configured route, host and task fields.
+        payload = _merge_route_fields(payload, self.route_identity_for_role(
+            role_id,
+            workflow_mode=workflow_mode,
+            error=error,
+            model=model,
+            provider="xai_grok_oauth",
+            route_kind="primary",
+            task_id=task_id,
+        ))
         stored_payload = await asyncio.to_thread(
             record_provider_notification,
             "oauth_provider_error",
@@ -666,7 +1109,7 @@ class APIClientManager:
             return int(error.resets_at)
         if error.resets_in_seconds:
             return int(time.time()) + int(error.resets_in_seconds)
-        return int(time.time()) + 3600
+        raise ValueError("Timed provider cooldown requires a credible reset time")
 
     def get_provider_cooldown(self, provider: str) -> Optional[Dict[str, Any]]:
         """Return active cooldown metadata for a provider, clearing expired entries."""
@@ -704,20 +1147,11 @@ class APIClientManager:
 
     @staticmethod
     async def _sleep_with_optional_stop(
-        seconds: int,
+        seconds: float,
         should_stop: Optional[Callable[[], bool]] = None,
-    ) -> None:
-        seconds = max(1, int(seconds))
-        if should_stop is not None and should_stop():
-            return
-        if seconds <= 1:
-            await asyncio.sleep(seconds)
-            return
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            if should_stop is not None and should_stop():
-                return
-            await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    ) -> bool:
+        """Compatibility seam over the canonical stop-aware recovery wait."""
+        return await provider_recovery_runtime.sleep_stop_aware(seconds, should_stop)
 
     def _clear_retryable_provider_backoff(self, provider: str, role_id: str, model: str) -> None:
         prefix = self._retryable_provider_key(provider, role_id, model).rsplit("|", 1)[0] + "|"
@@ -735,11 +1169,24 @@ class APIClientManager:
         role_id: str,
         model: str,
         error: Exception,
+        route_kind: str = "",
+        task_id: str = "",
+        configured_provider: str = "",
+        configured_model: str = "",
+        configured_host_provider: Optional[str] = None,
     ) -> RetryableProviderError:
+        error_summary = sanitize_provider_error_text(
+            getattr(error, "safe_message", "") or str(error),
+            max_chars=1000,
+        )
         message = (
             f"{provider_label} transient provider failure for role '{role_id}' "
-            f"after internal retries: {error}"
+            f"after internal retries: {error_summary}"
         )
+        # Only the host-side facts the adapter observed come from the typed error.
+        route_identity = route_identity_from_error(error)
+        if configured_host_provider is None:
+            configured_host_provider = route_identity.get("configured_host_provider")
         return RetryableProviderError(
             provider=provider,
             provider_label=provider_label,
@@ -747,6 +1194,15 @@ class APIClientManager:
             model=model,
             reason="transient_provider_error",
             message=message,
+            error_summary=error_summary,
+            route_kind=route_kind,
+            task_id=task_id,
+            configured_provider=configured_provider,
+            configured_model=configured_model,
+            configured_host_provider=configured_host_provider,
+            upstream_host_provider=str(route_identity.get("upstream_host_provider") or ""),
+            auto_fallback_from_host=str(route_identity.get("auto_fallback_from_host") or ""),
+            provider_request_id=str(route_identity.get("provider_request_id") or ""),
         )
 
     @staticmethod
@@ -781,9 +1237,20 @@ class APIClientManager:
             ),
             configured_provider=getattr(route, "configured_provider", "") or provider,
             configured_model=getattr(route, "configured_model", "") or model,
-            effective_host_provider=getattr(route, "host_provider", ""),
+            effective_host_provider=(
+                getattr(route, "upstream_host_provider", "")
+                or getattr(route, "host_provider", "")
+            ),
             route_kind=getattr(route, "route_kind", ""),
             error_detail=error_detail,
+            configured_host_provider=(
+                (getattr(route, "host_provider", "") or "")
+                if route is not None
+                else None
+            ),
+            upstream_host_provider=getattr(route, "upstream_host_provider", "") or "",
+            auto_fallback_from_host=getattr(route, "auto_fallback_from_host", "") or "",
+            task_id=getattr(route, "task_id", "") or "",
         )
 
     @staticmethod
@@ -811,13 +1278,20 @@ class APIClientManager:
         activity_callback: Optional[
             Callable[[str, Dict[str, Any]], Awaitable[None]]
         ] = None,
+        workflow_mode: str = "",
     ) -> None:
-        """Apply one standard workflow-level backoff for retryable provider failures."""
+        """Apply one standard workflow-level backoff for retryable provider failures.
+
+        ``workflow_mode`` names the owning workflow when the caller knows it
+        (for example a manual proof check started while another workflow owns
+        the session); otherwise it is derived from the active owner and role.
+        """
         if isinstance(error, ProviderCooldownError):
             await self.wait_for_provider_cooldown(
                 error,
                 role_id=role_id,
                 should_stop=should_stop,
+                workflow_mode=workflow_mode,
             )
             return
 
@@ -829,16 +1303,24 @@ class APIClientManager:
         failure_count = self._retryable_provider_backoff_state.get(key, 0) + 1
         self._retryable_provider_backoff_state[key] = failure_count
         wait_seconds = int(error.retry_after_seconds or min(60 * (2 ** (failure_count - 1)), 900))
-        logger.warning(
-            "%s retryable provider failure for role '%s' (attempt %s after provider retries); "
-            "waiting %s seconds before retry: %s",
-            error.provider_label or provider,
-            display_role,
-            failure_count,
-            wait_seconds,
-            error,
+        safe_error_detail = sanitize_provider_error_text(
+            error.error_summary or oauth_live_activity_error_message(error),
+            max_chars=OAUTH_LIVE_ERROR_MAX_CHARS,
         )
-        activity_payload = {
+        # Identity is built before the activity callback so callback consumers
+        # (such as proof_retry_* events) and the broadcast share one payload.
+        fields = self._resolve_route_identity(
+            display_role,
+            {"provider": provider},
+            workflow_mode=workflow_mode,
+            model_role_id=(
+                error.role_id
+                if error.role_id and error.role_id != display_role
+                else ""
+            ),
+            error=error,
+        )
+        activity_payload = _merge_route_fields({
             "provider": provider,
             "provider_label": error.provider_label or provider,
             "role_id": display_role,
@@ -846,11 +1328,35 @@ class APIClientManager:
             "retry_attempt": failure_count,
             "retry_after_seconds": wait_seconds,
             "reason": error.reason,
-        }
+            "error_summary": safe_error_detail,
+            "retry_layer": "workflow",
+        }, fields)
+        provider_label = activity_payload["provider_label"]
+        logger.warning(
+            "%s retryable provider failure for role '%s' (model %s, host %s; attempt %s after "
+            "provider retries); waiting %s seconds before retry: %s",
+            provider_label,
+            display_role,
+            activity_payload.get("model") or "unknown",
+            _route_log_host(fields),
+            failure_count,
+            wait_seconds,
+            error,
+        )
+        activity_payload["message"] = with_route_identity(
+            f"{provider_label} API error: "
+            f"{safe_error_detail.rstrip('.')}. "
+            f"{provider_label} API call will retry after a "
+            f"{wait_seconds:g}-second cooldown (retry {failure_count}).",
+            fields,
+        )
         if activity_callback is not None:
             await activity_callback("waiting", activity_payload)
-        await self._broadcast_provider_retry_cooldown(activity_payload, role_id=display_role)
-        await self._sleep_with_optional_stop(wait_seconds, should_stop)
+        await self.emit_and_wait_for_retry(
+            activity_payload,
+            role_id=display_role,
+            should_stop=should_stop,
+        )
         if (
             activity_callback is not None
             and not (should_stop is not None and should_stop())
@@ -863,12 +1369,27 @@ class APIClientManager:
         *,
         role_id: str = "",
         should_stop: Optional[Callable[[], bool]] = None,
+        workflow_mode: str = "",
     ) -> None:
         """Sleep until a provider usage-limit cooldown expires or stop is requested."""
         provider = str(error.provider or "").strip() or "unknown"
         active_role = role_id or error.role_id or "unknown"
+        fields = self._resolve_route_identity(
+            active_role,
+            {"provider": provider},
+            workflow_mode=workflow_mode,
+            model_role_id=(
+                error.role_id
+                if error.role_id and error.role_id != active_role
+                else ""
+            ),
+            error=error,
+        )
         waited_for_cooldown = False
+        cooldown_chunk_attempt = 0
         while self.is_provider_cooling_down(provider):
+            if should_stop is not None and should_stop():
+                return
             waited_for_cooldown = True
             cooldown = self.get_provider_cooldown(provider) or {}
             wait_seconds = cooldown.get("resets_in_seconds")
@@ -877,22 +1398,36 @@ class APIClientManager:
             if wait_seconds is None and error.resets_at:
                 wait_seconds = max(1, int(error.resets_at) - int(time.time()))
             wait_seconds = max(1, min(int(wait_seconds or 60), 300))
+            cooldown_chunk_attempt += 1
             logger.warning(
-                "%s usage-limit cooldown active for role '%s'; waiting %s seconds before retry",
+                "%s usage-limit cooldown active for role '%s' (model %s, host %s); "
+                "waiting %s seconds before retry",
                 error.provider_label or provider,
                 active_role,
+                fields.get("model") or "unknown",
+                _route_log_host(fields),
                 wait_seconds,
             )
-            await self._broadcast_provider_retry_cooldown({
-                "provider": provider,
-                "provider_label": error.provider_label or provider,
-                "role_id": active_role,
-                "model": error.model,
-                "retry_attempt": 1,
-                "retry_after_seconds": wait_seconds,
-                "reason": "usage_limit_cooldown",
-            })
-            await self._sleep_with_optional_stop(wait_seconds, should_stop)
+            await self.emit_and_wait_for_retry(
+                _merge_route_fields({
+                    "provider": provider,
+                    "provider_label": error.provider_label or provider,
+                    "role_id": active_role,
+                    "model": error.model,
+                    "retry_attempt": cooldown_chunk_attempt,
+                    "retry_after_seconds": wait_seconds,
+                    "reason": "usage_limit_cooldown",
+                    "cooldown_until": (
+                        cooldown.get("cooldown_until")
+                        or cooldown.get("resets_at")
+                        or error.resets_at
+                    ),
+                }, fields),
+                role_id=active_role,
+                should_stop=should_stop,
+            )
+            if should_stop is not None and should_stop():
+                return
         if waited_for_cooldown and not (should_stop is not None and should_stop()):
             expired = self._provider_recent_expired_cooldowns.get(provider, {})
             self._provider_resume_pending[(provider, active_role, str(error.model or ""))] = {
@@ -903,7 +1438,8 @@ class APIClientManager:
                 "model": error.model,
                 "resets_at": error.resets_at or expired.get("resets_at"),
                 "cooldown_until": error.resets_at or expired.get("cooldown_until"),
-                "workflow_mode": expired.get("workflow_mode") or _active_notification_workflow_mode(),
+                # The waiting role's workflow, not the role that first hit the limit.
+                "workflow_mode": str(fields.get("workflow_mode") or ""),
             }
 
     async def _confirm_provider_usage_limit_resumed(
@@ -913,6 +1449,7 @@ class APIClientManager:
         provider_label: str,
         role_id: str,
         model: str,
+        task_id: str = "",
     ) -> None:
         """Emit one durable resume event only after a real provider success."""
         key = (provider, role_id, model)
@@ -927,7 +1464,7 @@ class APIClientManager:
         }
         reset_at = int(pending.get("cooldown_until") or pending.get("resets_at") or 0)
         safe_model = str(model or "*").replace(":", "_")
-        payload = {
+        payload = canonical_recovery_event("provider_cooldown_resumed", {
             "notification_key": (
                 f"{provider}:{role_id}:usage_limit_resumed:"
                 f"{safe_model}@{reset_at or 'elapsed'}"
@@ -938,14 +1475,22 @@ class APIClientManager:
             "model": model,
             "reason": "usage_limit_resumed",
             "recoverable": True,
-            "workflow_mode": pending.get("workflow_mode") or _active_notification_workflow_mode(),
+            "workflow_mode": pending.get("workflow_mode") or _retry_workflow_mode(role_id),
             "resets_at": reset_at or None,
             "cooldown_until": reset_at or None,
             "message": (
                 f"{provider_label} responded successfully for {role_id}; "
                 "automatic provider work resumed."
             ),
-        }
+        }, recovery_action="recovery_confirmed")
+        payload = _merge_route_fields(payload, self.route_identity_for_role(
+            role_id,
+            workflow_mode=str(payload.get("workflow_mode") or ""),
+            model=model,
+            provider=provider,
+            route_kind="primary",
+            task_id=task_id,
+        ))
         stored_payload = await asyncio.to_thread(
             record_provider_notification,
             "provider_usage_limit_resumed",
@@ -969,19 +1514,20 @@ class APIClientManager:
         *,
         role_id: str,
         model: str,
+        task_id: str = "",
     ) -> Dict[str, Any]:
         cooldown_until = self._cooldown_until_from_error(error)
         resets_in_seconds = max(1, cooldown_until - int(time.time()))
         provider = str(getattr(error, "provider", "") or "unknown")
         provider_label = str(getattr(error, "provider_label", "") or provider)
-        payload = {
+        payload = canonical_recovery_event("provider_cooldown_started", {
             "provider": provider,
             "provider_label": provider_label,
             "role_id": role_id,
             "model": model,
             "reason": "usage_limit_reached",
             "recoverable": True,
-            "workflow_mode": _active_notification_workflow_mode(),
+            "workflow_mode": _retry_workflow_mode(role_id),
             "plan_type": str(getattr(error, "plan_type", "") or ""),
             "resets_at": cooldown_until,
             "cooldown_until": cooldown_until,
@@ -992,7 +1538,16 @@ class APIClientManager:
             ),
             "error_summary": redact_log_text(str(error), 700),
             "oauth_error_message": oauth_live_activity_error_message(error),
-        }
+        }, recovery_action="cooldown")
+        payload = _merge_route_fields(payload, self.route_identity_for_role(
+            role_id,
+            workflow_mode=str(payload.get("workflow_mode") or ""),
+            error=error,
+            model=model,
+            provider=provider,
+            route_kind="primary",
+            task_id=task_id,
+        ))
         self._oauth_provider_cooldowns[provider] = payload
         return payload
 
@@ -1002,9 +1557,49 @@ class APIClientManager:
         *,
         role_id: str,
         model: str,
+        task_id: str = "",
     ) -> Dict[str, Any]:
         """Compatibility wrapper for the original OAuth-specific helper."""
-        return self._mark_provider_cooldown(error, role_id=role_id, model=model)
+        return self._mark_provider_cooldown(error, role_id=role_id, model=model, task_id=task_id)
+
+    def _cooldown_payload_for_role(
+        self,
+        cooldown: Dict[str, Any],
+        *,
+        role_id: str,
+        model: str,
+        task_id: str = "",
+    ) -> Dict[str, Any]:
+        """Reuse a provider-wide cooldown payload for another role's blocked call.
+
+        The cooldown is shared across roles, so the event identity, workflow mode
+        and route identity derived for the role that first hit the limit are
+        rebuilt for this role; its notification then never replaces that role's.
+        """
+        payload = {
+            key: value
+            for key, value in cooldown.items()
+            if key not in _ROLE_SCOPED_ROUTE_IDENTITY_KEYS
+            and key not in _COOLDOWN_EVENT_IDENTITY_KEYS
+        }
+        payload.update({
+            "role_id": role_id,
+            "model": model,
+            "workflow_mode": _retry_workflow_mode(role_id),
+        })
+        payload = canonical_recovery_event(
+            "provider_cooldown_started",
+            payload,
+            recovery_action="cooldown",
+        )
+        return _merge_route_fields(payload, self.route_identity_for_role(
+            role_id,
+            workflow_mode=str(payload.get("workflow_mode") or ""),
+            model=model,
+            provider=str(payload.get("provider") or ""),
+            route_kind="primary",
+            task_id=task_id,
+        ))
 
     async def _broadcast_provider_usage_limit(
         self,
@@ -1064,9 +1659,18 @@ class APIClientManager:
         role_id: str,
         model: str,
         provider: str,
-        timeout_seconds: int = 900
+        timeout_seconds: int = 1500,
+        *,
+        provider_id: str = "",
+        route_kind: str = "",
+        task_id: str = "",
+        configured_host_provider: Optional[str] = None,
     ):
-        """Wrap an API call coroutine with a watchdog that alerts after timeout_seconds (default 15 min)."""
+        """Wrap an API call with a non-canceling watchdog (default 25 minutes).
+
+        ``provider`` is the display text the alert has always carried;
+        ``provider_id`` and the route keywords only supply route identity.
+        """
         async def _watchdog():
             await asyncio.sleep(timeout_seconds)
             minutes = timeout_seconds // 60
@@ -1077,16 +1681,25 @@ class APIClientManager:
                 redact_log_text(provider, 120),
                 minutes,
             )
-            await self._broadcast("hung_connection_alert", {
+            fields = self.route_identity_for_role(
+                role_id,
+                model=model,
+                provider=provider_id,
+                route_kind=route_kind,
+                task_id=task_id,
+                configured_host_provider=configured_host_provider,
+            )
+            await self._broadcast("hung_connection_alert", _merge_route_fields({
                 "role_id": role_id,
                 "model": model,
                 "provider": provider,
+                "provider_label": fields.get("provider_label", ""),
                 "elapsed_minutes": minutes,
                 "message": (
                     "The model may still be thinking; you can keep waiting or lower reasoning effort "
                     "in Settings if this repeats."
                 )
-            })
+            }, fields))
 
         watchdog_task = asyncio.create_task(_watchdog())
         try:
@@ -1310,6 +1923,49 @@ class APIClientManager:
             self._fastembed_provider = FastEmbedProvider(model_name=desired_model)
         return self._fastembed_provider
     
+    def set_role_activity_source(
+        self,
+        role_ids: List[str],
+        *,
+        source_type: str = "",
+        source_id: str = "",
+        proof_run_id: str = "",
+    ) -> None:
+        """Record which user-visible source a run-scoped role's calls belong to.
+
+        The source travels on that role's provider activity as routing data only;
+        it never enters correlation, notification, or backoff keys.
+        """
+        source = {
+            key: redact_log_text(value, limit)
+            for key, value, limit in (
+                ("source_type", source_type, 40),
+                ("source_id", source_id, 240),
+                ("proof_run_id", proof_run_id, 120),
+            )
+            if value
+        }
+        for role_id in role_ids:
+            if role_id and source:
+                self._role_activity_sources[role_id] = dict(source)
+
+    def clear_role_activity_source(self, role_ids: List[str]) -> None:
+        for role_id in role_ids:
+            self._role_activity_sources.pop(role_id, None)
+
+    def _role_activity_source_fields(self, *role_ids: str) -> Dict[str, str]:
+        """Return the registered source for a role, including run-suffixed variants."""
+        for role_id in role_ids:
+            if not role_id:
+                continue
+            source = self._role_activity_sources.get(role_id)
+            if source is not None:
+                return dict(source)
+            for registered_role, registered_source in self._role_activity_sources.items():
+                if role_id.startswith(f"{registered_role}_"):
+                    return dict(registered_source)
+        return {}
+
     def configure_role(self, role_id: str, config: ModelConfig) -> None:
         """
         Configure a role with model settings.
@@ -1971,6 +2627,7 @@ class APIClientManager:
                     "Configure this role with explicit provider, model, context-window, "
                     "and max-output settings before retrying the workflow."
                 ),
+                task_id=task_id,
             )
 
         messages, assistant_memory_target_hash = await self._maybe_add_assistant_memory_context(
@@ -2296,11 +2953,26 @@ class APIClientManager:
                             ),
                             tools=tools,
                             tool_choice=tool_choice,
-                            retry_callback=self._provider_retry_callback(role_id),
+                            retry_callback=self._provider_retry_callback(
+                                role_id,
+                                route_kind="boost",
+                                task_id=task_id,
+                                configured_model=(
+                                    _configured_role_model(initial_role_config)
+                                    if initial_role_config
+                                    else requested_model
+                                ),
+                                configured_provider=configured_provider or "",
+                                configured_host_provider=boost_provider or "",
+                            ),
                         ),
                         role_id=role_id,
                         model=boost_model,
-                        provider=boost_provider or "OpenRouter"
+                        provider=boost_provider or "OpenRouter",
+                        provider_id="openrouter",
+                        route_kind="boost",
+                        task_id=task_id,
+                        configured_host_provider=boost_provider or "",
                     )
                     
                     # Calculate duration
@@ -2439,11 +3111,20 @@ class APIClientManager:
                 logger.warning(f"Boost model rate limited for task {task_id}: {e}")
                 
                 # Broadcast rate limit event to frontend
-                await self._broadcast("openrouter_rate_limit", {
+                await self._broadcast("openrouter_rate_limit", _merge_route_fields({
                     "model": boost_model,
+                    "provider": "openrouter",
                     "role_id": role_id,
                     "message": f"OpenRouter rate limit hit for '{boost_model}' after retries exhausted."
-                })
+                }, self.route_identity_for_role(
+                    role_id,
+                    error=e,
+                    model=boost_model,
+                    provider="openrouter",
+                    route_kind="boost",
+                    task_id=task_id,
+                    configured_host_provider=boost_provider or "",
+                )))
                 
                 # Fall through to primary model (boost has no fallback concept)
                 logger.info(f"Boost rate limited, using primary model for task {task_id}")
@@ -2485,9 +3166,10 @@ class APIClientManager:
                 logger.error(f"OpenRouter privacy policy error for boost task {task_id}: {e}")
                 
                 # Broadcast warning to frontend
-                await self._broadcast("openrouter_privacy_error", {
+                await self._broadcast("openrouter_privacy_error", _merge_route_fields({
                     "error_type": "privacy_policy",
                     "model": boost_model,
+                    "provider": "openrouter",
                     "role_id": role_id,
                     "message": "Model requires privacy policy acceptance",
                     "solution_url": "https://openrouter.ai/settings/privacy",
@@ -2501,8 +3183,16 @@ class APIClientManager:
                         "• Use a paid OpenRouter model instead\n"
                         "• Configure an LM Studio fallback model in settings"
                     )
-                })
-                
+                }, self.route_identity_for_role(
+                    role_id,
+                    error=e,
+                    model=boost_model,
+                    provider="openrouter",
+                    route_kind="boost",
+                    task_id=task_id,
+                    configured_host_provider=boost_provider or "",
+                )))
+
                 # Raise clear error - boost mode has no fallback concept
                 raise RuntimeError(
                     f"Cannot use boost: OpenRouter privacy settings are blocking free models. "
@@ -2544,10 +3234,21 @@ class APIClientManager:
                 
                 # Boost credits exhausted - fall back to primary for this task
                 logger.warning(f"Boost credits exhausted for task {task_id}, using primary model")
-                await self._broadcast("boost_credits_exhausted", {
+                await self._broadcast("boost_credits_exhausted", _merge_route_fields({
                     "task_id": task_id,
+                    "role_id": role_id,
+                    "model": boost_model,
+                    "provider": "openrouter",
                     "message": "Boost credits exhausted, falling back to primary model"
-                })
+                }, self.route_identity_for_role(
+                    role_id,
+                    error=e,
+                    model=boost_model,
+                    provider="openrouter",
+                    route_kind="boost",
+                    task_id=task_id,
+                    configured_host_provider=boost_provider or "",
+                )))
                 if strict_boost:
                     raise RuntimeError(f"Strict boost call credits exhausted for task {task_id}: {e}") from e
                 # Continue to primary model routing below
@@ -2632,6 +3333,7 @@ class APIClientManager:
                         "Configure this role with explicit provider, model, context-window, "
                         "and max-output settings before retrying the workflow."
                     ),
+                    task_id=task_id,
                 )
             fallback_state = self._role_fallback_state.get(role_id, role_config.provider)
 
@@ -2691,6 +3393,12 @@ class APIClientManager:
                             "Set a valid OpenRouter API key, change this role's provider, "
                             "or configure an LM Studio fallback."
                         ),
+                        configured_provider=role_config.provider,
+                        configured_model=role_config.openrouter_model_id or role_config.model_id,
+                        configured_host_provider=role_config.openrouter_provider or "",
+                        effective_host_provider=role_config.openrouter_provider or "",
+                        route_kind="primary",
+                        task_id=task_id,
                     )
                 else:
                     # No API key but fallback exists - use fallback
@@ -2712,11 +3420,27 @@ class APIClientManager:
                         )
                         model = role_config.lm_studio_fallback_id
                     else:
-                        await self._broadcast("account_credits_exhausted", {
+                        await self._broadcast("account_credits_exhausted", _merge_route_fields({
+                            "role_id": role_id,
+                            "model": openrouter_model,
+                            "provider": "openrouter",
                             "message": "OpenRouter account free credits depleted. Add credits at openrouter.ai or configure LM Studio fallback."
-                        })
+                        }, self.route_identity_for_role(
+                            role_id,
+                            model=openrouter_model,
+                            provider="openrouter",
+                            route_kind="primary",
+                            task_id=task_id,
+                            configured_host_provider=openrouter_provider or "",
+                        )))
                         raise FreeModelExhaustedError(
-                            f"Account free credits exhausted and no LM Studio fallback for role '{role_id}'."
+                            f"Account free credits exhausted and no LM Studio fallback for role '{role_id}'.",
+                            role_id=role_id,
+                            model=openrouter_model,
+                            provider="openrouter",
+                            route_kind="primary",
+                            task_id=task_id,
+                            configured_host_provider=openrouter_provider or "",
                         )
                 
                 provider_info = f" via {openrouter_provider}" if openrouter_provider else ""
@@ -2737,11 +3461,21 @@ class APIClientManager:
                             tools=tools,
                             tool_choice=tool_choice,
                             allow_provider_auto_fallback=role_id.endswith("_assistant"),
-                            retry_callback=self._provider_retry_callback(role_id),
+                            retry_callback=self._provider_retry_callback(
+                                role_id,
+                                task_id=task_id,
+                                configured_model=openrouter_model,
+                                configured_provider=role_config.provider,
+                                configured_host_provider=openrouter_provider or "",
+                            ),
                         ),
                         role_id=role_id,
                         model=openrouter_model,
-                        provider=openrouter_provider or "OpenRouter"
+                        provider=openrouter_provider or "OpenRouter",
+                        provider_id="openrouter",
+                        route_kind="primary",
+                        task_id=task_id,
+                        configured_host_provider=openrouter_provider or "",
                     )
                     
                     # Calculate duration and extract response
@@ -2838,11 +3572,20 @@ class APIClientManager:
                     
                     logger.warning(f"OpenRouter rate limit for role {role_id}: {e}")
                     
-                    await self._broadcast("openrouter_rate_limit", {
+                    await self._broadcast("openrouter_rate_limit", _merge_route_fields({
                         "model": openrouter_model,
+                        "provider": "openrouter",
                         "role_id": role_id,
                         "message": f"OpenRouter rate limit hit for '{openrouter_model}' after retries exhausted."
-                    })
+                    }, self.route_identity_for_role(
+                        role_id,
+                        error=e,
+                        model=openrouter_model,
+                        provider="openrouter",
+                        route_kind="primary",
+                        task_id=task_id,
+                        configured_host_provider=openrouter_provider or "",
+                    )))
                     
                     # Mark this model as failed for rotation
                     free_model_manager.mark_model_failed(openrouter_model)
@@ -2861,7 +3604,7 @@ class APIClientManager:
                         reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
-                        retry_callback=self._provider_retry_callback(role_id),
+                        has_lm_studio_fallback=bool(role_config and role_config.lm_studio_fallback_id),
                     )
                     if rotated_result is not None:
                         free_model_manager.clear_failed_models()  # Success - clear failures
@@ -2869,9 +3612,25 @@ class APIClientManager:
                     
                     # Rotation chain exhausted — try LM Studio fallback
                     if not role_config.lm_studio_fallback_id:
+                        rotation_ran = (
+                            free_model_manager.looping_enabled
+                            or free_model_manager.auto_selector_enabled
+                        )
                         raise FreeModelExhaustedError(
                             f"All free model options exhausted for role '{role_id}'. "
-                            f"No LM Studio fallback configured."
+                            f"No LM Studio fallback configured.",
+                            role_id=role_id,
+                            model=openrouter_model,
+                            provider="openrouter",
+                            route_kind=(
+                                ("free_rotation" if free_model_manager.looping_enabled else "auto_selector")
+                                if rotation_ran
+                                else "primary"
+                            ),
+                            task_id=task_id,
+                            configured_host_provider=(
+                                "" if rotation_ran else openrouter_provider or ""
+                            ),
                         )
                     
                     fallback_model = role_config.lm_studio_fallback_id
@@ -2905,9 +3664,10 @@ class APIClientManager:
                     logger.error(f"OpenRouter privacy policy error for role {role_id}: {e}")
                     
                     # Broadcast warning to frontend
-                    await self._broadcast("openrouter_privacy_error", {
+                    await self._broadcast("openrouter_privacy_error", _merge_route_fields({
                         "error_type": "privacy_policy",
                         "model": openrouter_model,
+                        "provider": "openrouter",
                         "role_id": role_id,
                         "message": "Model requires privacy policy acceptance",
                         "solution_url": "https://openrouter.ai/settings/privacy",
@@ -2921,7 +3681,15 @@ class APIClientManager:
                             "• Use a paid OpenRouter model instead\n"
                             "• Configure an LM Studio fallback model in settings"
                         )
-                    })
+                    }, self.route_identity_for_role(
+                        role_id,
+                        error=e,
+                        model=openrouter_model,
+                        provider="openrouter",
+                        route_kind="primary",
+                        task_id=task_id,
+                        configured_host_provider=openrouter_provider or "",
+                    )))
                     
                     # CHECK: Is fallback configured?
                     if not role_config.lm_studio_fallback_id:
@@ -2945,6 +3713,12 @@ class APIClientManager:
                                 "Update OpenRouter privacy settings, select another provider, "
                                 "or configure an LM Studio fallback."
                             ),
+                            configured_provider=role_config.provider,
+                            configured_model=openrouter_model,
+                            configured_host_provider=openrouter_provider or "",
+                            effective_host_provider=openrouter_provider or "",
+                            route_kind="primary",
+                            task_id=task_id,
                         ) from e
                     
                     # Fallback IS configured - use it
@@ -2991,11 +3765,21 @@ class APIClientManager:
                         logger.error(error_msg)
                         if role_id not in self._fallback_failed_notified:
                             self._fallback_failed_notified.add(role_id)
-                            await self._broadcast("openrouter_fallback_failed", {
+                            await self._broadcast("openrouter_fallback_failed", _merge_route_fields({
                                 "role_id": role_id,
+                                "model": openrouter_model,
+                                "provider": "openrouter",
                                 "reason": "no_fallback_configured",
                                 "message": error_msg
-                            })
+                            }, self.route_identity_for_role(
+                                role_id,
+                                error=e,
+                                model=openrouter_model,
+                                provider="openrouter",
+                                route_kind="primary",
+                                task_id=task_id,
+                                configured_host_provider=openrouter_provider or "",
+                            )))
                         raise ProviderRepairRequiredError(
                             provider="openrouter",
                             provider_label="OpenRouter",
@@ -3007,6 +3791,12 @@ class APIClientManager:
                                 "Add OpenRouter credits, select another provider, "
                                 "or configure an LM Studio fallback."
                             ),
+                            configured_provider=role_config.provider,
+                            configured_model=openrouter_model,
+                            configured_host_provider=openrouter_provider or "",
+                            effective_host_provider=openrouter_provider or "",
+                            route_kind="primary",
+                            task_id=task_id,
                         ) from e
                     
                     # Fallback IS configured - use it
@@ -3020,12 +3810,22 @@ class APIClientManager:
                         f"Permanently falling back to LM Studio model: {fallback_model}"
                     )
                     
-                    await self._broadcast("openrouter_fallback", {
+                    await self._broadcast("openrouter_fallback", _merge_route_fields({
                         "role_id": role_id,
+                        "model": openrouter_model,
+                        "provider": "openrouter",
                         "reason": "credit_exhaustion",
                         "message": "Credits exhausted, falling back to alternative model",
                         "fallback_model": fallback_model
-                    })
+                    }, self.route_identity_for_role(
+                        role_id,
+                        error=e,
+                        model=openrouter_model,
+                        provider="openrouter",
+                        route_kind="primary",
+                        task_id=task_id,
+                        configured_host_provider=openrouter_provider or "",
+                    )))
                     
                     # Fall through to LM Studio
                     model = fallback_model
@@ -3072,6 +3872,11 @@ class APIClientManager:
                                 role_id=role_id,
                                 model=openrouter_model,
                                 error=e,
+                                route_kind="primary",
+                                task_id=task_id,
+                                configured_provider=role_config.provider,
+                                configured_model=openrouter_model,
+                                configured_host_provider=openrouter_provider or "",
                             ) from e
                         if isinstance(e, (ProviderRepairRequiredError, ProviderContextLengthError)):
                             raise
@@ -3094,7 +3899,12 @@ class APIClientManager:
                         self._role_fallback_state[role_id] = "lm_studio"
                         self._oauth_cooldown_fallback_roles.add(role_id)
                     await self._broadcast_provider_usage_limit(
-                        {**active_cooldown, "role_id": role_id, "model": sakana_model},
+                        self._cooldown_payload_for_role(
+                            active_cooldown,
+                            role_id=role_id,
+                            model=sakana_model,
+                            task_id=task_id,
+                        ),
                         fallback_model=role_config.lm_studio_fallback_id,
                     )
                     logger.warning(
@@ -3105,7 +3915,12 @@ class APIClientManager:
                     model = role_config.lm_studio_fallback_id
                 else:
                     await self._broadcast_provider_usage_limit(
-                        {**active_cooldown, "role_id": role_id, "model": sakana_model}
+                        self._cooldown_payload_for_role(
+                            active_cooldown,
+                            role_id=role_id,
+                            model=sakana_model,
+                            task_id=task_id,
+                        )
                     )
                     raise ProviderCooldownError(
                         provider="sakana_fugu",
@@ -3135,11 +3950,19 @@ class APIClientManager:
                         reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
-                        retry_callback=self._provider_retry_callback(role_id),
+                        retry_callback=self._provider_retry_callback(
+                            role_id,
+                            task_id=task_id,
+                            configured_model=sakana_model,
+                            configured_provider=role_config.provider,
+                        ),
                     ),
                     role_id=role_id,
                     model=sakana_model,
                     provider="Sakana Fugu",
+                    provider_id="sakana_fugu",
+                    route_kind="primary",
+                    task_id=task_id,
                 )
                 duration_ms = (time.time() - start_time) * 1000
                 if not result.get("choices"):
@@ -3201,10 +4024,7 @@ class APIClientManager:
                             "provider_label": "Sakana Fugu",
                             "role_id": role_id,
                             "model": sakana_model,
-                            "workflow_mode": (
-                                recent_cooldown.get("workflow_mode")
-                                or _active_notification_workflow_mode()
-                            ),
+                            "workflow_mode": _retry_workflow_mode(role_id),
                         },
                     )
                 await self._confirm_provider_usage_limit_resumed(
@@ -3212,6 +4032,7 @@ class APIClientManager:
                     provider_label="Sakana Fugu",
                     role_id=role_id,
                     model=sakana_model,
+                    task_id=task_id,
                 )
                 return result
               except SakanaFuguUsageLimitError as e:
@@ -3231,7 +4052,12 @@ class APIClientManager:
                         error=oauth_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
-                cooldown_payload = self._mark_provider_cooldown(e, role_id=role_id, model=sakana_model)
+                cooldown_payload = self._mark_provider_cooldown(
+                    e,
+                    role_id=role_id,
+                    model=sakana_model,
+                    task_id=task_id,
+                )
                 if role_config.lm_studio_fallback_id:
                     async with self._state_lock:
                         self._role_fallback_state[role_id] = "lm_studio"
@@ -3263,6 +4089,7 @@ class APIClientManager:
                     role_id=role_id,
                     model=sakana_model,
                     error=e,
+                    task_id=task_id,
                 )
                 raise self._as_provider_repair_error(
                     provider="sakana_fugu",
@@ -3296,8 +4123,9 @@ class APIClientManager:
                 if is_retryable_model_output_error(e):
                     raise
                 if role_config.lm_studio_fallback_id:
-                    async with self._state_lock:
-                        self._role_fallback_state[role_id] = "lm_studio"
+                    if not is_transient_model_call_error(e):
+                        async with self._state_lock:
+                            self._role_fallback_state[role_id] = "lm_studio"
                     logger.warning(
                         "Sakana Fugu failed for role '%s'; falling back to LM Studio model %s",
                         role_id,
@@ -3318,11 +4146,16 @@ class APIClientManager:
                             role_id=role_id,
                             model=sakana_model,
                             error=e,
+                            route_kind="primary",
+                            task_id=task_id,
+                            configured_provider=role_config.provider,
+                            configured_model=sakana_model,
                         ) from e
                     await self._broadcast_unrecoverable_sakana_fugu_error(
                         role_id=role_id,
                         model=sakana_model,
                         error=e,
+                        task_id=task_id,
                     )
                     raise self._as_provider_repair_error(
                         provider="sakana_fugu",
@@ -3374,11 +4207,16 @@ class APIClientManager:
                             role_id=role_id,
                             model=sakana_model,
                             error=e,
+                            route_kind="primary",
+                            task_id=task_id,
+                            configured_provider=role_config.provider,
+                            configured_model=sakana_model,
                         ) from e
                     await self._broadcast_unrecoverable_sakana_fugu_error(
                         role_id=role_id,
                         model=sakana_model,
                         error=e,
+                        task_id=task_id,
                     )
                     if isinstance(e, (ProviderRepairRequiredError, ProviderContextLengthError)):
                         raise
@@ -3399,7 +4237,12 @@ class APIClientManager:
                         self._role_fallback_state[role_id] = "lm_studio"
                         self._oauth_cooldown_fallback_roles.add(role_id)
                     await self._broadcast_oauth_usage_limit(
-                        {**active_cooldown, "role_id": role_id, "model": codex_model},
+                        self._cooldown_payload_for_role(
+                            active_cooldown,
+                            role_id=role_id,
+                            model=codex_model,
+                            task_id=task_id,
+                        ),
                         fallback_model=role_config.lm_studio_fallback_id,
                     )
                     logger.warning(
@@ -3409,7 +4252,14 @@ class APIClientManager:
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
-                    await self._broadcast_oauth_usage_limit({**active_cooldown, "role_id": role_id, "model": codex_model})
+                    await self._broadcast_oauth_usage_limit(
+                        self._cooldown_payload_for_role(
+                            active_cooldown,
+                            role_id=role_id,
+                            model=codex_model,
+                            task_id=task_id,
+                        )
+                    )
                     raise OAuthProviderCooldownError(
                         provider="openai_codex_oauth",
                         provider_label="OpenAI Codex",
@@ -3438,11 +4288,19 @@ class APIClientManager:
                             reasoning_effort=role_reasoning_effort,
                             tools=tools,
                             tool_choice=tool_choice,
-                            retry_callback=self._provider_retry_callback(role_id),
+                            retry_callback=self._provider_retry_callback(
+                                role_id,
+                                task_id=task_id,
+                                configured_model=codex_model,
+                                configured_provider=role_config.provider,
+                            ),
                         ),
                         role_id=role_id,
                         model=codex_model,
                         provider="OpenAI Codex",
+                        provider_id="openai_codex_oauth",
+                        route_kind="primary",
+                        task_id=task_id,
                     )
                     duration_ms = (time.time() - start_time) * 1000
                     if not result.get("choices"):
@@ -3496,6 +4354,28 @@ class APIClientManager:
 
                     await self._track_model_usage(codex_model)
                     self._clear_retryable_provider_backoff("openai_codex_oauth", role_id, codex_model)
+                    recent_cooldown = self._provider_recent_expired_cooldowns.get(
+                        "openai_codex_oauth"
+                    )
+                    if recent_cooldown is not None:
+                        self._provider_resume_pending.setdefault(
+                            ("openai_codex_oauth", role_id, codex_model),
+                            {
+                                **recent_cooldown,
+                                "provider": "openai_codex_oauth",
+                                "provider_label": "OpenAI Codex",
+                                "role_id": role_id,
+                                "model": codex_model,
+                                "workflow_mode": _retry_workflow_mode(role_id),
+                            },
+                        )
+                    await self._confirm_provider_usage_limit_resumed(
+                        provider="openai_codex_oauth",
+                        provider_label="OpenAI Codex",
+                        role_id=role_id,
+                        model=codex_model,
+                        task_id=task_id,
+                    )
                     return result
 
                 except OAuthUsageLimitError as e:
@@ -3515,7 +4395,12 @@ class APIClientManager:
                             error=str(e),
                             phase=self._current_autonomous_phase,
                         )
-                    cooldown_payload = self._mark_oauth_provider_cooldown(e, role_id=role_id, model=codex_model)
+                    cooldown_payload = self._mark_oauth_provider_cooldown(
+                        e,
+                        role_id=role_id,
+                        model=codex_model,
+                        task_id=task_id,
+                    )
                     if role_config.lm_studio_fallback_id:
                         async with self._state_lock:
                             self._role_fallback_state[role_id] = "lm_studio"
@@ -3561,9 +4446,44 @@ class APIClientManager:
                         )
                     if is_retryable_model_output_error(e):
                         raise
-                    if role_config.lm_studio_fallback_id:
-                        async with self._state_lock:
-                            self._role_fallback_state[role_id] = "lm_studio"
+                    if isinstance(e, OpenAICodexUntimedUsageLimitError):
+                        if role_config.lm_studio_fallback_id:
+                            async with self._state_lock:
+                                self._role_fallback_state[role_id] = "lm_studio"
+                            logger.warning(
+                                "OpenAI Codex usage limit has no reset for role '%s'; "
+                                "using LM Studio model %s until manual provider reset",
+                                role_id,
+                                role_config.lm_studio_fallback_id,
+                            )
+                            model = role_config.lm_studio_fallback_id
+                        else:
+                            repair_error = self._as_provider_repair_error(
+                                provider="openai_codex_oauth",
+                                provider_label="OpenAI Codex",
+                                role_id=role_id,
+                                model=codex_model,
+                                error=e,
+                                reason="usage_limit_reached",
+                                terminal_guidance=(
+                                    "Wait for or restore the OpenAI Codex usage allowance, "
+                                    "change this role's provider, or configure an LM Studio fallback."
+                                ),
+                            )
+                            await self._broadcast_unrecoverable_codex_error(
+                                role_id=role_id,
+                                model=codex_model,
+                                error=repair_error,
+                                task_id=task_id,
+                            )
+                            raise repair_error from e
+                    elif role_config.lm_studio_fallback_id:
+                        if not (
+                            is_transient_model_call_error(e)
+                            or _is_retryable_codex_completion_error(e)
+                        ):
+                            async with self._state_lock:
+                                self._role_fallback_state[role_id] = "lm_studio"
                         logger.warning(
                             "OpenAI Codex failed for role '%s'; falling back to LM Studio model %s",
                             role_id,
@@ -3587,11 +4507,16 @@ class APIClientManager:
                                 role_id=role_id,
                                 model=codex_model,
                                 error=e,
+                                route_kind="primary",
+                                task_id=task_id,
+                                configured_provider=role_config.provider,
+                                configured_model=codex_model,
                             ) from e
                         await self._broadcast_unrecoverable_codex_error(
                             role_id=role_id,
                             model=codex_model,
                             error=e,
+                            task_id=task_id,
                         )
                         raise self._as_provider_repair_error(
                             provider="openai_codex_oauth",
@@ -3646,11 +4571,16 @@ class APIClientManager:
                                 role_id=role_id,
                                 model=codex_model,
                                 error=e,
+                                route_kind="primary",
+                                task_id=task_id,
+                                configured_provider=role_config.provider,
+                                configured_model=codex_model,
                             ) from e
                         await self._broadcast_unrecoverable_codex_error(
                             role_id=role_id,
                             model=codex_model,
                             error=e,
+                            task_id=task_id,
                         )
                         if isinstance(e, (ProviderRepairRequiredError, ProviderContextLengthError)):
                             raise
@@ -3664,8 +4594,48 @@ class APIClientManager:
 
         if fallback_state == "xai_grok_oauth" and role_config:
             xai_model = role_config.model_id
+            active_cooldown = self.get_provider_cooldown("xai_grok_oauth")
+            if active_cooldown:
+                if role_config.lm_studio_fallback_id:
+                    async with self._state_lock:
+                        self._role_fallback_state[role_id] = "lm_studio"
+                        self._oauth_cooldown_fallback_roles.add(role_id)
+                    await self._broadcast_provider_usage_limit(
+                        self._cooldown_payload_for_role(
+                            active_cooldown,
+                            role_id=role_id,
+                            model=xai_model,
+                            task_id=task_id,
+                        ),
+                        fallback_model=role_config.lm_studio_fallback_id,
+                    )
+                    model = role_config.lm_studio_fallback_id
+                else:
+                    await self._broadcast_provider_usage_limit(
+                        self._cooldown_payload_for_role(
+                            active_cooldown,
+                            role_id=role_id,
+                            model=xai_model,
+                            task_id=task_id,
+                        )
+                    )
+                    raise ProviderCooldownError(
+                        provider="xai_grok_oauth",
+                        provider_label="xAI Grok",
+                        role_id=role_id,
+                        model=xai_model,
+                        resets_at=active_cooldown.get("cooldown_until") or active_cooldown.get("resets_at"),
+                        resets_in_seconds=active_cooldown.get("resets_in_seconds"),
+                        plan_type=str(active_cooldown.get("plan_type") or ""),
+                        message=str(active_cooldown.get("message") or ""),
+                    )
             start_time = time.time()
-            try:
+            use_xai = not (
+                model == role_config.lm_studio_fallback_id
+                and self._role_fallback_state.get(role_id) == "lm_studio"
+            )
+            if use_xai:
+              try:
                 logger.debug("Role %s using xAI Grok OAuth: %s", role_id, xai_model)
                 result = await self._with_hung_connection_watchdog(
                     xai_grok_client.generate_completion(
@@ -3677,11 +4647,19 @@ class APIClientManager:
                         reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
-                        retry_callback=self._provider_retry_callback(role_id),
+                        retry_callback=self._provider_retry_callback(
+                            role_id,
+                            task_id=task_id,
+                            configured_model=xai_model,
+                            configured_provider=role_config.provider,
+                        ),
                     ),
                     role_id=role_id,
                     model=xai_model,
                     provider="xAI Grok",
+                    provider_id="xai_grok_oauth",
+                    route_kind="primary",
+                    task_id=task_id,
                 )
                 duration_ms = (time.time() - start_time) * 1000
                 if not result.get("choices"):
@@ -3735,9 +4713,76 @@ class APIClientManager:
 
                 await self._track_model_usage(xai_model)
                 self._clear_retryable_provider_backoff("xai_grok_oauth", role_id, xai_model)
+                recent_cooldown = self._provider_recent_expired_cooldowns.get("xai_grok_oauth")
+                if recent_cooldown is not None:
+                    self._provider_resume_pending.setdefault(
+                        ("xai_grok_oauth", role_id, xai_model),
+                        {
+                            **recent_cooldown,
+                            "provider": "xai_grok_oauth",
+                            "provider_label": "xAI Grok",
+                            "role_id": role_id,
+                            "model": xai_model,
+                            "workflow_mode": _retry_workflow_mode(role_id),
+                        },
+                    )
+                await self._confirm_provider_usage_limit_resumed(
+                    provider="xai_grok_oauth",
+                    provider_label="xAI Grok",
+                    role_id=role_id,
+                    model=xai_model,
+                    task_id=task_id,
+                )
                 return result
 
-            except XAIGrokError as e:
+              except XAIGrokUsageLimitError as e:
+                duration_ms = (time.time() - start_time) * 1000
+                if self._autonomous_logger_callback:
+                    full_prompt = self._prompt_for_logging(messages)
+                    await self._autonomous_logger_callback(
+                        task_id=task_id,
+                        role_id=role_id,
+                        model=xai_model,
+                        provider="xai_grok_oauth",
+                        prompt=full_prompt,
+                        response="",
+                        tokens_used=None,
+                        duration_ms=duration_ms,
+                        success=False,
+                        error=oauth_live_activity_error_message(e),
+                        phase=self._current_autonomous_phase,
+                    )
+                cooldown_payload = self._mark_provider_cooldown(
+                    e,
+                    role_id=role_id,
+                    model=xai_model,
+                    task_id=task_id,
+                )
+                if role_config.lm_studio_fallback_id:
+                    async with self._state_lock:
+                        self._role_fallback_state[role_id] = "lm_studio"
+                        self._oauth_cooldown_fallback_roles.add(role_id)
+                    await self._broadcast_provider_usage_limit(
+                        cooldown_payload,
+                        fallback_model=role_config.lm_studio_fallback_id,
+                    )
+                    model = role_config.lm_studio_fallback_id
+                else:
+                    await self._broadcast_provider_usage_limit(cooldown_payload)
+                    raise ProviderCooldownError(
+                        provider=e.provider,
+                        provider_label=e.provider_label,
+                        role_id=role_id,
+                        model=xai_model,
+                        resets_at=cooldown_payload.get("cooldown_until") or e.resets_at,
+                        resets_in_seconds=(
+                            cooldown_payload.get("resets_in_seconds")
+                            or e.resets_in_seconds
+                        ),
+                        plan_type=e.plan_type,
+                        message=str(cooldown_payload.get("message") or str(e)),
+                    ) from e
+              except XAIGrokError as e:
                 duration_ms = (time.time() - start_time) * 1000
                 if self._autonomous_logger_callback:
                     full_prompt = self._prompt_for_logging(messages)
@@ -3757,8 +4802,9 @@ class APIClientManager:
                 if is_retryable_model_output_error(e):
                     raise
                 if role_config.lm_studio_fallback_id:
-                    async with self._state_lock:
-                        self._role_fallback_state[role_id] = "lm_studio"
+                    if not is_transient_model_call_error(e):
+                        async with self._state_lock:
+                            self._role_fallback_state[role_id] = "lm_studio"
                     logger.warning(
                         "xAI Grok failed for role '%s'; falling back to LM Studio model %s",
                         role_id,
@@ -3781,11 +4827,16 @@ class APIClientManager:
                                 "Increase or restore the xAI Grok spending/subscription allowance, "
                                 "change this role's provider, or configure an LM Studio fallback."
                             ),
+                            configured_provider=role_config.provider,
+                            configured_model=xai_model,
+                            route_kind="primary",
+                            task_id=task_id,
                         )
                         await self._broadcast_unrecoverable_xai_grok_error(
                             role_id=role_id,
                             model=xai_model,
                             error=repair_error,
+                            task_id=task_id,
                         )
                         raise repair_error from e
                     if _is_provider_context_length_error(e):
@@ -3801,11 +4852,16 @@ class APIClientManager:
                             role_id=role_id,
                             model=xai_model,
                             error=e,
+                            route_kind="primary",
+                            task_id=task_id,
+                            configured_provider=role_config.provider,
+                            configured_model=xai_model,
                         ) from e
                     await self._broadcast_unrecoverable_xai_grok_error(
                         role_id=role_id,
                         model=xai_model,
                         error=e,
+                        task_id=task_id,
                     )
                     raise self._as_provider_repair_error(
                         provider="xai_grok_oauth",
@@ -3814,7 +4870,7 @@ class APIClientManager:
                         model=xai_model,
                         error=e,
                     ) from e
-            except Exception as e:
+              except Exception as e:
                 duration_ms = (time.time() - start_time) * 1000
                 if self._autonomous_logger_callback:
                     full_prompt = self._prompt_for_logging(messages)
@@ -3834,8 +4890,9 @@ class APIClientManager:
                 if is_retryable_model_output_error(e):
                     raise
                 if role_config.lm_studio_fallback_id:
-                    async with self._state_lock:
-                        self._role_fallback_state[role_id] = "lm_studio"
+                    if not is_transient_model_call_error(e):
+                        async with self._state_lock:
+                            self._role_fallback_state[role_id] = "lm_studio"
                     logger.warning(
                         "xAI Grok error for role '%s': %s; falling back to LM Studio model %s",
                         role_id,
@@ -3857,11 +4914,16 @@ class APIClientManager:
                             role_id=role_id,
                             model=xai_model,
                             error=e,
+                            route_kind="primary",
+                            task_id=task_id,
+                            configured_provider=role_config.provider,
+                            configured_model=xai_model,
                         ) from e
                     await self._broadcast_unrecoverable_xai_grok_error(
                         role_id=role_id,
                         model=xai_model,
                         error=e,
+                        task_id=task_id,
                     )
                     if isinstance(e, (ProviderRepairRequiredError, ProviderContextLengthError)):
                         raise
@@ -3880,6 +4942,7 @@ class APIClientManager:
         ):
             model = role_config.lm_studio_fallback_id
 
+        lm_studio_route_kind = "fallback" if role_config.provider != "lm_studio" else "primary"
         if system_config.generic_mode:
             raise ProviderRepairRequiredError(
                 provider="lm_studio",
@@ -3894,6 +4957,10 @@ class APIClientManager:
                     "Configure the role with provider='openrouter' and a valid "
                     "OpenRouter model and key."
                 ),
+                configured_provider=role_config.provider,
+                configured_model=_configured_role_model(role_config),
+                route_kind=lm_studio_route_kind,
+                task_id=task_id,
             )
 
         # Use LM Studio (either configured as primary or fallen back)
@@ -3914,12 +4981,21 @@ class APIClientManager:
                     response_format=response_format,
                     tools=tools,
                     tool_choice=tool_choice,
-                    retry_callback=self._provider_retry_callback(role_id),
+                    retry_callback=self._provider_retry_callback(
+                        role_id,
+                        route_kind=lm_studio_route_kind,
+                        task_id=task_id,
+                        configured_model=_configured_role_model(role_config),
+                        configured_provider=role_config.provider,
+                    ),
                     **kwargs
                 ),
                 role_id=role_id,
                 model=model,
-                provider="LM Studio"
+                provider="LM Studio",
+                provider_id="lm_studio",
+                route_kind=lm_studio_route_kind,
+                task_id=task_id,
             )
             
             # Calculate duration and extract response
@@ -4009,6 +5085,10 @@ class APIClientManager:
                     role_id=role_id,
                     model=model,
                     error=e,
+                    route_kind=lm_studio_route_kind,
+                    task_id=task_id,
+                    configured_provider=role_config.provider,
+                    configured_model=_configured_role_model(role_config),
                 ) from e
             raise self._as_provider_repair_error(
                 provider="lm_studio",
@@ -4037,13 +5117,20 @@ class APIClientManager:
         reasoning_effort: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        has_lm_studio_fallback: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Attempt free model rotation chain: looping -> auto-selector.
         Returns API result on success, None if all options exhausted.
+
+        A transient failure of one rotation route moves on to the next route.
+        If no route succeeds and the role has no LM Studio fallback, the last
+        transient failure is raised as a route-identified retryable error.
         """
         if not self._openrouter_client:
             return None
+        # (route-identified retryable error, the provider failure that caused it)
+        last_transient_failure: Optional[tuple[Exception, BaseException]] = None
 
         # Step 1: Free Model Looping — iterate through available free models
         if free_model_manager.looping_enabled:
@@ -4056,12 +5143,23 @@ class APIClientManager:
                     break
                 tried_models.add(alt_model)
                 logger.info(f"Free model rotation: {original_model} -> {alt_model} for role {role_id}")
-                await self._broadcast("free_model_rotated", {
+                await self._broadcast("free_model_rotated", _merge_route_fields({
                     "role_id": role_id,
+                    "model": alt_model,
+                    "provider": "openrouter",
                     "from_model": original_model,
                     "to_model": alt_model,
                     "reason": "rate_limit",
-                })
+                    "configured_model": configured_model,
+                    "configured_provider": configured_provider,
+                }, self.route_identity_for_role(
+                    role_id,
+                    model=alt_model,
+                    provider="openrouter",
+                    route_kind="free_rotation",
+                    task_id=task_id,
+                    configured_host_provider="",
+                )))
                 try:
                     result = await self._with_hung_connection_watchdog(
                         self._openrouter_client.generate_completion(
@@ -4073,11 +5171,22 @@ class APIClientManager:
                             reasoning_effort=reasoning_effort,
                             tools=tools,
                             tool_choice=tool_choice,
-                            retry_callback=self._provider_retry_callback(role_id),
+                            retry_callback=self._provider_retry_callback(
+                                role_id,
+                                route_kind="free_rotation",
+                                task_id=task_id,
+                                configured_model=configured_model,
+                                configured_provider=configured_provider,
+                                configured_host_provider="",
+                            ),
                         ),
                         role_id=role_id,
                         model=alt_model,
-                        provider="OpenRouter (free rotation)"
+                        provider="OpenRouter (free rotation)",
+                        provider_id="openrouter",
+                        route_kind="free_rotation",
+                        task_id=task_id,
+                        configured_host_provider="",
                     )
                     await self._track_model_usage(alt_model)
                     if result.get("usage"):
@@ -4100,6 +5209,7 @@ class APIClientManager:
                     )
                     if free_model_manager.is_account_exhausted():
                         free_model_manager.clear_account_exhaustion()
+                    self._clear_retryable_provider_backoff("openrouter", role_id, alt_model)
                     return result
                 except RateLimitError:
                     free_model_manager.mark_model_failed(alt_model)
@@ -4117,6 +5227,32 @@ class APIClientManager:
                         configured_provider=configured_provider,
                         configured_model=configured_model,
                     ) from inner_e
+                except ProviderRouteError as inner_e:
+                    routed = self._free_model_route_failure(
+                        inner_e,
+                        role_id=role_id,
+                        task_id=task_id,
+                        route_kind="free_rotation",
+                        configured_provider=configured_provider,
+                        configured_model=configured_model,
+                    )
+                    if not isinstance(routed, RetryableProviderError):
+                        raise routed from inner_e
+                    free_model_manager.mark_model_failed(alt_model)
+                    last_transient_failure = (routed, inner_e)
+                    if isinstance(inner_e.cause, httpx.ConnectError):
+                        # OpenRouter itself is unreachable, so every other free
+                        # model would fail the same way.
+                        logger.warning(
+                            "Rotated model %s could not reach OpenRouter; ending free model looping",
+                            alt_model,
+                        )
+                        break
+                    logger.warning(
+                        "Rotated model %s transient provider failure, trying next: %s",
+                        alt_model,
+                        inner_e,
+                    )
                 except OpenRouterNoEndpointsError as inner_e:
                     free_model_manager.mark_model_failed(alt_model)
                     logger.warning(
@@ -4136,10 +5272,21 @@ class APIClientManager:
         if free_model_manager.auto_selector_enabled:
             auto_model = free_model_manager.AUTO_SELECTOR_MODEL
             logger.info(f"Trying auto-selector '{auto_model}' for role {role_id}")
-            await self._broadcast("free_model_auto_selector_used", {
+            await self._broadcast("free_model_auto_selector_used", _merge_route_fields({
                 "role_id": role_id,
+                "model": auto_model,
+                "provider": "openrouter",
                 "original_model": original_model,
-            })
+                "configured_model": configured_model,
+                "configured_provider": configured_provider,
+            }, self.route_identity_for_role(
+                role_id,
+                model=auto_model,
+                provider="openrouter",
+                route_kind="auto_selector",
+                task_id=task_id,
+                configured_host_provider="",
+            )))
             try:
                 result = await self._with_hung_connection_watchdog(
                     self._openrouter_client.generate_completion(
@@ -4151,11 +5298,22 @@ class APIClientManager:
                         reasoning_effort=reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
-                        retry_callback=self._provider_retry_callback(role_id),
+                        retry_callback=self._provider_retry_callback(
+                            role_id,
+                            route_kind="auto_selector",
+                            task_id=task_id,
+                            configured_model=configured_model,
+                            configured_provider=configured_provider,
+                            configured_host_provider="",
+                        ),
                     ),
                     role_id=role_id,
                     model=auto_model,
-                    provider="OpenRouter (auto-selector)"
+                    provider="OpenRouter (auto-selector)",
+                    provider_id="openrouter",
+                    route_kind="auto_selector",
+                    task_id=task_id,
+                    configured_host_provider="",
                 )
                 await self._track_model_usage(auto_model)
                 if result.get("usage"):
@@ -4178,6 +5336,7 @@ class APIClientManager:
                 )
                 if free_model_manager.is_account_exhausted():
                     free_model_manager.clear_account_exhaustion()
+                self._clear_retryable_provider_backoff("openrouter", role_id, auto_model)
                 return result
             except ProviderContextLengthError as inner_e:
                 raise inner_e.with_route_context(
@@ -4187,10 +5346,65 @@ class APIClientManager:
                     configured_provider=configured_provider,
                     configured_model=configured_model,
                 ) from inner_e
+            except ProviderRouteError as inner_e:
+                routed = self._free_model_route_failure(
+                    inner_e,
+                    role_id=role_id,
+                    task_id=task_id,
+                    route_kind="auto_selector",
+                    configured_provider=configured_provider,
+                    configured_model=configured_model,
+                )
+                if not isinstance(routed, RetryableProviderError):
+                    raise routed from inner_e
+                last_transient_failure = (routed, inner_e)
+                logger.warning(
+                    "Auto-selector '%s' transient provider failure: %s",
+                    auto_model,
+                    inner_e,
+                )
             except (RateLimitError, CreditExhaustionError) as inner_e:
                 logger.warning(f"Auto-selector '{auto_model}' also failed: {inner_e}")
 
+        # With an LM Studio fallback the caller uses it; otherwise the last
+        # transient route failure is retried by the workflow under its own route.
+        if last_transient_failure is not None and not has_lm_studio_fallback:
+            failure, cause = last_transient_failure
+            raise failure from cause
         return None
+
+    def _free_model_route_failure(
+        self,
+        error: ProviderRouteError,
+        *,
+        role_id: str,
+        task_id: str,
+        route_kind: str,
+        configured_provider: str,
+        configured_model: str,
+    ) -> Exception:
+        """Attach free-model route context; type transient failures for workflow retry."""
+        routed = error.with_route_context(
+            role_id=role_id,
+            task_id=task_id,
+            route_kind=route_kind,
+            configured_provider=configured_provider,
+            configured_model=configured_model,
+        )
+        if not is_transient_model_call_error(routed):
+            return routed
+        return self._as_retryable_provider_error(
+            provider="openrouter",
+            provider_label="OpenRouter",
+            role_id=role_id,
+            model=routed.route.model,
+            error=routed,
+            route_kind=route_kind,
+            task_id=task_id,
+            configured_provider=configured_provider,
+            configured_model=configured_model,
+            configured_host_provider="",
+        )
 
     def get_fallback_state(self, role_id: str) -> str:
         """
@@ -4299,7 +5513,14 @@ class APIClientManager:
         
         # Try LM Studio first (local, free)
         try:
-            return await lm_studio_client.get_embeddings(texts, model)
+            return await lm_studio_client.get_embeddings(
+                texts,
+                model,
+                retry_callback=self._provider_retry_callback(
+                    "embeddings",
+                    route_kind="embeddings",
+                ),
+            )
         except Exception as lm_error:
             logger.warning(f"LM Studio embeddings unavailable: {lm_error}")
             

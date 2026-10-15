@@ -6,9 +6,15 @@ from typing import Literal, Mapping
 from .invariant_catalog import INVARIANTS_BY_ID
 
 
-AdapterType = Literal["model", "real_route", "real_coordinator", "browser_smoke"]
+AdapterType = Literal[
+    "model",
+    "focused_production",
+    "real_route",
+    "real_coordinator",
+    "browser_smoke",
+]
 ResultStatus = Literal["passed", "failed", "skipped", "blocked"]
-CoverageRunner = Literal["pytest", "playwright"]
+CoverageRunner = Literal["pytest", "vitest", "playwright"]
 
 
 @dataclass(frozen=True)
@@ -26,6 +32,10 @@ class InteractionCoverage:
     runner: CoverageRunner | None = None
     test_selectors: tuple[str, ...] = ()
     asserted_invariants: tuple[str, ...] = ()
+    real_components: tuple[str, ...] = ()
+    faked_dependencies: tuple[str, ...] = ()
+    blocked_dependencies: tuple[str, ...] = ()
+    observed_transition: str | None = None
 
 
 def assert_coverage_metadata_valid(record: InteractionCoverage) -> None:
@@ -35,7 +45,10 @@ def assert_coverage_metadata_valid(record: InteractionCoverage) -> None:
         raise AssertionError(f"{record.scenario_id} does not declare crossed fields.")
     if not record.invariants:
         raise AssertionError(f"{record.scenario_id} does not declare invariant ids.")
-    if not record.test_file.startswith("tests/"):
+    valid_test_root = record.test_file.startswith("tests/") or (
+        record.runner == "vitest" and record.test_file.startswith("frontend/src/")
+    )
+    if not valid_test_root:
         raise AssertionError(f"{record.scenario_id} has non-test file path {record.test_file!r}.")
     if record.seed is not None and record.seed < 0:
         raise AssertionError(f"{record.scenario_id} has a negative seed.")
@@ -43,11 +56,25 @@ def assert_coverage_metadata_valid(record: InteractionCoverage) -> None:
         raise AssertionError(f"{record.scenario_id} has a seed but no replay.")
     if record.result == "passed" and not record.evidence:
         raise AssertionError(f"{record.scenario_id} passed without evidence.")
-    executable_claim = record.adapter in {"real_route", "real_coordinator", "browser_smoke"}
+    executable_claim = record.adapter in {
+        "focused_production",
+        "real_route",
+        "real_coordinator",
+        "browser_smoke",
+    }
+    production_claim = record.adapter in {
+        "focused_production",
+        "real_route",
+        "real_coordinator",
+    }
     if record.result == "passed" and executable_claim and not record.runner:
         raise AssertionError(f"{record.scenario_id} passed without an executable runner.")
     if record.result == "passed" and executable_claim and not record.test_selectors:
         raise AssertionError(f"{record.scenario_id} passed without exact test selectors.")
+    if record.result == "passed" and production_claim and not record.real_components:
+        raise AssertionError(f"{record.scenario_id} passed without real production components.")
+    if record.result == "passed" and production_claim and not record.observed_transition:
+        raise AssertionError(f"{record.scenario_id} passed without an observed transition.")
     if (
         record.result == "passed"
         and executable_claim
@@ -60,6 +87,8 @@ def assert_coverage_metadata_valid(record: InteractionCoverage) -> None:
         record.runner or record.test_selectors or record.asserted_invariants or record.evidence
     ):
         raise AssertionError(f"{record.scenario_id} is blocked but is not metadata-only.")
+    if record.result == "blocked" and production_claim and not record.blocked_dependencies:
+        raise AssertionError(f"{record.scenario_id} is blocked without blocked dependencies.")
     if record.result in {"failed", "skipped", "blocked"} and not record.diagnostics:
         raise AssertionError(
             f"{record.scenario_id} is {record.result} without diagnostics."
@@ -74,6 +103,15 @@ def assert_coverage_metadata_valid(record: InteractionCoverage) -> None:
         raise AssertionError(f"{record.scenario_id} has duplicate test selectors.")
     if len(record.asserted_invariants) != len(set(record.asserted_invariants)):
         raise AssertionError(f"{record.scenario_id} has duplicate asserted invariants.")
+    for field_name, values in (
+        ("real_components", record.real_components),
+        ("faked_dependencies", record.faked_dependencies),
+        ("blocked_dependencies", record.blocked_dependencies),
+    ):
+        if any(not item.strip() for item in values):
+            raise AssertionError(f"{record.scenario_id} has an empty {field_name} entry.")
+        if len(values) != len(set(values)):
+            raise AssertionError(f"{record.scenario_id} has duplicate {field_name} entries.")
     if record.runner == "pytest":
         for selector in record.test_selectors:
             parts = selector.split("::")
@@ -86,6 +124,19 @@ def assert_coverage_metadata_valid(record: InteractionCoverage) -> None:
             if "::" not in selector or not selector.split("::", 1)[0].endswith(".spec.js"):
                 raise AssertionError(
                     f"{record.scenario_id} has non-exact Playwright selector {selector!r}."
+                )
+    if record.runner == "vitest":
+        for selector in record.test_selectors:
+            parts = selector.split("::")
+            if (
+                len(parts) != 3
+                or not parts[0].startswith("frontend/src/")
+                or not parts[0].endswith((".test.js", ".test.jsx"))
+                or not parts[1].strip()
+                or not parts[2].strip()
+            ):
+                raise AssertionError(
+                    f"{record.scenario_id} has non-exact Vitest selector {selector!r}."
                 )
 
     for invariant_id in record.invariants:

@@ -4,6 +4,25 @@ export const REJECTION_FEEDBACK_NOTICE = 'Validator feedback was provided for th
 
 export const TENTH_REJECTION_FEEDBACK_NOTICE = `${REJECTION_FEEDBACK_NOTICE} This is the tenth consecutive rejection in the current streak.`;
 
+// The backend composes `route_identity` (mode, role, model, provider, host) for
+// provider/API-error activity; the frontend only prefixes it, exactly once.
+export const withRouteIdentity = (message = '', data = {}) => {
+  const text = String(message ?? '').trim();
+  const identity = String(data?.route_identity ?? '').trim();
+  if (!identity || text.includes(identity)) return text;
+  return `${identity} ${text}`.trim();
+};
+
+export const formatHungConnectionMessage = (data = {}) => {
+  const model = data.model || 'model';
+  const provider = data.provider || 'provider';
+  const elapsed = data.elapsed_minutes || 15;
+  return withRouteIdentity(
+    `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`,
+    data,
+  );
+};
+
 export const formatContextOverflowActivityMessage = (data = {}) => {
   const message = data.message || CONTEXT_OVERFLOW_STOP_MESSAGE;
   const configuredModel = data.configured_model || '';
@@ -62,7 +81,11 @@ export const buildRejectionFeedbackNoticeActivity = (timestamp, data = {}) => ({
   },
 });
 
-export const formatSolutionPathEventMessage = (event = '', data = {}) => {
+export const formatSolutionPathEventMessage = (event = '', data = {}) => (
+  withRouteIdentity(formatSolutionPathEventBase(event, data), data)
+);
+
+const formatSolutionPathEventBase = (event = '', data = {}) => {
   if (data.message) return data.message;
   const queued = Number(data.queued_proposals || 0);
   switch (event) {
@@ -203,11 +226,17 @@ export const formatProviderUsageLimitActivityMessage = (
     ? ''
     : ` Reset time: ${new Date(resetTime).toLocaleString()}.`;
   if (data.fallback_model) {
-    return `${providerLabel} usage limit reached for ${roleId}. `
-      + `Using LM Studio fallback (${data.fallback_model}) until reset.${resetText}`;
+    return withRouteIdentity(
+      `${providerLabel} usage limit reached for ${roleId}. `
+        + `Using LM Studio fallback (${data.fallback_model}) until reset.${resetText}`,
+      data,
+    );
   }
-  return `${providerLabel} usage limit reached for ${roleId}. `
-    + `This role is waiting for the provider cooldown to end.${resetText}`;
+  return withRouteIdentity(
+    `${providerLabel} usage limit reached for ${roleId}. `
+      + `This role is waiting for the provider cooldown to end.${resetText}`,
+    data,
+  );
 };
 
 export const formatProviderUsageLimitResumedMessage = (
@@ -216,20 +245,42 @@ export const formatProviderUsageLimitResumedMessage = (
 ) => {
   const providerLabel = data.provider_label || fallbackProviderLabel;
   const roleId = data.role_id || 'a role';
-  return `${providerLabel} usage limit ended for ${roleId}; provider work resumed.`;
+  return withRouteIdentity(
+    `${providerLabel} usage limit ended for ${roleId}; provider work resumed.`,
+    data,
+  );
 };
 
 export const formatProviderRetryCooldownMessage = (data = {}) => {
-  if (data.message) return data.message;
+  if (data.message || data.activity_message) {
+    return withRouteIdentity(data.message || data.activity_message, data);
+  }
   const providerLabel = data.provider_label || data.provider || 'Provider';
+  const errorSummary = String(data.error_summary || data.activity_detail || '').trim();
+  const reason = String(data.reason || '');
+  const errorLabel = ['connection_error', 'stream_error'].includes(reason)
+    ? 'connection error'
+    : ['http_error', 'invalid_response', 'transient_http_error', 'upstream_provider_error'].includes(reason)
+      ? 'server-side error'
+      : 'API error';
   const waitSeconds = Number(data.retry_after_seconds || 0);
   const formattedWait = Number.isInteger(waitSeconds) ? String(waitSeconds) : waitSeconds.toFixed(1);
   const waitText = waitSeconds > 0 ? ` after a ${formattedWait}-second cooldown` : '';
   const retryAttempt = Number(data.retry_attempt || 1);
-  return `${providerLabel} API call will retry${waitText} (retry ${retryAttempt}).`;
+  const retryMessage = `${providerLabel} API call will retry${waitText} (retry ${retryAttempt}).`;
+  return withRouteIdentity(
+    errorSummary
+      ? `${providerLabel} ${errorLabel}: ${errorSummary.replace(/\.+$/, '')}. ${retryMessage}`
+      : retryMessage,
+    data,
+  );
 };
 
-export const formatProofRunEventMessage = (event = '', data = {}) => {
+export const formatProofRunEventMessage = (event = '', data = {}) => (
+  withRouteIdentity(formatProofRunEventBase(event, data), data)
+);
+
+const formatProofRunEventBase = (event = '', data = {}) => {
   if (data.message) return data.message;
   const round = Number(data.proof_round_index || data.round_index || data.current_round || 0);
   const roundLabel = round > 0 ? `Round ${round}` : 'Proof run';
@@ -242,15 +293,28 @@ export const formatProofRunEventMessage = (event = '', data = {}) => {
     case 'proof_run_round_complete': {
       const candidateCount = Number(data.candidate_count);
       const hasCandidateCount = Number.isFinite(candidateCount) && candidateCount >= 0;
+      const noDiscoveryStreak = Number(data.consecutive_no_discovery_rounds || 0);
+      const noDiscoveryLimit = Number(data.no_discovery_round_limit || 0);
+      const streakText = (
+        candidateCount === 0
+        && noDiscoveryStreak > 0
+        && noDiscoveryLimit > 0
+      )
+        ? ` No candidates found; ${noDiscoveryStreak}/${noDiscoveryLimit} consecutive no-discovery rounds.`
+        : '';
       const candidateText = hasCandidateCount
         ? (candidateCount === 0
           ? formatEmptyProofDiscoveryMessage('Discovery')
           : `Discovery found ${candidateCount} ${candidateCount === 1 ? 'candidate' : 'candidates'} for this round.`)
         : 'The round finished its proof discovery and verification work.';
       const nextText = data.run_mode === 'loop_with_pruning' && data.next_round_automatic !== false
-        ? ' The next round will start automatically; the loop continues until you press Stop.'
+        ? (
+          noDiscoveryLimit > 0
+            ? ` The next round will start automatically; the loop continues until you press Stop or ${noDiscoveryLimit} consecutive rounds find no candidates.`
+            : ' The next round will start automatically; the loop continues until you press Stop.'
+        )
         : '';
-      return `${roundLabel} complete. ${candidateText}${nextText}`;
+      return `${roundLabel} complete. ${candidateText}${streakText}${nextText}`;
     }
     case 'proof_run_provider_resumed':
       return `${roundLabel} resumed after the provider pause.`;
@@ -265,6 +329,10 @@ export const formatProofRunEventMessage = (event = '', data = {}) => {
         || 'Proof run needs provider, model, source, or runtime repair. Repair settings, then start a new proof loop.';
     case 'proof_run_terminal':
     case 'proof_run_failed':
+      if (data.terminal_reason === 'consecutive_no_discovery_limit') {
+        const limit = Number(data.no_discovery_round_limit || 10);
+        return `Proof run completed after ${limit} consecutive rounds found no useful novel proof candidates. The search finished normally; start a new loop if you want to continue searching.`;
+      }
       if (data.last_error_summary || data.error_detail) {
         return `Proof run ended: ${data.last_error_summary || data.error_detail}`;
       }
@@ -479,6 +547,8 @@ export const getActivityIcon = (event = '') => {
       return '>';
     case 'proof_lean_accepted':
       return '>';
+    case 'proof_novelty_assessment_started':
+      return '?';
     case 'proof_integrity_rejected':
       return '⚠';
     case 'proof_attempt_failed':
@@ -487,6 +557,7 @@ export const getActivityIcon = (event = '') => {
       return '⚠';
     case 'context_overflow_error':
     case 'proof_context_overflow':
+    case 'lean_workspace_repair_required':
       return '!';
     case 'proof_verified':
     case 'known_proof_verified':
@@ -629,6 +700,7 @@ export const getActivityClass = (event = '', item = {}) => {
 
   if (
     event === 'assistant_proof_pack_updated' ||
+    event === 'proof_novelty_assessment_started' ||
     event === 'solution_path_activated' ||
     event === 'solution_path_proposal_queued' ||
     event === 'solution_path_proposal_reviewing'
@@ -698,6 +770,7 @@ export const getActivityClass = (event = '', item = {}) => {
     event === 'smt_check_error' ||
     event === 'context_overflow_error' ||
     event === 'proof_context_overflow' ||
+    event === 'lean_workspace_repair_required' ||
     event === 'leanoj_brainstorm_rejected' ||
     event === 'leanoj_brainstorm_submitter_failed' ||
     event === 'leanoj_brainstorm_prune_rejected' ||
@@ -923,7 +996,10 @@ export const formatAssistantProofPackEventMessage = (event = '', data = {}) => {
   if (event === 'assistant_proof_pack_failed') {
     const detail = String(data.error_message || data.reason || '').trim();
     const failureText = detail ? `: ${detail}` : '';
-    return `Assistant memory model call failed for ${target}${phaseText}${modelText}${failureText}${counterText}`;
+    return withRouteIdentity(
+      `Assistant memory model call failed for ${target}${phaseText}${modelText}${failureText}${counterText}`,
+      data,
+    );
   }
   if (event === 'assistant_proof_pack_stopped') {
     return `Assistant memory stopped (${data.reason || 'parent stopped'})`;
@@ -935,8 +1011,11 @@ export const buildAutonomousProofProviderPauseActivity = (data = {}) => {
   const isCreditPause = data.reason === 'openrouter_credit_exhaustion';
   return {
     isCreditPause,
-    message: isCreditPause
-      ? `Autonomous proof verification paused until OpenRouter credits are reset: ${data.message || data.source_id || 'provider credits exhausted'}`
-      : `Autonomous proof verification paused for a transient provider error and will retry automatically: ${data.message || data.source_id || 'provider retry pending'}`,
+    message: withRouteIdentity(
+      isCreditPause
+        ? `Autonomous proof verification paused until OpenRouter credits are reset: ${data.message || data.source_id || 'provider credits exhausted'}`
+        : `Autonomous proof verification paused for a transient provider error and will retry automatically: ${data.message || data.source_id || 'provider retry pending'}`,
+      data,
+    ),
   };
 };

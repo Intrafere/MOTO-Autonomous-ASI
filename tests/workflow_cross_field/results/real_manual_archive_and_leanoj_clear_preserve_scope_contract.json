@@ -1,11 +1,19 @@
 {
   "adapter": "real_coordinator",
   "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_scope.manual_clear_archives_active",
+    "state.clear_removes_active_preserves_history"
+  ],
+  "blocked_dependencies": [],
   "diagnostics": {},
   "evidence": [
     "physical_manual_archive",
     "active_store_empty",
     "leanoj_root_removed"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains"
   ],
   "fields": [
     "proof_scope_isolation",
@@ -16,11 +24,22 @@
     "proof_scope.manual_clear_archives_active",
     "state.clear_removes_active_preserves_history"
   ],
+  "observed_transition": "physical_manual_archive; active_store_empty; leanoj_root_removed",
+  "real_components": [
+    "backend/api/routes/proofs.py",
+    "backend/autonomous/memory/proof_database.py"
+  ],
   "replay": [],
   "result": "passed",
+  "runner": "pytest",
   "scenario_id": "real_manual_archive_and_leanoj_clear_preserve_scope_contract",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": null,
   "source": "real_adapter",
-  "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+  "source_identity": "workflow-source-v1:cbc8e02d1ec13f80fcf6e0640aaec60c0d2023fdf61c0a8d4774246d1683c218",
+  "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py::test_manual_clear_archive_moves_active_proofs_to_history_only",
+    "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py::test_leanoj_current_and_history_routes_are_disjoint_then_clear_removes_root"
+  ]
 }

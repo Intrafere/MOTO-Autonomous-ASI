@@ -184,7 +184,7 @@ describe('lifecycle API errors', () => {
     expect(snapshot.source_key).toBe(buildProofSourceKey('autonomous', 'paper', 'session-1:paper-1'));
   });
 
-  test('preserves unbounded continuous mode through reload normalization', () => {
+  test('preserves continuous no-discovery progress through reload normalization', () => {
     const snapshot = normalizeProofRunSnapshot({
       proof_run_id: 'proof-run-progress',
       source_type: 'paper',
@@ -192,11 +192,15 @@ describe('lifecycle API errors', () => {
       run_mode: 'loop_with_pruning',
       lifecycle_generation: 3,
       status: 'running',
+      consecutive_no_discovery_rounds: 4,
+      no_discovery_round_limit: 10,
     });
     expect(snapshot).toMatchObject({
       run_mode: 'loop_with_pruning',
       unbounded: true,
       status: 'running',
+      consecutive_no_discovery_rounds: 4,
+      no_discovery_round_limit: 10,
     });
   });
 

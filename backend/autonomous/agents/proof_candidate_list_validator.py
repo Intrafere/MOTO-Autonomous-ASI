@@ -184,5 +184,5 @@ class ProofCandidateListValidator:
         return [candidate for candidate in candidates if candidate.theorem_id in approved_ids]
 
     @staticmethod
-    def threshold_met(*, approved_count: int, proposed_count: int) -> bool:
-        return proposed_count > 0 and approved_count * 4 >= proposed_count * 3
+    def list_accepted(*, approved_count: int) -> bool:
+        return approved_count > 0

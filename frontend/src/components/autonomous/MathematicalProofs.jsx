@@ -14,6 +14,8 @@ import { downloadTextFile } from '../../utils/downloadHelpers';
 import {
   buildProofLiveContextMutation,
   classifyProofLiveContext,
+  getNoveltyGroupAnchorIds,
+  getNoveltyGroupSize,
   getProofLiveContextRiskWarnings,
 } from '../../utils/proofPresentation';
 
@@ -567,6 +569,20 @@ function MathematicalProofs({
       );
     } catch (err) {
       setError(`Failed to download proof certificate: ${err.message}`);
+    }
+  };
+
+  const handleDownloadNoveltyGroup = async (proof) => {
+    try {
+      const anchorId = getNoveltyGroupAnchorIds(proof)[0] || proof.proof_id;
+      const group = await api.getProofNoveltyGroup(anchorId, proofScope);
+      downloadTextFile(
+        JSON.stringify(group, null, 2),
+        `${proof.proof_id}_novelty_group.json`,
+        'application/json'
+      );
+    } catch (err) {
+      setError(`Failed to download novelty-ranked proof group: ${err.message}`);
     }
   };
 
@@ -1215,6 +1231,15 @@ function MathematicalProofs({
                       >
                         Download .lean
                       </button>
+                      {getNoveltyGroupAnchorIds(proof).length > 0 && (
+                        <button
+                          type="button"
+                          className="math-proof-download"
+                          onClick={() => handleDownloadNoveltyGroup(proof)}
+                        >
+                          Download Ranked Group (JSON)
+                        </button>
+                      )}
                       {liveContext.canPrune && (
                         <button
                           type="button"
@@ -1267,6 +1292,19 @@ function MathematicalProofs({
                         <div>{proof.novelty_reasoning}</div>
                       </div>
                     )}
+
+                    <div className="math-proof-detail-block">
+                      <strong>Discovery Ranking Scope</strong>
+                      <div>
+                        {proof.novelty_scope === 'group'
+                          ? `Verified proof group (${getNoveltyGroupSize(proof)} proofs including this proof)`
+                          : 'Accepted Lean statement alone'}
+                      </div>
+                      {proof.novelty_group_claim && <div>{proof.novelty_group_claim}</div>}
+                      {proof.novelty_scope === 'group' && proof.novelty_group_proof_ids?.length > 0 && (
+                        <div>Ranked with: {proof.novelty_group_proof_ids.join(', ')}</div>
+                      )}
+                    </div>
 
                     {proof.solver_hints?.length > 0 && (
                       <div className="math-proof-detail-block">

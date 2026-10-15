@@ -15,6 +15,7 @@ import {
   MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
 } from '../utils/manualProofSources';
 import { isCloudAccessProvider } from '../utils/oauthProviders';
+import { isReplayedProofRunActivity } from '../utils/proofRunActivityRecovery';
 
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
 export {
@@ -100,6 +101,15 @@ export function mergeProofRun(current, incoming) {
   const currentGeneration = Number(current.lifecycle_generation || 0);
   const incomingGeneration = Number(incoming.lifecycle_generation || 0);
   if (incomingGeneration < currentGeneration) return current;
+  if (
+    incomingGeneration === currentGeneration
+    && TERMINAL_PROOF_RUN_STATUSES.has(current.status)
+    && !TERMINAL_PROOF_RUN_STATUSES.has(incoming.status)
+  ) {
+    // A finished generation never resumes, so a non-terminal snapshot is stale;
+    // it may only fill fields the terminal record lacks, such as source identity.
+    return { ...incoming, ...current };
+  }
   return { ...current, ...incoming };
 }
 
@@ -456,6 +466,8 @@ export function useProofCheckRuntime() {
 
   useEffect(() => {
     const reconcileRunEvent = (data = {}) => {
+      // Replayed history is feed-only; run state comes from fresh snapshots.
+      if (isReplayedProofRunActivity(data)) return;
       const proofRunId = data.proof_run_id;
       if (!proofRunId) return;
       if (data.source_type && data.source_id) {
@@ -510,6 +522,7 @@ export function useProofCheckRuntime() {
 
   useEffect(() => {
     const unsubscribeStarted = websocket.on('proof_check_started', (data) => {
+      if (isReplayedProofRunActivity(data)) return;
       const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
       setActiveChecks((prev) => ({
         ...prev,
@@ -529,6 +542,7 @@ export function useProofCheckRuntime() {
     });
 
     const unsubscribeCandidates = websocket.on('proof_check_candidates_found', (data) => {
+      if (isReplayedProofRunActivity(data)) return;
       const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
       setActiveChecks((prev) => ({
         ...prev,
@@ -540,6 +554,7 @@ export function useProofCheckRuntime() {
     });
 
     const unsubscribeNoCandidates = websocket.on('proof_check_no_candidates', (data) => {
+      if (isReplayedProofRunActivity(data)) return;
       const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
       setActiveChecks((prev) => ({
         ...prev,
@@ -551,7 +566,12 @@ export function useProofCheckRuntime() {
     });
 
     const unsubscribeComplete = websocket.on('proof_check_complete', (data) => {
+      if (isReplayedProofRunActivity(data)) return;
       const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
+      if (data.run_mode === 'loop_with_pruning' && data.proof_run_id) {
+        refreshProofStatus();
+        return;
+      }
       setActiveChecks((prev) => {
         if (!prev[sourceKey]) {
           return prev;

@@ -21,6 +21,6 @@
     "generated_context_overflow_contract_seed_7",
     "generated_context_overflow_contract_seed_29"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "target_id": "generated_context_overflow_contract"
 }

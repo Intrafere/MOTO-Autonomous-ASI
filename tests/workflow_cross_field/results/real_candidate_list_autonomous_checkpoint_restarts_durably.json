@@ -1,0 +1,43 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "proof_runtime.candidate_list_autonomous_restart_owned"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "durable_checkpoint",
+    "same_scope_reuse",
+    "round_scope_fence"
+  ],
+  "faked_dependencies": [
+    "candidate Validator response",
+    "Lean proof-stage boundary"
+  ],
+  "fields": [
+    "proof_runtime_gating",
+    "provider_pause_resume",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "proof_runtime.candidate_list_autonomous_restart_owned"
+  ],
+  "observed_transition": "approved list persists through a fresh ResearchMetadata lifecycle and is reused only under its original review scope",
+  "real_components": [
+    "backend/autonomous/core/proof_verification_stage.py",
+    "backend/autonomous/memory/research_metadata.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "real_candidate_list_autonomous_checkpoint_restarts_durably",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:5181d629ac0d94f4e40ac69310a04463f31f2aa3758f4921825a9438b2ef55f5",
+  "test_file": "tests/workflow_real_adapters/test_build_07_candidate_list_ownership.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_build_07_candidate_list_ownership.py::test_real_autonomous_candidate_list_checkpoint_survives_lifecycle_restart"
+  ]
+}

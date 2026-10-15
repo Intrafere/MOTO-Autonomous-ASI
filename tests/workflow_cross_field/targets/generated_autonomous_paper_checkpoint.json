@@ -17,6 +17,6 @@
     "generated_autonomous_paper_checkpoint_seed_7",
     "generated_autonomous_paper_checkpoint_seed_29"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "target_id": "generated_autonomous_paper_checkpoint"
 }

@@ -15,13 +15,16 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verify_brainstorm_proof_candidate
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
 from backend.aggregator.core.context_allocator import ContextAllocationError, context_allocator
+from backend.shared.lean4_client import LeanWorkspaceRepairRequiredError
 from backend.shared.provider_errors import (
     ProviderContextLengthError,
     ProviderRepairRequiredError,
 )
+from backend.shared.provider_route_identity import merge_route_identity, route_identity_from_error
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.memory.local_training import LocalTrainingMemory
@@ -43,6 +46,61 @@ def _requires_lean_retry_schema(llm_output: str, lean4_enabled: bool) -> bool:
             or '"lean_code"' in llm_output
             or '"theorem_statement"' in llm_output
         )
+    )
+
+
+def free_model_exhaustion_route_identity(
+    role_id: str,
+    *,
+    error: Optional[BaseException] = None,
+    display_role_id: str = "",
+    workflow_mode: str = "",
+) -> Dict[str, str]:
+    """Route identity for a wait after a role's free OpenRouter options ran out.
+
+    A route carried by ``error`` names the leg that failed last. Without one,
+    the error came from the role's primary route (its configured model and
+    pinned host) when no free-model rotation leg can have run: the account-credit
+    short-circuit, or free-model looping and the auto-selector both disabled.
+    Otherwise rotation ran, which calls OpenRouter with auto host routing.
+    """
+    display_role = display_role_id or role_id
+    if error is not None and route_identity_from_error(error).get("route_kind"):
+        return api_client_manager.route_identity_for_role(
+            display_role,
+            workflow_mode=workflow_mode,
+            model_role_id=role_id,
+            error=error,
+        )
+    account_credits_exhausted = "account free credits exhausted" in str(error or "").lower()
+    if account_credits_exhausted or not (
+        free_model_manager.looping_enabled or free_model_manager.auto_selector_enabled
+    ):
+        return api_client_manager.route_identity_for_role(
+            display_role,
+            workflow_mode=workflow_mode,
+            provider="openrouter",
+            route_kind="primary",
+            model_role_id=role_id,
+            error=error,
+        )
+    config = api_client_manager.get_role_config(role_id)
+    model = ""
+    if config is not None:
+        model = str(
+            (config.openrouter_model_id if config.provider == "openrouter" else "")
+            or config.model_id
+            or ""
+        )
+    return api_client_manager.route_identity_for_role(
+        display_role,
+        workflow_mode=workflow_mode,
+        error=error,
+        model=model,
+        provider="openrouter",
+        route_kind="free_rotation",
+        model_role_id=role_id,
+        configured_host_provider="",
     )
 
 
@@ -218,14 +276,21 @@ class SubmitterAgent:
             except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
                 logger.warning(f"Submitter {self.submitter_id}: all free models exhausted: {e}")
-                await api_client_manager.broadcast_retry_cooldown(
-                    provider="openrouter",
-                    provider_label="OpenRouter free models",
+                await api_client_manager.emit_and_wait_for_retry(
+                    merge_route_identity(
+                        {
+                            "provider": "openrouter",
+                            "provider_label": "OpenRouter free models",
+                            "role_id": self.role_id,
+                            "retry_after_seconds": 120,
+                            "reason": "free_models_exhausted",
+                        },
+                        free_model_exhaustion_route_identity(self.role_id, error=e),
+                    ),
                     role_id=self.role_id,
-                    retry_after_seconds=120,
-                    reason="free_models_exhausted",
+                    should_stop=lambda: not self.is_running,
+                    error=e,
                 )
-                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             except RetryableProviderError as e:
                 logger.warning(
                     "Submitter %s paused for retryable provider failure: %s",
@@ -250,6 +315,17 @@ class SubmitterAgent:
                     self.is_running = False
                     self.state.is_active = False
                 break
+            except LeanWorkspaceRepairRequiredError as e:
+                # Lean is shared by every lane, so the whole Aggregator stops.
+                if self.coordinator and hasattr(
+                    self.coordinator,
+                    "_handle_lean_workspace_repair_required",
+                ):
+                    await self.coordinator._handle_lean_workspace_repair_required(e)
+                else:
+                    self.is_running = False
+                    self.state.is_active = False
+                break
             except ContextAllocationError as e:
                 logger.error("Submitter %s context overflow: %s", self.submitter_id, e)
                 if self.coordinator and hasattr(self.coordinator, "_handle_context_overflow"):
@@ -260,7 +336,20 @@ class SubmitterAgent:
                 break
             except Exception as e:
                 logger.error(f"Submitter {self.submitter_id} error on iteration {iteration}: {e}", exc_info=True)
-                await asyncio.sleep(5)
+                await api_client_manager.emit_and_wait_for_retry(
+                    {
+                        "provider": "unknown",
+                        "provider_label": f"Aggregator submitter {self.submitter_id}",
+                        "role_id": self.role_id,
+                        "retry_attempt": iteration,
+                        "retry_after_seconds": 5,
+                        "reason": "submitter_loop_retry",
+                        "error_summary": str(e),
+                    },
+                    role_id=self.role_id,
+                    should_stop=lambda: not self.is_running,
+                    error=e,
+                )
         
         logger.warning(f"Submitter {self.submitter_id} run loop EXITED after {iteration} iterations - is_running={self.is_running}")
     
@@ -275,7 +364,11 @@ class SubmitterAgent:
             self.current_chunk_index = (self.current_chunk_index + 1) % len(self.chunk_sizes)
             
             # Get context
-            shared_training_content = await shared_training_memory.get_all_content()
+            shared_training_content = (
+                await self.coordinator.get_projected_shared_training_content()
+                if self.coordinator
+                else await shared_training_memory.get_all_content()
+            )
             local_training_content = ""  # Local training would be added if implemented
             from backend.shared.utils import count_tokens
             max_allowed_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
@@ -458,7 +551,21 @@ class SubmitterAgent:
                             f"Submitter {self.submitter_id}: HTTP error (attempt {attempt + 1}/{max_retries}): {error_msg}. "
                             f"Retrying in {backoff_time}s..."
                         )
-                        await asyncio.sleep(backoff_time)
+                        await api_client_manager.emit_and_wait_for_retry(
+                            {
+                                "provider": "configured_role",
+                                "provider_label": "Configured provider",
+                                "role_id": self.role_id,
+                                "retry_attempt": attempt + 1,
+                                "max_attempts": max_retries,
+                                "retry_after_seconds": backoff_time,
+                                "reason": "http_or_context_retry",
+                                "error_summary": error_msg,
+                            },
+                            role_id=self.role_id,
+                            should_stop=lambda: not self.is_running,
+                            error=e,
+                        )
                         continue
                     else:
                         # Final retry or non-recoverable error
@@ -801,6 +908,11 @@ class SubmitterAgent:
                             for attempt in (gate_result.attempts or [])
                         ],
                         "attempt_count": len(gate_result.attempts or []),
+                        "compile_receipt": (
+                            gate_result.compile_receipt.model_dump(mode="json")
+                            if gate_result.compile_receipt
+                            else None
+                        ),
                     }
                 }
 
@@ -865,9 +977,14 @@ class SubmitterAgent:
             
         except ContextAllocationError:
             raise
-        except (FreeModelExhaustedError, RetryableProviderError, ProviderRepairRequiredError):
-            # Provider lifecycle errors belong to the outer run loop, which owns
-            # cooldown waiting, retry backoff, lane disablement, and terminal repair.
+        except (
+            FreeModelExhaustedError,
+            RetryableProviderError,
+            ProviderRepairRequiredError,
+            LeanWorkspaceRepairRequiredError,
+        ):
+            # Provider and Lean lifecycle errors belong to the outer run loop, which
+            # owns cooldown waiting, retry backoff, lane disablement, and terminal repair.
             raise
         except Exception as e:
             logger.error(f"Submitter {self.submitter_id} failed to generate submission: {e}")

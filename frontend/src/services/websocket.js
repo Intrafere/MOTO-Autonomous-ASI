@@ -2,6 +2,7 @@
  * WebSocket service for real-time updates
  */
 import { getDesktopApiToken } from '../utils/runtimeConfig';
+import { acceptLiveProofRunActivity } from '../utils/proofRunActivityRecovery';
 
 class WebSocketService {
   constructor() {
@@ -63,9 +64,13 @@ class WebSocketService {
       try {
         const message = JSON.parse(event.data);
         // Include server timestamp in the data if available
-        const dataWithTimestamp = message.timestamp 
+        const dataWithTimestamp = message.timestamp
           ? { ...message.data, _serverTimestamp: message.timestamp }
           : message.data;
+        // Proof-run activity may already have been replayed after a resume.
+        if (!acceptLiveProofRunActivity(dataWithTimestamp)) {
+          return;
+        }
         this.emit(message.type, dataWithTimestamp);
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);

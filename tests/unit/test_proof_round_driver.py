@@ -18,6 +18,9 @@ class ProofRoundPolicyTests(unittest.TestCase):
 
         self.assertEqual(one_round.max_rounds, 1)
         self.assertFalse(one_round.holds_source_reservation)
+        self.assertFalse(one_round.continues_after_empty_round)
+        self.assertTrue(automatic.continues_after_empty_round)
+        self.assertFalse(continuous.continues_after_empty_round)
         self.assertEqual(one_round.trigger_for_round("retry", 2), "retry")
         self.assertEqual(automatic.max_rounds, 4)
         self.assertTrue(automatic.holds_source_reservation)
@@ -52,7 +55,7 @@ class ProofRoundPolicyTests(unittest.TestCase):
 
 
 class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
-    async def test_multi_round_holds_one_reservation_and_stops_on_no_candidates(self):
+    async def test_multi_round_holds_one_reservation_and_runs_every_round(self):
         calls = []
         reserves = []
         releases = []
@@ -88,13 +91,14 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(await driver.run(), "complete")
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
         self.assertEqual(reserves, [("paper", "paper-1")])
         self.assertEqual(releases, [("paper", "paper-1", "owner-token")])
         self.assertTrue(all(call[3] == "owner-token" for call in calls))
-        self.assertEqual(calls[2][1], "automatic_round_3")
+        self.assertEqual(calls[3][1], "automatic_round_4")
         self.assertIn("Round 1:", calls[1][2])
         self.assertIn("Round 2:", calls[2][2])
+        self.assertIn("Round 3: 0/0 candidates verified", calls[3][2])
 
     async def test_one_round_does_not_reserve(self):
         calls = []
@@ -126,7 +130,7 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await driver.run(), "complete")
         self.assertEqual(calls, [(1, "retry", "", "")])
 
-    async def test_only_valid_no_candidates_outcome_stops_follow_up_rounds(self):
+    async def test_automatic_policy_continues_past_completed_empty_checkpoints(self):
         calls = []
 
         async def reserve(*_args):
@@ -144,6 +148,39 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
             source_type="brainstorm",
             source_id="topic-1",
             base_trigger="automatic",
+            execute_round=execute,
+            should_stop=lambda: False,
+            reserve_source=reserve,
+            release_source=release,
+        )
+
+        self.assertEqual(await driver.run(), "complete")
+        self.assertEqual(calls, [1, 2, 3, 4])
+
+    async def test_continuous_policy_completes_on_terminal_empty_round(self):
+        calls = []
+
+        async def reserve(*_args):
+            return "owner-token"
+
+        async def release(*_args):
+            return None
+
+        async def execute(index, _trigger, _prior_results, _token):
+            calls.append(index)
+            return "completed", SimpleNamespace(
+                verified_count=0,
+                total_candidates=0,
+                novel_count=0,
+                results=[],
+                had_error=False,
+            )
+
+        driver = ProofRoundDriver(
+            policy=ContinuousPruningPolicy(),
+            source_type="paper",
+            source_id="paper-1",
+            base_trigger="manual",
             execute_round=execute,
             should_stop=lambda: False,
             reserve_source=reserve,

@@ -12,7 +12,12 @@ import aiofiles
 from backend.api.routes import websocket
 from backend.shared.models import CompilerStartRequest, CompilerState, CritiqueRequest, ModelConfig
 from backend.shared.config import system_config
+from backend.shared.credential_locks import wolfram_credential_mutation
 from backend.shared.embedding_readiness import require_embedding_provider_ready
+from backend.shared.lean4_client import (
+    LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+    LeanWorkspaceRepairRequiredError,
+)
 from backend.shared.token_tracker import token_tracker
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.log_redaction import redact_log_text
@@ -172,6 +177,18 @@ async def _append_proof_to_saved_compiler_paper(output_path: Path, proof_record)
         return False
 
 
+async def _broadcast_lean_workspace_repair(
+    error: LeanWorkspaceRepairRequiredError,
+    stopped_subject: str,
+) -> None:
+    """Tell the user a background proof check stopped because Lean cannot run."""
+    logger.error("%s stopped because Lean 4 needs repair: %s", stopped_subject, error)
+    await websocket.broadcast_event(
+        LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
+        error.to_repair_event(workflow_mode="compiler", stopped_subject=stopped_subject),
+    )
+
+
 async def _run_saved_compiler_paper_proof_check(
     full_content: str,
     source_title: str,
@@ -236,31 +253,34 @@ async def _run_saved_compiler_paper_proof_check(
         )
 
         stage = ProofVerificationStage()
-        await stage.run(
-            content=proof_content,
-            source_type="paper",
-            source_id=source_id,
-            user_prompt=manual_proof_database.inject_into_prompt(
-                str(proof_config.get("user_prompt") or ""),
-                requesting_run_id=await manual_proof_database.get_or_create_active_run_id(),
-            ),
-            submitter_model=submitter_model,
-            submitter_context=submitter_config.context_window,
-            submitter_max_tokens=submitter_config.max_output_tokens,
-            validator_model=validator_model,
-            validator_context=validator_config.context_window,
-            validator_max_tokens=validator_config.max_output_tokens,
-            broadcast_fn=websocket.broadcast_event,
-            novel_proofs_db=manual_proof_database,
-            source_title=source_title,
-            role_suffix_override=role_suffix,
-            trigger="manual_compiler_save",
-            source_reserved=source_reserved,
-            source_reservation_token=source_reservation_token,
-            release_source_on_exit=False,
-            append_to_source=False,
-            append_proof_callback=lambda proof: _append_proof_to_saved_compiler_paper(output_path, proof),
-        )
+        try:
+            await stage.run(
+                content=proof_content,
+                source_type="paper",
+                source_id=source_id,
+                user_prompt=manual_proof_database.inject_into_prompt(
+                    str(proof_config.get("user_prompt") or ""),
+                    requesting_run_id=await manual_proof_database.get_or_create_active_run_id(),
+                ),
+                submitter_model=submitter_model,
+                submitter_context=submitter_config.context_window,
+                submitter_max_tokens=submitter_config.max_output_tokens,
+                validator_model=validator_model,
+                validator_context=validator_config.context_window,
+                validator_max_tokens=validator_config.max_output_tokens,
+                broadcast_fn=websocket.broadcast_event,
+                novel_proofs_db=manual_proof_database,
+                source_title=source_title,
+                role_suffix_override=role_suffix,
+                trigger="manual_compiler_save",
+                source_reserved=source_reserved,
+                source_reservation_token=source_reservation_token,
+                release_source_on_exit=False,
+                append_to_source=False,
+                append_proof_callback=lambda proof: _append_proof_to_saved_compiler_paper(output_path, proof),
+            )
+        except LeanWorkspaceRepairRequiredError as exc:
+            await _broadcast_lean_workspace_repair(exc, "Saved-paper proof check")
     finally:
         await _release_pre_reserved_source(
             "paper",
@@ -404,27 +424,30 @@ async def _run_compiler_aggregator_proof_check(
             if requesting_run_id
             else manual_proof_database.inject_into_prompt(request.compiler_prompt)
         )
-        await stage.run(
-            content=f"PART 1 AGGREGATOR DATABASE:\n{content}",
-            source_type="brainstorm",
-            source_id=source_id,
-            user_prompt=proof_user_prompt,
-            submitter_model=request.high_param_model,
-            submitter_context=request.high_param_context_size,
-            submitter_max_tokens=request.high_param_max_output_tokens,
-            validator_model=request.validator_model,
-            validator_context=request.validator_context_size,
-            validator_max_tokens=request.validator_max_output_tokens,
-            broadcast_fn=websocket.broadcast_event,
-            novel_proofs_db=manual_proof_database,
-            source_title=request.compiler_prompt or "Compiler Aggregator Database",
-            role_suffix_override=role_suffix,
-            trigger="manual_compiler_aggregator",
-            source_reserved=source_reserved,
-            source_reservation_token=source_reservation_token,
-            append_to_source=False,
-            append_proof_callback=append_proof_to_manual_shared_training,
-        )
+        try:
+            await stage.run(
+                content=f"PART 1 AGGREGATOR DATABASE:\n{content}",
+                source_type="brainstorm",
+                source_id=source_id,
+                user_prompt=proof_user_prompt,
+                submitter_model=request.high_param_model,
+                submitter_context=request.high_param_context_size,
+                submitter_max_tokens=request.high_param_max_output_tokens,
+                validator_model=request.validator_model,
+                validator_context=request.validator_context_size,
+                validator_max_tokens=request.validator_max_output_tokens,
+                broadcast_fn=websocket.broadcast_event,
+                novel_proofs_db=manual_proof_database,
+                source_title=request.compiler_prompt or "Compiler Aggregator Database",
+                role_suffix_override=role_suffix,
+                trigger="manual_compiler_aggregator",
+                source_reserved=source_reserved,
+                source_reservation_token=source_reservation_token,
+                append_to_source=False,
+                append_proof_callback=append_proof_to_manual_shared_training,
+            )
+        except LeanWorkspaceRepairRequiredError as exc:
+            await _broadcast_lean_workspace_repair(exc, "Compiler proof verification")
         await websocket.broadcast_event(
             "compiler_proof_check_complete",
             {"source_type": "brainstorm", "source_id": source_id},
@@ -1562,6 +1585,7 @@ async def get_compiler_default_critique_prompt():
 # =============================================================================
 
 @router.post("/wolfram/set-api-key")
+@wolfram_credential_mutation
 async def set_wolfram_api_key(request: dict):
     """
     Set and validate Wolfram Alpha API key.
@@ -1572,8 +1596,16 @@ async def set_wolfram_api_key(request: dict):
     Returns:
         Success status and validation result
     """
-    from backend.shared.secret_store import SecretStoreError, store_wolfram_api_key
-    from backend.shared.wolfram_alpha_client import initialize_wolfram_client, get_wolfram_client
+    from backend.shared.secret_store import (
+        SecretStoreError,
+        load_wolfram_api_key,
+        store_wolfram_api_key,
+    )
+    from backend.shared.wolfram_alpha_client import (
+        ToolResultStatus,
+        WolframAlphaClient,
+        replace_wolfram_client,
+    )
     
     try:
         api_key = request.get("api_key", "").strip()
@@ -1581,30 +1613,51 @@ async def set_wolfram_api_key(request: dict):
         if not api_key:
             raise HTTPException(status_code=400, detail="API key is required")
         
-        # Initialize client
-        initialize_wolfram_client(api_key)
-        
-        # Test connection with simple query
-        client = get_wolfram_client()
-        test_result = await client.query("What is 2+2?")
-        
-        if test_result is None:
+        client = WolframAlphaClient(api_key)
+        try:
+            validation = await client.query_result("What is 2+2?")
+        finally:
+            await client.close()
+
+        if validation.status == ToolResultStatus.REPAIR_REQUIRED:
             raise HTTPException(
                 status_code=400,
-                detail="Failed to connect to Wolfram Alpha - invalid API key or network error"
+                detail=validation.safe_error or "Wolfram Alpha rejected this App ID.",
             )
+        if validation.status == ToolResultStatus.RATE_LIMITED:
+            raise HTTPException(
+                status_code=429,
+                detail=validation.safe_error or "Wolfram Alpha rate limit reached. Try again later.",
+                headers=(
+                    {"Retry-After": str(validation.retry_after_seconds)}
+                    if validation.retry_after_seconds is not None
+                    else None
+                ),
+            )
+        if validation.status == ToolResultStatus.RETRYABLE_FAILURE:
+            raise HTTPException(
+                status_code=502,
+                detail=validation.safe_error or "Could not reach Wolfram Alpha to validate this App ID.",
+            )
+        if validation.status != ToolResultStatus.SUCCESS:
+            raise HTTPException(
+                status_code=502,
+                detail="Wolfram Alpha did not return a validation result. The App ID was not saved.",
+            )
+        test_result = validation.content
         
-        # Store in system config
-        system_config.wolfram_alpha_api_key = api_key
-        system_config.wolfram_alpha_enabled = True
-
         if system_config.generic_mode:
             logger.info("Generic mode active - keeping Wolfram Alpha API key in runtime memory only")
             success_message = "Wolfram Alpha API key validated and loaded into runtime memory"
         else:
-            # Persist to secure backend storage so the key survives restarts.
             store_wolfram_api_key(api_key)
+            if load_wolfram_api_key() != api_key:
+                raise SecretStoreError("Stored Wolfram Alpha credential could not be verified")
             success_message = "Wolfram Alpha API key validated successfully"
+
+        await replace_wolfram_client(api_key)
+        system_config.wolfram_alpha_api_key = api_key
+        system_config.wolfram_alpha_enabled = True
         
         logger.info("Wolfram Alpha API key set and validated")
         
@@ -1625,6 +1678,7 @@ async def set_wolfram_api_key(request: dict):
 
 
 @router.delete("/wolfram/api-key")
+@wolfram_credential_mutation
 async def clear_wolfram_api_key():
     """
     Clear Wolfram Alpha API key.
@@ -1636,19 +1690,16 @@ async def clear_wolfram_api_key():
     from backend.shared.wolfram_alpha_client import clear_wolfram_client
     
     try:
-        # Clear client
-        clear_wolfram_client()
-        
-        # Clear from config
-        system_config.wolfram_alpha_api_key = None
-        system_config.wolfram_alpha_enabled = False
-
         if system_config.generic_mode:
             logger.info("Generic mode active - cleared in-memory Wolfram Alpha API key")
             success_message = "Wolfram Alpha API key cleared from runtime memory"
         else:
             clear_persisted_wolfram_api_key()
             success_message = "Wolfram Alpha API key cleared"
+
+        await clear_wolfram_client()
+        system_config.wolfram_alpha_api_key = None
+        system_config.wolfram_alpha_enabled = False
         
         logger.info("Wolfram Alpha API key cleared")
         

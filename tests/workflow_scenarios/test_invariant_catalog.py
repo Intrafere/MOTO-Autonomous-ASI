@@ -15,6 +15,9 @@ from tests.workflow_harness.actions import (
     emit_frontend_scoped_event,
     emit_registered_proof_verified,
     exercise_candidate_list_validator_contract,
+    exercise_current_product_laws,
+    exercise_live_activity_assurance,
+    exercise_overflow_lifecycle_contracts,
     exercise_proof_pruning_and_continuous_contracts,
     force_paper_writing,
     prepare_prompt_context,
@@ -70,6 +73,8 @@ PLAN2_INVARIANT_IDS = {
     "proof_runtime.hosted_proof_settings_unavailable",
     "proof_runtime.truncation_is_attempt_failure",
     "proof_runtime.candidate_list_validator_gate",
+    "proof_runtime.candidate_list_autonomous_restart_owned",
+    "proof_runtime.candidate_list_manual_process_local",
     "outputs.at_least_one_output_enabled",
     "outputs.proofs_only_no_paper_phase",
     "outputs.papers_only_skips_proof_work",
@@ -93,6 +98,8 @@ PLAN2_INVARIANT_IDS = {
     "events.context_overflow_persists_across_reload",
     "events.context_overflow_terminal_stop_once",
     "events.proof_context_overflow_nonfatal",
+    "events.autonomous_mandatory_overflow_checkpoint_preserved",
+    "events.continuous_manual_overflow_terminal_after_drain",
     "events.proof_verified_after_registration",
     "api.hosted_desktop_only_routes_unavailable",
     "prompt.user_prompt_direct_injected",
@@ -112,6 +119,25 @@ PLAN2_INVARIANT_IDS = {
     "proof_loop.continuous_explicit_ownership",
     "proof_loop.automatic_round_policy_preserved",
     "proof_pruning.occurrence_scope_isolated",
+    "solution_path.activation_review_fenced",
+    "proof_competition.secondary_after_primary_exhaustion",
+    "provider.exact_role_and_cooldown_scope",
+    "feedback_projection.newest_five_whole",
+    "bulk_mutation.atomic_revision_fenced",
+    "runtime_root.single_owner_bound_paths",
+    "proof_run.identity_generation_fenced",
+    "proof_framing.allowed_outputs_gate",
+    "sleep.unique_owner_released",
+    "supercharge_creativity.routing_separation",
+    "proof_novelty.group_atomic_same_run",
+    "leanoj.parent_control_generation_fences_children",
+    "live_activity.provider_retry_each_wait_visible",
+    "live_activity.provider_retry_identity_stable",
+    "live_activity.provider_retry_secret_safe",
+    "live_activity.provider_retry_persists_reload",
+    "live_activity.all_retry_wait_sources_accounted",
+    "live_activity.provider_error_route_identity",
+    "live_activity.provider_error_sources_route_attributed",
 }
 
 
@@ -136,6 +162,12 @@ SCENARIOS_BY_INVARIANT = {
     "proof_runtime.hosted_proof_settings_unavailable": [try_hosted_desktop_only_route],
     "proof_runtime.truncation_is_attempt_failure": [simulate_provider_output_truncation],
     "proof_runtime.candidate_list_validator_gate": [
+        exercise_candidate_list_validator_contract,
+    ],
+    "proof_runtime.candidate_list_autonomous_restart_owned": [
+        exercise_candidate_list_validator_contract,
+    ],
+    "proof_runtime.candidate_list_manual_process_local": [
         exercise_candidate_list_validator_contract,
     ],
     "outputs.at_least_one_output_enabled": [start_autonomous_no_outputs],
@@ -221,7 +253,13 @@ SCENARIOS_BY_INVARIANT = {
     "events.context_overflow_route_identity": [emit_context_overflow_contract_events],
     "events.context_overflow_persists_across_reload": [emit_context_overflow_contract_events],
     "events.context_overflow_terminal_stop_once": [emit_context_overflow_contract_events],
-    "events.proof_context_overflow_nonfatal": [emit_context_overflow_contract_events],
+    "events.proof_context_overflow_nonfatal": [exercise_overflow_lifecycle_contracts],
+    "events.autonomous_mandatory_overflow_checkpoint_preserved": [
+        exercise_overflow_lifecycle_contracts
+    ],
+    "events.continuous_manual_overflow_terminal_after_drain": [
+        exercise_overflow_lifecycle_contracts
+    ],
     "events.proof_verified_after_registration": [
         start_autonomous_papers_and_proofs,
         emit_registered_proof_verified,
@@ -262,6 +300,35 @@ SCENARIOS_BY_INVARIANT = {
     "proof_pruning.occurrence_scope_isolated": [
         exercise_proof_pruning_and_continuous_contracts
     ],
+    **{
+        invariant_id: [exercise_live_activity_assurance]
+        for invariant_id in (
+            "live_activity.provider_retry_each_wait_visible",
+            "live_activity.provider_retry_identity_stable",
+            "live_activity.provider_retry_secret_safe",
+            "live_activity.provider_retry_persists_reload",
+            "live_activity.all_retry_wait_sources_accounted",
+            "live_activity.provider_error_route_identity",
+            "live_activity.provider_error_sources_route_attributed",
+        )
+    },
+    **{
+        invariant_id: [exercise_current_product_laws]
+        for invariant_id in (
+            "solution_path.activation_review_fenced",
+            "proof_competition.secondary_after_primary_exhaustion",
+            "provider.exact_role_and_cooldown_scope",
+            "feedback_projection.newest_five_whole",
+            "bulk_mutation.atomic_revision_fenced",
+            "runtime_root.single_owner_bound_paths",
+            "proof_run.identity_generation_fenced",
+            "proof_framing.allowed_outputs_gate",
+            "sleep.unique_owner_released",
+            "supercharge_creativity.routing_separation",
+            "proof_novelty.group_atomic_same_run",
+            "leanoj.parent_control_generation_fences_children",
+        )
+    },
 }
 
 
@@ -282,7 +349,11 @@ def _make_invariant_violation(model: WorkflowModel, invariant_id: str) -> None:
         model.hosted_desktop_route_unavailable = False
     elif invariant_id == "proof_runtime.truncation_is_attempt_failure":
         model.truncation_failures = model.provider_pause_from_truncation = 1
-    elif invariant_id == "proof_runtime.candidate_list_validator_gate":
+    elif invariant_id in {
+        "proof_runtime.candidate_list_validator_gate",
+        "proof_runtime.candidate_list_autonomous_restart_owned",
+        "proof_runtime.candidate_list_manual_process_local",
+    }:
         model.candidate_list_contract_exercised = True
         model.candidate_list_gate_before_proof_cost = False
     elif invariant_id == "outputs.at_least_one_output_enabled":
@@ -341,11 +412,15 @@ def _make_invariant_violation(model: WorkflowModel, invariant_id: str) -> None:
     elif invariant_id == "events.context_overflow_route_identity":
         model.events.append(WorkflowEvent("context_overflow_error", {}))
     elif invariant_id == "events.context_overflow_persists_across_reload":
-        model.events.append(WorkflowEvent("context_overflow_error", {"fatal": True}))
+        model.events.append(WorkflowEvent("context_overflow_error", {"fatal": True, "workflow_mode": "autonomous", "scope": "checkpoint"}))
     elif invariant_id == "events.context_overflow_terminal_stop_once":
         model.events.append(WorkflowEvent("context_overflow_error", {"fatal": True}))
     elif invariant_id == "events.proof_context_overflow_nonfatal":
-        model.events.append(WorkflowEvent("proof_context_overflow", {"fatal": True}))
+        model.events.append(WorkflowEvent("proof_context_overflow", {"scope": "candidate", "candidate_id": "candidate-1", "fatal": True}))
+    elif invariant_id == "events.autonomous_mandatory_overflow_checkpoint_preserved":
+        model.events.append(WorkflowEvent("context_overflow_error", {"workflow_mode": "autonomous", "scope": "checkpoint", "fatal": True, "siblings_drained": True}))
+    elif invariant_id == "events.continuous_manual_overflow_terminal_after_drain":
+        model.events.append(WorkflowEvent("context_overflow_error", {"scope": "continuous_manual", "fatal": True, "siblings_drained": False, "terminal_after_drain": True}))
     elif invariant_id == "events.proof_verified_after_registration":
         model.events.append(WorkflowEvent("proof_verified", {"proof_id": "missing-proof"}))
     elif invariant_id == "api.hosted_desktop_only_routes_unavailable":
@@ -383,6 +458,58 @@ def _make_invariant_violation(model: WorkflowModel, invariant_id: str) -> None:
     elif invariant_id == "proof_pruning.occurrence_scope_isolated":
         model.canonical_occurrences = {"canonical": {"proof-1", "proof-2"}}
         model.pruned_proof_occurrences = {"proof-1", "proof-2"}
+    elif invariant_id in {
+        "live_activity.provider_retry_each_wait_visible",
+    }:
+        model.provider_retry_waits = 2
+        model.provider_retry_attempts = [1]
+    elif invariant_id == "live_activity.all_retry_wait_sources_accounted":
+        model.retry_wait_inventory_complete = False
+        model.retry_wait_inventory_assured = False
+    elif invariant_id == "live_activity.provider_retry_identity_stable":
+        model.provider_retry_waits = 2
+        model.provider_retry_attempts = [1, 2]
+        model.provider_retry_event_ids = {"duplicate"}
+        model.provider_retry_correlation_ids = {"correlation-1", "correlation-2"}
+    elif invariant_id == "live_activity.provider_retry_secret_safe":
+        model.provider_retry_secret_leaks = 1
+    elif invariant_id == "live_activity.provider_retry_persists_reload":
+        model.provider_retry_waits = 1
+        model.provider_retry_attempts = [1]
+        model.provider_retry_visible_after_reload = False
+    elif invariant_id == "live_activity.provider_error_route_identity":
+        model.events.append(
+            WorkflowEvent(
+                "provider_retry_cooldown",
+                {
+                    "workflow_mode": "autonomous",
+                    "scope": "autonomous",
+                    "phase": "idle",
+                    "role_id": "aggregator_submitter_2",
+                    "provider": "openrouter",
+                    "message": "OpenRouter API call will retry after a 2-second cooldown (retry 1).",
+                },
+            )
+        )
+    elif invariant_id == "live_activity.provider_error_sources_route_attributed":
+        model.provider_error_inventory_complete = False
+        model.provider_error_inventory_route_attributed = False
+    elif invariant_id in {
+        "solution_path.activation_review_fenced",
+        "proof_competition.secondary_after_primary_exhaustion",
+        "provider.exact_role_and_cooldown_scope",
+        "feedback_projection.newest_five_whole",
+        "bulk_mutation.atomic_revision_fenced",
+        "runtime_root.single_owner_bound_paths",
+        "proof_run.identity_generation_fenced",
+        "proof_framing.allowed_outputs_gate",
+        "sleep.unique_owner_released",
+        "supercharge_creativity.routing_separation",
+        "proof_novelty.group_atomic_same_run",
+        "leanoj.parent_control_generation_fences_children",
+    }:
+        model.law_observations.add(invariant_id)
+        model.law_violations.add(invariant_id)
     else:
         raise AssertionError(f"No negative fixture for {invariant_id}")
 

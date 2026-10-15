@@ -1,0 +1,65 @@
+{
+  "action_ids": [
+    "exercise_overflow_lifecycle_contracts"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "events.proof_context_overflow_nonfatal",
+    "events.autonomous_mandatory_overflow_checkpoint_preserved",
+    "events.continuous_manual_overflow_terminal_after_drain"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {
+    "final_mode": "none",
+    "final_phase": "idle"
+  },
+  "evidence": [
+    "autonomous_mandatory_overflow",
+    "candidate_local_overflow",
+    "context_overflow",
+    "continuous_manual_overflow",
+    "overflow_lifecycle"
+  ],
+  "exercised_invariants": [
+    "events.autonomous_mandatory_overflow_checkpoint_preserved",
+    "events.continuous_manual_overflow_terminal_after_drain",
+    "events.proof_context_overflow_nonfatal"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "proof_runtime_gating",
+    "continuous_proof_loop"
+  ],
+  "invariants": [
+    "events.proof_context_overflow_nonfatal",
+    "events.autonomous_mandatory_overflow_checkpoint_preserved",
+    "events.continuous_manual_overflow_terminal_after_drain"
+  ],
+  "observed_fields": [
+    "continuous_proof_loop",
+    "proof_runtime_gating",
+    "runtime_exclusivity",
+    "websocket_api_contracts",
+    "workflow_filesystem_state"
+  ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
+  "replay": [
+    "exercise_overflow_lifecycle_contracts()"
+  ],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "generated_overflow_lifecycle_matrix_seed_29",
+  "schema_version": 2,
+  "seed": 29,
+  "source_identity": "workflow-source-v1:d3c3ce0d94cb3d3f09a4d63610229453afef6aa0e2f1cff358327665fe3404fe",
+  "target_artifact": "targets/generated_overflow_lifecycle_matrix.json",
+  "target_id": "generated_overflow_lifecycle_matrix",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
+}
