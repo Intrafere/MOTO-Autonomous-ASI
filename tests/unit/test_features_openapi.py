@@ -16,6 +16,8 @@ EXPECTED_FEATURE_FIELDS = {
     "openai_codex_oauth_available",
     "xai_grok_oauth_available",
     "sakana_fugu_available",
+    "kimi_code_available",
+    "subscription_providers",
     "syntheticlib_product_state",
 }
 
@@ -48,12 +50,38 @@ def test_features_response_rejects_unknown_fields() -> None:
         "openai_codex_oauth_available": True,
         "xai_grok_oauth_available": True,
         "sakana_fugu_available": True,
+        "kimi_code_available": True,
+        "subscription_providers": [],
         "syntheticlib_product_state": "coming_soon",
         "unexpected": "not part of the stable contract",
     }
 
     with pytest.raises(ValidationError):
         FeaturesResponse.model_validate(payload)
+
+
+@pytest.mark.parametrize("generic_mode", [False, True])
+def test_features_lists_every_cloud_subscription_provider(generic_mode: bool) -> None:
+    from unittest import mock
+
+    from backend.api.routes import features
+    from backend.shared.subscription_providers.metadata import CLOUD_PROVIDERS
+
+    import asyncio
+
+    with mock.patch.object(features.system_config, "generic_mode", generic_mode):
+        payload = asyncio.run(features.get_features())
+    FeaturesResponse.model_validate(payload)
+    listed = {entry["id"]: entry for entry in payload["subscription_providers"]}
+    assert set(listed) == {provider.provider_id for provider in CLOUD_PROVIDERS}
+    for provider in CLOUD_PROVIDERS:
+        assert payload[provider.capability_flag] is (not generic_mode)
+        assert listed[provider.provider_id] == {
+            "id": provider.provider_id,
+            "label": provider.label,
+            "auth_kind": provider.auth_kind,
+            "available": not generic_mode,
+        }
 
 
 def test_features_openapi_exposes_syntheticlib_lifecycle_enum() -> None:

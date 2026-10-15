@@ -48,6 +48,11 @@ support graph.
 - Run `npm run test:deep` locally after every major build and after substantial orchestration,
   persistence, provider, proof, prompt/RAG, event-contract, runtime-root, or cross-mode
   change. It is additive: run `npm test` separately for normal backend/frontend coverage.
+- Before any push, run `npm run test:github`: every `ci.yml` check, the post-merge release
+  evidence, and `npm run test:codeql` (GitHub's CodeQL actions/python/javascript analyses,
+  security-extended suite), failing on any alert `origin/main` lacks. CodeQL default setup only
+  scans pull requests into `main`; CI's `codeql-new-alerts` job repeats this on `dev/*` pushes.
+  Never call a branch ready while a check failed or was skipped.
 - Regenerate deterministic cross-field artifacts with
   `python -m tests.workflow_cross_field.artifacts` when their inputs change, then verify
   that the checked-in projection is clean.

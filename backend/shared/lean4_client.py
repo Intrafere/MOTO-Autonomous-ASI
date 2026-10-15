@@ -125,9 +125,10 @@ _PLACEHOLDER_REJECTION_PREFIX = "PROOF REJECTED: PLACEHOLDER USED"
 _MATHLIB_CACHE_ARCHIVE_RE = re.compile(r"\(([^()\r\n]+?\.ltar)\)")
 _LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
 _OLEAN_OBJECT_FILE_MISSING_RE = re.compile(
-    r"object file ['\"].*?\.olean['\"] of module .*? does not exist",
+    r"object file ['\"](?P<path>[^'\"\r\n]*?\.olean)['\"] of module .*? does not exist",
     re.IGNORECASE,
 )
+_LAKE_BUILD_LIB_MARKER = "/.lake/build/lib/lean/"
 _LEAN_WORKSPACE_ERROR_MARKERS: tuple[str, ...] = (
     "imports are out of date",
     "invalid or corrupt .olean",
@@ -138,6 +139,32 @@ _LEAN_WORKSPACE_ERROR_MARKERS: tuple[str, ...] = (
 _LEAN_WORKSPACE_COMBINED_MARKERS: tuple[tuple[str, ...], ...] = (
     ("no such file or directory", ".lake"),
 )
+
+# Git refuses to check out a package whose working tree a previous checkout
+# left half-written (for example when the disk filled up mid-update).
+_INTERRUPTED_CHECKOUT_MARKERS: tuple[str, ...] = (
+    "would be overwritten by checkout",
+    "commit your changes or stash them",
+    "please move or remove them",
+    "index.lock",
+)
+
+# MOTO keeps its own Mathlib download cache so pruning it never touches the
+# shared cache other Lean projects on the machine may rely on.
+_MOTO_MATHLIB_CACHE_DIRNAME = ".moto_mathlib_cache"
+
+
+def _shared_mathlib_cache_dir() -> Optional[Path]:
+    """Mathlib's default download cache, resolved the way Mathlib's `cache` tool does."""
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache:
+        return Path(xdg_cache) / "mathlib"
+    if os.name == "nt":
+        drive, home_path = os.environ.get("HOMEDRIVE"), os.environ.get("HOMEPATH")
+        home = f"{drive}{home_path}" if drive and home_path else None
+    else:
+        home = os.environ.get("HOME")
+    return Path(home) / ".cache" / "mathlib" if home else None
 
 # Windows reports over-long paths as "path not found" (os error 3) or
 # "filename too long" (os error 206) when Mathlib's cache unpacks.
@@ -233,6 +260,36 @@ _BAD_IMPORT_RE = re.compile(
     r"(?:bad import|unknown module|could not find module)[^\n]*",
     re.IGNORECASE,
 )
+
+
+def _olean_module_source_is_missing(olean_path: str) -> bool:
+    """True when a missing ``.olean`` belongs to a module with no ``.lean`` source.
+
+    Lean reports an import of a module that no longer exists the same way as a
+    missing compiled file. When the owning package is present but has no source
+    for the module, the import is wrong; the workspace is fine. A path outside a
+    Lake build directory, or a missing package, stays an infrastructure problem.
+    """
+    normalized = olean_path.replace("\\", "/")
+    marker_index = normalized.find(_LAKE_BUILD_LIB_MARKER)
+    if marker_index < 0:
+        return False
+    package_root = Path(normalized[:marker_index])
+    module_path = normalized[marker_index + len(_LAKE_BUILD_LIB_MARKER):]
+    if not module_path.lower().endswith(".olean") or not package_root.is_dir():
+        return False
+    return not (package_root / f"{module_path[:-len('.olean')]}.lean").exists()
+
+
+def _has_bad_import(output: str) -> bool:
+    """True when Lean rejected an import of a module that does not exist."""
+    text = output or ""
+    if _BAD_IMPORT_RE.search(text):
+        return True
+    missing_oleans = [match.group("path") for match in _OLEAN_OBJECT_FILE_MISSING_RE.finditer(text)]
+    return bool(missing_oleans) and all(
+        _olean_module_source_is_missing(path) for path in missing_oleans
+    )
 _BAD_IMPORT_HINT = (
     "HINT: One or more `import` statements reference Mathlib modules that do not "
     "exist in the current Mathlib version. Mathlib4 frequently reorganises its "
@@ -354,6 +411,7 @@ class Lean4Client:
         # relaunching, so it latches for the life of this process.
         self._workspace_path_problem: Optional[WorkspacePathProblem] = None
         self._lean_version = ""
+        self._shared_cache_noted = False
 
     @classmethod
     def _get_lean_execution_lock(cls) -> asyncio.Lock:
@@ -541,6 +599,36 @@ class Lean4Client:
         """Return the cache path used for the local Mathlib declaration index."""
         return self.workspace_dir / ".moto_mathlib_index.json"
 
+    @property
+    def mathlib_cache_dir(self) -> Path:
+        """Mathlib download cache used by this workspace's `lake exe cache` calls.
+
+        An operator-set ``MATHLIB_CACHE_DIR`` is honored; otherwise MOTO uses a
+        folder it owns so pruning old downloads never touches other projects.
+        """
+        operator_dir = os.environ.get("MATHLIB_CACHE_DIR", "").strip()
+        if operator_dir:
+            return Path(operator_dir)
+        return self.workspace_dir / _MOTO_MATHLIB_CACHE_DIRNAME
+
+    def _owns_mathlib_cache_dir(self) -> bool:
+        return self.mathlib_cache_dir == self.workspace_dir / _MOTO_MATHLIB_CACHE_DIRNAME
+
+    def _note_shared_mathlib_cache(self) -> None:
+        """Point once per process at the shared download cache older MOTO builds filled."""
+        if self._shared_cache_noted or not self._owns_mathlib_cache_dir():
+            return
+        self._shared_cache_noted = True
+        shared_dir = _shared_mathlib_cache_dir()
+        if shared_dir is not None and shared_dir.is_dir():
+            logger.info(
+                "MOTO now keeps Mathlib downloads in %s and prunes old ones automatically. "
+                "Older MOTO builds stored every Mathlib version they downloaded in the shared "
+                "folder %s; delete that folder to free its space unless another Lean project uses it.",
+                self.mathlib_cache_dir,
+                shared_dir,
+            )
+
     def get_mathlib_commit(self) -> str:
         """Best-effort lookup of the pinned Mathlib source revision."""
         manifest_path = self.workspace_dir / "lake-manifest.json"
@@ -586,6 +674,7 @@ class Lean4Client:
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "MATHLIB_CACHE_DIR": str(self.mathlib_cache_dir)},
         )
         try:
             if timeout is not None:
@@ -642,7 +731,7 @@ class Lean4Client:
 
         # A "bad import" is a proof-level error (stale/renamed Mathlib module),
         # not infrastructure failure. Short-circuit to avoid the repair loop.
-        if _BAD_IMPORT_RE.search(text):
+        if _has_bad_import(text):
             return False
 
         if bool(_OLEAN_OBJECT_FILE_MISSING_RE.search(text)):
@@ -722,6 +811,7 @@ class Lean4Client:
             "url has changed" in text
             or "exited with code 128" in text
             or ("delete" in text and "packages" in text and "manually" in text)
+            or any(marker in text for marker in _INTERRUPTED_CHECKOUT_MARKERS)
         )
 
     def _wipe_lake_directory(self) -> None:
@@ -748,6 +838,62 @@ class Lean4Client:
             func(path)
         except OSError as exc:
             logger.debug("Failed to recover rmtree operation for %s: %s", path, exc)
+
+    async def _restore_interrupted_package_checkouts(self) -> bool:
+        """Undo half-applied git checkouts left in the workspace's Lake packages.
+
+        A checkout cut short (for example by a full disk) leaves modified and
+        untracked files that make every later checkout fail. Resetting to the
+        recorded commit keeps the download; ignored build output (`.lake`) is
+        kept. Returns False when a package could not be restored.
+        """
+        packages_dir = self.workspace_dir / ".lake" / "packages"
+        if not packages_dir.is_dir():
+            return True
+        package_dirs = sorted(path for path in packages_dir.iterdir() if (path / ".git").exists())
+        git_cmd = shutil.which("git")
+        if not package_dirs or not git_cmd:
+            return True
+        status_args = [git_cmd, "status", "--porcelain", "--untracked-files=normal"]
+        for package_dir in package_dirs:
+            rc, stdout, stderr = await self._run_process(status_args, cwd=package_dir)
+            if rc == 0 and not stdout.strip():
+                continue
+            logger.warning(
+                "Lean 4 package %s has an interrupted git checkout; restoring it. Details: %s",
+                package_dir.name,
+                (stderr or stdout).strip()[:500],
+            )
+            for repair_args in (
+                [git_cmd, "reset", "--hard", "--quiet", "HEAD"],
+                [git_cmd, "clean", "-fd", "--quiet"],
+                status_args,
+            ):
+                rc, stdout, stderr = await self._run_process(repair_args, cwd=package_dir)
+                if rc != 0:
+                    logger.warning(
+                        "Could not restore Lean 4 package %s: %s",
+                        package_dir.name,
+                        (stderr or stdout).strip()[:500],
+                    )
+                    return False
+            if stdout.strip():
+                return False
+        return True
+
+    async def _prune_mathlib_cache(self, lake_cmd: str) -> None:
+        """Delete downloaded Mathlib archives the installed version no longer uses."""
+        if not self._owns_mathlib_cache_dir():
+            return
+        rc, stdout, stderr = await self._run_process(
+            [lake_cmd, "exe", "cache", "clean"],
+            cwd=self.workspace_dir,
+        )
+        if rc != 0:
+            logger.warning(
+                "Could not prune old Mathlib downloads (proof checking is unaffected): %s",
+                (stderr or stdout).strip()[:500],
+            )
 
     async def _repair_workspace_after_infrastructure_error(self, output: str) -> bool:
         logger.warning(
@@ -903,38 +1049,54 @@ class Lean4Client:
             return False
 
         mathlib_pkg_dir = self.workspace_dir / ".lake" / "packages" / "mathlib"
-        needs_bootstrap = not mathlib_pkg_dir.exists()
+        manifest_path = self.workspace_dir / "lake-manifest.json"
 
-        if needs_bootstrap or not self._workspace_ready:
-            logger.info("Bootstrapping Lean 4 workspace at %s", self.workspace_dir)
+        if not mathlib_pkg_dir.exists() or not self._workspace_ready:
+            self._note_shared_mathlib_cache()
+            if not await self._restore_interrupted_package_checkouts():
+                logger.warning(
+                    "Lean 4 package checkout could not be restored; wiping .lake and reinstalling Mathlib."
+                )
+                await asyncio.to_thread(self._wipe_lake_directory)
 
-            # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
-            update_rc, update_stdout, update_stderr = await self._run_process(
-                [lake_cmd, "update"],
-                cwd=self.workspace_dir,
-            )
-            if update_rc != 0:
-                combined_update_output = "\n".join(
-                    part for part in (update_stdout, update_stderr) if part
-                ).strip()
-                lake_dir = self.workspace_dir / ".lake"
-                if lake_dir.exists() and self._is_stale_lake_state(combined_update_output):
-                    logger.warning(
-                        "lake update failed due to stale .lake state; wiping .lake directory and retrying."
-                    )
-                    self._wipe_lake_directory()
-                    # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
-                    update_rc, update_stdout, update_stderr = await self._run_process(
-                        [lake_cmd, "update"],
-                        cwd=self.workspace_dir,
-                    )
+            # Mathlib is installed once and then kept at its recorded version:
+            # `lake update` would move it to the newest Mathlib on every start.
+            if not mathlib_pkg_dir.exists() or not manifest_path.exists():
+                logger.info("Installing Mathlib into the Lean 4 workspace at %s", self.workspace_dir)
+
+                # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
+                update_rc, update_stdout, update_stderr = await self._run_process(
+                    [lake_cmd, "update"],
+                    cwd=self.workspace_dir,
+                )
                 if update_rc != 0:
-                    await self._record_workspace_setup_failure(update_stderr or update_stdout)
-                    logger.warning(
-                        "Lean 4 workspace update failed: %s",
-                        (update_stderr or update_stdout).strip(),
-                    )
-                    return False
+                    combined_update_output = "\n".join(
+                        part for part in (update_stdout, update_stderr) if part
+                    ).strip()
+                    lake_dir = self.workspace_dir / ".lake"
+                    if lake_dir.exists() and self._is_stale_lake_state(combined_update_output):
+                        logger.warning(
+                            "lake update failed due to stale .lake state; wiping .lake directory and retrying."
+                        )
+                        await asyncio.to_thread(self._wipe_lake_directory)
+                        # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
+                        update_rc, update_stdout, update_stderr = await self._run_process(
+                            [lake_cmd, "update"],
+                            cwd=self.workspace_dir,
+                        )
+                    if update_rc != 0:
+                        await self._record_workspace_setup_failure(update_stderr or update_stdout)
+                        logger.warning(
+                            "Lean 4 workspace update failed: %s",
+                            (update_stderr or update_stdout).strip(),
+                        )
+                        return False
+            else:
+                logger.info(
+                    "Preparing Lean 4 workspace at %s with installed Mathlib %s",
+                    self.workspace_dir,
+                    self.get_mathlib_commit()[:12] or "<unknown>",
+                )
 
             # The project's lean-toolchain MUST match Mathlib's pinned toolchain,
             # otherwise `lake exe cache get` refuses to download the prebuilt
@@ -993,9 +1155,11 @@ class Lean4Client:
                         "Wiping .lake and marking unhealthy. Details: %s",
                         sanity_output[:500],
                     )
-                    self._wipe_lake_directory()
+                    await asyncio.to_thread(self._wipe_lake_directory)
                 self._mark_workspace_unhealthy(sanity_output)
                 return False
+
+            await self._prune_mathlib_cache(lake_cmd)
 
         self._workspace_ready = True
         self._workspace_unhealthy_error = ""
@@ -1024,7 +1188,10 @@ class Lean4Client:
             # The archives are intact; Windows cannot unpack them under this
             # path. Deleting or refetching them would only waste the download.
             return cache_rc, cache_stdout, cache_stderr
-        removed_archives = self._remove_failed_mathlib_cache_archives(failed_output)
+        removed_archives = self._remove_failed_mathlib_cache_archives(
+            failed_output,
+            cache_dir=self.mathlib_cache_dir,
+        )
         if removed_archives:
             logger.warning(
                 "Lean 4 Mathlib cache fetch failed after corrupt archive download; "
@@ -1044,7 +1211,7 @@ class Lean4Client:
         )
 
     @staticmethod
-    def _remove_failed_mathlib_cache_archives(output: str) -> int:
+    def _remove_failed_mathlib_cache_archives(output: str, *, cache_dir: Path) -> int:
         """Delete only the failed `.ltar` archives named by `lake exe cache get`."""
         removed = 0
         seen: set[Path] = set()
@@ -1056,7 +1223,10 @@ class Lean4Client:
 
             if archive_path.suffix.lower() != ".ltar":
                 continue
-            if archive_path.parent.name.lower() != "mathlib":
+            in_cache_dir = os.path.normcase(str(archive_path.parent.resolve())) == os.path.normcase(
+                str(cache_dir.resolve())
+            )
+            if archive_path.parent.name.lower() != "mathlib" and not in_cache_dir:
                 continue
 
             try:
@@ -1215,7 +1385,7 @@ class Lean4Client:
         """
         if not error_output:
             return error_output
-        if not _BAD_IMPORT_RE.search(error_output):
+        if not _has_bad_import(error_output):
             return error_output
         if _BAD_IMPORT_HINT in error_output:
             return error_output

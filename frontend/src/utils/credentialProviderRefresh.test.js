@@ -1,14 +1,14 @@
-import { refreshCredentialProviderState } from './credentialProviderRefresh';
+import {
+  refreshCloudProviderStates,
+  refreshOpenRouterCredentialState,
+} from './credentialProviderRefresh';
 import { cloudAccessAPI, openRouterAPI } from '../services/api';
+import { CLOUD_ACCESS_PROVIDERS } from './oauthProviders';
 
 vi.mock('../services/api', () => ({
   cloudAccessAPI: {
-    getOpenAICodexStatus: vi.fn(),
-    getOpenAICodexModels: vi.fn(),
-    getXAIGrokStatus: vi.fn(),
-    getXAIGrokModels: vi.fn(),
-    getSakanaFuguStatus: vi.fn(),
-    getSakanaFuguModels: vi.fn(),
+    getProviderStatus: vi.fn(),
+    getProviderModels: vi.fn(),
   },
   openRouterAPI: {
     getApiKeyStatus: vi.fn(),
@@ -16,9 +16,17 @@ vi.mock('../services/api', () => ({
   },
 }));
 
+const DESKTOP = { genericMode: false };
+
+function statesFrom(setCloudProviderState) {
+  return Object.fromEntries(setCloudProviderState.mock.calls.map(([providerId, state]) => [providerId, state]));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(console, 'error').mockImplementation(() => {});
+  cloudAccessAPI.getProviderStatus.mockResolvedValue({ status: { configured: false } });
+  cloudAccessAPI.getProviderModels.mockResolvedValue({ models: [] });
 });
 
 afterEach(() => {
@@ -33,7 +41,7 @@ test('keeps OpenRouter enabled when model refresh fails after a valid key check'
   openRouterAPI.getApiKeyStatus.mockResolvedValue({ has_key: true });
   openRouterAPI.getModels.mockRejectedValue(new Error('models unavailable'));
 
-  await refreshCredentialProviderState({
+  await refreshOpenRouterCredentialState({
     setHasOpenRouterKey,
     setOpenRouterModels,
     setLoadingOpenRouter,
@@ -45,51 +53,56 @@ test('keeps OpenRouter enabled when model refresh fails after a valid key check'
   expect(setLoadingOpenRouter).toHaveBeenLastCalledWith(false);
 });
 
-test('keeps configured OAuth provider enabled when model loading fails', async () => {
-  const setHasOpenAICodexLogin = vi.fn();
-  const setOpenAICodexModels = vi.fn();
-  const setOpenAICodexModelError = vi.fn();
+test('refreshes every registry provider and keeps a configured OAuth provider when models fail', async () => {
+  const setCloudProviderState = vi.fn();
+  cloudAccessAPI.getProviderStatus.mockImplementation(async (providerId) => ({
+    status: { configured: providerId === 'openai_codex_oauth' },
+  }));
+  cloudAccessAPI.getProviderModels.mockRejectedValue(new Error('oauth model error'));
 
-  openRouterAPI.getApiKeyStatus.mockResolvedValue({ has_key: false });
-  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getOpenAICodexModels.mockRejectedValue(new Error('oauth model error'));
+  await refreshCloudProviderStates({ capabilities: DESKTOP, setCloudProviderState });
 
-  await refreshCredentialProviderState({
-    openAICodexOauthAvailable: true,
-    setHasOpenAICodexLogin,
-    setOpenAICodexModels,
-    setOpenAICodexModelError,
-  });
-
-  expect(setHasOpenAICodexLogin).toHaveBeenCalledWith(true);
-  expect(setOpenAICodexModels).toHaveBeenCalledWith([]);
-  expect(setOpenAICodexModelError).toHaveBeenCalledWith(
-    expect.stringContaining('OpenAI Codex OAuth models could not be loaded')
-  );
+  const states = statesFrom(setCloudProviderState);
+  expect(Object.keys(states).sort()).toEqual(CLOUD_ACCESS_PROVIDERS.map((provider) => provider.id).sort());
+  expect(states.openai_codex_oauth.configured).toBe(true);
+  expect(states.openai_codex_oauth.models).toEqual([]);
+  expect(states.openai_codex_oauth.error).toContain('OpenAI Codex OAuth is connected, but models could not be loaded');
+  expect(states.kimi_code).toEqual({ configured: false, models: [], error: '' });
 });
 
 test('keeps configured subscription provider enabled when no models are returned', async () => {
-  const setHasSakanaFuguKey = vi.fn();
-  const setSakanaFuguModels = vi.fn();
-  const setSakanaFuguModelError = vi.fn();
+  const setCloudProviderState = vi.fn();
+  cloudAccessAPI.getProviderStatus.mockImplementation(async (providerId) => ({
+    status: { configured: providerId === 'sakana_fugu' },
+  }));
 
-  openRouterAPI.getApiKeyStatus.mockResolvedValue({ has_key: false });
-  cloudAccessAPI.getSakanaFuguStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getSakanaFuguModels.mockResolvedValue({ models: [] });
+  await refreshCloudProviderStates({ capabilities: DESKTOP, setCloudProviderState });
 
-  await refreshCredentialProviderState({
-    sakanaFuguAvailable: true,
-    setHasSakanaFuguKey,
-    setSakanaFuguModels,
-    setSakanaFuguModelError,
+  const sakana = statesFrom(setCloudProviderState).sakana_fugu;
+  expect(sakana.configured).toBe(true);
+  expect(sakana.models).toEqual([]);
+  expect(sakana.error).toContain('no Fugu models were returned');
+});
+
+test('hosted mode resets every provider without requests', async () => {
+  const setCloudProviderState = vi.fn();
+
+  await refreshCloudProviderStates({ capabilities: { genericMode: true }, setCloudProviderState });
+
+  expect(cloudAccessAPI.getProviderStatus).not.toHaveBeenCalled();
+  expect(Object.values(statesFrom(setCloudProviderState)).every((state) => !state.configured)).toBe(true);
+});
+
+test('a provider reported unavailable is reset without requests', async () => {
+  const setCloudProviderState = vi.fn();
+
+  await refreshCloudProviderStates({
+    capabilities: { genericMode: false, kimiCodeAvailable: false },
+    setCloudProviderState,
   });
 
-  expect(setHasSakanaFuguKey).toHaveBeenCalledWith(true);
-  expect(setHasSakanaFuguKey).not.toHaveBeenCalledWith(false);
-  expect(setSakanaFuguModels).toHaveBeenCalledWith([]);
-  expect(setSakanaFuguModelError).toHaveBeenCalledWith(
-    expect.stringContaining('no Fugu models were returned')
-  );
+  expect(cloudAccessAPI.getProviderStatus).not.toHaveBeenCalledWith('kimi_code');
+  expect(cloudAccessAPI.getProviderStatus).toHaveBeenCalledWith('sakana_fugu');
 });
 
 test('does not update state after shouldApply returns false', async () => {
@@ -102,7 +115,7 @@ test('does not update state after shouldApply returns false', async () => {
     return { has_key: true };
   });
 
-  await refreshCredentialProviderState({
+  await refreshOpenRouterCredentialState({
     setHasOpenRouterKey,
     setOpenRouterModels,
     shouldApply: () => current,

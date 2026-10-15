@@ -25,7 +25,8 @@ from backend.shared.openai_codex_client import (
 from backend.shared.openrouter_client import RateLimitError
 from backend.shared.provider_errors import ProviderRouteError, ProviderRouteIdentity
 from backend.shared.provider_notification_store import record_provider_notification
-from backend.shared.sakana_fugu_client import SakanaFuguUsageLimitError
+from backend.shared.subscription_providers.errors import SubscriptionUsageLimitError
+from backend.shared.subscription_providers.registry import get_api_key_subscription_client
 from backend.shared.proof_search.assistant_coordinator import (
     _assistant_oauth_provider_is_cooling_down,
     _assistant_provider_is_cooling_down,
@@ -201,15 +202,18 @@ class APIClientManagerOAuthCooldownTests(IsolatedAsyncioTestCase):
                 max_output_tokens=8192,
             ),
         )
-        usage_error = SakanaFuguUsageLimitError(
+        usage_error = SubscriptionUsageLimitError(
             "usage limit reached",
+            provider="sakana_fugu",
+            provider_label="Sakana Fugu",
             resets_in_seconds=120,
             plan_type="pro",
         )
 
         with (
-            mock.patch(
-                "backend.shared.api_client_manager.sakana_fugu_client.generate_completion",
+            mock.patch.object(
+                get_api_key_subscription_client("sakana_fugu"),
+                "generate_completion",
                 new=mock.AsyncMock(side_effect=usage_error),
             ),
             mock.patch(
@@ -230,8 +234,9 @@ class APIClientManagerOAuthCooldownTests(IsolatedAsyncioTestCase):
 
         self.manager._oauth_provider_cooldowns["sakana_fugu"]["cooldown_until"] = int(time.time()) - 1
         with (
-            mock.patch(
-                "backend.shared.api_client_manager.sakana_fugu_client.generate_completion",
+            mock.patch.object(
+                get_api_key_subscription_client("sakana_fugu"),
+                "generate_completion",
                 new=mock.AsyncMock(return_value={"choices": [{"message": {"content": "restored"}}]}),
             ),
             mock.patch.object(

@@ -85,7 +85,11 @@ from backend.autonomous.prompts.proof_prompts import (
     build_proof_framing_gate_prompt,
 )
 from backend.autonomous.agents.proof_pruning_agent import proof_run_role_suffix
-from backend.autonomous.core.proof_verification_stage import ProofVerificationProviderPause, ProofVerificationStage
+from backend.autonomous.core.proof_verification_stage import (
+    AUTONOMOUS_WORKFLOW_PROOF_OWNER,
+    ProofVerificationProviderPause,
+    ProofVerificationStage,
+)
 from backend.autonomous.core.proof_pruning_coordinator import ProofPruningCoordinator
 from backend.autonomous.core.proof_round_driver import (
     AutomaticMultiRoundPolicy,
@@ -1275,6 +1279,7 @@ class AutonomousCoordinator:
                             "proof_run_id": self._run_id,
                             "lifecycle_generation": self._lifecycle_generation,
                             "scope": "autonomous",
+                            "owner": AUTONOMOUS_WORKFLOW_PROOF_OWNER,
                             "round_index": proof_round_index,
                             "round_trigger": round_trigger,
                             "proof_competition": self._proof_competition.model_dump(mode="json"),
@@ -1308,11 +1313,12 @@ class AutonomousCoordinator:
                         self._stop_event.set()
                         await self._save_workflow_state(phase=f"{source_type}_proof_verification")
                         return "fatal_stop", proof_result
-                    has_deferred = bool(getattr(proof_result, "deferred_candidate_ids", []))
+                    # Candidates set aside for context overflow were settled as
+                    # open targets by the stage, so the round is complete and the
+                    # next round may run; only a blocked round stops (above).
                     if (
                         not self._stop_event.is_set()
                         and not getattr(proof_result, "had_error", False)
-                        and not has_deferred
                     ):
                         await research_metadata.mark_proof_checkpoint_trigger_complete(
                             source_type,
@@ -1329,15 +1335,6 @@ class AutonomousCoordinator:
                         )
                     if getattr(proof_result, "had_error", False):
                         return "error_preserved", proof_result
-                    if has_deferred:
-                        logger.info(
-                            "Proof verification deferred %s context-overflow candidate(s) for %s %s trigger=%s",
-                            len(proof_result.deferred_candidate_ids),
-                            source_type,
-                            source_id,
-                            round_trigger,
-                        )
-                        return "deferred", proof_result
                     return "completed", proof_result
                 except LeanWorkspaceRepairRequiredError as exc:
                     logger.error(
@@ -1619,12 +1616,7 @@ class AutonomousCoordinator:
         if self._stop_event.is_set():
             return "stopped"
 
-        proof_checkpoint = await research_metadata.get_proof_checkpoint(
-            "brainstorm",
-            self._current_topic_id,
-        )
-        if not proof_checkpoint or proof_checkpoint.get("status") != "deferred":
-            await research_metadata.clear_proof_checkpoint("brainstorm", self._current_topic_id)
+        await research_metadata.clear_proof_checkpoint("brainstorm", self._current_topic_id)
         await self._save_workflow_state(
             tier="tier2_paper_writing",
             phase="pre_paper_compilation",
@@ -7774,9 +7766,7 @@ class AutonomousCoordinator:
                 self._stop_event.set()
             return "stopped" if self._stop_event.is_set() else proof_status
 
-        proof_checkpoint = await research_metadata.get_proof_checkpoint("paper", paper_id)
-        if not proof_checkpoint or proof_checkpoint.get("status") != "deferred":
-            await research_metadata.clear_proof_checkpoint("paper", paper_id)
+        await research_metadata.clear_proof_checkpoint("paper", paper_id)
         return "complete"
     
     async def _auto_generate_paper_critique(

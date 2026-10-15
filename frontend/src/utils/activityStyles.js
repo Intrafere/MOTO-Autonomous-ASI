@@ -437,6 +437,7 @@ export const getActivityIcon = (event = '') => {
       return '▶';
     case 'openai_codex_oauth_error':
     case 'oauth_provider_error':
+    case 'subscription_provider_error':
     case 'sakana_fugu_error':
       return '⚠';
     case 'completion_review_result':
@@ -694,7 +695,13 @@ export const getActivityClass = (event = '', item = {}) => {
     return 'activity-info';
   }
 
-  if (event === 'openai_codex_oauth_error' || event === 'oauth_provider_error' || event === 'sakana_fugu_error') {
+  if (
+    event === 'openai_codex_oauth_error'
+    || event === 'oauth_provider_error'
+    || event === 'subscription_provider_error'
+    // Persisted notifications written before subscription providers shared one event.
+    || event === 'sakana_fugu_error'
+  ) {
     return 'activity-warning';
   }
 

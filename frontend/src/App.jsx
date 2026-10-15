@@ -89,7 +89,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from './utils/openRouterSelection';
-import { CLOUD_ACCESS_PROVIDERS, isCloudAccessProvider } from './utils/oauthProviders';
+import { CLOUD_ACCESS_PROVIDERS, getCloudAccessProvider, isCloudAccessProvider } from './utils/oauthProviders';
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
@@ -162,9 +162,7 @@ const DEFAULT_CAPABILITIES = Object.freeze({
   genericMode: false,
   lmStudioEnabled: true,
   pdfDownloadAvailable: true,
-  openAICodexOauthAvailable: true,
-  xaiGrokOauthAvailable: true,
-  sakanaFuguAvailable: true,
+  ...Object.fromEntries(CLOUD_ACCESS_PROVIDERS.map((provider) => [provider.capabilityKey, true])),
   syntheticLibProductState: undefined,
   version: '',
   buildCommit: '',
@@ -258,12 +256,11 @@ function buildOAuthProviderNotification(data = {}, fallbackProvider = 'oauth') {
   const roleId = data.role_id || provider;
   const reason = data.reason || 'unrecoverable_oauth_error';
   const notificationKey = getProviderNotificationKey({ ...data, provider, role_id: roleId, reason });
-  const isCodex = provider === 'openai_codex_oauth';
   return {
     id: `oauth_provider_${notificationKey}`,
     notification_key: notificationKey,
     provider,
-    provider_label: data.provider_label || (isCodex ? 'OpenAI Codex' : 'OAuth provider'),
+    provider_label: data.provider_label || getCloudAccessProvider(provider)?.label || 'OAuth provider',
     role_id: roleId,
     model: data.model,
     reason,
@@ -389,8 +386,7 @@ function buildOAuthActivityMessage(data = {}, fallbackProviderLabel = 'OAuth pro
   const providerLabel = data.provider_label || fallbackProviderLabel;
   const roleId = data.role_id || 'a role';
   const isOAuthProvider = providerLabel.toLowerCase().includes('oauth')
-    || data.provider === 'openai_codex_oauth'
-    || data.provider === 'xai_grok_oauth';
+    || getCloudAccessProvider(data.provider)?.authKind === 'oauth_pkce';
   const providerKind = isOAuthProvider ? 'OAuth' : 'provider';
   const repairHint = isOAuthProvider
     ? 'check your OAuth connection and sign in again'
@@ -518,15 +514,11 @@ function normalizeFeaturesPayload(payload = {}) {
     genericMode,
     lmStudioEnabled: payload.lm_studio_enabled !== false,
     pdfDownloadAvailable: payload.pdf_download_available !== false,
-    openAICodexOauthAvailable: payload.openai_codex_oauth_available === undefined
-      ? !genericMode
-      : payload.openai_codex_oauth_available !== false,
-    xaiGrokOauthAvailable: payload.xai_grok_oauth_available === undefined
-      ? !genericMode
-      : payload.xai_grok_oauth_available !== false,
-    sakanaFuguAvailable: payload.sakana_fugu_available === undefined
-      ? !genericMode
-      : payload.sakana_fugu_available !== false,
+    // Older backends omit a provider flag; desktop then treats it as available.
+    ...Object.fromEntries(CLOUD_ACCESS_PROVIDERS.map((provider) => [
+      provider.capabilityKey,
+      payload[provider.featureFlag] === undefined ? !genericMode : payload[provider.featureFlag] !== false,
+    ])),
     syntheticLibProductState: payload.syntheticlib_product_state,
     version: payload.version || '',
     buildCommit: payload.build_commit || '',
@@ -2879,10 +2871,10 @@ function App() {
       addOAuthProviderNotification(setCodexOAuthNotifications, data, data.provider || 'oauth');
     }));
 
-    unsubscribers.push(websocket.on('sakana_fugu_error', (data) => {
-      console.error('Sakana Fugu error:', data);
+    unsubscribers.push(websocket.on('subscription_provider_error', (data) => {
+      console.error('Subscription provider error:', data);
       addScopedProviderActivity(data);
-      addOAuthProviderNotification(setCodexOAuthNotifications, data, 'sakana_fugu');
+      addOAuthProviderNotification(setCodexOAuthNotifications, data, data.provider || 'subscription_provider');
     }));
 
     unsubscribers.push(websocket.on('oauth_provider_usage_limited', (data) => {

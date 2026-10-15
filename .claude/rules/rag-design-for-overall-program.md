@@ -22,7 +22,9 @@ Model-visible rolling rejection/execution feedback uses whole chronological entr
 start with at most the newest five, remove the oldest one at a time while rebuilding
 and counting the complete prompt, and retain the newest entry as the minimum. Retained
 feedback stays direct and never enters RAG; if newest-only still overflows, use the
-mode's existing hard context-overflow path without mutating durable history.
+mode's existing hard context-overflow path without mutating durable history. Proof-attempt
+entries show a bounded, priority-ordered prefix of their Lean output with an omission
+note and do not repeat goal lines already shown; durable feedback stays complete.
 Provider-context retries preserve already-omitted optional context and re-count the
 complete rebuilt prompt; normal and compact full-script/tactic proof calls share this
 policy without consuming additional proof attempts. LeanOJ deduplicates overlapping

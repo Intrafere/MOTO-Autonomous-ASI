@@ -42,13 +42,13 @@ project-root/
 │   ├── shared/                          # SHARED RESOURCES
 │   │   ├── __init__.py                  # Package initialization
 │   │   ├── config.py                    # RAGConfig, SystemConfig (instance runtime contract, ports, data/log roots, secret namespace, generic_mode)
-│   │   ├── prompt_feedback_budget.py    # Pure whole-entry newest-suffix model-feedback fitter
+│   │   ├── prompt_feedback_budget.py    # Pure whole-entry newest-suffix model-feedback fitter plus bounded per-attempt Lean diagnostic projection
 │   │   ├── models.py                    # Pydantic models (includes ModelConfig with per-role supercharge_enabled, BoostConfig, WorkflowTask)
 │   │   ├── lm_studio_client.py          # LM Studio HTTP API client + same-base numeric :# instance sharing
 │   │   ├── openrouter_client.py         # OpenRouter HTTP API client (credit exhaustion, transient malformed-completion retries, and model/endpoint metadata)
 │   │   ├── openai_codex_client.py       # Desktop-only OpenAI Codex/ChatGPT OAuth client, Codex backend adapter (Responses WebSocket transport first, HTTP/SSE fallback), and Codex model metadata normalizer
 │   │   ├── xai_grok_client.py           # Desktop-only xAI Grok/SuperGrok OAuth client; splits untimed spending limits from timed 429 usage windows
-│   │   ├── sakana_fugu_client.py        # Desktop-only Sakana client (Responses/chat fallback, model metadata, typed quota/entitlement classification)
+│   │   ├── subscription_providers/       # Cloud subscription registry: dependency-free metadata (all cloud providers), shared API-key client, Sakana Fugu and Kimi Code profiles, recovery-adapter registry
 │   │   ├── api_client_manager.py        # Unified API router (exact configured-role enforcement, Supercharge, OpenRouter/OAuth/LM Studio fallback, boost)
 │   │   ├── provider_errors.py            # Typed safe provider-route, context-limit, and operator-repair-required errors
 │   │   ├── provider_route_identity.py    # Provider/API-error route identity fields and the composed Live Activity display prefix
@@ -67,7 +67,7 @@ project-root/
 │   │   ├── wolfram_alpha_client.py      # Wolfram Alpha API client (logs redacted metadata, not raw query/result text)
 │   │   ├── utils.py                     # Common utilities
 │   │   ├── json_parser.py               # JSON parsing with sanitization for LLM quirks
-│   │   ├── response_extraction.py        # Central OpenAI-compatible assistant text extraction with content-first reasoning/thinking fallback policy
+│   │   ├── response_extraction.py        # Central OpenAI-compatible assistant text extraction with content-first reasoning/thinking fallback policy (never for output-limit cut-offs)
 │   │   ├── critique_memory.py           # Paper critique persistence (saves up to 10 validator critiques per paper)
 │   │   ├── critique_prompts.py          # Default critique prompt and builder function for validator critiques
 │   │   ├── secret_store.py              # Secure credential persistence via OS keyring (OpenRouter, desktop OAuth tokens, Wolfram Alpha); bypassed in generic mode
@@ -324,6 +324,8 @@ project-root/
 ├── syntheticlib-trade/compatibility/   # Publishable credential-free MOTO proof-trade compatibility evidence (gitignore-allowlisted members only)
 ├── scripts/
 │   ├── check_syntheticlib_trade_contract.py # Explicitly generates or read-only verifies the closed MOTO compatibility evidence set
+│   ├── run_codeql.py                    # `npm run test:codeql`: GitHub's CodeQL analyses on a clean tree export, failing on alerts origin/main lacks; also CI's dev-push job
+│   ├── run_github_checks.py             # `npm run test:github`: pre-push parity for every ci.yml check, release evidence, and CodeQL with a pass/fail summary
 │   └── run_local_syntheticlib_compatibility_ci.py # Runs deterministic release-generation parity from allowlisted implementation/orchestration inputs without mutating the real repository or partially replacing retained output
 │
 ├── frontend/
@@ -385,6 +387,9 @@ project-root/
 │   │   ├── StartupModals.css            # Shared responsive startup-dialog shells, internal overflow affordance, and provider-card breakpoints
 │   │   ├── ConnectivityPanel.jsx        # Grouped top-right connectivity launcher for inference providers and optional skills
 │   │   ├── OpenRouterApiKeyModal.jsx    # OpenRouter/OAuth modal for OpenRouter API key and desktop OAuth logins
+│   │   ├── SubscriptionApiKeySection.jsx # Registry-driven save/clear/model-check/quota section for API-key subscriptions (Sakana Fugu, Kimi Code)
+│   │   ├── CloudReasoningControl.jsx    # Registry-driven reasoning-effort control for every cloud provider (Codex catalog control or option list)
+│   │   ├── CloudProviderModelErrors.jsx # Per-provider credential/model-load error banners for settings panels
 │   │   ├── SecretInput.jsx              # Shared masked, provider-unique, autofill-safe credential input
 │   │   ├── SyntheticLib4AccessModal.jsx # SyntheticLib4 coming-soon proof-corpus explainer
 │   │   ├── SyntheticLib4DeveloperWorkspace.jsx # Developer-only prelaunch lifecycle/privacy-boundary workspace with explicit-click authority-gated local evidence audit, authorization-readiness check, trade-ledger check, and confirmed local ledger controls (no upload)
@@ -418,6 +423,7 @@ project-root/
 │   │   │
 │   │   ├── hooks/
 │   │   │   ├── useOverflowAssist.js     # Measured, reduced-motion-aware, user-cancellable one-time overflow assistance for startup dialogs
+│   │   │   ├── useCloudAccessProviders.js # Status/models/errors for every registry cloud provider in settings panels; refreshes on credential token
 │   │   │   ├── useExplicitRequest.js    # Generation-fenced one-click request state; inactive/unmount resets, ignores late responses, and passes `isCurrent` so multi-step requests stop
 │   │   │   ├── useModalDialogFocus.js   # Shared modal focus contract: initial focus, inert background, Tab wrap, Escape, focus restore
 │   │   │   ├── useSyntheticLibPrivateSurface.js # SyntheticLib connectivity surface state; closes the developer workspace when its gate is lost
@@ -444,9 +450,9 @@ project-root/
 │   │   │   ├── manualProofSources.js    # Manual proof-source identity and lookup helpers
 │   │   │   ├── manualLogRouting.js      # Manual workflow proof/activity routing helpers
 │   │   │   ├── solutionPathPresentation.js # Progressive Solution Path UI state and stale-safe presentation helpers
-│   │   │   ├── credentialProviderRefresh.js # Mounted-settings credential/provider refresh coordination
+│   │   │   ├── credentialProviderRefresh.js # OpenRouter and registry-wide cloud-provider status/model refresh helpers
 │   │   │   ├── promptDraftStorage.js    # Durable prompt-draft storage with large-value offload
-│   │   │   ├── oauthProviders.js        # Shared desktop OAuth/subscription provider registry helpers
+│   │   │   ├── oauthProviders.js        # Frontend cloud-provider registry mirroring backend metadata (labels, slugs, capability keys, reasoning options, API-key UI)
 │   │   │   ├── runtimeConfig.js         # Frontend runtime helpers (instance storage prefix, active data-root display, instance ID)
 │   │   │   ├── researchRunHistory.js    # Groups Tier 2 papers + final answers into per-run history entries for Stage2PaperHistory/FinalAnswerLibrary
 │   │   │   └── disclaimerHelper.js      # Frontend-only disclaimer injection for brainstorm/paper views
@@ -511,7 +517,7 @@ project-root/
 - `openrouter_client.py`: OpenRouter HTTP client (credit exhaustion detection, bounded transient/missing-choices retries, fallback, model/provider endpoint metadata, and redacted upstream host/request-id reporting into route identity, with upstream error detail added to no-choices retry text)
 - `openai_codex_client.py`: Desktop-only OpenAI Codex/ChatGPT OAuth token lifecycle, incrementally consumed Responses stream adapter (WebSocket transport first, HTTP/SSE fallback) with strict terminal-state validation (and unsupported output-limit/temperature knob removal), plus Codex model context/output metadata normalization; not the regular OpenAI API-key billing path
 - `xai_grok_client.py`: Desktop-only xAI Grok/SuperGrok OAuth client; untimed spending/subscription limits stay repair-required, while timed 429 usage windows use JSON body reset or Retry-After and other transients remain retryable
-- `sakana_fugu_client.py`: Desktop-only Sakana Fugu subscription API client; stores the key in keyring, prefers `/responses`, supports tool-turn chat completions, normalizes responses/model metadata, and separates timed usage windows from transient throttling and hard entitlement failures before retry
+- `subscription_providers/`: `metadata.py` is the single dependency-free list of cloud providers (id, label, auth kind, slug, capability flag, `max`-effort support) from which model validation, route labels, error markers, locks, and status sets derive; `api_key_client.py` is the shared OpenAI-compatible API-key client (env-then-keyring key, region detection with non-secret persistence, honest MOTO User-Agent, bounded retries through `assured_retry_wait`, streamed or Responses-then-Chat wires, key scrubbing in errors); `profile.py`/`errors.py` define provider profiles and typed errors; `sakana_fugu.py` and `kimi_code.py` hold each provider's endpoints, models, request shaping, and error classifier; `registry.py` instantiates clients and registers recovery adapters.
 - `api_client_manager.py`: Unified API router (exact configured-role fail-closed enforcement, optional per-role Supercharge, OpenRouter/desktop OAuth/LM Studio fallback, boost, model tracking, and the atomic route-identified retry-activity/stop-aware-wait seam, plus a run-scoped role→source registry that tags manual proof-check retry activity with its source); persisted LM Studio fallback state uses the configured fallback model ID, and generic mode early-returns FastEmbed for embeddings
 - `boost_manager.py`: Singleton boost manager (next-count, always-prefer, category, and per-task boost routing; broadcasts events)
 - `boost_logger.py`: Boost API call logger (persists boost-routed calls for the combined API log view)
@@ -525,7 +531,7 @@ project-root/
 - `token_tracker.py`: Cumulative input/output token tracker singleton with per-model breakdown and research timer. Reset on session start, timer start/stop tied to coordinator lifecycle. Stats broadcast via `token_usage_updated` WebSocket event after each successful LLM call.
 - `utils.py`: Token counting, text compression, file I/O
 - `json_parser.py`: JSON parsing with sanitization for LLM responses; sanitizes reasoning tokens, markdown blocks, control tokens, LaTeX escapes, control characters; **rejects truncated JSON** (raises ValueError with diagnostics) to prevent corrupted content from passing validation; also provides `sanitize_model_output_for_retry_context()` so retries/memory/RAG can preserve visible failed-output excerpts without replaying known private thought/channel/control tokens or corrupting visible Lean/math syntax such as `<|`; retry-facing parser exceptions must not include raw response excerpts
-- `response_extraction.py`: Central assistant text extraction for OpenAI-compatible responses. It prefers `message.content` and falls back to compatibility fields such as `reasoning`/`thinking` only when content is empty so reasoning-only local endpoints still work under one policy.
+- `response_extraction.py`: Central assistant text extraction for OpenAI-compatible responses. It prefers `message.content` and falls back to compatibility fields such as `reasoning`/`thinking` only when content is empty so reasoning-only local endpoints still work under one policy. It owns the shared output-limit finish reasons; a reply cut off before any answer never uses the fallback, and `drop_unfinished_thinking()` strips that unfinished thinking in the shared completion path.
 - `critique_memory.py`: Paper critique persistence (ratings, feedback, history, session-aware)
 - `critique_prompts.py`: Default critique prompt and builder function
 - `secret_store.py`: Secure credential persistence via OS keyring; bypassed in generic mode (keys are env-injected/in-memory only)
@@ -554,7 +560,7 @@ project-root/
 - `proof_search/assistant_coordinator.py` / `assistant_ranker.py` / `assistant_cache.py` / `assistant_models.py`: Non-blocking up-to-7 verified Lean proof-history support selection with deterministic lanes, two-receiver reuse, requesting-run/session filtering on fresh and every cached/stale reuse path, and pre-selection exclusion of group-scoped anchors until complete-group hydration is supported. Supports are optional and cannot redirect or mathematically reinterpret an unrelated parent goal.
 - `solution_path/models.py` / `engine.py` / `integration.py` / `registry.py` / `reviewer.py`: One durable Progressive Solution Path per top-level run, absent before five parent-owned accepted brainstorm events. Only semantic validators may enqueue material optional updates; separately parsed malformed path data cannot affect primary decisions. `reviewer.py` owns the production Main Submitter 1 prompt and bounded sanitized JSON retry. Review is non-blocking, serial, transactional, and generation-fenced; immediate hard failures and repeated invalid/unknown failures use explicit repair/retry. Only the bounded approved plan is advisory context; Stop/crash preserves work and Clear/new-run is the only reset.
 - `fastembed_provider.py`: FastEmbed embedding wrapper (generic mode only); lazy-imported so default installs are unaffected
-- `lean4_client.py`: Lean 4 checker with lazy single-flight workspace bootstrap. A failed workspace raises `LeanWorkspaceRepairRequiredError` through `require_lean_workspace` / `raise_for_lean_workspace_failure`; a Windows path too long for Mathlib is latched before any `lake` work. Successful subprocess/LSP checks emit immutable receipts bound to exact checked bytes, actual checker route, proof-time toolchain/build, timeout/profile, and parsed imports. Never bundled into the hosted image.
+- `lean4_client.py`: Lean 4 checker with lazy single-flight workspace bootstrap. A failed workspace raises `LeanWorkspaceRepairRequiredError` through `require_lean_workspace` / `raise_for_lean_workspace_failure`; a Windows path too long for Mathlib is latched before any `lake` work. Mathlib is installed once and kept at its recorded version (no `lake update` per start); each setup first restores interrupted package checkouts (wiping `.lake` if that fails), downloads into a MOTO-owned `.moto_mathlib_cache` (an operator `MATHLIB_CACHE_DIR` wins), and prunes unused archives there. Successful subprocess/LSP checks emit immutable receipts bound to exact checked bytes, actual checker route, proof-time toolchain/build, timeout/profile, and parsed imports. Never bundled into the hosted image.
 - `lean_source_evidence.py`: Pure versioned source hashing/import parsing and receipt canonicalization; contains no workspace or persistence authority.
 - `local_novelty_receipt.py`: Finalizes digest-bound internal MOTO novelty-assessment provenance after canonical locator assignment, preserving independent rank, assessment origin, group binding, and duplicate overlay without mapping a SyntheticLib trade rank or authorizing selection.
 - `smt_client.py`: Optional Z3/SMT launcher-managed subprocess wrapper. When `smt_enabled=False`, SMT checks return explicit disabled/error results rather than invoking Z3. SMT results are hint-only; Lean 4 remains authoritative. Never bundled into the hosted image.

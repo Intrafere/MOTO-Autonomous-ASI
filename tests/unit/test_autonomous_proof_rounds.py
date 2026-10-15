@@ -389,57 +389,33 @@ class _FatalContextOverflowProofStage(_FakeProofStage):
         )
 
 
-class _DeferredThenCompleteProofStage:
-    def __init__(self):
-        self.calls = []
+class _SettledOverflowProofStage(_FakeProofStage):
+    """Round 1 sets one candidate aside for overflow while another reached the model."""
 
     async def run(self, **kwargs):
+        if self.calls:
+            return await super().run(**kwargs)
         self.calls.append(kwargs)
-        candidates = kwargs.get("theorem_candidates") or [
-            ProofCandidate(theorem_id="done", statement="Completed theorem."),
-            ProofCandidate(theorem_id="deferred", statement="Deferred theorem."),
-        ]
-        if len(self.calls) == 1:
-            overflow = ProofAttemptFeedback(
-                attempt=1,
-                theorem_id="deferred",
-                error_output="MANDATORY FULL SOURCE CONTEXT OVERFLOW",
-                overflow_origin="local_preflight",
-                prompt_tokens=7000,
-                max_input_tokens=6000,
-            )
-            await kwargs["checkpoint_callback"](
-                {
-                    "source_type": kwargs["source_type"],
-                    "source_id": kwargs["source_id"],
-                    "source_title": kwargs["source_title"],
-                    "trigger": kwargs["trigger"],
-                    "status": "deferred",
-                    "candidates": [
-                        {"index": 1, "candidate": candidates[0].model_dump(mode="json")},
-                        {"index": 2, "candidate": candidates[1].model_dump(mode="json")},
-                    ],
-                    "processed_candidate_ids": ["done"],
-                    "deferred_candidate_ids": ["deferred"],
-                    "attempts_by_candidate": {
-                        "deferred": [overflow.model_dump(mode="json")],
-                    },
-                    "theorem_names_by_candidate": {},
-                    "results": [],
-                    "total_candidates": 2,
-                }
-            )
-            return ProofStageResult(
-                source_type=kwargs["source_type"],
-                source_id=kwargs["source_id"],
-                total_candidates=2,
-                deferred_candidate_ids=["deferred"],
-            )
         return ProofStageResult(
             source_type=kwargs["source_type"],
             source_id=kwargs["source_id"],
-            total_candidates=1,
-            verified_count=1,
+            total_candidates=2,
+            results=[
+                ProofAttemptResult(
+                    theorem_id="reached",
+                    theorem_statement="Reached the model.",
+                    attempts_used=1,
+                ),
+                ProofAttemptResult(
+                    theorem_id="overflow",
+                    theorem_statement="Set aside for context overflow.",
+                ),
+            ],
+            deferred_candidate_ids=["overflow"],
+            context_overflow_payload={
+                "workflow_mode": "autonomous",
+                "role_id": "autonomous_proof_formalization_paper",
+            },
         )
 
 class _LeanBlockedThenCompleteProofStage:
@@ -1349,35 +1325,58 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(fake_metadata.mark_calls[0], "automatic")
 
-    async def test_deferred_overflow_resumes_without_replaying_completed_candidate(self):
-        fake_stage = _DeferredThenCompleteProofStage()
+    async def test_settled_overflow_round_completes_without_replay(self):
+        fake_stage = _SettledOverflowProofStage([1])
         coordinator = _configured_coordinator(fake_stage)
         fake_metadata = coordinator_module.research_metadata
 
         first_status = await coordinator._run_proof_verification(
             content="Paper source.",
             source_type="paper",
-            source_id="paper_deferred",
+            source_id="paper_overflow_settled",
             source_title="Paper title",
         )
 
         self.assertEqual(first_status, "complete")
-        self.assertEqual(fake_metadata.mark_calls, [])
-        self.assertEqual(fake_metadata.checkpoint["status"], "deferred")
-        self.assertEqual(fake_metadata.checkpoint["processed_candidate_ids"], ["done"])
+        self.assertFalse(coordinator._stop_event.is_set())
+        self.assertEqual(fake_metadata.mark_calls, ["automatic"])
+        self.assertEqual(
+            fake_stage.calls[0]["proof_run_context"]["owner"],
+            "autonomous_workflow",
+        )
 
         second_status = await coordinator._run_proof_verification(
             content="Paper source.",
             source_type="paper",
-            source_id="paper_deferred",
+            source_id="paper_overflow_settled",
             source_title="Paper title",
         )
 
         self.assertEqual(second_status, "complete")
-        self.assertEqual(len(fake_stage.calls), 2)
-        resumed = fake_stage.calls[1]["theorem_candidates"]
-        self.assertEqual([candidate.theorem_id for candidate in resumed], ["deferred"])
-        self.assertEqual(fake_metadata.mark_calls, ["automatic"])
+        self.assertEqual(len(fake_stage.calls), 1)
+
+    async def test_overflow_round_continues_to_next_automatic_round(self):
+        fake_stage = _SettledOverflowProofStage([1])
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
+        fake_metadata = coordinator_module.research_metadata
+
+        status = await coordinator._run_proof_verification(
+            content="Paper source.",
+            source_type="paper",
+            source_id="paper_overflow_rounds",
+            source_title="Paper title",
+        )
+
+        self.assertEqual(status, "complete")
+        self.assertFalse(coordinator._stop_event.is_set())
+        self.assertEqual(
+            [call["trigger"] for call in fake_stage.calls],
+            ["automatic", "automatic_round_2", "automatic_round_3", "automatic_round_4"],
+        )
+        self.assertEqual(
+            fake_metadata.mark_calls,
+            ["automatic", "automatic_round_2", "automatic_round_3", "automatic_round_4"],
+        )
 
     async def test_automatic_follow_up_rounds_hold_source_reservation(self):
         class ReservationCheckingStage(_FakeProofStage):

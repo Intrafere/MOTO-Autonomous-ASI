@@ -1,11 +1,18 @@
 import unittest
 
 from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text, extract_response_text
+from backend.shared.response_extraction import (
+    drop_unfinished_thinking,
+    extract_message_text,
+    extract_response_text,
+)
 
 
-def _response(message):
-    return {"choices": [{"message": message}]}
+def _response(message, finish_reason=None):
+    choice = {"message": message}
+    if finish_reason is not None:
+        choice["finish_reason"] = finish_reason
+    return {"choices": [choice]}
 
 
 class ResponseExtractionTests(unittest.TestCase):
@@ -30,6 +37,69 @@ class ResponseExtractionTests(unittest.TestCase):
         parsed = parse_json(text)
         self.assertEqual(parsed["submission"], "works")
         self.assertEqual(parsed["reasoning"], "schema field")
+
+    def test_uses_reasoning_fallback_when_reply_finished_normally(self):
+        text = extract_response_text(
+            _response(
+                {"content": "", "reasoning": '{"submission": "works"}'},
+                finish_reason="stop",
+            )
+        )
+
+        self.assertEqual(parse_json(text)["submission"], "works")
+
+    def test_cut_off_reply_never_uses_unfinished_thinking_as_answer(self):
+        for finish_reason in ("length", "max_tokens", "incomplete", "LENGTH"):
+            for field in ("reasoning", "reasoning_content", "thinking"):
+                with self.subTest(finish_reason=finish_reason, field=field):
+                    text = extract_response_text(
+                        _response(
+                            {"content": "", field: "Let me think about the lemma first..."},
+                            finish_reason=finish_reason,
+                        )
+                    )
+
+                    self.assertEqual(text, "")
+
+    def test_cut_off_reply_keeps_visible_answer_text(self):
+        text = extract_response_text(
+            _response(
+                {"content": '{"submission": "visible"}', "reasoning": "private"},
+                finish_reason="length",
+            )
+        )
+
+        self.assertEqual(text, '{"submission": "visible"}')
+
+    def test_drop_unfinished_thinking_strips_cut_off_empty_answers(self):
+        response = _response(
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "unfinished thought",
+                "reasoning_content": "unfinished thought",
+                "thinking": "unfinished thought",
+            },
+            finish_reason="length",
+        )
+
+        drop_unfinished_thinking(response)
+
+        message = response["choices"][0]["message"]
+        self.assertEqual(message, {"role": "assistant", "content": ""})
+        self.assertEqual(extract_message_text(message), "")
+
+    def test_drop_unfinished_thinking_leaves_other_replies_alone(self):
+        finished = _response({"content": "", "reasoning": '{"ok": true}'}, finish_reason="stop")
+        answered = _response({"content": "answer", "reasoning": "thought"}, finish_reason="length")
+
+        drop_unfinished_thinking(finished)
+        drop_unfinished_thinking(answered)
+        drop_unfinished_thinking(None)
+        drop_unfinished_thinking({"choices": "not-a-list"})
+
+        self.assertEqual(finished["choices"][0]["message"]["reasoning"], '{"ok": true}')
+        self.assertEqual(answered["choices"][0]["message"]["reasoning"], "thought")
 
     def test_can_disable_fallback_fields(self):
         text = extract_response_text(

@@ -25,6 +25,7 @@ PROVIDER_ERROR_ACTIVITY_EVENTS = frozenset({
     "provider_retry_cooldown",
     "openai_codex_oauth_error",
     "sakana_fugu_error",
+    "subscription_provider_error",
     "oauth_provider_error",
     "oauth_provider_usage_limited",
     "provider_usage_limit_resumed",
@@ -346,7 +347,7 @@ ACTIVITY_POLICIES: tuple[ActivityPolicy, ...] = (
         _policy(_MANAGER, scope, call, event, ATTRIBUTED, "Unrecoverable provider error payload merges route_identity_for_role for the role, model and error.")
         for scope, event in (
             ("APIClientManager._broadcast_unrecoverable_codex_error", "openai_codex_oauth_error"),
-            ("APIClientManager._broadcast_unrecoverable_sakana_fugu_error", "sakana_fugu_error"),
+            ("APIClientManager._broadcast_unrecoverable_subscription_error", "subscription_provider_error"),
             ("APIClientManager._broadcast_unrecoverable_xai_grok_error", "oauth_provider_error"),
         )
         for call in ("asyncio.to_thread", "_broadcast")
@@ -385,7 +386,7 @@ ACTIVITY_POLICIES: tuple[ActivityPolicy, ...] = (
     _policy("backend/shared/openrouter_client.py", "OpenRouterClient._execute_completion_request.wait_before_retry", "assured_retry_wait", _RETRY, ATTRIBUTED, "OpenRouter retry payload names model, provider, configured and upstream host and request id."),
     _policy(_ASSISTANT, "AssistantProofSearchCoordinator._select_and_publish_assistant_pack", "_broadcast_event", "assistant_proof_pack_failed", ATTRIBUTED, "Assistant failure payload merges _assistant_failure_route_identity for the Assistant role."),
     _policy(_RECOVERY_RUNTIME, "assured_retry_wait", _EMIT, _RETRY, EXEMPT, _PASS_THROUGH),
-    *_policies("backend/shared/sakana_fugu_client.py", "SakanaFuguClient._request_with_retry", "assured_retry_wait", _RETRY, 2, ATTRIBUTED, _ADAPTER_ROUTE),
+    _policy("backend/shared/subscription_providers/api_key_client.py", "SubscriptionApiKeyClient._wait_before_retry", "assured_retry_wait", _RETRY, ATTRIBUTED, _ADAPTER_ROUTE),
     *_policies(_SOLUTION_PATH, "SolutionPathEngine._review_loop", "_broadcast", "solution_path_proposal_user_repair_required", 3, ATTRIBUTED, "Reviewer repair payload merges _reviewer_route_identity for the Main Submitter 1 review route."),
     *_policies("backend/shared/xai_grok_client.py", "XAIGrokClient._post_with_retry", "assured_retry_wait", _RETRY, 2, ATTRIBUTED, _ADAPTER_ROUTE),
 )

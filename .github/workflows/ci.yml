@@ -100,6 +100,39 @@ jobs:
           tests/unit/test_chroma_cache_cleanup.py
           tests/test_workflow_start_guard_ownership.py
 
+  codeql-new-alerts:
+    name: CodeQL (no new alerts vs main)
+    # CodeQL default setup only scans pull requests into main. This repeats its
+    # analyses on every dev push and fails on alerts main does not have; results
+    # stay in the log and are never uploaded, so default setup is unaffected.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/dev/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch main as the baseline
+        run: git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve baseline tree
+        id: baseline
+        run: echo "tree=$(git rev-parse 'origin/main^{tree}')" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached baseline results
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/moto-codeql/results
+          key: codeql-results-${{ steps.baseline.outputs.tree }}
+
+      - name: Run CodeQL against the main baseline
+        run: python -m scripts.run_codeql --no-fetch --install-if-missing
+
   frontend-build:
     name: Frontend build
     runs-on: ubuntu-latest

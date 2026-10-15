@@ -94,6 +94,9 @@ ProofPruningPressureCallback = Optional[
 LEAN_WORKSPACE_BLOCKED_STATUS = "lean_workspace_blocked"
 PROOF_TRUNCATION_STOP_REASON = "proof_output_truncation_recovery_exhausted"
 PROOF_TRUNCATION_POLICY_VERSION = "proof-truncation-v1"
+# `proof_run_context["owner"]` value set only by the Autonomous workflow's own
+# proof checkpoints.
+AUTONOMOUS_WORKFLOW_PROOF_OWNER = "autonomous_workflow"
 
 
 def _candidate_fingerprint(candidate: ProofCandidate, source_type: str, source_id: str) -> str:
@@ -886,6 +889,78 @@ class ProofVerificationStage:
             suggested_lemma_targets=suggested_lemma_targets,
         )
 
+    async def _settle_overflow_deferrals(
+        self,
+        result: ProofStageResult,
+        *,
+        candidates: list[ProofCandidate],
+        attempts_by_candidate: dict[str, list[ProofAttemptFeedback]],
+        processed_candidate_ids: set[str],
+        novel_proofs_db: Any,
+        source_type: str,
+        source_id: str,
+    ) -> bool:
+        """Close context-overflow deferrals at round end; return True when blocked.
+
+        The round is blocked when no candidate ever reached the model, so the
+        same settings cannot make progress. Otherwise each deferred candidate
+        becomes a failed open target that later discovery may retry, and the
+        round completes so the run can continue.
+        """
+        deferred = [
+            theorem_id
+            for theorem_id in result.deferred_candidate_ids
+            if theorem_id not in processed_candidate_ids
+        ]
+        if not deferred:
+            return False
+        reached_by_candidate = {
+            theorem_id: [
+                attempt
+                for attempt in attempts_by_candidate.get(theorem_id, [])
+                if not ProofFormalizationAgent.is_context_overflow_feedback(attempt)
+                and not is_lean_workspace_error_text(attempt.error_output)
+            ]
+            for theorem_id in deferred
+        }
+        if not result.results and not any(reached_by_candidate.values()):
+            return True
+        candidates_by_id = {candidate.theorem_id: candidate for candidate in candidates}
+        for theorem_id in deferred:
+            candidate = candidates_by_id.get(theorem_id)
+            if candidate is None:
+                continue
+            reached = reached_by_candidate[theorem_id]
+            attempts = reached or attempts_by_candidate.get(theorem_id, [])
+            basis = attempts[-1].error_output if attempts else ""
+            error_summary = self._summarize_error(basis)
+            await self._record_failed_target(
+                novel_proofs_db,
+                source_type=source_type,
+                source_id=source_id,
+                candidate=candidate,
+                error_summary=error_summary,
+                suggested_lemma_targets=self._extract_suggested_lemma_targets(basis),
+            )
+            result.results.append(
+                ProofAttemptResult(
+                    theorem_id=theorem_id,
+                    theorem_statement=candidate.statement,
+                    lean_code=reached[-1].lean_code if reached else "",
+                    success=False,
+                    novel=False,
+                    attempts_used=len(reached),
+                    error_summary=error_summary,
+                    candidate_fingerprint=_candidate_fingerprint(
+                        candidate,
+                        source_type,
+                        source_id,
+                    ),
+                )
+            )
+            processed_candidate_ids.add(theorem_id)
+        return False
+
     async def _prepare_candidate(
         self,
         *,
@@ -988,9 +1063,11 @@ class ProofVerificationStage:
         candidate_list_review_active = False
         candidate_list_review_attempt = 0
         candidate_list_review_count = 0
-        autonomous_terminal_context_overflow = (
-            str((proof_run_context or {}).get("scope") or "").strip().lower()
-            == "autonomous"
+        # Only the Autonomous workflow's own checkpoint turns a blocked round into
+        # a durable workflow stop. Manual checks of Autonomous sources share the
+        # "autonomous" storage scope but leave their stop decision to the run.
+        autonomous_workflow_owner = (
+            (proof_run_context or {}).get("owner") == AUTONOMOUS_WORKFLOW_PROOF_OWNER
         )
         candidate_list_scope = _candidate_list_review_scope(
             source_type=source_type,
@@ -1898,28 +1975,17 @@ class ProofVerificationStage:
                             _batch_index, completed_outcome = future.result()
                         except BaseException:
                             return (0, -1)
-                        is_fatal_overflow = bool(
-                            autonomous_terminal_context_overflow
-                            and not completed_outcome.success
-                            and completed_outcome.attempts
-                            and ProofFormalizationAgent.is_context_overflow_feedback(
-                                completed_outcome.attempts[-1]
-                            )
-                        )
                         return (
-                            0 if is_fatal_overflow else 1,
+                            1,
                             candidate_indexes.get(
                                 completed_outcome.candidate.theorem_id,
                                 0,
                             ),
                         )
 
-                    # A mandatory Autonomous overflow owns the whole completion
-                    # turn. Process it before any sibling that happened to
-                    # finish in the same event-loop tick so Phase B cannot
-                    # nondeterministically commit or discard that sibling based
-                    # on set iteration order. Other completed outcomes retain
-                    # stable candidate order.
+                    # Failures that stop the whole stage are handled first;
+                    # outcomes that finished in the same event-loop tick keep a
+                    # stable candidate order instead of set iteration order.
                     ordered_done_tasks = sorted(done_tasks, key=completed_task_order)
                     for future in ordered_done_tasks:
                         try:
@@ -1997,9 +2063,9 @@ class ProofVerificationStage:
                                 and ProofFormalizationAgent.is_context_overflow_feedback(attempts[-1])
                             )
                             if context_overflow:
-                                # This candidate is deferred, not failed. Do not add it
-                                # to results or processed IDs: its checkpoint remains
-                                # eligible after proof-model/context settings change.
+                                # Only this candidate is set aside. Running siblings
+                                # and later batches continue; the end of the round
+                                # decides whether anything could reach the model.
                                 if candidate.theorem_id not in result.deferred_candidate_ids:
                                     result.deferred_candidate_ids.append(candidate.theorem_id)
                                 if (
@@ -2009,23 +2075,6 @@ class ProofVerificationStage:
                                     result.context_overflow_payload = dict(
                                         outcome.context_overflow_payload
                                     )
-                                if autonomous_terminal_context_overflow:
-                                    result.fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
-                                    result.fatal_stop_payload = {
-                                        **dict(result.context_overflow_payload),
-                                        "fatal": True,
-                                        "notification_kind": "model_error",
-                                        "terminal_reason": CONTEXT_OVERFLOW_STOP_REASON,
-                                    }
-                                    abort_event.set()
-                                    ordered_outcomes[
-                                        candidate_indexes.get(candidate.theorem_id, 0)
-                                    ] = ("neutral", {})
-                                    mark_batch_outcome_processed(batch_index)
-                                    await cancel_and_drain(set(done_tasks) - {future})
-                                    await save_checkpoint("fatal_context_overflow")
-                                    partial_stop = True
-                                    break
                                 ordered_outcomes[candidate_indexes.get(candidate.theorem_id, 0)] = (
                                     "neutral",
                                     {},
@@ -2450,7 +2499,26 @@ class ProofVerificationStage:
             if partial_stop:
                 return result
 
-            checkpoint_status = "deferred" if result.deferred_candidate_ids else "complete"
+            checkpoint_status = "complete"
+            if result.deferred_candidate_ids and await self._settle_overflow_deferrals(
+                result,
+                candidates=resolved_candidates,
+                attempts_by_candidate=attempts_by_candidate,
+                processed_candidate_ids=processed_candidate_ids,
+                novel_proofs_db=novel_proofs_db,
+                source_type=source_type,
+                source_id=source_id,
+            ):
+                result.context_overflow_blocked = True
+                checkpoint_status = "fatal_context_overflow"
+                if autonomous_workflow_owner:
+                    result.fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
+                    result.fatal_stop_payload = {
+                        **dict(result.context_overflow_payload),
+                        "fatal": True,
+                        "notification_kind": "model_error",
+                        "terminal_reason": CONTEXT_OVERFLOW_STOP_REASON,
+                    }
             await save_checkpoint(checkpoint_status)
             await self._broadcast(
                 broadcast_fn,
@@ -2564,7 +2632,9 @@ class ProofVerificationStage:
             }
             result.context_overflow_payload = overflow_payload
             result.error_message = str(exc)
-            if autonomous_terminal_context_overflow:
+            # Discovery and list review gate the whole round: nothing can submit.
+            result.context_overflow_blocked = True
+            if autonomous_workflow_owner:
                 result.fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
                 result.fatal_stop_payload = {
                     **overflow_payload,

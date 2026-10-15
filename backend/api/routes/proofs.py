@@ -1945,10 +1945,9 @@ async def _run_manual_proof_check(
                     return "stopped", None
                 raise
 
-            continuous_context_overflow = (
-                run_control.snapshot.run_mode == "loop_with_pruning"
-                and bool(result.context_overflow_payload)
-            )
+            # A set-aside candidate never ends the run while other work reached
+            # the model; only a round where nothing could submit does.
+            blocked_context_overflow = bool(result.context_overflow_blocked)
             if result.context_overflow_payload:
                 overflow_detail = (
                     result.context_overflow_payload.get("error_detail")
@@ -1963,7 +1962,7 @@ async def _run_manual_proof_check(
                             limit=1800,
                         ),
                     )
-            if continuous_context_overflow:
+            if blocked_context_overflow:
                 overflow_payload = dict(result.context_overflow_payload or {})
                 overflow_payload.update(
                     {

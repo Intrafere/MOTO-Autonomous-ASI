@@ -14,6 +14,10 @@ from backend.shared.provider_errors import (
     ProviderRepairRequiredError,
     ProviderRouteError,
 )
+from backend.shared.subscription_providers.metadata import (
+    cloud_provider_error_markers,
+    cloud_provider_transient_markers,
+)
 
 
 _NON_RETRYABLE_MODEL_ERROR_MARKERS = (
@@ -62,32 +66,26 @@ _TRANSIENT_MODEL_CALL_MARKERS = (
     "incomplete chunked read",
     "lm studio connection failed",
     "lm studio transient",
-    "openai codex connection failed",
-    "openai codex transient",
     "openrouter connection failed",
     "peer closed connection",
     "readerror",
     "remoteprotocolerror",
     "response missing 'choices'",
-    "sakana fugu connection failed",
-    "sakana fugu transient",
     "server_error",
     "service unavailable",
     "temporarily unavailable",
     "upstream connect error",
     "upstream provider timeout",
-    "xai grok connection failed",
-    "xai grok transient",
     "you can retry your request",
+    # "<provider label> connection failed" / "<provider label> transient" for
+    # every cloud provider in the subscription-provider registry.
+    *cloud_provider_transient_markers(),
 )
 
 _TRANSIENT_MODEL_PROVIDER_MARKERS = (
-    "codex",
-    "grok",
     "lm studio",
     "openrouter",
-    "sakana",
-    "xai",
+    *cloud_provider_error_markers(),
 )
 
 _TRANSIENT_PROVIDER_ERROR_PREFIX = "TRANSIENT PROVIDER ERROR"

@@ -115,7 +115,8 @@ async def test_source_adapter_feedback_projection(monkeypatch, source_environmen
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source_type,source_id", SOURCES)
 @pytest.mark.parametrize("run_mode", MODES)
-async def test_newest_overflow_route_lifecycle_and_mathematical_proofs_lookup(monkeypatch, source_environment, source_type, source_id, run_mode):
+@pytest.mark.parametrize("blocked", [True, False], ids=["round-blocked", "candidate-set-aside"])
+async def test_newest_overflow_route_lifecycle_and_mathematical_proofs_lookup(monkeypatch, source_environment, source_type, source_id, run_mode, blocked):
     """Inject a stage overflow result; verify real route/driver/manager ownership."""
     from backend.autonomous.core import proof_run_manager as manager_module
     manager = ProofRunManager()
@@ -132,13 +133,17 @@ async def test_newest_overflow_route_lifecycle_and_mathematical_proofs_lookup(mo
         events.append((kind, payload))
     monkeypatch.setattr(routes.websocket, "broadcast_event", broadcast)
     monkeypatch.setattr(routes, "_broadcast_manual_aggregator_proof_event", broadcast)
-    entered, release = asyncio.Event(), asyncio.Event()
+    entered, release, second_round = asyncio.Event(), asyncio.Event(), asyncio.Event()
     calls = []
     async def stage_boundary(**kwargs):
         calls.append(kwargs)
+        if len(calls) > 1:
+            # A later round proves the loop continued; park it until Stop.
+            second_round.set()
+            await asyncio.Event().wait()
         entered.set()
         await release.wait()
-        return ProofStageResult(source_type=source_type, source_id=source_id, total_candidates=1, deferred_candidate_ids=["target"], context_overflow_payload={"overflow_origin": "local_preflight", "configured_model": "fake-model"})
+        return ProofStageResult(source_type=source_type, source_id=source_id, total_candidates=1, deferred_candidate_ids=["target"], context_overflow_payload={"overflow_origin": "local_preflight", "configured_model": "fake-model"}, context_overflow_blocked=blocked)
     monkeypatch.setattr(routes, "autonomous_coordinator", SimpleNamespace(_proof_verification_stage=SimpleNamespace(run_manual=stage_boundary)))
     role = ProofRoleConfigSnapshot(model_id="fake-model", context_window=32000, max_output_tokens=2000)
     runtime = ProofRuntimeConfigSnapshot(brainstorm=role, paper=role, validator=role)
@@ -154,21 +159,31 @@ async def test_newest_overflow_route_lifecycle_and_mathematical_proofs_lookup(mo
         assert lookup.preferred_proof_run_id == queued.proof_run_id
         assert lookup.ambiguous is False
         release.set()
+        fatal = lambda: [(kind, data) for kind, data in events if kind == "context_overflow_error"]
+        if not blocked and run_mode == "loop_with_pruning":
+            # A set-aside candidate never ends a continuous run.
+            await asyncio.wait_for(second_round.wait(), timeout=5)
+            assert not fatal()
+            await manager.stop(queued.proof_run_id, control.snapshot.lifecycle_generation)
+            # Stop cancels the in-flight round, so the task ends cancelled.
+            await asyncio.wait_for(asyncio.gather(control.task, return_exceptions=True), timeout=5)
+            assert len(calls) == 2
+            assert control.snapshot.status == "stopped"
+            return
         await asyncio.wait_for(control.task, timeout=5)
-        assert len(calls) == 1  # Continuous overflow must not start another round.
+        assert len(calls) == 1  # A blocked or single round never starts another round.
         assert calls[0]["content"] == adapter.source_content
         assert calls[0]["canonical_user_prompt"] == GOAL
         assert calls[0]["proof_run_context"]["run_mode"] == run_mode
-        fatal = [(kind, data) for kind, data in events if kind == "context_overflow_error"]
-        if run_mode == "loop_with_pruning":
+        if blocked:
             assert control.snapshot.status == "error"
             assert control.snapshot.terminal_reason == routes.CONTEXT_OVERFLOW_STOP_REASON
-            assert len(fatal) == 1
-            assert fatal[0][1]["proof_run_id"] == queued.proof_run_id
-            assert fatal[0][1]["source_id"] == source_id
+            assert len(fatal()) == 1
+            assert fatal()[0][1]["proof_run_id"] == queued.proof_run_id
+            assert fatal()[0][1]["source_id"] == source_id
         else:
             assert control.snapshot.status == "completed"
-            assert not fatal
+            assert not fatal()
         assert await ProofRunManager().get(queued.proof_run_id) is None
     finally:
         release.set()

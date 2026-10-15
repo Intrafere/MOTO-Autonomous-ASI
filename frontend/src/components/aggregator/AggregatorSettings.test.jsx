@@ -9,12 +9,8 @@ vi.mock('../../services/api', () => ({
     getModels: vi.fn(),
   },
   cloudAccessAPI: {
-    getOpenAICodexStatus: vi.fn(),
-    getXAIGrokStatus: vi.fn(),
-    getSakanaFuguStatus: vi.fn(),
-    getOpenAICodexModels: vi.fn(),
-    getXAIGrokModels: vi.fn(),
-    getSakanaFuguModels: vi.fn(),
+    getProviderStatus: vi.fn(),
+    getProviderModels: vi.fn(),
   },
   openRouterAPI: {
     getApiKeyStatus: vi.fn(),
@@ -24,6 +20,19 @@ vi.mock('../../services/api', () => ({
     setFreeModelSettings: vi.fn(),
   },
 }));
+
+const cloudProviderMocks = {};
+function mockCloudProvider(providerId, { configured, modelsResponse } = {}) {
+  const current = cloudProviderMocks[providerId] || { configured: false, models: [] };
+  cloudProviderMocks[providerId] = {
+    configured: configured ?? current.configured,
+    models: modelsResponse ? (modelsResponse.models || []) : current.models,
+  };
+  cloudAccessAPI.getProviderStatus.mockImplementation(async (id) => ({
+    status: { configured: Boolean(cloudProviderMocks[id]?.configured) },
+  }));
+  cloudAccessAPI.getProviderModels.mockImplementation(async (id) => ({ models: cloudProviderMocks[id]?.models || [] }));
+}
 
 const baseConfig = {
   userPrompt: 'Aggregate.',
@@ -111,17 +120,17 @@ beforeEach(() => {
   });
   openRouterAPI.getProviders.mockResolvedValue({ providers: [], endpoints: [] });
   api.getModels.mockResolvedValue({ models: [{ id: 'lm-validator' }, { id: 'lm-assistant' }] });
-  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getSakanaFuguStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [] });
-  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [] });
-  cloudAccessAPI.getSakanaFuguModels.mockResolvedValue({ models: [] });
+  mockCloudProvider('openai_codex_oauth', { configured: false });
+  mockCloudProvider('xai_grok_oauth', { configured: false });
+  mockCloudProvider('sakana_fugu', { configured: false });
+  mockCloudProvider('openai_codex_oauth', { modelsResponse: { models: [] } });
+  mockCloudProvider('xai_grok_oauth', { modelsResponse: { models: [] } });
+  mockCloudProvider('sakana_fugu', { modelsResponse: { models: [] } });
 });
 
 test.each([false, true])('Codex effort covers all Aggregator roles with running=%s', async isRunning => {
-  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [{ id: 'codex', supported_reasoning_levels: ['high', 'max'] }] });
+  mockCloudProvider('openai_codex_oauth', { configured: true });
+  mockCloudProvider('openai_codex_oauth', { modelsResponse: { models: [{ id: 'codex', supported_reasoning_levels: ['high', 'max'] }] } });
   const result = renderSettings({ isRunning, initialConfig: { ...baseConfig, validatorProvider: 'openai_codex_oauth', validatorModel: 'codex', validatorOpenrouterReasoningEffort: 'max', assistantProvider: 'openai_codex_oauth', assistantModel: 'codex', assistantOpenrouterReasoningEffort: 'max', submitterConfigs: [{ ...baseConfig.submitterConfigs[0], provider: 'openai_codex_oauth', modelId: 'codex', openrouterReasoningEffort: 'max' }] } });
   await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' })).toHaveLength(3));
   await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.value === 'max')).toBe(true));
@@ -130,8 +139,8 @@ test.each([false, true])('Codex effort covers all Aggregator roles with running=
 });
 
 test.each([false, true])('xAI effort covers all Aggregator roles with running=%s', async isRunning => {
-  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [{ id: 'grok-4.3' }] });
+  mockCloudProvider('xai_grok_oauth', { configured: true });
+  mockCloudProvider('xai_grok_oauth', { modelsResponse: { models: [{ id: 'grok-4.3' }] } });
   const result = renderSettings({ isRunning, initialConfig: { ...baseConfig, validatorProvider: 'xai_grok_oauth', validatorModel: 'grok-4.3', validatorOpenrouterReasoningEffort: 'medium', assistantProvider: 'xai_grok_oauth', assistantModel: 'grok-4.3', assistantOpenrouterReasoningEffort: 'medium', submitterConfigs: [{ ...baseConfig.submitterConfigs[0], provider: 'xai_grok_oauth', modelId: 'grok-4.3', openrouterReasoningEffort: 'medium' }] } });
   const controls = await screen.findAllByRole('combobox', { name: 'xAI Reasoning Effort' });
   expect(controls).toHaveLength(3);
@@ -140,6 +149,38 @@ test.each([false, true])('xAI effort covers all Aggregator roles with running=%s
     fireEvent.change(controls[0], { target: { value: 'low' } });
     await waitFor(() => expect(result.getObservedConfig().submitterConfigs[0].openrouterReasoningEffort).toBe('low'));
   }
+});
+
+test('Kimi Code roles use the registry reasoning choices and model limits', async () => {
+  mockCloudProvider('kimi_code', { configured: true });
+  mockCloudProvider('kimi_code', {
+    modelsResponse: { models: [{ id: 'k3', name: 'Kimi K3', context_length: 1048576 }, { id: 'kimi-for-coding-highspeed' }] },
+  });
+  const result = renderSettings({
+    initialConfig: {
+      ...baseConfig,
+      validatorProvider: 'kimi_code',
+      validatorModel: 'k3',
+      validatorOpenrouterReasoningEffort: 'xhigh',
+      submitterConfigs: [{ ...baseConfig.submitterConfigs[0], provider: 'kimi_code', modelId: 'kimi-for-coding-highspeed' }],
+    },
+  });
+  // Validator and the Assistant (which mirrors the Validator) both use Kimi Code.
+  const controls = await screen.findAllByRole('combobox', { name: 'Kimi Code Reasoning Effort' });
+  expect(controls.length).toBeGreaterThanOrEqual(1);
+  const control = controls[0];
+  expect(control).toHaveValue('max');
+  expect([...control.options].map((option) => option.value)).toEqual(['auto', 'max', 'high', 'low', 'none']);
+  expect(screen.getByText('This model always reasons; it has no effort setting.')).toBeInTheDocument();
+  expect(cloudAccessAPI.getProviderStatus).toHaveBeenCalledWith('kimi_code');
+  expect(result.getObservedConfig().validatorProvider).toBe('kimi_code');
+});
+
+test('shows a model error banner for any cloud provider', async () => {
+  mockCloudProvider('kimi_code', { configured: true });
+  mockCloudProvider('kimi_code', { modelsResponse: { models: [] } });
+  renderSettings();
+  expect(await screen.findByText(/no Kimi Code models were returned/)).toBeInTheDocument();
 });
 
 test('renders Assistant role and greys it out when Session History Memory is disabled', async () => {
@@ -230,12 +271,8 @@ test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', asy
   await waitFor(() => {
     expect(openRouterAPI.getApiKeyStatus).toHaveBeenCalled();
   });
-  expect(cloudAccessAPI.getOpenAICodexStatus).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getXAIGrokStatus).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getSakanaFuguStatus).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getOpenAICodexModels).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getXAIGrokModels).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getSakanaFuguModels).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getProviderStatus).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getProviderModels).not.toHaveBeenCalled();
 });
 
 test('rejects raw settings when submitter count does not match configured roles', async () => {
@@ -274,17 +311,17 @@ test('canonicalizes legacy persisted submitter IDs from array order', () => {
 
 
 test('loads Sakana Fugu models when desktop capability is enabled and key is configured', async () => {
-  cloudAccessAPI.getSakanaFuguStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getSakanaFuguModels.mockResolvedValue({
+  mockCloudProvider('sakana_fugu', { configured: true });
+  mockCloudProvider('sakana_fugu', { modelsResponse: {
     models: [{ id: 'fugu', name: 'Fugu', context_length: 1000000, max_output_tokens: 100000 }],
-  });
+  } });
 
   renderSettings({
     capabilities: { lmStudioEnabled: true, genericMode: false, sakanaFuguAvailable: true },
   });
 
   await waitFor(() => {
-    expect(cloudAccessAPI.getSakanaFuguStatus).toHaveBeenCalled();
-    expect(cloudAccessAPI.getSakanaFuguModels).toHaveBeenCalled();
+    expect(cloudAccessAPI.getProviderStatus).toHaveBeenCalledWith('sakana_fugu');
+    expect(cloudAccessAPI.getProviderModels).toHaveBeenCalledWith('sakana_fugu');
   });
 });

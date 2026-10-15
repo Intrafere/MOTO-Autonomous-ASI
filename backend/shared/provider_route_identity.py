@@ -13,11 +13,13 @@ import re
 from typing import Any, Mapping, Optional
 
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.subscription_providers.metadata import CLOUD_PROVIDERS
 
 PROVIDER_ERROR_ACTIVITY_EVENTS = frozenset({
     "provider_retry_cooldown",
     "openai_codex_oauth_error",
     "sakana_fugu_error",
+    "subscription_provider_error",
     "oauth_provider_error",
     "oauth_provider_usage_limited",
     "provider_usage_limit_resumed",
@@ -68,9 +70,7 @@ WORKFLOW_LABELS = {
 PROVIDER_LABELS = {
     "openrouter": "OpenRouter",
     "lm_studio": "LM Studio",
-    "openai_codex_oauth": "OpenAI Codex",
-    "xai_grok_oauth": "xAI Grok",
-    "sakana_fugu": "Sakana Fugu",
+    **{provider.provider_id: provider.label for provider in CLOUD_PROVIDERS},
 }
 MODEL_PROVIDERS = frozenset(PROVIDER_LABELS)
 OPENROUTER_FAMILY_PROVIDERS = frozenset({"openrouter"})

@@ -2,6 +2,8 @@
  * API service for backend communication
  */
 
+import { getCloudAccessProvider } from '../utils/oauthProviders';
+
 const API_BASE = import.meta.env.VITE_MOTO_API_BASE || '/api';
 const PROOF_STATUS_READY_CACHE_MS = 5000;
 const PROOF_STATUS_STARTING_CACHE_MS = 30000;
@@ -1770,6 +1772,14 @@ export const openRouterAPI = {
   },
 };
 
+function requireCloudProvider(providerId) {
+  const provider = getCloudAccessProvider(providerId);
+  if (!provider) {
+    throw new Error(`Unknown cloud provider: ${providerId}`);
+  }
+  return provider;
+}
+
 export const cloudAccessAPI = {
   async getStatus() {
     const response = await fetch(`${API_BASE}/cloud-access/status`);
@@ -1879,33 +1889,45 @@ export const cloudAccessAPI = {
     return response.json();
   },
 
-  async getSakanaFuguStatus() {
-    const response = await fetch(`${API_BASE}/cloud-access/sakana-fugu/status`);
-    if (!response.ok) await throwFromResponse(response, 'Failed to get Sakana Fugu status');
+  // Registry-driven routes shared by every cloud subscription provider.
+  async getProviderStatus(providerId) {
+    const provider = requireCloudProvider(providerId);
+    const response = await fetch(`${API_BASE}/cloud-access/${provider.apiSlug}/status`);
+    if (!response.ok) await throwFromResponse(response, `Failed to get ${provider.label} status`);
     return response.json();
   },
 
-  async setSakanaFuguApiKey(apiKey) {
-    const response = await fetch(`${API_BASE}/cloud-access/sakana-fugu/api-key`, {
+  async getProviderModels(providerId) {
+    const provider = requireCloudProvider(providerId);
+    const response = await fetch(`${API_BASE}/cloud-access/${provider.apiSlug}/models`);
+    if (!response.ok) await throwFromResponse(response, `Failed to fetch ${provider.label} models`);
+    return response.json();
+  },
+
+  async setProviderApiKey(providerId, apiKey) {
+    const provider = requireCloudProvider(providerId);
+    const response = await fetch(`${API_BASE}/cloud-access/${provider.apiSlug}/api-key`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: apiKey }),
     });
-    if (!response.ok) await throwFromResponse(response, 'Failed to save Sakana Fugu API key');
+    if (!response.ok) await throwFromResponse(response, `Failed to save ${provider.label} API key`);
     return response.json();
   },
 
-  async getSakanaFuguModels() {
-    const response = await fetch(`${API_BASE}/cloud-access/sakana-fugu/models`);
-    if (!response.ok) await throwFromResponse(response, 'Failed to fetch Sakana Fugu models');
-    return response.json();
-  },
-
-  async clearSakanaFuguApiKey() {
-    const response = await fetch(`${API_BASE}/cloud-access/sakana-fugu`, {
+  async clearProviderApiKey(providerId) {
+    const provider = requireCloudProvider(providerId);
+    const response = await fetch(`${API_BASE}/cloud-access/${provider.apiSlug}`, {
       method: 'DELETE',
     });
-    if (!response.ok) await throwFromResponse(response, 'Failed to clear Sakana Fugu API key');
+    if (!response.ok) await throwFromResponse(response, `Failed to clear ${provider.label} API key`);
+    return response.json();
+  },
+
+  async getProviderUsage(providerId) {
+    const provider = requireCloudProvider(providerId);
+    const response = await fetch(`${API_BASE}/cloud-access/${provider.apiSlug}/usage`);
+    if (!response.ok) await throwFromResponse(response, `Failed to get ${provider.label} usage`);
     return response.json();
   },
 };

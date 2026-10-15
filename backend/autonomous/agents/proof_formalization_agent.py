@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, List, Optional, Tuple
 
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text
+from backend.shared.response_extraction import TRUNCATED_FINISH_REASONS, extract_message_text
 from backend.shared.lean4_client import (
     LeanWorkspaceRepairRequiredError,
     get_lean4_client,
@@ -75,14 +75,6 @@ _MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX = "MANDATORY FULL SOURCE CONTEXT 
 _PROOF_SEARCH_CONTEXT_OMITTED = (
     "[Proof-search context omitted because it was unavailable or did not fit the configured context budget.]"
 )
-_TRUNCATED_FINISH_REASONS = {
-    "incomplete",
-    "length",
-    "max_tokens",
-    "max_output_tokens",
-    "token_limit",
-    "output_limit",
-}
 _TRUNCATED_RESPONSE_STATUSES = {
     "incomplete",
     "length",
@@ -177,7 +169,7 @@ def _response_indicates_output_truncation(response: dict[str, Any]) -> bool:
     if isinstance(choices, list) and choices:
         first_choice = choices[0] if isinstance(choices[0], dict) else {}
         finish_reason = str(first_choice.get("finish_reason") or "").strip().lower()
-        if finish_reason in _TRUNCATED_FINISH_REASONS:
+        if finish_reason in TRUNCATED_FINISH_REASONS:
             return True
     status = str(response.get("status") or "").strip().lower()
     if status in _TRUNCATED_RESPONSE_STATUSES:
@@ -185,7 +177,7 @@ def _response_indicates_output_truncation(response: dict[str, Any]) -> bool:
     incomplete_details = response.get("incomplete_details")
     if isinstance(incomplete_details, dict):
         reason = str(incomplete_details.get("reason") or "").strip().lower()
-        if reason in _TRUNCATED_FINISH_REASONS:
+        if reason in TRUNCATED_FINISH_REASONS:
             return True
     return False
 

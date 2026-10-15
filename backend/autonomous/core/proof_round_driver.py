@@ -177,8 +177,6 @@ class ProofRoundDriver:
                         round_index += 1
                         continue
                     return "complete"
-                if round_status == "deferred":
-                    return "complete"
                 if proof_result is None:
                     round_index += 1
                     continue

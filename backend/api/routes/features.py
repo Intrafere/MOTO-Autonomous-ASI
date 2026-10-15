@@ -6,18 +6,30 @@ import json
 import logging
 from pathlib import Path
 import time
-from typing import Any, Dict, Literal
+from typing import Any, Dict, List, Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
 from backend.shared.build_info import get_build_info
 from backend.shared.config import system_config
+from backend.shared.subscription_providers.metadata import CLOUD_PROVIDERS
 from backend.shared.syntheticlib_product import get_syntheticlib_product_state
 from backend.shared.trade_data_boundary import redact_trade_text
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+class SubscriptionProviderCapability(BaseModel):
+    """Capability-only description of one desktop subscription provider."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: str
+    label: str
+    auth_kind: Literal["oauth_pkce", "api_key"]
+    available: bool
 
 
 class FeaturesResponse(BaseModel):
@@ -35,6 +47,8 @@ class FeaturesResponse(BaseModel):
     openai_codex_oauth_available: bool
     xai_grok_oauth_available: bool
     sakana_fugu_available: bool
+    kimi_code_available: bool
+    subscription_providers: List[SubscriptionProviderCapability]
     syntheticlib_product_state: Literal[
         "coming_soon",
         "developer_preview",
@@ -70,9 +84,16 @@ async def get_features() -> Dict[str, Any]:
             "generic_mode": is_generic,
             "lm_studio_enabled": not is_generic,
             "pdf_download_available": not is_generic,
-            "openai_codex_oauth_available": not is_generic,
-            "xai_grok_oauth_available": not is_generic,
-            "sakana_fugu_available": not is_generic,
+            **{provider.capability_flag: not is_generic for provider in CLOUD_PROVIDERS},
+            "subscription_providers": [
+                {
+                    "id": provider.provider_id,
+                    "label": provider.label,
+                    "auth_kind": provider.auth_kind,
+                    "available": not (is_generic and provider.desktop_only),
+                }
+                for provider in CLOUD_PROVIDERS
+            ],
             "syntheticlib_product_state": get_syntheticlib_product_state().value,
         }
     )

@@ -1,4 +1,4 @@
-import tempfile
+import os
 from unittest import IsolatedAsyncioTestCase, mock
 
 from fastapi import HTTPException
@@ -11,13 +11,30 @@ from backend.shared import secret_store
 from backend.shared.config import system_config
 from backend.shared.model_error_utils import is_retryable_model_output_error
 from backend.shared.models import ModelConfig
-from backend.shared.sakana_fugu_client import (
-    SakanaFuguAuthError,
-    SakanaFuguClient,
-    SakanaFuguEntitlementError,
-    SakanaFuguRequestError,
-    SakanaFuguUsageLimitError,
+from backend.shared.subscription_providers.api_key_client import SubscriptionApiKeyClient
+from backend.shared.subscription_providers.errors import (
+    SubscriptionAuthError,
+    SubscriptionEntitlementError,
+    SubscriptionRequestError,
+    SubscriptionUsageLimitError,
 )
+from backend.shared.subscription_providers.registry import get_api_key_subscription_client
+from backend.shared.subscription_providers.sakana_fugu import SAKANA_FUGU_PROFILE
+
+_CLIENT_MODULE = "backend.shared.subscription_providers.api_key_client"
+
+
+def _route_endpoint(path: str, method: str):
+    for route in cloud_access_route.router.routes:
+        if route.path == path and method in route.methods:
+            return route.endpoint
+    raise AssertionError(f"route not found: {method} {path}")
+
+
+def _sakana_client() -> SubscriptionApiKeyClient:
+    client = SubscriptionApiKeyClient(SAKANA_FUGU_PROFILE)
+    client._api_key = "test-key"
+    return client
 
 
 class SakanaFuguClientTests(IsolatedAsyncioTestCase):
@@ -31,11 +48,12 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
         )
 
     def test_normalize_reasoning_effort_filters_invalid_values(self) -> None:
-        self.assertEqual(SakanaFuguClient._normalize_reasoning_effort("auto"), "xhigh")
-        self.assertEqual(SakanaFuguClient._normalize_reasoning_effort("xhigh"), "xhigh")
-        self.assertEqual(SakanaFuguClient._normalize_reasoning_effort("high"), "high")
-        self.assertIsNone(SakanaFuguClient._normalize_reasoning_effort("medium"))
-        self.assertIsNone(SakanaFuguClient._normalize_reasoning_effort("none"))
+        normalize = SAKANA_FUGU_PROFILE.normalize_reasoning_effort
+        self.assertEqual(normalize("auto", model="fugu"), "xhigh")
+        self.assertEqual(normalize("xhigh", model="fugu"), "xhigh")
+        self.assertEqual(normalize("high", model="fugu"), "high")
+        self.assertIsNone(normalize("medium", model="fugu"))
+        self.assertIsNone(normalize("none", model="fugu"))
 
     def test_normalize_responses_to_chat_shape(self) -> None:
         payload = {
@@ -44,36 +62,32 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
             "output_text": '{"submission":"ok"}',
             "usage": {"input_tokens": 10, "output_tokens": 5},
         }
-        normalized = SakanaFuguClient._normalize_responses_to_chat(payload, "fugu")
+        normalized = _sakana_client()._normalize_responses_to_chat(payload, "fugu")
         self.assertEqual(normalized["object"], "chat.completion")
         self.assertEqual(normalized["choices"][0]["message"]["content"], '{"submission":"ok"}')
         self.assertEqual(normalized["usage"]["prompt_tokens"], 10)
         self.assertEqual(normalized["usage"]["completion_tokens"], 5)
-        self.assertEqual(normalized["_moto_sakana_wire_api"], "responses")
+        self.assertEqual(normalized["_moto_wire_api"], "responses")
 
     def test_messages_need_chat_completions_for_tools(self) -> None:
+        need_chat = SubscriptionApiKeyClient._messages_need_chat_completions
         self.assertTrue(
-            SakanaFuguClient._messages_need_chat_completions(
+            need_chat(
                 [{"role": "user", "content": "hi"}],
                 [{"type": "function", "function": {"name": "tool"}}],
             )
         )
-        self.assertTrue(
-            SakanaFuguClient._messages_need_chat_completions(
-                [{"role": "tool", "content": "result"}],
-                None,
-            )
-        )
-        self.assertFalse(
-            SakanaFuguClient._messages_need_chat_completions(
-                [{"role": "user", "content": "hi"}],
-                None,
-            )
-        )
+        self.assertTrue(need_chat([{"role": "tool", "content": "result"}], None))
+        self.assertFalse(need_chat([{"role": "user", "content": "hi"}], None))
+
+    def test_moto_env_override_takes_precedence_over_legacy_names(self) -> None:
+        env = {"MOTO_SAKANA_FUGU_API_KEY": "moto-key", "SAKANA_API_KEY": "legacy-key", "FUGU_API_KEY": "old-key"}
+        with mock.patch.dict(os.environ, env, clear=False):
+            client = SubscriptionApiKeyClient(SAKANA_FUGU_PROFILE)
+        self.assertEqual(client._api_key, "moto-key")
 
     async def test_generate_completion_uses_chat_completions_for_tool_calls(self) -> None:
-        client = SakanaFuguClient()
-        client._api_key = "test-key"
+        client = _sakana_client()
         with mock.patch.object(
             client,
             "_generate_via_chat_completions",
@@ -86,9 +100,16 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
             )
         chat_mock.assert_awaited_once()
 
+    async def test_requests_identify_moto_honestly(self) -> None:
+        client = _sakana_client()
+        success = self._response(200, {"id": "resp_ok", "model": "fugu", "output_text": "ok"})
+        with mock.patch.object(client.client, "request", mock.AsyncMock(return_value=success)) as request:
+            await client.generate_completion(model="fugu", messages=[{"role": "user", "content": "hi"}])
+        user_agent = request.await_args.kwargs["headers"]["User-Agent"]
+        self.assertTrue(user_agent.startswith("MOTO-Autonomous-ASI/"))
+
     async def test_responses_usage_limit_is_typed_and_not_retried(self) -> None:
-        client = SakanaFuguClient()
-        client._api_key = "test-key"
+        client = _sakana_client()
         response = self._response(
             429,
             {
@@ -106,16 +127,16 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
         )
         with (
             mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
-            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+            mock.patch(f"{_CLIENT_MODULE}.assured_retry_wait", new=mock.AsyncMock()) as wait,
         ):
-            with self.assertRaises(SakanaFuguUsageLimitError) as ctx:
+            with self.assertRaises(SubscriptionUsageLimitError) as ctx:
                 await client.generate_completion(
                     model="fugu",
                     messages=[{"role": "user", "content": "hello"}],
                 )
 
         self.assertEqual(request.await_count, 1)
-        sleep.assert_not_awaited()
+        wait.assert_not_awaited()
         self.assertEqual(ctx.exception.plan_type, "pro")
         self.assertEqual(ctx.exception.resets_in_seconds, 120)
         self.assertIsNotNone(ctx.exception.resets_at)
@@ -124,8 +145,7 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
         self.assertNotIn("sk-or-v1-secret-token", str(ctx.exception))
 
     async def test_usage_limit_code_is_not_hidden_by_generic_error_type(self) -> None:
-        client = SakanaFuguClient()
-        client._api_key = "test-key"
+        client = _sakana_client()
         response = self._response(
             429,
             {
@@ -139,19 +159,18 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
         )
         with (
             mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
-            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+            mock.patch(f"{_CLIENT_MODULE}.assured_retry_wait", new=mock.AsyncMock()) as wait,
         ):
-            with self.assertRaises(SakanaFuguUsageLimitError):
+            with self.assertRaises(SubscriptionUsageLimitError):
                 await client.generate_completion(
                     model="fugu",
                     messages=[{"role": "user", "content": "hello"}],
                 )
         self.assertEqual(request.await_count, 1)
-        sleep.assert_not_awaited()
+        wait.assert_not_awaited()
 
     async def test_chat_completions_usage_limit_reads_retry_after_header(self) -> None:
-        client = SakanaFuguClient()
-        client._api_key = "test-key"
+        client = _sakana_client()
         response = self._response(
             429,
             {"error": {"code": "usage_limit_reached", "message": "Timed quota reached"}},
@@ -159,9 +178,9 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
         )
         with (
             mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
-            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+            mock.patch(f"{_CLIENT_MODULE}.assured_retry_wait", new=mock.AsyncMock()) as wait,
         ):
-            with self.assertRaises(SakanaFuguUsageLimitError) as ctx:
+            with self.assertRaises(SubscriptionUsageLimitError) as ctx:
                 await client.generate_completion(
                     model="fugu",
                     messages=[{"role": "user", "content": "hello"}],
@@ -169,12 +188,11 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(request.await_count, 1)
-        sleep.assert_not_awaited()
+        wait.assert_not_awaited()
         self.assertEqual(ctx.exception.resets_in_seconds, 45)
 
     async def test_usage_limit_without_reset_is_hard_entitlement(self) -> None:
-        client = SakanaFuguClient()
-        client._api_key = "test-key"
+        client = _sakana_client()
         response = self._response(
             429,
             {
@@ -186,20 +204,19 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
         )
         with (
             mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
-            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+            mock.patch(f"{_CLIENT_MODULE}.assured_retry_wait", new=mock.AsyncMock()) as wait,
         ):
-            with self.assertRaises(SakanaFuguEntitlementError):
+            with self.assertRaises(SubscriptionEntitlementError):
                 await client.generate_completion(
                     model="fugu",
                     messages=[{"role": "user", "content": "hello"}],
                 )
 
         self.assertEqual(request.await_count, 1)
-        sleep.assert_not_awaited()
+        wait.assert_not_awaited()
 
     async def test_models_hard_entitlement_error_is_typed_and_not_retried(self) -> None:
-        client = SakanaFuguClient()
-        client._api_key = "test-key"
+        client = _sakana_client()
         response = self._response(
             403,
             {
@@ -215,19 +232,18 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
         )
         with (
             mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
-            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+            mock.patch(f"{_CLIENT_MODULE}.assured_retry_wait", new=mock.AsyncMock()) as wait,
         ):
-            with self.assertRaises(SakanaFuguEntitlementError) as ctx:
+            with self.assertRaises(SubscriptionEntitlementError) as ctx:
                 await client.list_models()
 
         self.assertEqual(request.await_count, 1)
-        sleep.assert_not_awaited()
+        wait.assert_not_awaited()
         self.assertEqual(ctx.exception.error_code, "subscription_required")
         self.assertEqual(ctx.exception.status_code, 403)
 
     async def test_ordinary_429_honors_retry_after_then_succeeds(self) -> None:
-        client = SakanaFuguClient()
-        client._api_key = "test-key"
+        client = _sakana_client()
         rate_limited = self._response(
             429,
             {"error": {"code": "rate_limit_exceeded", "message": "Slow down"}},
@@ -248,9 +264,9 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
                 "request",
                 mock.AsyncMock(side_effect=[rate_limited, success]),
             ) as request,
-            mock.patch("backend.shared.sakana_fugu_client.random.uniform", return_value=0.5),
+            mock.patch(f"{_CLIENT_MODULE}.random.uniform", return_value=0.5),
             mock.patch(
-                "backend.shared.sakana_fugu_client.assured_retry_wait",
+                f"{_CLIENT_MODULE}.assured_retry_wait",
                 new=mock.AsyncMock(return_value=True),
             ) as wait_mock,
         ):
@@ -275,9 +291,9 @@ class SakanaFuguSecretStoreTests(IsolatedAsyncioTestCase):
             mock.patch.object(secret_store, "_get_secret", return_value="sk-sakana-test"),
             mock.patch.object(secret_store, "_delete_secret") as delete_secret,
         ):
-            secret_store.store_sakana_fugu_api_key("sk-sakana-test")
-            self.assertEqual(secret_store.load_sakana_fugu_api_key(), "sk-sakana-test")
-            secret_store.clear_sakana_fugu_api_key()
+            secret_store.store_subscription_api_key("sakana_fugu_api_key", "sk-sakana-test")
+            self.assertEqual(secret_store.load_subscription_api_key("sakana_fugu_api_key"), "sk-sakana-test")
+            secret_store.clear_subscription_api_key("sakana_fugu_api_key")
             self.assertEqual(
                 set_secret.call_args_list[:2],
                 [
@@ -286,6 +302,11 @@ class SakanaFuguSecretStoreTests(IsolatedAsyncioTestCase):
                 ],
             )
             self.assertGreaterEqual(delete_secret.call_count, 4)
+
+    def test_subscription_secret_names_cannot_reuse_other_credentials(self) -> None:
+        for name in ("openrouter_api_key", "wolfram_alpha_api_key", "syntheticlib4_api_key", "../x_api_key", "sakana"):
+            with self.assertRaises(ValueError):
+                secret_store.load_subscription_api_key(name)
 
 
 class SakanaFuguRouteTests(IsolatedAsyncioTestCase):
@@ -300,30 +321,31 @@ class SakanaFuguRouteTests(IsolatedAsyncioTestCase):
         self.assertFalse(hosted_payload["sakana_fugu_available"])
 
     async def test_set_api_key_rejected_in_generic_mode(self) -> None:
+        endpoint = _route_endpoint("/api/cloud-access/sakana-fugu/api-key", "POST")
         with mock.patch.object(cloud_access_route.system_config, "generic_mode", True):
             with self.assertRaises(HTTPException) as ctx:
-                await cloud_access_route.set_sakana_fugu_api_key(
-                    cloud_access_route.SakanaFuguApiKeyRequest(api_key="sk-test")
-                )
+                await endpoint(cloud_access_route.SubscriptionApiKeyRequest(api_key="sk-test"))
         self.assertEqual(ctx.exception.status_code, 501)
 
     async def test_set_api_key_validates_before_persisting(self) -> None:
+        endpoint = _route_endpoint("/api/cloud-access/sakana-fugu/api-key", "POST")
+        client = get_api_key_subscription_client("sakana_fugu")
         with (
             mock.patch.object(cloud_access_route.system_config, "generic_mode", False),
             mock.patch.object(
-                cloud_access_route.sakana_fugu_client,
-                "list_models",
-                mock.AsyncMock(side_effect=SakanaFuguAuthError("bad key")),
-            ) as list_models,
-            mock.patch.object(cloud_access_route.sakana_fugu_client, "set_api_key") as set_api_key,
+                client,
+                "validate_candidate",
+                mock.AsyncMock(
+                    side_effect=SubscriptionAuthError("bad key", provider="sakana_fugu", provider_label="Sakana Fugu")
+                ),
+            ) as validate_candidate,
+            mock.patch.object(client, "set_api_key") as set_api_key,
         ):
             with self.assertRaises(HTTPException) as ctx:
-                await cloud_access_route.set_sakana_fugu_api_key(
-                    cloud_access_route.SakanaFuguApiKeyRequest(api_key=" bad-key ")
-                )
+                await endpoint(cloud_access_route.SubscriptionApiKeyRequest(api_key=" bad-key "))
 
         self.assertEqual(ctx.exception.status_code, 400)
-        list_models.assert_awaited_once_with(api_key="bad-key")
+        validate_candidate.assert_awaited_once_with(" bad-key ")
         set_api_key.assert_not_called()
 
     async def test_cloud_access_status_includes_sakana_provider(self) -> None:
@@ -332,7 +354,12 @@ class SakanaFuguRouteTests(IsolatedAsyncioTestCase):
 
         with (
             mock.patch.object(cloud_access_route.system_config, "generic_mode", False),
-            mock.patch.object(cloud_access_route.sakana_fugu_client, "status", sakana_status),
+            mock.patch.object(get_api_key_subscription_client("sakana_fugu"), "status", sakana_status),
+            mock.patch.object(
+                get_api_key_subscription_client("kimi_code"),
+                "status",
+                mock.AsyncMock(return_value={"configured": False}),
+            ),
             mock.patch.object(
                 cloud_access_route.openai_codex_client,
                 "status",
@@ -387,7 +414,7 @@ class SakanaFuguAPIClientManagerTests(IsolatedAsyncioTestCase):
         with (
             mock.patch.object(system_config, "generic_mode", False),
             mock.patch.object(
-                cloud_access_route.sakana_fugu_client,
+                get_api_key_subscription_client("sakana_fugu"),
                 "generate_completion",
                 mock.AsyncMock(side_effect=lambda **_kwargs: fake_response()),
             ) as generate_completion,
@@ -422,26 +449,28 @@ class SakanaFuguAPIClientManagerTests(IsolatedAsyncioTestCase):
                 max_output_tokens=100000,
             ),
         )
-        truncation_error = SakanaFuguRequestError(
+        truncation_error = SubscriptionRequestError(
             "Sakana Fugu completion failed: "
             '{"type":"response.incomplete","response":{"status":"incomplete",'
-            '"incomplete_details":{"reason":"max_output_tokens"}}}'
+            '"incomplete_details":{"reason":"max_output_tokens"}}}',
+            provider="sakana_fugu",
+            provider_label="Sakana Fugu",
         )
 
         with (
             mock.patch.object(system_config, "generic_mode", False),
             mock.patch.object(
-                cloud_access_route.sakana_fugu_client,
+                get_api_key_subscription_client("sakana_fugu"),
                 "generate_completion",
                 mock.AsyncMock(side_effect=truncation_error),
             ),
             mock.patch.object(
                 manager,
-                "_broadcast_unrecoverable_sakana_fugu_error",
+                "_broadcast_unrecoverable_subscription_error",
                 new=mock.AsyncMock(),
             ) as unrecoverable_broadcast,
         ):
-            with self.assertRaises(SakanaFuguRequestError) as ctx:
+            with self.assertRaises(SubscriptionRequestError) as ctx:
                 await manager.generate_completion(
                     task_id="proof_form_000",
                     role_id=role_id,

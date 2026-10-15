@@ -9,10 +9,8 @@ vi.mock('../../services/api', () => ({
     getModels: vi.fn(),
   },
   cloudAccessAPI: {
-    getOpenAICodexStatus: vi.fn(),
-    getXAIGrokStatus: vi.fn(),
-    getOpenAICodexModels: vi.fn(),
-    getXAIGrokModels: vi.fn(),
+    getProviderStatus: vi.fn(),
+    getProviderModels: vi.fn(),
   },
   openRouterAPI: {
     getApiKeyStatus: vi.fn(),
@@ -22,9 +20,22 @@ vi.mock('../../services/api', () => ({
   },
 }));
 
+const cloudProviderMocks = {};
+function mockCloudProvider(providerId, { configured, modelsResponse } = {}) {
+  const current = cloudProviderMocks[providerId] || { configured: false, models: [] };
+  cloudProviderMocks[providerId] = {
+    configured: configured ?? current.configured,
+    models: modelsResponse ? (modelsResponse.models || []) : current.models,
+  };
+  cloudAccessAPI.getProviderStatus.mockImplementation(async (id) => ({
+    status: { configured: Boolean(cloudProviderMocks[id]?.configured) },
+  }));
+  cloudAccessAPI.getProviderModels.mockImplementation(async (id) => ({ models: cloudProviderMocks[id]?.models || [] }));
+}
+
 test.each([false, true])('Codex effort covers every visible LeanOJ role with running=%s', async isRunning => {
-  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [{ id: 'codex', supported_reasoning_levels: ['high', 'max'] }] });
+  mockCloudProvider('openai_codex_oauth', { configured: true });
+  mockCloudProvider('openai_codex_oauth', { modelsResponse: { models: [{ id: 'codex', supported_reasoning_levels: ['high', 'max'] }] } });
   const role = { provider: 'openai_codex_oauth', modelId: 'codex', openrouterReasoningEffort: 'max', contextWindow: 400000, maxOutputTokens: 32000 };
   const settings = normalizeLeanOJSettings({ numSubmitters: 1, submitterConfigs: [role], roles: Object.fromEntries(['topic_generator', 'topic_validator', 'brainstorm_validator', 'final_solver', 'assistant'].map(key => [key, role])) });
   render(<LeanOJSettings settings={settings} onSettingsChange={vi.fn()} capabilities={{ lmStudioEnabled: true }} connectivityStatus={{ skills: { agent_conversation_memory: { enabled: true } } }} isRunning={isRunning} />);
@@ -34,8 +45,8 @@ test.each([false, true])('Codex effort covers every visible LeanOJ role with run
 });
 
 test.each([false, true])('xAI effort covers every visible LeanOJ role with running=%s', async isRunning => {
-  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [{ id: 'grok-4.3' }] });
+  mockCloudProvider('xai_grok_oauth', { configured: true });
+  mockCloudProvider('xai_grok_oauth', { modelsResponse: { models: [{ id: 'grok-4.3' }] } });
   const role = { provider: 'xai_grok_oauth', modelId: 'grok-4.3', openrouterReasoningEffort: 'low', contextWindow: 1000000, maxOutputTokens: 131072 };
   const settings = normalizeLeanOJSettings({ numSubmitters: 1, submitterConfigs: [role], roles: Object.fromEntries(['topic_generator', 'topic_validator', 'brainstorm_validator', 'final_solver', 'assistant'].map(key => [key, role])) });
   render(<LeanOJSettings settings={settings} onSettingsChange={vi.fn()} capabilities={{ lmStudioEnabled: true }} connectivityStatus={{ skills: { agent_conversation_memory: { enabled: true } } }} isRunning={isRunning} />);
@@ -53,10 +64,10 @@ beforeEach(() => {
   });
   openRouterAPI.getProviders.mockResolvedValue({ providers: [], endpoints: [] });
   api.getModels.mockResolvedValue({ models: [{ id: 'lm-final' }] });
-  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [] });
-  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [] });
+  mockCloudProvider('openai_codex_oauth', { configured: false });
+  mockCloudProvider('xai_grok_oauth', { configured: false });
+  mockCloudProvider('openai_codex_oauth', { modelsResponse: { models: [] } });
+  mockCloudProvider('xai_grok_oauth', { modelsResponse: { models: [] } });
 });
 
 test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', async () => {
@@ -79,10 +90,8 @@ test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', asy
   await waitFor(() => {
     expect(openRouterAPI.getApiKeyStatus).toHaveBeenCalled();
   });
-  expect(cloudAccessAPI.getOpenAICodexStatus).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getXAIGrokStatus).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getOpenAICodexModels).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getXAIGrokModels).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getProviderStatus).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getProviderModels).not.toHaveBeenCalled();
 });
 
 test('keeps configured models visible while running when discovery returns no models', async () => {

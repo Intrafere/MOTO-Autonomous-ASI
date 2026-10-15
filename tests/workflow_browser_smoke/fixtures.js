@@ -13,6 +13,13 @@ const HOSTED_FEATURES = {
   openai_codex_oauth_available: false,
   xai_grok_oauth_available: false,
   sakana_fugu_available: false,
+  kimi_code_available: false,
+  subscription_providers: [
+    { id: 'openai_codex_oauth', label: 'OpenAI Codex', auth_kind: 'oauth_pkce', available: false },
+    { id: 'xai_grok_oauth', label: 'xAI Grok', auth_kind: 'oauth_pkce', available: false },
+    { id: 'sakana_fugu', label: 'Sakana Fugu', auth_kind: 'api_key', available: false },
+    { id: 'kimi_code', label: 'Kimi Code', auth_kind: 'api_key', available: false },
+  ],
 };
 
 const IDLE_STATUS = {

@@ -1110,9 +1110,9 @@ def _assistant_provider_key(role_id: str) -> str:
     if config is None:
         return ""
     provider = str(config.provider or "").strip()
-    if provider in {"openai_codex_oauth", "xai_grok_oauth", "sakana_fugu"}:
-        return provider
-    return ""
+    from backend.shared.subscription_providers.metadata import is_cloud_provider
+
+    return provider if is_cloud_provider(provider) else ""
 
 
 def _assistant_provider_is_cooling_down(role_id: str) -> bool:

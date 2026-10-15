@@ -1,9 +1,11 @@
 """Pure helpers for fitting rolling feedback into model prompts.
 
 Durable feedback stores remain authoritative.  These helpers operate on copied,
-model-visible projections only and never split an individual feedback entry.
+model-visible projections only. Whole entries are never split; only the tool
+diagnostics inside an entry (Lean output) are bounded.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Generic, Iterable, Tuple, TypeVar
 
@@ -11,6 +13,59 @@ from backend.shared.utils import count_tokens
 
 
 T = TypeVar("T")
+
+# Lean can print every hypothesis of every unsolved goal, so one failed attempt's
+# raw output can exceed a whole model context window. Prompts show a bounded,
+# priority-ordered prefix of each attempt's output; durable feedback keeps it all.
+LEAN_FEEDBACK_PROMPT_CHAR_LIMIT = 30_000
+LEAN_GOAL_STATES_PROMPT_CHAR_LIMIT = 10_000
+_LEAN_ERROR_LINE_RE = re.compile(r"\berror(?:\([^)]*\))?:")
+
+
+def _leading_lines(text: str, limit: int) -> tuple[str, list[str]]:
+    """Return the leading whole lines within ``limit`` chars and the omitted lines.
+
+    A first line longer than ``limit`` is cut so some diagnostics always remain.
+    """
+    lines = text.splitlines()
+    kept: list[str] = []
+    used = 0
+    for index, line in enumerate(lines):
+        cost = len(line) + (1 if kept else 0)
+        if used + cost > limit:
+            if not kept:
+                return line[:limit], lines[index:]
+            return "\n".join(kept), lines[index:]
+        kept.append(line)
+        used += cost
+    return "\n".join(kept), []
+
+
+def _omission_note(omitted: list[str]) -> str:
+    error_lines = sum(1 for line in omitted if _LEAN_ERROR_LINE_RE.search(line))
+    detail = f", including {error_lines} error line(s)" if error_lines else ""
+    return f"[Shortened to fit the prompt: {len(omitted)} more line(s) omitted{detail}.]"
+
+
+def project_lean_feedback(error_text: str, goal_states: str) -> tuple[str, str]:
+    """Bound one attempt's Lean feedback and goal states for a model prompt.
+
+    Goal-state lines already shown in the feedback are not repeated. Returns
+    ``(feedback, goal_states)``; an empty goal-state result means none remain.
+    """
+    feedback, omitted = _leading_lines(error_text or "", LEAN_FEEDBACK_PROMPT_CHAR_LIMIT)
+    if omitted:
+        feedback = f"{feedback}\n{_omission_note(omitted)}"
+    shown = {line.strip() for line in feedback.splitlines() if line.strip()}
+    remaining = "\n".join(
+        line
+        for line in (goal_states or "").splitlines()
+        if line.strip() and line.strip() not in shown
+    )
+    goals, goals_omitted = _leading_lines(remaining, LEAN_GOAL_STATES_PROMPT_CHAR_LIMIT)
+    if goals_omitted:
+        goals = f"{goals}\n{_omission_note(goals_omitted)}"
+    return feedback, goals
 
 
 @dataclass(frozen=True)

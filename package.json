@@ -15,6 +15,8 @@
     "test:workflow-artifacts": "python -m tests.workflow_cross_field.artifacts --check",
     "test:syntheticlib-trade-contract": "python -m scripts.check_syntheticlib_trade_contract --check",
     "test:syntheticlib-trade-release-local": "python -m scripts.run_local_syntheticlib_compatibility_ci",
+    "test:codeql": "python -m scripts.run_codeql",
+    "test:github": "python -m scripts.run_github_checks",
     "test:context-overflow": "python -m pytest tests/regressions/test_context_overflow_metadata.py tests/regressions/test_context_overflow_emitters.py tests/regressions/test_provider_routing_errors.py tests/regressions/test_proof_context_overflow_metadata.py && npm --prefix frontend run test -- src/utils/activityStyles.test.js src/components/contextOverflowBehavior.test.jsx",
     "test:deep": "python tests/run_deep_workflows.py",
     "test:all": "npm run test:backend && npm run test:frontend"

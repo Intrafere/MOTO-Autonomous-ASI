@@ -1972,6 +1972,8 @@ class FeaturesContractTests(IsolatedAsyncioTestCase):
         self.assertTrue(payload["xai_grok_oauth_available"])
         self.assertIn("sakana_fugu_available", payload)
         self.assertTrue(payload["sakana_fugu_available"])
+        self.assertIn("kimi_code_available", payload)
+        self.assertTrue(payload["kimi_code_available"])
 
 
 class CloudAccessStatusTests(IsolatedAsyncioTestCase):

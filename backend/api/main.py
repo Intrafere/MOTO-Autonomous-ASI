@@ -342,9 +342,11 @@ async def _application_lifespan(app: FastAPI):
     clear_lean4_client()
     await lm_studio_client.close()
     from backend.shared.openai_codex_client import openai_codex_client
-    from backend.shared.sakana_fugu_client import sakana_fugu_client
+    from backend.shared.subscription_providers.registry import close_api_key_subscription_clients
+    from backend.shared.xai_grok_client import xai_grok_client
     await openai_codex_client.close()
-    await sakana_fugu_client.close()
+    await xai_grok_client.close()
+    await close_api_key_subscription_clients()
     logger.info("Shutdown complete")
 
 

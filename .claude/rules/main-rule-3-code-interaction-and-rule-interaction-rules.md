@@ -100,7 +100,7 @@ Definitive typed spending/entitlement failures bypass transient retries. A faile
 
 18.) Current-run Mathematical Proofs tabs are flat per-proof views and must not group by or display the run's user prompt; proof statements, reasoning, and Lean code remain complete. Prompt/run collapsing and bounded prompt previews belong only to historical proof libraries. Manual live proofs and archived manual proof runs use separate tabs, and LeanOJ completed-proof history excludes the currently loaded run.
 
-19.) User-facing fatal `context_overflow_error` and nonfatal `proof_context_overflow` activity must identify configured and effective routes without exposing provider text/secrets. Events remain workflow-scoped, survive bounded instance-prefixed persistence, and avoid duplicate stops. A process-local continuous manual proof run may drain siblings before an unresolved mandatory Validator/proof-solver overflow terminates it; an Autonomous proof checkpoint cancels and drains siblings immediately, durably stops the whole run, and preserves its checkpoint for recovery after configuration changes.
+19.) User-facing fatal `context_overflow_error` and nonfatal `proof_context_overflow` activity must identify configured and effective routes without exposing provider text/secrets. Events remain workflow-scoped, survive bounded instance-prefixed persistence, and avoid duplicate stops. A single proof candidate's overflow sets aside only that candidate: running siblings, later batches, and later rounds continue, and at round end it becomes a failed open target. Only a round where nothing can reach the model (discovery/list-review overflow, or every candidate overflowing before its first call) stops: manual runs end with the overflow error, and the Autonomous workflow stops durably, preserving its checkpoint for recovery after configuration changes.
 
 20.) Each top-level run may own exactly one Progressive Solution Path: one manual Aggregator→Compiler run, one Autonomous session, or one LeanOJ session. Activation uses a monotonic count of accepted brainstorm events—not retained post-cleanup memory—and a parent-controlled child never writes it. Before five acceptances the path is absent from prompts and UI. After activation, only existing semantic LLM validators may originate optional material updates in their normal response; malformed/omitted path JSON cannot affect the primary decision. Exact Main Submitter 1 review is serial, transactional, and non-blocking. Hard failures enter visible user-repair state and resume only through an explicit generation-fenced retry. Stop/crash preserves plan/queue; serialized Clear/new-run is the only reset.
 
@@ -118,8 +118,9 @@ Linked inline brainstorm-proof submissions follow the same owning-run filter in 
 22.) Model-facing rolling rejection, retry, and execution feedback is a prompt-only
 projection. Start with at most the newest five whole entries, remove the oldest one at
 a time after complete-prompt accounting (including provider context rejection), and
-never truncate or remove the newest entry. Newest-only overflow preserves durable state
-and uses the owning workflow's existing stop/repair lifecycle. Semantic proof-pruning
+never remove the newest entry; only tool diagnostics inside an entry (Lean output) are
+bounded in the projection. Newest-only overflow preserves durable state and uses the
+owning workflow's existing stop/repair lifecycle (rule 19 for proof candidates). Semantic proof-pruning
 evidence ledgers remain atomic and outside this chronological policy.
 
 23.) User-facing Live Activity uses additive stable event identity, owning workflow/run/

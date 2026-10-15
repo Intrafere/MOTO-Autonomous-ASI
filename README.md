@@ -13,6 +13,7 @@
 [![ChatGPT Subscription](https://img.shields.io/badge/ChatGPT_Subscription-Codex_OAuth-10a37f.svg)](https://chatgpt.com/)
 [![SuperGrok Subscription](https://img.shields.io/badge/SuperGrok_Subscription-xAI_OAuth-black.svg)](https://grok.com/)
 [![Sakana Fugu Subscription](https://img.shields.io/badge/Sakana_Fugu-Subscription_API-e85d75.svg)](https://sakana.ai/fugu/)
+[![Kimi Code Subscription](https://img.shields.io/badge/Kimi_Code-Subscription_API-1f6feb.svg)](https://www.kimi.com/code/)
 [![OpenRouter: API Key](https://img.shields.io/badge/OpenRouter-API_Key-6467f2.svg)](https://openrouter.ai/)
 [![LM Studio: Local Models](https://img.shields.io/badge/LM_Studio-Local_Models-7c3aed.svg)](https://lmstudio.ai/)
 

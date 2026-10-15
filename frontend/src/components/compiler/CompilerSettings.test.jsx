@@ -14,10 +14,8 @@ vi.mock('../../services/api', () => ({
     getDefaultCritiquePrompt: vi.fn(),
   },
   cloudAccessAPI: {
-    getOpenAICodexStatus: vi.fn(),
-    getXAIGrokStatus: vi.fn(),
-    getOpenAICodexModels: vi.fn(),
-    getXAIGrokModels: vi.fn(),
+    getProviderStatus: vi.fn(),
+    getProviderModels: vi.fn(),
   },
   openRouterAPI: {
     getApiKeyStatus: vi.fn(),
@@ -27,6 +25,19 @@ vi.mock('../../services/api', () => ({
     setFreeModelSettings: vi.fn(),
   },
 }));
+
+const cloudProviderMocks = {};
+function mockCloudProvider(providerId, { configured, modelsResponse } = {}) {
+  const current = cloudProviderMocks[providerId] || { configured: false, models: [] };
+  cloudProviderMocks[providerId] = {
+    configured: configured ?? current.configured,
+    models: modelsResponse ? (modelsResponse.models || []) : current.models,
+  };
+  cloudAccessAPI.getProviderStatus.mockImplementation(async (id) => ({
+    status: { configured: Boolean(cloudProviderMocks[id]?.configured) },
+  }));
+  cloudAccessAPI.getProviderModels.mockImplementation(async (id) => ({ models: cloudProviderMocks[id]?.models || [] }));
+}
 
 function renderSettings({
   lmStudioEnabled = true,
@@ -51,8 +62,8 @@ function renderSettings({
 }
 
 test.each([false, true])('Codex effort survives saved settings and honors running=%s for all compiler roles', async isRunning => {
-  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [{ id: 'codex', supported_reasoning_levels: ['medium', 'max'] }] });
+  mockCloudProvider('openai_codex_oauth', { configured: true });
+  mockCloudProvider('openai_codex_oauth', { modelsResponse: { models: [{ id: 'codex', supported_reasoning_levels: ['medium', 'max'] }] } });
   const settings = {};
   for (const prefix of ['validator', 'assistant', 'writer', 'highParam']) Object.assign(settings, { [`${prefix}Provider`]: 'openai_codex_oauth', [`${prefix}Model`]: 'codex', [`${prefix}OpenrouterReasoningEffort`]: 'max' });
   localStorage.setItem('compiler_settings', JSON.stringify(settings));
@@ -63,8 +74,8 @@ test.each([false, true])('Codex effort survives saved settings and honors runnin
 });
 
 test.each([false, true])('xAI effort survives saved settings and honors running=%s for all compiler roles', async isRunning => {
-  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [{ id: 'grok-4.3' }] });
+  mockCloudProvider('xai_grok_oauth', { configured: true });
+  mockCloudProvider('xai_grok_oauth', { modelsResponse: { models: [{ id: 'grok-4.3' }] } });
   const settings = {};
   for (const prefix of ['validator', 'assistant', 'writer', 'highParam']) Object.assign(settings, { [`${prefix}Provider`]: 'xai_grok_oauth', [`${prefix}Model`]: 'grok-4.3', [`${prefix}OpenrouterReasoningEffort`]: 'low' });
   localStorage.setItem('compiler_settings', JSON.stringify(settings));
@@ -98,10 +109,10 @@ beforeEach(() => {
   });
   openRouterAPI.getProviders.mockResolvedValue({ providers: [], endpoints: [] });
   api.getModels.mockResolvedValue({ models: [{ id: 'lm-validator' }] });
-  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [] });
-  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [] });
+  mockCloudProvider('openai_codex_oauth', { configured: false });
+  mockCloudProvider('xai_grok_oauth', { configured: false });
+  mockCloudProvider('openai_codex_oauth', { modelsResponse: { models: [] } });
+  mockCloudProvider('xai_grok_oauth', { modelsResponse: { models: [] } });
   compilerAPI.getDefaultCritiquePrompt.mockResolvedValue({
     data: {
       prompt: 'Default critique prompt.',
@@ -262,10 +273,8 @@ test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', asy
   await waitFor(() => {
     expect(openRouterAPI.getApiKeyStatus).toHaveBeenCalled();
   });
-  expect(cloudAccessAPI.getOpenAICodexStatus).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getXAIGrokStatus).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getOpenAICodexModels).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getXAIGrokModels).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getProviderStatus).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getProviderModels).not.toHaveBeenCalled();
 });
 
 test('migrates legacy saved compiler writer settings into Writing Submitter fields', async () => {

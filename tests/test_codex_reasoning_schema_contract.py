@@ -12,6 +12,7 @@ ROLE_MODELS = [
     models.ModelConfig, models.SubmitterConfig, models.ProofRoleConfigSnapshot,
     models.ProofRoleRuntimeConfig, models.LeanOJRoleConfig,
 ]
+MAX_PROVIDERS = ["openai_codex_oauth", "kimi_code"]
 OTHER_PROVIDERS = ["lm_studio", "openrouter", "xai_grok_oauth", "sakana_fugu"]
 LEGACY_EFFORTS = ["auto", "xhigh", "high", "medium", "low", "minimal", "none"]
 
@@ -22,17 +23,17 @@ def role(provider="openai_codex_oauth", effort="max"):
 
 
 @pytest.mark.parametrize("model", ROLE_MODELS)
-@pytest.mark.parametrize("provider", ["openai_codex_oauth", *OTHER_PROVIDERS])
-def test_role_max_is_codex_only(model, provider):
+@pytest.mark.parametrize("provider", [*MAX_PROVIDERS, *OTHER_PROVIDERS])
+def test_role_max_is_limited_to_providers_that_accept_it(model, provider):
     data = role(provider)
     if model is models.SubmitterConfig:
         data["submitter_id"] = 1
-    if provider == "openai_codex_oauth":
+    if provider in MAX_PROVIDERS:
         instance = model.model_validate(data)
         assert instance.openrouter_reasoning_effort == "max"
         assert model.model_validate(instance.model_dump()).openrouter_reasoning_effort == "max"
     else:
-        with pytest.raises(ValidationError, match="only by openai_codex_oauth"):
+        with pytest.raises(ValidationError, match="supported only by kimi_code, openai_codex_oauth"):
             model.model_validate(data)
 
 
@@ -47,11 +48,11 @@ FLAT_ROLES = [(model, data, name) for model, data in STARTS
 
 
 @pytest.mark.parametrize("model,data,field", FLAT_ROLES)
-@pytest.mark.parametrize("provider", ["openai_codex_oauth", *OTHER_PROVIDERS])
+@pytest.mark.parametrize("provider", [*MAX_PROVIDERS, *OTHER_PROVIDERS])
 def test_every_flat_start_role_checks_its_own_provider(model, data, field, provider):
     provider_field = field.removesuffix("openrouter_reasoning_effort") + "provider"
     payload = {**data, provider_field: provider, field: "max"}
-    if provider == "openai_codex_oauth":
+    if provider in MAX_PROVIDERS:
         assert getattr(model.model_validate(payload), field) == "max"
     else:
         with pytest.raises(ValidationError):
@@ -141,4 +142,4 @@ def test_competitor_nested_snapshot_and_start():
 def test_contract_version_matches_manifest():
     from backend.shared.build_info import _DEFAULT_BUILD_INFO
     manifest = json.loads((Path(__file__).resolve().parents[1] / "moto-update-manifest.json").read_text())
-    assert manifest["api_contract_version"] == _DEFAULT_BUILD_INFO["api_contract_version"] == "build6-v121"
+    assert manifest["api_contract_version"] == _DEFAULT_BUILD_INFO["api_contract_version"] == "build6-v122"

@@ -1,4 +1,5 @@
 import { loadModelCache, getModelApiId } from './modelCache';
+import { CLOUD_ACCESS_PROVIDERS } from './oauthProviders';
 import {
   computeCodexAutoSettings,
   computeCloudAccessAutoSettings,
@@ -813,7 +814,7 @@ export function mergeAutonomousConfig(current, update) {
 }
 
 export function validateAutonomousConfig(config, { assistantEnabled = true } = {}) {
-  const providers = new Set(['openrouter', 'lm_studio', 'openai_codex_oauth', 'xai_grok_oauth', 'sakana_fugu']);
+  const providers = new Set(['openrouter', 'lm_studio', ...CLOUD_ACCESS_PROVIDERS.map((provider) => provider.id)]);
   const errors = [];
   const checkRole = (label, provider, model, context, output) => {
     if (!providers.has(provider) || typeof model !== 'string' || !model.trim()) {

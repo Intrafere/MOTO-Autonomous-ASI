@@ -7,6 +7,8 @@ from typing import Annotated, List, Dict, Optional, Any, Literal
 
 from pydantic import AfterValidator, AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
+from backend.shared.subscription_providers.metadata import MAX_EFFORT_PROVIDER_IDS, MODEL_PROVIDER_IDS
+
 DEFAULT_CONTEXT_WINDOW = 0
 DEFAULT_MAX_OUTPUT_TOKENS = 0
 DEFAULT_OPENROUTER_REASONING_EFFORT = "auto"
@@ -14,7 +16,7 @@ BoostReasoningEffort = Literal["auto", "xhigh", "high", "medium", "low", "minima
 
 
 def _validate_role_reasoning_effort(value: str, info: ValidationInfo) -> str:
-    """Keep legacy field names while reserving literal max for Codex routes.
+    """Keep legacy field names while reserving literal max for providers that accept it.
 
     Provider fields precede reasoning fields, including their legacy aliases, so
     validated sibling data is available without inspecting untrusted raw input.
@@ -22,8 +24,11 @@ def _validate_role_reasoning_effort(value: str, info: ValidationInfo) -> str:
     suffix = "openrouter_reasoning_effort"
     prefix = (info.field_name or "").removesuffix(suffix)
     provider = (info.data or {}).get(f"{prefix}provider")
-    if value == "max" and provider != "openai_codex_oauth":
-        raise ValueError("Reasoning effort 'max' is supported only by openai_codex_oauth")
+    if value == "max" and provider not in MAX_EFFORT_PROVIDER_IDS:
+        raise ValueError(
+            "Reasoning effort 'max' is supported only by "
+            + ", ".join(sorted(MAX_EFFORT_PROVIDER_IDS))
+        )
     return value
 
 
@@ -33,7 +38,7 @@ RoleReasoningEffort = Annotated[
 ]
 # Compatibility name for the existing provider-aware role fields below.
 OpenRouterReasoningEffort = RoleReasoningEffort
-ModelProvider = Literal["lm_studio", "openrouter", "openai_codex_oauth", "xai_grok_oauth", "sakana_fugu"]
+ModelProvider = Literal[MODEL_PROVIDER_IDS]
 _LEGACY_WRITER_PREFIX = "high" + "_context"
 
 
@@ -1732,6 +1737,9 @@ class ProofStageResult(BaseModel):
     error_message: str = ""
     deferred_candidate_ids: List[str] = Field(default_factory=list)
     context_overflow_payload: Dict[str, Any] = Field(default_factory=dict)
+    # True when context overflow left nothing in the round able to reach the
+    # model (discovery/list review, or every candidate before its first call).
+    context_overflow_blocked: bool = False
     fatal_stop_reason: str = ""
     fatal_stop_payload: Dict[str, Any] = Field(default_factory=dict)
 

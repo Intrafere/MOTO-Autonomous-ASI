@@ -13,12 +13,8 @@ vi.mock('../../services/api', () => ({
     getDefaultCritiquePrompt: vi.fn(),
   },
   cloudAccessAPI: {
-    getOpenAICodexStatus: vi.fn(),
-    getXAIGrokStatus: vi.fn(),
-    getSakanaFuguStatus: vi.fn(),
-    getOpenAICodexModels: vi.fn(),
-    getXAIGrokModels: vi.fn(),
-    getSakanaFuguModels: vi.fn(),
+    getProviderStatus: vi.fn(),
+    getProviderModels: vi.fn(),
   },
   openRouterAPI: {
     getApiKeyStatus: vi.fn(),
@@ -28,6 +24,19 @@ vi.mock('../../services/api', () => ({
     setFreeModelSettings: vi.fn(),
   },
 }));
+
+const cloudProviderMocks = {};
+function mockCloudProvider(providerId, { configured, modelsResponse } = {}) {
+  const current = cloudProviderMocks[providerId] || { configured: false, models: [] };
+  cloudProviderMocks[providerId] = {
+    configured: configured ?? current.configured,
+    models: modelsResponse ? (modelsResponse.models || []) : current.models,
+  };
+  cloudAccessAPI.getProviderStatus.mockImplementation(async (id) => ({
+    status: { configured: Boolean(cloudProviderMocks[id]?.configured) },
+  }));
+  cloudAccessAPI.getProviderModels.mockImplementation(async (id) => ({ models: cloudProviderMocks[id]?.models || [] }));
+}
 
 const baseConfig = {
   validator_provider: 'openrouter',
@@ -86,8 +95,8 @@ function renderSettings({
 }
 
 test.each([false, true])('Codex effort covers all Autonomous roles with running=%s', async isRunning => {
-  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [{ id: 'codex', supported_reasoning_levels: ['medium', 'max'] }] });
+  mockCloudProvider('openai_codex_oauth', { configured: true });
+  mockCloudProvider('openai_codex_oauth', { modelsResponse: { models: [{ id: 'codex', supported_reasoning_levels: ['medium', 'max'] }] } });
   const config = { ...baseConfig, submitter_configs: [{ ...baseConfig.submitter_configs[0], provider: 'openai_codex_oauth', modelId: 'codex', openrouterReasoningEffort: 'max' }] };
   for (const prefix of ['validator', 'assistant', 'writer', 'high_param']) Object.assign(config, { [`${prefix}_provider`]: 'openai_codex_oauth', [`${prefix}_model`]: 'codex', [`${prefix}_openrouter_reasoning_effort`]: 'max' });
   renderSettings({ config, isRunning });
@@ -97,8 +106,8 @@ test.each([false, true])('Codex effort covers all Autonomous roles with running=
 });
 
 test.each([false, true])('xAI effort covers all Autonomous roles with running=%s', async isRunning => {
-  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: true } });
-  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [{ id: 'grok-4.3' }] });
+  mockCloudProvider('xai_grok_oauth', { configured: true });
+  mockCloudProvider('xai_grok_oauth', { modelsResponse: { models: [{ id: 'grok-4.3' }] } });
   const config = { ...baseConfig, submitter_configs: [{ ...baseConfig.submitter_configs[0], provider: 'xai_grok_oauth', modelId: 'grok-4.3', openrouterReasoningEffort: 'medium' }] };
   for (const prefix of ['validator', 'assistant', 'writer', 'high_param']) Object.assign(config, { [`${prefix}_provider`]: 'xai_grok_oauth', [`${prefix}_model`]: 'grok-4.3', [`${prefix}_openrouter_reasoning_effort`]: 'medium' });
   renderSettings({ config, isRunning });
@@ -140,12 +149,12 @@ beforeEach(() => {
       prompt: 'Default critique prompt.',
     },
   });
-  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getSakanaFuguStatus.mockResolvedValue({ status: { configured: false } });
-  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [] });
-  cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [] });
-  cloudAccessAPI.getSakanaFuguModels.mockResolvedValue({ models: [] });
+  mockCloudProvider('openai_codex_oauth', { configured: false });
+  mockCloudProvider('xai_grok_oauth', { configured: false });
+  mockCloudProvider('sakana_fugu', { configured: false });
+  mockCloudProvider('openai_codex_oauth', { modelsResponse: { models: [] } });
+  mockCloudProvider('xai_grok_oauth', { modelsResponse: { models: [] } });
+  mockCloudProvider('sakana_fugu', { modelsResponse: { models: [] } });
 });
 
 test('renders Assistant role and greys it out when Session History Memory is disabled', async () => {
@@ -189,10 +198,8 @@ test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', asy
   await waitFor(() => {
     expect(openRouterAPI.getApiKeyStatus).toHaveBeenCalled();
   });
-  expect(cloudAccessAPI.getOpenAICodexStatus).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getXAIGrokStatus).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getOpenAICodexModels).not.toHaveBeenCalled();
-  expect(cloudAccessAPI.getXAIGrokModels).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getProviderStatus).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getProviderModels).not.toHaveBeenCalled();
 });
 
 test('does not invent extra submitters or LM Studio providers for incomplete saved roles', async () => {
