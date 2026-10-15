@@ -643,6 +643,9 @@ def test_cli_release_mode_requires_explicit_output_directory() -> None:
 
 
 def test_matrix_policy_versions_match_owning_module_constants() -> None:
+    # The owning modules need MOTO's runtime dependencies; the release-evidence
+    # runner installs only pytest, so this cross-check runs in the full CI job.
+    pytest.importorskip("pydantic")
     from backend.shared.lean_source_evidence import LEAN_COMPILE_RECEIPT_VERSION
     from backend.shared.legacy_port_receipt import LEGACY_PORT_RECEIPT_VERSION
     from backend.shared.local_novelty_receipt import LOCAL_NOVELTY_RECEIPT_VERSION

@@ -9,10 +9,15 @@
   ``0`` disables) prints its node ID and every thread's stack, then ends the
   process instead of looping forever. Production workflows are intentionally unbounded, so a test
   that drives one without a stop condition would otherwise never finish.
+
+The SyntheticLib release workflow runs its dependency-free tests with only pytest
+installed, so the guards that need MOTO's runtime modules stand down when those
+modules' dependencies are missing; no test in such a run can reach them.
 """
 from __future__ import annotations
 
 import faulthandler
+import importlib
 import os
 import shutil
 import sys
@@ -78,11 +83,23 @@ def _audit_real_root_writes(event: str, args: tuple) -> None:
         pass
 
 
+def _import_runtime_module(name: str):
+    """Import a MOTO runtime module, or return None when a dependency is not installed."""
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").partition(".")[0] == "backend":
+            raise
+        return None
+
+
 def pytest_configure(config: pytest.Config) -> None:
     global _session_root, _original_roots
-    from backend.shared.config import bind_runtime_roots, system_config
-
     sys.addaudithook(_audit_real_root_writes)
+    runtime_config = _import_runtime_module("backend.shared.config")
+    if runtime_config is None:
+        return
+    system_config = runtime_config.system_config
     # A harness that already isolated this process (for example a deep child run
     # with its own MOTO_DATA_ROOT) keeps its roots; only a session that would
     # otherwise use the real backend roots is rebound to a temporary one.
@@ -94,13 +111,13 @@ def pytest_configure(config: pytest.Config) -> None:
         return
     _original_roots = (system_config.data_dir, system_config.logs_dir)
     _session_root = Path(tempfile.mkdtemp(prefix="moto-test-roots-"))
-    bind_runtime_roots(_session_root / "data", _session_root / "logs")
+    runtime_config.bind_runtime_roots(_session_root / "data", _session_root / "logs")
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
-    from backend.shared.config import bind_runtime_roots
-
     if _original_roots is not None:
+        from backend.shared.config import bind_runtime_roots
+
         bind_runtime_roots(*_original_roots)
     if _session_root is not None:
         shutil.rmtree(_session_root, ignore_errors=True)
@@ -115,7 +132,11 @@ def _block_real_codex_websocket_transport():
     ``_open_websocket`` on its own instance; a test that enables the transport
     without a fake fails here instead of reaching the network.
     """
-    from backend.shared.openai_codex_client import OpenAICodexClient
+    codex_client = _import_runtime_module("backend.shared.openai_codex_client")
+    if codex_client is None:
+        yield
+        return
+    OpenAICodexClient = codex_client.OpenAICodexClient
 
     def _refuse_real_websocket(self, url, headers):
         raise AssertionError(
@@ -138,8 +159,10 @@ def _isolate_installation_identity_store(monkeypatch):
     Each test gets a fresh in-memory registry; tests that need custom storage
     behavior still patch these names themselves.
     """
-    from backend.shared import installation_identity
-
+    installation_identity = _import_runtime_module("backend.shared.installation_identity")
+    if installation_identity is None:
+        yield
+        return
     stored: dict[str, str | None] = {"value": None}
     monkeypatch.setattr(
         installation_identity,

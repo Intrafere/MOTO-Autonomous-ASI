@@ -1,8 +1,8 @@
 """Run every check GitHub runs on this repository, locally, before pushing.
 
 Mirrors .github/workflows/ci.yml (Python tests, Windows native lifecycle, and
-frontend build jobs), the SyntheticLib release-evidence workflow that runs after
-a merge to main, and CodeQL code scanning, which GitHub's default setup only
+frontend build jobs), the SyntheticLib release-evidence workflow (including its pytest-only
+test environment), and CodeQL code scanning, which GitHub's default setup only
 runs on pull requests into main. Every step runs even after a failure, and the
 summary names each step that passed, failed, or was skipped.
 
@@ -34,6 +34,87 @@ SYNTHETICLIB_EVIDENCE = (
     "syntheticlib-trade/compatibility/moto-preflight-attestation.json",
     "syntheticlib-trade/compatibility/MOTO_COMPATIBILITY_RECEIPT.md",
 )
+# The release-evidence workflow installs only pytest before running these.
+RELEASE_FOCUSED_TESTS = (
+    "tests/unit/test_syntheticlib_trade_compatibility.py",
+    "tests/integration/test_syntheticlib_trade_contract_command.py",
+    "tests/unit/test_local_syntheticlib_compatibility_ci.py",
+)
+# Runs pytest as if only pytest were installed: every other installed package
+# (and every pytest plugin) is hidden, so a test-suite import of a runtime
+# dependency fails here the way it fails on the release runner.
+PYTEST_ONLY_BOOTSTRAP = """
+import importlib.abc
+from importlib import metadata
+import os
+import site
+import sys
+import sysconfig
+
+from packaging.requirements import Requirement
+
+
+def _normalize(name):
+    return name.lower().replace("_", "-").replace(".", "-")
+
+
+def _pytest_install_set():
+    pending, installed = ["pytest"], set()
+    while pending:
+        name = pending.pop()
+        if _normalize(name) in installed:
+            continue
+        installed.add(_normalize(name))
+        for raw in metadata.requires(name) or []:
+            requirement = Requirement(raw)
+            if requirement.marker is None or requirement.marker.evaluate({"extra": ""}):
+                pending.append(requirement.name)
+    return installed
+
+
+_INSTALLED = _pytest_install_set()
+_ALLOWED = {
+    top
+    for top, distributions in metadata.packages_distributions().items()
+    if any(_normalize(dist) in _INSTALLED for dist in distributions)
+}
+_SITE_DIRS = tuple(
+    os.path.normcase(os.path.abspath(path)) + os.sep
+    for path in {
+        sysconfig.get_paths()["purelib"],
+        sysconfig.get_paths()["platlib"],
+        site.getusersitepackages(),
+    }
+)
+
+
+class _OnlyPytestInstalled(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.partition(".")[0] in _ALLOWED:
+            return None
+        for finder in sys.meta_path:
+            if finder is self or not hasattr(finder, "find_spec"):
+                continue
+            spec = finder.find_spec(name, path, target)
+            if spec is None:
+                continue
+            locations = [spec.origin or "", *(spec.submodule_search_locations or [])]
+            if any(
+                os.path.normcase(os.path.abspath(location)).startswith(_SITE_DIRS)
+                for location in locations
+                if location and location not in ("built-in", "frozen")
+            ):
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+            return None
+        return None
+
+
+sys.meta_path.insert(0, _OnlyPytestInstalled())
+os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+import pytest
+
+raise SystemExit(pytest.main(sys.argv[1:]))
+"""
 
 
 @dataclass(frozen=True)
@@ -74,8 +155,13 @@ def build_steps(python: str = sys.executable, npm: Optional[str] = None) -> tupl
         Step("build", "Frontend build", (npm, "run", "build"), cwd="frontend"),
         Step("browser", "Browser smoke tests", (npm, "run", "test:browser"), cwd="frontend"),
         Step(
+            "release-tests",
+            "SyntheticLib release tests with only pytest installed",
+            (python, "-c", PYTEST_ONLY_BOOTSTRAP, *RELEASE_FOCUSED_TESTS),
+        ),
+        Step(
             "release-evidence",
-            "SyntheticLib release evidence (runs after merges to main)",
+            "SyntheticLib release evidence",
             (python, "-m", "scripts.run_local_syntheticlib_compatibility_ci"),
         ),
         Step(
