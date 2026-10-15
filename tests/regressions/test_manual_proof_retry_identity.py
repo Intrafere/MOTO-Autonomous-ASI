@@ -435,6 +435,9 @@ class ManualProofRetryIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(control.snapshot.last_error_summary.startswith(identity))
         self.assertTrue(persisted["proof_run_terminal"].startswith(f"Proof run ended: {identity}"))
         self.assertNotIn(identity, str(error))
+        # The repair outcome stays final so the source is not shown as busy.
+        self.assertEqual(control.snapshot.status, "error")
+        self.assertFalse(control.snapshot.stop_requested)
 
     async def test_credit_pause_names_the_proof_route(self):
         events, persisted, _provider_events, _control = await self._run(

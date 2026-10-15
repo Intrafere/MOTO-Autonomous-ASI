@@ -75,9 +75,9 @@ export default function ProofRunStatusControls({
             : ''}
         </div>
       )}
-      {status === 'repair_required' && (
+      {(status === 'repair_required' || run.terminal_reason === 'repair_required') && (
         <div className="proof-run-status-controls__progress">
-          Repair the provider or model settings, then start a new proof loop.
+          Repair the provider or model settings, then start a new proof check.
         </div>
       )}
       {isTerminal && run.terminal_reason && (

@@ -84,7 +84,7 @@ test('guides repair state to a new loop and disables stop while stopping', () =>
     />
   );
   expect(screen.queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
-  expect(screen.getByText(/repair.*then start a new proof loop/i)).toBeInTheDocument();
+  expect(screen.getByText(/repair.*then start a new proof check/i)).toBeInTheDocument();
   rerender(
     <ProofRunStatusControls
       run={{ ...baseRun, status: 'stopping' }}
@@ -111,4 +111,7 @@ test('shows the full safe terminal error detail when the backend provides it', (
 
   expect(screen.getByRole('alert')).toHaveTextContent('51489 tokens');
   expect(screen.getByRole('alert')).toHaveTextContent('n_ctx');
+  // Backend repair runs end as status "error"; the guidance follows the reason.
+  expect(screen.getByText(/repair.*then start a new proof check/i)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Stop/ })).not.toBeInTheDocument();
 });

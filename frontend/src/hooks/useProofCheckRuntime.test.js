@@ -11,6 +11,7 @@ import {
   useProofCheckRuntime,
 } from './useProofCheckRuntime';
 import { API_ERROR_KINDS, autonomousAPI, MotoApiError } from '../services/api';
+import { websocket } from '../services/websocket';
 
 afterEach(() => {
   localStorage.clear();
@@ -158,6 +159,27 @@ describe('proof run lifecycle presentation', () => {
     expect(mergeProofRun(current, stale)).toBe(current);
   });
 
+  test('a finished generation is not reopened by a stale non-terminal snapshot', () => {
+    const finished = {
+      proof_run_id: 'run-1',
+      lifecycle_generation: 1,
+      status: 'error',
+      terminal_reason: 'repair_required',
+    };
+    const stale = {
+      proof_run_id: 'run-1',
+      lifecycle_generation: 1,
+      status: 'stopping',
+      source_key: 'autonomous:brainstorm:topic-1',
+    };
+    expect(mergeProofRun(finished, stale)).toEqual({
+      ...finished,
+      source_key: 'autonomous:brainstorm:topic-1',
+    });
+    const restarted = { proof_run_id: 'run-1', lifecycle_generation: 2, status: 'running' };
+    expect(mergeProofRun(finished, restarted).status).toBe('running');
+  });
+
   test('describes running and pruning states', () => {
     expect(proofRunStatusLabel({ status: 'running', pruning_status: 'idle' }))
       .toBe('Running');
@@ -202,6 +224,46 @@ describe('proof run lifecycle presentation', () => {
 });
 
 describe('proof check runtime recovery', () => {
+  test('a provider-repair run leaves the source free for a new check', async () => {
+    const repairRun = {
+      proof_run_id: 'repair-run',
+      run_mode: 'one_round',
+      scope: 'autonomous',
+      source_type: 'brainstorm',
+      source_id: 'topic-1',
+      lifecycle_generation: 1,
+      status: 'error',
+      terminal_reason: 'repair_required',
+      last_error_summary: 'OpenAI Codex OAuth is not configured.',
+    };
+    vi.spyOn(autonomousAPI, 'getProofStatus').mockResolvedValue({
+      lean4_enabled: true,
+      manual_check_ready: true,
+      workspace_ready: true,
+      lean4_version: '4.20',
+    });
+    vi.spyOn(autonomousAPI, 'listProofRuns').mockResolvedValue({ runs: [] });
+    // The detail hydration races the worker's cleanup and sees a stale state.
+    const getRun = vi.spyOn(autonomousAPI, 'getProofRun').mockResolvedValue({
+      ...repairRun,
+      status: 'stopping',
+    });
+
+    const { result } = renderHook(() => useProofCheckRuntime());
+    await waitFor(() => expect(result.current.manualCheckEnabled).toBe(true));
+
+    act(() => {
+      websocket.emit('proof_run_terminal', repairRun);
+    });
+    await waitFor(() => expect(getRun).toHaveBeenCalledWith('repair-run'));
+
+    await waitFor(() => {
+      const state = result.current.getSourceState('brainstorm', 'topic-1', 'autonomous');
+      expect(state?.status).toBe('error');
+      expect(isProofRunBusy(state)).toBe(false);
+    });
+  });
+
   test('recovers a committed source run after an ambiguous queue transport failure', async () => {
     const recovered = {
       proof_run_id: 'recovered-run',

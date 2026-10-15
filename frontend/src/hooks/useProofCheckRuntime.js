@@ -101,6 +101,15 @@ export function mergeProofRun(current, incoming) {
   const currentGeneration = Number(current.lifecycle_generation || 0);
   const incomingGeneration = Number(incoming.lifecycle_generation || 0);
   if (incomingGeneration < currentGeneration) return current;
+  if (
+    incomingGeneration === currentGeneration
+    && TERMINAL_PROOF_RUN_STATUSES.has(current.status)
+    && !TERMINAL_PROOF_RUN_STATUSES.has(incoming.status)
+  ) {
+    // A finished generation never resumes, so a non-terminal snapshot is stale;
+    // it may only fill fields the terminal record lacks, such as source identity.
+    return { ...incoming, ...current };
+  }
   return { ...current, ...incoming };
 }
 

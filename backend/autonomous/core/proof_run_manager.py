@@ -524,6 +524,14 @@ class ProofRunManager:
                 return control.snapshot.model_copy(deep=True)
             requested_status = updates.get("status")
             if (
+                requested_status is not None
+                and control.snapshot.status in TERMINAL_STATUSES
+                and requested_status != control.snapshot.status
+            ):
+                # A finished run's outcome is final. A later status write would
+                # silently replace it after its terminal event was published.
+                return control.snapshot.model_copy(deep=True)
+            if (
                 control.snapshot.stop_requested
                 and requested_status is not None
                 and requested_status not in TERMINAL_STATUSES

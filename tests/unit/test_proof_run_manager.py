@@ -308,6 +308,25 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.control.snapshot.status, "stopped")
         self.assertEqual(self.control.snapshot.terminal_reason, "cancelled")
 
+    async def test_finished_run_outcome_is_not_rewritten_by_later_status_updates(self):
+        async def worker(control):
+            await self.manager.repair_required(
+                control,
+                reason="OpenAI Codex OAuth is not configured.",
+            )
+            # A caller that only learned "the round stopped" must not reopen it.
+            await self.manager.update(control, status="stopping", stop_requested=True)
+
+        self.manager._runs["proof-run-1"] = self.control
+        await self.manager._drive(self.control, worker)
+
+        snapshot = await self.manager.get("proof-run-1")
+        self.assertEqual(snapshot.status, "error")
+        self.assertEqual(snapshot.terminal_reason, "repair_required")
+        self.assertFalse(snapshot.stop_requested)
+        self.assertIn("not configured", snapshot.last_error_summary)
+        self.assertTrue(snapshot.cleanup_completed)
+
     async def test_terminal_callback_is_exact_once(self):
         events = []
 
