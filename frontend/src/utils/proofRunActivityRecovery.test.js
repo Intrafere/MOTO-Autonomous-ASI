@@ -70,6 +70,35 @@ describe('proof-run activity tracker', () => {
     expect(reloaded.resumeFrom('run-a')).toBe(2);
   });
 
+  it('never writes a prototype-named run ID onto Object.prototype', () => {
+    const tracker = memoryTracker();
+    tracker.advanceTo('__proto__', 2);
+    expect(tracker.accept('__proto__', 3)).toBe(true);
+    expect(Object.prototype).not.toHaveProperty('watermark');
+    expect(Object.prototype).not.toHaveProperty('seen');
+    expect(tracker.resumeFrom('__proto__')).toBe(3);
+  });
+
+  it('treats prototype-named run IDs as ordinary runs', () => {
+    let stored = JSON.parse('{"__proto__":{"watermark":3,"seen":[],"settled":false}}');
+    const options = {
+      readState: () => stored,
+      writeState: (state) => {
+        stored = JSON.parse(JSON.stringify(state));
+      },
+    };
+    const tracker = createProofRunActivityTracker(options);
+    expect(tracker.accept('__proto__', 3)).toBe(false);
+    expect(tracker.accept('__proto__', 4)).toBe(true);
+    tracker.advanceTo('constructor', 2);
+    tracker.markSettled('constructor');
+    expect(Object.prototype).not.toHaveProperty('watermark');
+    expect(Object.prototype).not.toHaveProperty('seen');
+    expect(Object.prototype).not.toHaveProperty('settled');
+    expect(createProofRunActivityTracker(options).resumeFrom('__proto__')).toBe(4);
+    expect(Object.keys(stored).sort()).toEqual(['__proto__', 'constructor']);
+  });
+
   it('marks replayed payloads', () => {
     expect(isReplayedProofRunActivity({ [PROOF_RUN_ACTIVITY_REPLAY_FLAG]: true })).toBe(true);
     expect(isReplayedProofRunActivity({})).toBe(false);

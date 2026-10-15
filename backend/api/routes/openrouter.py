@@ -16,7 +16,7 @@ from typing import Dict, Any, Optional
 import logging
 import json
 import httpx
-import hashlib
+import hmac
 import time
 from pathlib import Path
 
@@ -41,22 +41,28 @@ from backend.shared.models import FreeModelSettings
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _openrouter_validation_state = "unknown"
-_validated_openrouter_key_fingerprint: Optional[str] = None
+# The key the validation state was measured for, held in memory only like
+# rag_config's copy, so a replaced key never inherits another key's result.
+_validated_openrouter_key: Optional[str] = None
 _validated_openrouter_key_at: Optional[float] = None
 _OPENROUTER_VALIDATION_TTL_SECONDS = 5 * 60
 
 
-def _key_fingerprint(api_key: Optional[str]) -> Optional[str]:
-    normalized = (api_key or "").strip()
-    if not normalized:
-        return None
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+def _normalized_key(api_key: Optional[str]) -> Optional[str]:
+    return (api_key or "").strip() or None
+
+
+def _validation_belongs_to(api_key: Optional[str]) -> bool:
+    current = _normalized_key(api_key)
+    if current is None or _validated_openrouter_key is None:
+        return False
+    return hmac.compare_digest(_validated_openrouter_key.encode("utf-8"), current.encode("utf-8"))
 
 
 def _current_validation_state() -> str:
     if not rag_config.openrouter_api_key:
         return "missing"
-    if _validated_openrouter_key_fingerprint != _key_fingerprint(rag_config.openrouter_api_key):
+    if not _validation_belongs_to(rag_config.openrouter_api_key):
         return "unknown"
     if (
         _openrouter_validation_state == "valid"
@@ -172,7 +178,7 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
     Returns:
         Success status and validation result
     """
-    global _openrouter_validation_state, _validated_openrouter_key_fingerprint, _validated_openrouter_key_at
+    global _openrouter_validation_state, _validated_openrouter_key, _validated_openrouter_key_at
     try:
         api_key = request.api_key.strip()
         if not api_key:
@@ -194,9 +200,9 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
         rag_config.openrouter_enabled = True
         api_client_manager.set_openrouter_api_key(api_key)
         _openrouter_validation_state = "valid"
-        _validated_openrouter_key_fingerprint = _key_fingerprint(api_key)
+        _validated_openrouter_key = _normalized_key(api_key)
         _validated_openrouter_key_at = time.monotonic()
-            
+
         if system_config.generic_mode:
             logger.info("Generic mode active - keeping OpenRouter API key in runtime memory only")
             success_message = "OpenRouter API key validated and loaded into runtime memory"
@@ -239,7 +245,7 @@ async def clear_api_key() -> Dict[str, Any]:
     Returns:
         Success status
     """
-    global _openrouter_validation_state, _validated_openrouter_key_fingerprint, _validated_openrouter_key_at
+    global _openrouter_validation_state, _validated_openrouter_key, _validated_openrouter_key_at
     try:
         if system_config.generic_mode:
             success_message = "OpenRouter API key cleared from runtime memory"
@@ -251,9 +257,9 @@ async def clear_api_key() -> Dict[str, Any]:
         rag_config.openrouter_enabled = False
         api_client_manager.set_openrouter_api_key(None)
         _openrouter_validation_state = "unknown"
-        _validated_openrouter_key_fingerprint = None
+        _validated_openrouter_key = None
         _validated_openrouter_key_at = None
-        
+
         logger.info("Global OpenRouter API key cleared")
         
         return {
@@ -290,11 +296,11 @@ async def get_api_key_status() -> Dict[str, Any]:
 @openrouter_credential_mutation
 async def validate_current_api_key() -> Dict[str, Any]:
     """Validate the restored/runtime key without returning credential material."""
-    global _openrouter_validation_state, _validated_openrouter_key_fingerprint, _validated_openrouter_key_at
+    global _openrouter_validation_state, _validated_openrouter_key, _validated_openrouter_key_at
     api_key = (rag_config.openrouter_api_key or "").strip()
     if not api_key:
         _openrouter_validation_state = "unknown"
-        _validated_openrouter_key_fingerprint = None
+        _validated_openrouter_key = None
         _validated_openrouter_key_at = None
         return {"success": True, "has_key": False, "validation_state": "missing"}
     try:
@@ -310,7 +316,7 @@ async def validate_current_api_key() -> Dict[str, Any]:
     except Exception:
         _openrouter_validation_state = "unreachable"
         _validated_openrouter_key_at = time.monotonic()
-    _validated_openrouter_key_fingerprint = _key_fingerprint(api_key)
+    _validated_openrouter_key = _normalized_key(api_key)
     return {
         "success": True,
         "has_key": True,

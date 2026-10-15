@@ -60,29 +60,29 @@ export function createProofRunActivityTracker({
   readState = defaultReadState,
   writeState = defaultWriteState,
 } = {}) {
+  // Keyed by run ID. A Map keeps a run ID such as "__proto__" from ever
+  // resolving to Object.prototype.
   let state = null;
 
   const load = () => {
     if (state) return state;
     const raw = readState();
-    state = {};
+    state = new Map();
     if (raw && typeof raw === 'object') {
       Object.entries(raw).forEach(([runId, entry]) => {
         const clean = sanitizeEntry(entry);
-        if (clean) state[runId] = clean;
+        if (clean) state.set(runId, clean);
       });
     }
     return state;
   };
 
   const save = () => {
-    const runIds = Object.keys(state);
-    if (runIds.length > MAX_TRACKED_RUNS) {
-      runIds.slice(0, runIds.length - MAX_TRACKED_RUNS).forEach((runId) => {
-        delete state[runId];
-      });
+    const excess = state.size - MAX_TRACKED_RUNS;
+    if (excess > 0) {
+      [...state.keys()].slice(0, excess).forEach((runId) => state.delete(runId));
     }
-    writeState(state);
+    writeState(Object.fromEntries(state));
   };
 
   const compact = (entry) => {
@@ -100,11 +100,11 @@ export function createProofRunActivityTracker({
     accept(runId, sequence) {
       if (!runId || !Number.isInteger(sequence) || sequence < 1) return true;
       const runs = load();
-      let entry = runs[runId];
+      let entry = runs.get(runId);
       if (!entry) {
         // The first event of a run proves nothing earlier existed to miss.
         entry = { watermark: sequence === 1 ? 0 : null, seen: [], settled: false };
-        runs[runId] = entry;
+        runs.set(runId, entry);
       }
       if (entry.watermark !== null && sequence <= entry.watermark) return false;
       if (entry.seen.includes(sequence)) return false;
@@ -119,7 +119,7 @@ export function createProofRunActivityTracker({
      * and only needs a baseline.
      */
     resumeFrom(runId) {
-      const entry = load()[runId];
+      const entry = load().get(runId);
       if (!entry) return null;
       if (entry.watermark === null) {
         if (!entry.seen.length) return null;
@@ -134,20 +134,20 @@ export function createProofRunActivityTracker({
     /** Mark every sequence through `sequence` as processed or unrecoverable. */
     advanceTo(runId, sequence) {
       const runs = load();
-      const entry = runs[runId] || { watermark: null, seen: [], settled: false };
+      const entry = runs.get(runId) || { watermark: null, seen: [], settled: false };
       entry.watermark = Math.max(entry.watermark ?? 0, Math.max(0, sequence));
       compact(entry);
-      runs[runId] = entry;
+      runs.set(runId, entry);
       save();
     },
 
     /** A finished run whose retained activity has all been processed. */
     isSettled(runId) {
-      return load()[runId]?.settled === true;
+      return load().get(runId)?.settled === true;
     },
 
     markSettled(runId) {
-      const entry = load()[runId];
+      const entry = load().get(runId);
       if (!entry || entry.settled) return;
       entry.settled = true;
       save();
@@ -158,9 +158,9 @@ export function createProofRunActivityTracker({
       const runs = load();
       const keep = new Set(runIds);
       let changed = false;
-      Object.keys(runs).forEach((runId) => {
+      [...runs.keys()].forEach((runId) => {
         if (!keep.has(runId)) {
-          delete runs[runId];
+          runs.delete(runId);
           changed = true;
         }
       });

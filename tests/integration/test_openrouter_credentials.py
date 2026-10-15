@@ -19,7 +19,7 @@ class OpenRouterCredentialTests(IsolatedAsyncioTestCase):
         rag_config.openrouter_enabled = False
         system_config.generic_mode = True
         openrouter_route._openrouter_validation_state = "unknown"
-        openrouter_route._validated_openrouter_key_fingerprint = None
+        openrouter_route._validated_openrouter_key = None
         openrouter_route._validated_openrouter_key_at = None
 
     async def asyncTearDown(self) -> None:
@@ -96,9 +96,7 @@ class OpenRouterCredentialTests(IsolatedAsyncioTestCase):
     async def test_validation_state_does_not_transfer_to_a_replaced_runtime_key(self) -> None:
         rag_config.openrouter_api_key = "old-key"
         openrouter_route._openrouter_validation_state = "valid"
-        openrouter_route._validated_openrouter_key_fingerprint = (
-            openrouter_route._key_fingerprint("old-key")
-        )
+        openrouter_route._validated_openrouter_key = "old-key"
         rag_config.openrouter_api_key = "new-restored-key"
 
         status = await openrouter_route.get_api_key_status()
@@ -109,9 +107,7 @@ class OpenRouterCredentialTests(IsolatedAsyncioTestCase):
     async def test_valid_validation_state_expires(self) -> None:
         rag_config.openrouter_api_key = "stored-key"
         openrouter_route._openrouter_validation_state = "valid"
-        openrouter_route._validated_openrouter_key_fingerprint = (
-            openrouter_route._key_fingerprint("stored-key")
-        )
+        openrouter_route._validated_openrouter_key = "stored-key"
         openrouter_route._validated_openrouter_key_at = 1.0
 
         with mock.patch.object(
@@ -126,9 +122,7 @@ class OpenRouterCredentialTests(IsolatedAsyncioTestCase):
     async def test_unreachable_current_key_can_be_revalidated_after_recovery(self) -> None:
         rag_config.openrouter_api_key = "stored-key"
         openrouter_route._openrouter_validation_state = "unreachable"
-        openrouter_route._validated_openrouter_key_fingerprint = (
-            openrouter_route._key_fingerprint("stored-key")
-        )
+        openrouter_route._validated_openrouter_key = "stored-key"
 
         with mock.patch.object(
             openrouter_route,
