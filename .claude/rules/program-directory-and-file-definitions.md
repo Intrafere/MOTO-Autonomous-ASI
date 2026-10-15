@@ -326,6 +326,7 @@ project-root/
 │   ├── check_syntheticlib_trade_contract.py # Explicitly generates or read-only verifies the closed MOTO compatibility evidence set
 │   ├── run_codeql.py                    # `npm run test:codeql`: GitHub's CodeQL analyses on a clean tree export, failing on alerts origin/main lacks; also CI's dev-push job
 │   ├── run_github_checks.py             # `npm run test:github`: pre-push parity for every ci.yml check, release evidence, and CodeQL with a pass/fail summary
+│   ├── run_npm_audit.py                 # CI/local production npm audit: fails on high/critical findings, retries only failed advisory-service requests
 │   └── run_local_syntheticlib_compatibility_ci.py # Runs deterministic release-generation parity from allowlisted implementation/orchestration inputs without mutating the real repository or partially replacing retained output
 │
 ├── frontend/

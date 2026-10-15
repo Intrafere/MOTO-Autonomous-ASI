@@ -148,8 +148,7 @@ def build_steps(python: str = sys.executable, npm: Optional[str] = None) -> tupl
         Step(
             "npm-audit",
             "Frontend production dependency audit",
-            (npm, "audit", "--omit=dev", "--audit-level=high"),
-            cwd="frontend",
+            (python, "-m", "scripts.run_npm_audit"),
         ),
         Step("vitest", "Frontend tests", (npm, "run", "test"), cwd="frontend"),
         Step("build", "Frontend build", (npm, "run", "build"), cwd="frontend"),

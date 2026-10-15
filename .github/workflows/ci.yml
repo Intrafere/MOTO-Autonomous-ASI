@@ -153,8 +153,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Retries only a failed advisory-service request; vulnerabilities fail at once.
       - name: Audit production frontend dependencies
-        run: npm audit --omit=dev --audit-level=high
+        working-directory: .
+        run: python -m scripts.run_npm_audit
 
       - name: Run frontend tests
         run: npm run test
