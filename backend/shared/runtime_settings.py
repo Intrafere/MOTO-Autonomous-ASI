@@ -36,10 +36,18 @@ _PROOF_INT_FIELDS = {
     "smt_timeout": (1, 600),
 }
 
-# Previously shipped defaults; a persisted value equal to one of these was never
-# user-chosen, so it follows the current default instead.
-_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUTS = frozenset({"600", "900"})
-_LEGACY_DEFAULT_SMT_TIMEOUT = 30
+# Every save stores all proof fields, including defaults the user never changed,
+# so a stored value equal to a default shipped under that file's settings version
+# follows the current default; any other stored value is applied as saved. When a
+# default changes, bump the version and record the outgoing default under the
+# previous version. Version 1 covers files saved before versioning existed.
+_PROOF_SETTINGS_VERSION = 2
+_SHIPPED_PROOF_DEFAULTS_BY_VERSION: Dict[int, Dict[str, frozenset[str]]] = {
+    1: {
+        "lean4_proof_timeout": frozenset({"600", "900"}),
+        "smt_timeout": frozenset({"30"}),
+    },
+}
 
 _CONNECTIVITY_BOOL_FIELDS = {
     "syntheticlib4_enabled",
@@ -117,6 +125,7 @@ def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
 
 def _proof_settings_from_config() -> Dict[str, Any]:
     return {
+        "settings_version": _PROOF_SETTINGS_VERSION,
         "lean4_user_enabled": bool(system_config.lean4_user_enabled),
         "lean4_lsp_enabled": bool(system_config.lean4_lsp_enabled),
         "lean4_proof_timeout": int(system_config.lean4_proof_timeout),
@@ -177,6 +186,34 @@ def save_connectivity_runtime_settings() -> None:
     _write_settings(payload)
 
 
+_SUBSCRIPTION_REGIONS_KEY = "subscription_endpoint_regions"
+
+
+def get_subscription_endpoint_region(provider_id: str) -> str:
+    """Return the persisted endpoint region id for a subscription provider, or ``""``."""
+    regions = _read_settings().get(_SUBSCRIPTION_REGIONS_KEY)
+    if not isinstance(regions, dict):
+        return ""
+    value = regions.get(provider_id)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def set_subscription_endpoint_region(provider_id: str, region_id: str) -> None:
+    """Persist (or with an empty region, remove) a subscription provider's endpoint region."""
+    payload = _read_settings()
+    regions = payload.get(_SUBSCRIPTION_REGIONS_KEY)
+    regions = dict(regions) if isinstance(regions, dict) else {}
+    if region_id:
+        regions[provider_id] = region_id
+    else:
+        regions.pop(provider_id, None)
+    if regions:
+        payload[_SUBSCRIPTION_REGIONS_KEY] = regions
+    else:
+        payload.pop(_SUBSCRIPTION_REGIONS_KEY, None)
+    _write_settings(payload)
+
+
 def get_persisted_connectivity_toggles() -> Dict[str, bool]:
     """Return persisted connectivity toggles, omitting fields not yet saved."""
     toggles = _read_settings().get("connectivity_toggles")
@@ -212,19 +249,17 @@ def apply_persisted_runtime_settings() -> None:
                         field,
                         _coerce_bool(proof_settings[field], bool(getattr(system_config, field))),
                     )
+            stored_version = _coerce_int(
+                proof_settings.get("settings_version"),
+                1,
+                1,
+                _PROOF_SETTINGS_VERSION,
+            )
+            shipped_defaults = _SHIPPED_PROOF_DEFAULTS_BY_VERSION.get(stored_version, {})
             for field, (minimum, maximum) in _PROOF_INT_FIELDS.items():
                 if field in proof_settings:
                     default = int(getattr(system_config, field))
-                    if (
-                        field == "lean4_proof_timeout"
-                        and str(proof_settings[field]).strip() in _LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUTS
-                    ):
-                        proof_settings[field] = default
-                    if (
-                        field == "smt_timeout"
-                        and default != _LEGACY_DEFAULT_SMT_TIMEOUT
-                        and str(proof_settings[field]).strip() == str(_LEGACY_DEFAULT_SMT_TIMEOUT)
-                    ):
+                    if str(proof_settings[field]).strip() in shipped_defaults.get(field, ()):
                         proof_settings[field] = default
                     setattr(
                         system_config,

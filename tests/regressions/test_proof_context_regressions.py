@@ -2691,6 +2691,8 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.had_error)
         self.assertEqual(result.deferred_candidate_ids, ["overflow"])
+        # The only candidate never reached the model, so the round is blocked.
+        self.assertTrue(result.context_overflow_blocked)
         self.assertEqual(record_failed_calls, 0)
         self.assertIn("proof_context_overflow", events)
         self.assertNotIn("proof_attempts_exhausted", events)

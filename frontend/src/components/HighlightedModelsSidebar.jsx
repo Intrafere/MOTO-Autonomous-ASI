@@ -194,7 +194,8 @@ export default function HighlightedModelsSidebar() {
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
-          <div className="model-item">
+          <div className="model-item model-item--oa">
+            <OauthTag stacked />
             <div className="model-item-name">Moonshot AI's Kimi</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>

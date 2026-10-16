@@ -13,6 +13,7 @@ class LeanRuntimeCapabilityTests(TestCase):
             "lean4_runtime_available": system_config.lean4_runtime_available,
             "lean4_user_enabled": system_config.lean4_user_enabled,
             "lean4_proof_timeout": system_config.lean4_proof_timeout,
+            "smt_timeout": system_config.smt_timeout,
         }
 
     def tearDown(self) -> None:
@@ -84,3 +85,45 @@ class LeanRuntimeCapabilityTests(TestCase):
             runtime_settings.apply_persisted_runtime_settings()
 
         self.assertEqual(system_config.lean4_proof_timeout, 1200)
+
+    def test_versioned_settings_keep_values_equal_to_legacy_defaults(self) -> None:
+        system_config.generic_mode = False
+        system_config.lean4_proof_timeout = 2000
+        system_config.smt_timeout = 300
+        with mock.patch.object(runtime_settings, "_read_settings", return_value={}):
+            with mock.patch.object(runtime_settings, "_write_settings") as write:
+                runtime_settings.save_proof_runtime_settings()
+        saved = write.call_args.args[0]["proof_settings"]
+        saved.update({"lean4_proof_timeout": 900, "smt_timeout": 30})
+
+        with mock.patch.object(
+            runtime_settings,
+            "_read_settings",
+            return_value={"proof_settings": saved},
+        ):
+            runtime_settings.apply_persisted_runtime_settings()
+
+        self.assertEqual(system_config.lean4_proof_timeout, 900)
+        self.assertEqual(system_config.smt_timeout, 30)
+
+    def test_later_default_change_migrates_only_that_versions_shipped_default(self) -> None:
+        system_config.generic_mode = False
+        shipped = {
+            **runtime_settings._SHIPPED_PROOF_DEFAULTS_BY_VERSION,
+            2: {"lean4_proof_timeout": frozenset({"2000"})},
+        }
+        with mock.patch.object(runtime_settings, "_PROOF_SETTINGS_VERSION", 3), mock.patch.object(
+            runtime_settings,
+            "_SHIPPED_PROOF_DEFAULTS_BY_VERSION",
+            shipped,
+        ):
+            for stored, expected in ((2000, 2500), (900, 900), (600, 600)):
+                with self.subTest(stored=stored):
+                    system_config.lean4_proof_timeout = 2500
+                    payload = {
+                        "proof_settings": {"settings_version": 2, "lean4_proof_timeout": stored},
+                    }
+                    with mock.patch.object(runtime_settings, "_read_settings", return_value=payload):
+                        runtime_settings.apply_persisted_runtime_settings()
+
+                    self.assertEqual(system_config.lean4_proof_timeout, expected)

@@ -4,6 +4,10 @@ Some local/OpenAI-compatible servers put the only usable final answer in
 provider-specific fields such as ``reasoning`` or ``thinking`` when
 ``message.content`` is empty.  Keep that compatibility in one place so callers
 do not each invent their own response-field policy.
+
+A reply that stopped at the output-token limit before writing any answer is
+different: its reasoning fields hold unfinished thinking, never an answer, so
+the fallback does not apply to it.
 """
 
 from __future__ import annotations
@@ -15,6 +19,16 @@ from typing import Any, Mapping, Optional
 logger = logging.getLogger(__name__)
 
 FALLBACK_TEXT_FIELDS = ("reasoning", "reasoning_content", "thinking")
+
+# Finish reasons meaning the provider stopped the reply at the output-token limit.
+TRUNCATED_FINISH_REASONS = frozenset({
+    "incomplete",
+    "length",
+    "max_tokens",
+    "max_output_tokens",
+    "token_limit",
+    "output_limit",
+})
 
 
 def _coerce_text(value: Any) -> str:
@@ -34,6 +48,42 @@ def _coerce_text(value: Any) -> str:
                     parts.append(text)
         return "".join(parts)
     return str(value)
+
+
+def choice_hit_output_limit(choice: Any) -> bool:
+    """Return True when a completion choice stopped at the output-token limit."""
+    if not isinstance(choice, Mapping):
+        return False
+    finish_reason = str(choice.get("finish_reason") or "").strip().lower()
+    return finish_reason in TRUNCATED_FINISH_REASONS
+
+
+def drop_unfinished_thinking(response: Any, *, context: str = "") -> None:
+    """Remove reasoning fields from replies cut off before any answer was written.
+
+    Callers that read ``choices[0].message`` directly cannot see the finish
+    reason, so the shared completion path strips the unfinished thinking here.
+    Those callers then see an empty answer instead of the model's thoughts.
+    """
+    if not isinstance(response, Mapping):
+        return
+    choices = response.get("choices")
+    if not isinstance(choices, list):
+        return
+    for choice in choices:
+        if not choice_hit_output_limit(choice):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict) or _coerce_text(message.get("content")):
+            continue
+        removed = [field for field in FALLBACK_TEXT_FIELDS if message.pop(field, None) is not None]
+        if removed:
+            label = f" for {context}" if context else ""
+            logger.info(
+                "Reply%s hit the output limit before any answer; discarded unfinished %s.",
+                label,
+                "/".join(removed),
+            )
 
 
 def extract_message_text(
@@ -93,6 +143,6 @@ def extract_response_text(
         return ""
     return extract_message_text(
         message,
-        allow_fallback_fields=allow_fallback_fields,
+        allow_fallback_fields=allow_fallback_fields and not choice_hit_output_limit(first_choice),
         context=context,
     )

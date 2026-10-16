@@ -431,7 +431,7 @@ BUILD_07_SOURCE_MAPPINGS: tuple[WorkflowSourceMapping, ...] = (
             "backend/shared/lm_studio_client.py",
             "backend/shared/openai_codex_client.py",
             "backend/shared/xai_grok_client.py",
-            "backend/shared/sakana_fugu_client.py",
+            "backend/shared/subscription_providers/api_key_client.py",
             "backend/aggregator/core/coordinator.py",
             "backend/compiler/core/compiler_coordinator.py",
             "backend/autonomous/core/autonomous_coordinator.py",

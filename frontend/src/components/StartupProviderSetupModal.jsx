@@ -2,6 +2,9 @@ import React from 'react';
 import './settings-common.css';
 import './StartupModals.css';
 import useOverflowAssist from '../hooks/useOverflowAssist';
+import { CLOUD_ACCESS_PROVIDERS } from '../utils/oauthProviders';
+
+const SUBSCRIPTION_PROVIDER_NAMES = CLOUD_ACCESS_PROVIDERS.map((provider) => provider.label).join(', ');
 
 export default function StartupProviderSetupModal({
   isOpen,
@@ -25,7 +28,9 @@ export default function StartupProviderSetupModal({
   if (!isOpen) return null;
 
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
-  const oauthAvailable = Boolean(capabilities?.openAICodexOauthAvailable || capabilities?.xaiGrokOauthAvailable);
+  // Startup only advertises add-ons the backend explicitly reported as available.
+  const oauthAvailable = !capabilities?.genericMode
+    && CLOUD_ACCESS_PROVIDERS.some((provider) => capabilities?.[provider.capabilityKey] === true);
 
   return (
     <div
@@ -135,7 +140,7 @@ export default function StartupProviderSetupModal({
             >
               <h3 style={{ marginTop: 0, color: '#ff9f4a' }}>Cloud Provider Add-On</h3>
               <ol style={{ margin: '0 0 1rem 1.1rem', padding: 0, color: '#d7d7e8', lineHeight: '1.55' }}>
-                <li>Use a supported subscription provider such as OpenAI Codex, xAI Grok/SuperGrok, or Sakana Fugu for chat/model roles.</li>
+                <li>Use a supported subscription provider ({SUBSCRIPTION_PROVIDER_NAMES}) for chat/model roles.</li>
                 <li>Set up OpenRouter or LM Studio first so RAG embeddings are available.</li>
                 <li>After startup, add cloud provider access from OpenRouter & Cloud Subscriptions and select it in role settings.</li>
               </ol>

@@ -8,7 +8,7 @@ MOTO is ONE codebase serving TWO deployment targets. A single `generic_mode` boo
 
 ## Two Deployment Targets
 
-- **Default mode (`generic_mode=False`)**: GitHub open-source release. Desktop app with `.bat` / PowerShell launchers. LM Studio + OpenRouter + desktop provider add-ons such as OpenAI Codex OAuth, xAI Grok OAuth, and Sakana Fugu API key. User runs locally.
+- **Default mode (`generic_mode=False`)**: GitHub open-source release. Desktop app with `.bat` / PowerShell launchers. LM Studio + OpenRouter + desktop provider add-ons such as OpenAI Codex OAuth, xAI Grok OAuth, Kimi Code, and Sakana Fugu API key. User runs locally.
 - **Generic mode (`generic_mode=True`)**: Hosted web backend. API-only sandbox on Blaxel, fronted by the Intrafere website/control plane on AWS. FastEmbed embeddings and OpenRouter-only LLM inference; hosted clients should not use LM Studio diagnostics even if legacy endpoints still exist for the shared route surface.
 
 ## Two-Team Boundary (Strict)
@@ -91,11 +91,13 @@ Returns a typed capability-only response:
     "openai_codex_oauth_available": bool,
     "xai_grok_oauth_available": bool,
     "sakana_fugu_available": bool,
+    "kimi_code_available": bool,
+    "subscription_providers": [{"id": str, "label": str, "auth_kind": "oauth_pkce" | "api_key", "available": bool}],
  "syntheticlib_product_state": "coming_soon" | "developer_preview" | "launched",
 }
 ```
 
-The current contract includes typed durable Autonomous terminal/provider-repair state with provider route identity, bounded proof-truncation recovery, run-scoped candidate-list review activity, provider usage-limit cooldown/resume activity, nonfatal proof versus fatal workflow context-overflow activity, and process-local manual proof-run discovery/Stop/live-context controls. Manual proof-run terminal events and reconnect records expose bounded secret-redacted error summaries when available; clients use generic terminal reasons only as fallback. Mandatory proof Validator/formalization overflow durably stops Autonomous after sibling proof tasks are canceled and drained. Manual proof runs have no Resume or Next Round REST authority and are not reconstructed after backend restart. Exact release chronology belongs in release notes, tests, and git history rather than this always-injected rule.
+The current contract includes typed durable Autonomous terminal/provider-repair state with provider route identity, bounded proof-truncation recovery, run-scoped candidate-list review activity, provider usage-limit cooldown/resume activity, nonfatal proof versus fatal workflow context-overflow activity, and process-local manual proof-run discovery/Stop/live-context controls. Manual proof-run terminal events and reconnect records expose bounded secret-redacted error summaries when available; clients use generic terminal reasons only as fallback. Proof context overflow durably stops Autonomous only when nothing in the round can reach the model; a single candidate's overflow sets it aside while siblings and later rounds continue. Manual proof runs have no Resume or Next Round REST authority and are not reconstructed after backend restart. Exact release chronology belongs in release notes, tests, and git history rather than this always-injected rule.
 
 Provider recovery is provider-neutral: timed usage windows use stop-aware waiting with success-confirmed recovery, while untimed spending/entitlement remains repair-required. HTTP Retry-After is a 429 throttle window, not a spending reset. `/api/cloud-access/provider-recovery/events` is the typed durable alias for provider notifications; the legacy provider-notifications route remains compatible.
 

@@ -13,6 +13,7 @@
 [![ChatGPT Subscription](https://img.shields.io/badge/ChatGPT_Subscription-Codex_OAuth-10a37f.svg)](https://chatgpt.com/)
 [![SuperGrok Subscription](https://img.shields.io/badge/SuperGrok_Subscription-xAI_OAuth-black.svg)](https://grok.com/)
 [![Sakana Fugu Subscription](https://img.shields.io/badge/Sakana_Fugu-Subscription_API-e85d75.svg)](https://sakana.ai/fugu/)
+[![Kimi Code Subscription](https://img.shields.io/badge/Kimi_Code-Subscription_API-1f6feb.svg)](https://www.kimi.com/code/)
 [![OpenRouter: API Key](https://img.shields.io/badge/OpenRouter-API_Key-6467f2.svg)](https://openrouter.ai/)
 [![LM Studio: Local Models](https://img.shields.io/badge/LM_Studio-Local_Models-7c3aed.svg)](https://lmstudio.ai/)
 
@@ -166,7 +167,7 @@ bash linux-ubuntu-launcher.sh
 - Dirty or locally mutated repos remain runnable, but they are update-detection-only and are not eligible for automatic update-apply behavior.
 - If launcher-managed backend/frontend services from this install are still running, the updater warns and skips update-apply until those services are closed.
 - If GitHub `main` is reachable but `moto-update-manifest.json` is not published there yet, the launcher falls back to branch-head comparison and keeps update-apply disabled until the manifest is present.
-- The launcher runs `npm audit fix` when `npm install` reports frontend vulnerabilities, including on clean git checkouts, so dependency CVE remediation remains automatic.
+- After installing frontend dependencies, the launcher runs a read-only high/critical `npm audit` and warns about findings. It never runs `npm audit fix` on your machine; dependency fixes ship as updated lockfiles.
 - Preservation is defined against the active runtime roots, not only the default folders. The launcher may use `backend/data`, `backend/logs`, or instance-scoped `.moto_instances/<instance_id>/...` roots, and browser storage prefixes plus OS-keyring namespaces are part of that same preserved state boundary.
 
 ---

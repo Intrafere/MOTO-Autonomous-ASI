@@ -7,6 +7,7 @@ from typing import Iterable, Any
 
 from backend.shared.lean4_client import is_lean_workspace_error_text
 from backend.shared.models import MathlibLemmaHint, ProofAttemptFeedback, SmtHint
+from backend.shared.prompt_feedback_budget import project_lean_feedback
 
 
 PROOF_FRAMING_CONTEXT = """[PROOF FRAMING CONTEXT -- This research prompt targets formal mathematical proof.
@@ -87,6 +88,7 @@ def _format_attempt_history(prior_attempts: Iterable[ProofAttemptFeedback]) -> s
             for step in (attempt.tactic_trace or [])
         ) or "[none]"
         error_text = attempt.error_output or "[no error output]"
+        feedback_text, goal_text = project_lean_feedback(error_text, attempt.goal_states)
         rejection_banner = ""
         if "PROOF REJECTED: PLACEHOLDER USED" in error_text:
             rejection_banner = (
@@ -105,8 +107,8 @@ def _format_attempt_history(prior_attempts: Iterable[ProofAttemptFeedback]) -> s
             "Tactic trace:",
             tactic_trace,
             "Lean 4 feedback:",
-            error_text,
-            f"Goal states: {attempt.goal_states or '[none]'}",
+            feedback_text,
+            f"Goal states: {goal_text or ('[shown in the Lean 4 feedback above]' if attempt.goal_states else '[none]')}",
         ]
         if rejection_banner:
             block.append(rejection_banner)

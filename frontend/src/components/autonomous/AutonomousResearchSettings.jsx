@@ -5,13 +5,10 @@
  * Now supports per-role OpenRouter model selection with provider and fallback options.
  */
 import React, { useState, useEffect, useRef } from 'react';
-import { cloudAccessAPI, openRouterAPI, api, autonomousAPI } from '../../services/api';
+import { openRouterAPI, api, autonomousAPI } from '../../services/api';
 import {
-  computeCodexAutoSettings,
-  computeCloudAccessAutoSettings,
+  computeCloudProviderAutoSettings,
   computeOpenRouterAutoSettings,
-  computeSakanaFuguAutoSettings,
-  computeXAIGrokAutoSettings,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
   formatOpenRouterProviderLabel,
@@ -21,17 +18,12 @@ import {
   hasEndpointMetadata,
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
-  SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
-  XAI_GROK_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
-import { refreshCredentialProviderState } from '../../utils/credentialProviderRefresh';
+import { refreshOpenRouterCredentialState } from '../../utils/credentialProviderRefresh';
+import useCloudAccessProviders from '../../hooks/useCloudAccessProviders';
 import {
   chooseCloudAccessProvider,
-  getConfiguredCloudAccessProviders,
   isCloudAccessProvider,
-  cloudAccessProviderLabel,
-  SAKANA_FUGU_PROVIDER,
-  XAI_GROK_PROVIDER,
 } from '../../utils/oauthProviders';
 import {
   AUTONOMOUS_PROFILES_STORAGE_KEY,
@@ -44,7 +36,8 @@ import {
   settingsToAutonomousConfig,
   normalizeProofCompetition,
 } from '../../utils/autonomousProfiles';
-import CodexReasoningControl from '../CodexReasoningControl';
+import CloudProviderModelErrors from '../CloudProviderModelErrors';
+import CloudReasoningControl from '../CloudReasoningControl';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
@@ -73,30 +66,19 @@ const ModelSelector = ({
   onFallbackChange,
   lmStudioModels,
   openRouterModels,
-  openAICodexModels,
-  xaiGrokModels,
-  sakanaFuguModels,
+  cloudProviders,
   modelProviders,
   hasOpenRouterKey,
-  hasOpenAICodexLogin,
-  hasXAIGrokLogin,
-  hasSakanaFuguKey,
   isRunning,
   lmStudioEnabled,
 }) => {
   const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
-  const oauthStatusByProvider = {
-    openai_codex_oauth: { configured: hasOpenAICodexLogin },
-    [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
-    [SAKANA_FUGU_PROVIDER]: { configured: hasSakanaFuguKey },
-  };
-  const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
+  const oauthStatusByProvider = cloudProviders.statusByProvider;
+  const configuredOAuthProviders = cloudProviders.configuredProviders;
   const currentModels = effectiveProvider === 'openrouter'
     ? openRouterModels
     : (isCloudAccessProvider(effectiveProvider)
-      ? (effectiveProvider === XAI_GROK_PROVIDER
-        ? xaiGrokModels
-        : (effectiveProvider === SAKANA_FUGU_PROVIDER ? sakanaFuguModels : openAICodexModels))
+      ? cloudProviders.modelsFor(effectiveProvider)
       : lmStudioModels);
   const providers = modelId && effectiveProvider === 'openrouter'
     ? getProviderNames(modelProviders[modelId])
@@ -238,41 +220,15 @@ const ModelSelector = ({
         </div>
       )}
 
-      {effectiveProvider === 'openai_codex_oauth' && modelId && <CodexReasoningControl model={currentModels.find(item => item.id === modelId)} modelId={modelId} value={openrouterReasoningEffort} disabled={isRunning} onChange={onOpenrouterReasoningEffortChange} />}
-      {effectiveProvider === XAI_GROK_PROVIDER && modelId && (
-        <div className="settings-row">
-          <label>Reasoning Effort</label>
-          <select
-            aria-label="xAI Reasoning Effort"
-            value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort, XAI_GROK_PROVIDER)}
-            onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
-            disabled={isRunning}
-          >
-            {XAI_GROK_REASONING_EFFORT_OPTIONS.map(option => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-          <small className="settings-hint">
-            Auto sends high reasoning effort; disabled omits the xAI reasoning setting.
-          </small>
-        </div>
-      )}
-      {effectiveProvider === SAKANA_FUGU_PROVIDER && modelId && (
-        <div className="settings-row">
-          <label>Reasoning Effort</label>
-          <select
-            value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort)}
-            onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
-            disabled={isRunning}
-          >
-            {SAKANA_FUGU_REASONING_EFFORT_OPTIONS.map(option => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-          <small className="settings-hint">
-            Sakana Fugu supports high and xhigh reasoning effort only; auto maps to xhigh.
-          </small>
-        </div>
+      {isCloudAccessProvider(effectiveProvider) && (
+        <CloudReasoningControl
+          provider={effectiveProvider}
+          modelId={modelId}
+          models={currentModels}
+          value={openrouterReasoningEffort}
+          disabled={isRunning}
+          onChange={onOpenrouterReasoningEffortChange}
+        />
       )}
 
       {/* LM Studio Fallback (if cloud provider) */}
@@ -310,14 +266,9 @@ const RoleConfig = ({
   isRunning,
   lmStudioModels,
   openRouterModels,
-  openAICodexModels,
-  xaiGrokModels,
-  sakanaFuguModels,
+  cloudProviders,
   modelProviders,
   hasOpenRouterKey,
-  hasOpenAICodexLogin,
-  hasXAIGrokLogin,
-  hasSakanaFuguKey,
   lmStudioEnabled,
   developerModeEnabled = false,
   showProofStrengthBadge = false,
@@ -366,14 +317,9 @@ const RoleConfig = ({
         onFallbackChange={(f) => handleChange(`${rolePrefix}_lm_studio_fallback`, f)}
         lmStudioModels={lmStudioModels}
         openRouterModels={openRouterModels}
-        openAICodexModels={openAICodexModels}
-        xaiGrokModels={xaiGrokModels}
-        sakanaFuguModels={sakanaFuguModels}
+        cloudProviders={cloudProviders}
         modelProviders={modelProviders}
         hasOpenRouterKey={hasOpenRouterKey}
-        hasOpenAICodexLogin={hasOpenAICodexLogin}
-        hasXAIGrokLogin={hasXAIGrokLogin}
-        hasSakanaFuguKey={hasSakanaFuguKey}
         isRunning={isRunning || disabled}
         lmStudioEnabled={lmStudioEnabled}
       />
@@ -538,17 +484,8 @@ const AutonomousResearchSettings = ({
   // Models and OpenRouter state
   const [lmStudioModels, setLmStudioModels] = useState(models || []);
   const [openRouterModels, setOpenRouterModels] = useState([]);
-  const [openAICodexModels, setOpenAICodexModels] = useState([]);
-  const [xaiGrokModels, setXaiGrokModels] = useState([]);
-  const [sakanaFuguModels, setSakanaFuguModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
-  const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
-  const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
-  const [hasSakanaFuguKey, setHasSakanaFuguKey] = useState(false);
-  const [openAICodexModelError, setOpenAICodexModelError] = useState('');
-  const [xaiGrokModelError, setXaiGrokModelError] = useState('');
-  const [sakanaFuguModelError, setSakanaFuguModelError] = useState('');
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(false);
@@ -586,9 +523,11 @@ const AutonomousResearchSettings = ({
   const [defaultCritiquePrompt, setDefaultCritiquePrompt] = useState('');
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
   const genericMode = Boolean(capabilities?.genericMode);
-  const openAICodexOauthAvailable = !genericMode && capabilities?.openAICodexOauthAvailable !== false;
-  const xaiGrokOauthAvailable = !genericMode && capabilities?.xaiGrokOauthAvailable !== false;
-  const sakanaFuguAvailable = !genericMode && capabilities?.sakanaFuguAvailable !== false;
+  const cloudProviders = useCloudAccessProviders({
+    capabilities,
+    refreshToken: credentialStatusRefreshToken,
+    logContext: 'Autonomous settings',
+  });
   const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled === true;
   const showLean4Settings = Boolean(lmStudioEnabled && proofStatus?.lean4_path && !genericMode);
 
@@ -743,64 +682,7 @@ const AutonomousResearchSettings = ({
       } catch (err) {
         console.error('Failed to check OpenRouter key:', err);
       }
-      if (openAICodexOauthAvailable) {
-        try {
-          const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
-          const configured = Boolean(codexStatus.status?.configured);
-          setHasOpenAICodexLogin(configured);
-          if (configured) {
-            fetchOpenAICodexModels();
-          } else {
-            setOpenAICodexModelError('');
-          }
-        } catch (err) {
-          console.error('Failed to check OpenAI Codex login:', err);
-          setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
-        }
-      } else {
-        setHasOpenAICodexLogin(false);
-        setOpenAICodexModels([]);
-        setOpenAICodexModelError('');
-      }
-      if (xaiGrokOauthAvailable) {
-        try {
-          const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
-          const configured = Boolean(xaiStatus.status?.configured);
-          setHasXAIGrokLogin(configured);
-          if (configured) {
-            fetchXAIGrokModels();
-          } else {
-            setXaiGrokModelError('');
-          }
-        } catch (err) {
-          console.error('Failed to check xAI Grok login:', err);
-          setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
-        }
-      } else {
-        setHasXAIGrokLogin(false);
-        setXaiGrokModels([]);
-        setXaiGrokModelError('');
-      }
-      if (sakanaFuguAvailable) {
-        try {
-          const sakanaStatus = await cloudAccessAPI.getSakanaFuguStatus();
-          const configured = Boolean(sakanaStatus.status?.configured);
-          setHasSakanaFuguKey(configured);
-          if (configured) {
-            fetchSakanaFuguModels();
-          } else {
-            setSakanaFuguModelError('');
-          }
-        } catch (err) {
-          console.error('Failed to check Sakana Fugu API key:', err);
-          setSakanaFuguModelError(`Sakana Fugu status could not be checked: ${err.message || 'unknown error'}.`);
-        }
-      } else {
-        setHasSakanaFuguKey(false);
-        setSakanaFuguModels([]);
-        setSakanaFuguModelError('');
-      }
-      
+
       // Try to fetch fresh LM Studio models
       if (lmStudioEnabled) {
         try {
@@ -1041,101 +923,17 @@ const AutonomousResearchSettings = ({
     }
   };
 
-  const fetchOpenAICodexModels = async () => {
-    if (!openAICodexOauthAvailable) {
-      setOpenAICodexModels([]);
-      setHasOpenAICodexLogin(false);
-      setOpenAICodexModelError('');
-      return;
-    }
-    try {
-      const result = await cloudAccessAPI.getOpenAICodexModels();
-      const models = result.models || [];
-      setOpenAICodexModels(models);
-      setHasOpenAICodexLogin(true);
-      setOpenAICodexModelError(models.length > 0
-        ? ''
-        : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
-      );
-    } catch (err) {
-      console.error('Failed to fetch OpenAI Codex models:', err);
-      setOpenAICodexModels([]);
-      setHasOpenAICodexLogin(true);
-      setOpenAICodexModelError(`OpenAI Codex OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
-    }
-  };
-
-  const fetchXAIGrokModels = async () => {
-    if (!xaiGrokOauthAvailable) {
-      setXaiGrokModels([]);
-      setHasXAIGrokLogin(false);
-      setXaiGrokModelError('');
-      return;
-    }
-    try {
-      const result = await cloudAccessAPI.getXAIGrokModels();
-      const models = result.models || [];
-      setXaiGrokModels(models);
-      setHasXAIGrokLogin(true);
-      setXaiGrokModelError(models.length > 0
-        ? ''
-        : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
-      );
-    } catch (err) {
-      console.error('Failed to fetch xAI Grok models:', err);
-      setXaiGrokModels([]);
-      setHasXAIGrokLogin(true);
-      setXaiGrokModelError(`xAI Grok OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
-    }
-  };
-
-  const fetchSakanaFuguModels = async () => {
-    if (!sakanaFuguAvailable) {
-      setSakanaFuguModels([]);
-      setHasSakanaFuguKey(false);
-      setSakanaFuguModelError('');
-      return;
-    }
-    try {
-      const result = await cloudAccessAPI.getSakanaFuguModels();
-      const models = result.models || [];
-      setSakanaFuguModels(models);
-      setHasSakanaFuguKey(true);
-      setSakanaFuguModelError(models.length > 0
-        ? ''
-        : 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.'
-      );
-    } catch (err) {
-      console.error('Failed to fetch Sakana Fugu models:', err);
-      setSakanaFuguModels([]);
-      setHasSakanaFuguKey(true);
-      setSakanaFuguModelError(`Sakana Fugu API key is saved, but models could not be loaded: ${err.message || 'unknown error'}.`);
-    }
-  };
-
   useEffect(() => {
     if (credentialStatusRefreshToken === 0) {
       return;
     }
 
     let isCurrent = true;
-    refreshCredentialProviderState({
+    refreshOpenRouterCredentialState({
       freeOnly,
-      openAICodexOauthAvailable,
-      xaiGrokOauthAvailable,
-      sakanaFuguAvailable,
       setHasOpenRouterKey,
       setOpenRouterModels,
       setLoadingOpenRouter,
-      setHasOpenAICodexLogin,
-      setOpenAICodexModels,
-      setOpenAICodexModelError,
-      setHasXAIGrokLogin,
-      setXaiGrokModels,
-      setXaiGrokModelError,
-      setHasSakanaFuguKey,
-      setSakanaFuguModels,
-      setSakanaFuguModelError,
       shouldApply: () => isCurrent,
       logContext: 'Autonomous settings',
     });
@@ -1239,40 +1037,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     return autoSettings;
   };
 
-  const getCodexAutoSettingsForModel = (modelId) => {
-    const model = openAICodexModels.find((item) => item.id === modelId);
-    if (!model) {
-      console.debug('[AutonomousCodexAutoFill] model not in loaded list, skipping auto-fill', { modelId });
-      return null;
-    }
-    const autoSettings = computeCodexAutoSettings(model);
-    if (autoSettings.warnings.length > 0) {
-      console.warn('[AutonomousCodexAutoFill] auto-settings fallback used:', autoSettings.warnings);
-    }
-    return autoSettings;
-  };
-
-  const getOAuthModels = (provider) => {
-    if (provider === 'openai_codex_oauth') return openAICodexModels;
-    if (provider === XAI_GROK_PROVIDER) return xaiGrokModels;
-    if (provider === SAKANA_FUGU_PROVIDER) return sakanaFuguModels;
-    return [];
-  };
-
   const getCloudAccessAutoSettingsForModel = (provider, modelId) => {
-    if (provider === 'openai_codex_oauth') {
-      return getCodexAutoSettingsForModel(modelId);
-    }
-    const model = getOAuthModels(provider).find((item) => item.id === modelId);
+    const model = cloudProviders.modelsFor(provider).find((item) => item.id === modelId);
     if (!model) {
       console.debug('[AutonomousOAuthAutoFill] model not in loaded list, skipping auto-fill', { provider, modelId });
       return null;
     }
-    const autoSettings = provider === XAI_GROK_PROVIDER
-      ? computeXAIGrokAutoSettings(model)
-      : (provider === SAKANA_FUGU_PROVIDER
-        ? computeSakanaFuguAutoSettings(model)
-        : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider)));
+    const autoSettings = computeCloudProviderAutoSettings(provider, model);
     if (autoSettings.warnings.length > 0) {
       console.warn('[AutonomousOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
     }
@@ -2096,16 +1867,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           </p>
         </div>
       )}
-      {openAICodexModelError && (
-        <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
-          {openAICodexModelError}
-        </div>
-      )}
-      {xaiGrokModelError && (
-        <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
-          {xaiGrokModelError}
-        </div>
-      )}
+      <CloudProviderModelErrors modelErrors={cloudProviders.modelErrors} />
 
       {/* Show only free models + model refresh controls — grouped at top */}
       <div className="model-refresh-controls">
@@ -2239,14 +2001,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               onFallbackChange={(f) => handleSubmitterConfigChange(idx, 'lmStudioFallbackId', f)}
               lmStudioModels={lmStudioModels}
               openRouterModels={openRouterModels}
-              openAICodexModels={openAICodexModels}
-              xaiGrokModels={xaiGrokModels}
-              sakanaFuguModels={sakanaFuguModels}
+              cloudProviders={cloudProviders}
               modelProviders={modelProviders}
               hasOpenRouterKey={hasOpenRouterKey}
-              hasOpenAICodexLogin={hasOpenAICodexLogin}
-              hasXAIGrokLogin={hasXAIGrokLogin}
-              hasSakanaFuguKey={hasSakanaFuguKey}
               isRunning={isRunning}
               lmStudioEnabled={lmStudioEnabled}
             />
@@ -2325,14 +2082,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           isRunning={isRunning}
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
-          openAICodexModels={openAICodexModels}
-          xaiGrokModels={xaiGrokModels}
-          sakanaFuguModels={sakanaFuguModels}
+          cloudProviders={cloudProviders}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
-          hasOpenAICodexLogin={hasOpenAICodexLogin}
-          hasXAIGrokLogin={hasXAIGrokLogin}
-          hasSakanaFuguKey={hasSakanaFuguKey}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />
@@ -2350,14 +2102,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           isRunning={isRunning}
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
-          openAICodexModels={openAICodexModels}
-          xaiGrokModels={xaiGrokModels}
-          sakanaFuguModels={sakanaFuguModels}
+          cloudProviders={cloudProviders}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
-          hasOpenAICodexLogin={hasOpenAICodexLogin}
-          hasXAIGrokLogin={hasXAIGrokLogin}
-          hasSakanaFuguKey={hasSakanaFuguKey}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
           disabled={!assistantMemoryEnabled}
@@ -2384,14 +2131,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           isRunning={isRunning}
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
-          openAICodexModels={openAICodexModels}
-          xaiGrokModels={xaiGrokModels}
-          sakanaFuguModels={sakanaFuguModels}
+          cloudProviders={cloudProviders}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
-          hasOpenAICodexLogin={hasOpenAICodexLogin}
-          hasXAIGrokLogin={hasXAIGrokLogin}
-          hasSakanaFuguKey={hasSakanaFuguKey}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />
@@ -2409,14 +2151,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           isRunning={isRunning}
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
-          openAICodexModels={openAICodexModels}
-          xaiGrokModels={xaiGrokModels}
-          sakanaFuguModels={sakanaFuguModels}
+          cloudProviders={cloudProviders}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
-          hasOpenAICodexLogin={hasOpenAICodexLogin}
-          hasXAIGrokLogin={hasXAIGrokLogin}
-          hasSakanaFuguKey={hasSakanaFuguKey}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
           showProofStrengthBadge
@@ -2432,14 +2169,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           isRunning={isRunning}
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
-          openAICodexModels={openAICodexModels}
-          xaiGrokModels={xaiGrokModels}
-          sakanaFuguModels={sakanaFuguModels}
+          cloudProviders={cloudProviders}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
-          hasOpenAICodexLogin={hasOpenAICodexLogin}
-          hasXAIGrokLogin={hasXAIGrokLogin}
-          hasSakanaFuguKey={hasSakanaFuguKey}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />

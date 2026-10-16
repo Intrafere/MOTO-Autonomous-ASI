@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { ProofCompetitionSettings } from './AutonomousResearchSettings';
+import { buildCloudProvidersView } from '../../hooks/useCloudAccessProviders';
+
+const NO_CLOUD_PROVIDERS = buildCloudProvidersView({});
 
 function Harness({ model = 'primary', developerModeEnabled = false, isRunning = false, lmStudioEnabled = true }) {
   const [competition, setCompetition] = useState({ enabled: false, secondaries: [] });
@@ -8,7 +11,7 @@ function Harness({ model = 'primary', developerModeEnabled = false, isRunning = 
     localConfig={{ high_param_provider: 'lm_studio', high_param_model: model,
       high_param_context_window: 64000, high_param_max_tokens: 8000, proof_competition: competition }}
     onChange={setCompetition} lmStudioModels={[{ id: 'primary' }, { id: 'changed' }]}
-    openRouterModels={[]} openAICodexModels={[]} xaiGrokModels={[]} sakanaFuguModels={[]}
+    openRouterModels={[]} cloudProviders={NO_CLOUD_PROVIDERS}
     modelProviders={{}} lmStudioEnabled={lmStudioEnabled} isRunning={isRunning} developerModeEnabled={developerModeEnabled}
   /><output data-testid="state">{JSON.stringify(competition)}</output></>;
 }
@@ -16,7 +19,7 @@ function Harness({ model = 'primary', developerModeEnabled = false, isRunning = 
 test('Codex competition primary is locked and secondary effort uses its own catalog', () => {
   const onChange = vi.fn();
   const role = { provider: 'openai_codex_oauth', model_id: 'codex', openrouter_reasoning_effort: 'max', context_window: 400000, max_tokens: 32000 };
-  render(<ProofCompetitionSettings localConfig={{ high_param_provider: role.provider, high_param_model: role.model_id, high_param_openrouter_reasoning_effort: 'max', proof_competition: { enabled: true, secondaries: [role] } }} onChange={onChange} lmStudioModels={[]} openRouterModels={[]} openAICodexModels={[{ id: 'codex', supported_reasoning_levels: [{ effort: 'medium' }, { effort: 'max' }] }]} xaiGrokModels={[]} sakanaFuguModels={[]} modelProviders={{}} lmStudioEnabled hasOpenAICodexLogin />);
+  render(<ProofCompetitionSettings localConfig={{ high_param_provider: role.provider, high_param_model: role.model_id, high_param_openrouter_reasoning_effort: 'max', proof_competition: { enabled: true, secondaries: [role] } }} onChange={onChange} lmStudioModels={[]} openRouterModels={[]} cloudProviders={buildCloudProvidersView({ openai_codex_oauth: { configured: true, models: [{ id: 'codex', supported_reasoning_levels: [{ effort: 'medium' }, { effort: 'max' }] }] } })} modelProviders={{}} lmStudioEnabled />);
   const controls = screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' });
   expect(controls[0]).toBeDisabled();
   expect(controls[1]).not.toBeDisabled();

@@ -1,5 +1,5 @@
 import {
-  computeSakanaFuguAutoSettings,
+  computeCloudProviderAutoSettings,
   formatOpenRouterProviderLabel,
   getOpenRouterProviderTitle,
   isOpenRouterUsHostProvider,
@@ -21,7 +21,7 @@ test('leaves non-USA OpenRouter host providers unmarked', () => {
 });
 
 test('auto-fills Sakana Fugu models from provider metadata', () => {
-  const autoSettings = computeSakanaFuguAutoSettings({
+  const autoSettings = computeCloudProviderAutoSettings('sakana_fugu', {
     id: 'fugu-ultra',
     context_length: 1000000,
     max_output_tokens: 100000,

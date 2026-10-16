@@ -7,6 +7,7 @@ storage so keys survive restarts without being written to frontend localStorage.
 from typing import Optional
 import json
 import logging
+import re
 
 import keyring
 from keyring.errors import KeyringError, PasswordDeleteError
@@ -23,13 +24,15 @@ _OPENAI_CODEX_OAUTH_CHUNK_COUNT = "openai_codex_oauth_chunk_count"
 _XAI_GROK_OAUTH = "xai_grok_oauth"
 _XAI_GROK_OAUTH_CHUNK_PREFIX = "xai_grok_oauth_chunk"
 _XAI_GROK_OAUTH_CHUNK_COUNT = "xai_grok_oauth_chunk_count"
-_SAKANA_FUGU_API_KEY = "sakana_fugu_api_key"
 _SYNTHETICLIB4_API_KEY = "syntheticlib4_api_key"
 _MOTO_INSTALLATION_IDENTITY_STATE = "moto_installation_identity_state"
 # Windows Credential Manager limits blobs to 2560 bytes, which is about
 # 1280 UTF-16 characters through keyring/win32cred. Keep chunks below that.
 _SECRET_CHUNK_SIZE = 1000
 _WOLFRAM_KEY = "wolfram_alpha_api_key"
+# Subscription providers store one single-value key each (e.g. "sakana_fugu_api_key").
+_SUBSCRIPTION_SECRET_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,62}_api_key")
+_RESERVED_SECRET_NAMES = frozenset({_OPENROUTER_KEY, _SYNTHETICLIB4_API_KEY, _WOLFRAM_KEY})
 
 
 class SecretStoreError(RuntimeError):
@@ -399,19 +402,26 @@ def clear_xai_grok_oauth_tokens() -> None:
     _delete_chunked_secret(_XAI_GROK_OAUTH_CHUNK_PREFIX, _XAI_GROK_OAUTH_CHUNK_COUNT)
 
 
-def load_sakana_fugu_api_key() -> Optional[str]:
-    """Load the persisted Sakana Fugu API key."""
-    return _load_atomic_secret(_SAKANA_FUGU_API_KEY)
+def _subscription_secret_name(secret_name: str) -> str:
+    name = str(secret_name or "").strip()
+    if not _SUBSCRIPTION_SECRET_NAME_PATTERN.fullmatch(name) or name in _RESERVED_SECRET_NAMES:
+        raise ValueError("Subscription API-key secret names must look like '<provider>_api_key'.")
+    return name
 
 
-def store_sakana_fugu_api_key(api_key: str) -> None:
-    """Persist the Sakana Fugu API key securely."""
-    _store_atomic_secret(_SAKANA_FUGU_API_KEY, api_key)
+def load_subscription_api_key(secret_name: str) -> Optional[str]:
+    """Load a persisted subscription-provider API key (for example Sakana Fugu or Kimi Code)."""
+    return _load_atomic_secret(_subscription_secret_name(secret_name))
 
 
-def clear_sakana_fugu_api_key() -> None:
-    """Delete the persisted Sakana Fugu API key."""
-    _clear_atomic_secret(_SAKANA_FUGU_API_KEY)
+def store_subscription_api_key(secret_name: str, api_key: str) -> None:
+    """Persist a subscription-provider API key securely."""
+    _store_atomic_secret(_subscription_secret_name(secret_name), api_key)
+
+
+def clear_subscription_api_key(secret_name: str) -> None:
+    """Delete a persisted subscription-provider API key."""
+    _clear_atomic_secret(_subscription_secret_name(secret_name))
 
 
 def load_syntheticlib4_api_key() -> Optional[str]:

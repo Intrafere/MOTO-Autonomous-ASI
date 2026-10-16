@@ -3,12 +3,20 @@ import { cloudAccessAPI, openRouterAPI } from '../services/api';
 import {
   CLOUD_ACCESS_PROVIDERS,
   OPENAI_CODEX_PROVIDER,
-  SAKANA_FUGU_PROVIDER,
   XAI_GROK_PROVIDER,
   chooseDefaultCloudAccessProvider,
+  getAvailableCloudAccessProviders,
   getConfiguredCloudAccessProviders,
+  isApiKeyCloudProvider,
+  isCloudProviderAvailable,
 } from '../utils/oauthProviders';
 import SecretInput from './SecretInput';
+import SubscriptionApiKeySection from './SubscriptionApiKeySection';
+
+const API_KEY_PROVIDERS = CLOUD_ACCESS_PROVIDERS.filter((provider) => provider.authKind === 'api_key');
+const EMPTY_MODELS_STATUS = { checking: false, count: null, error: '' };
+const initialApiKeyStatus = () => Object.fromEntries(API_KEY_PROVIDERS.map((provider) => [provider.id, { configured: false }]));
+const initialApiKeyModelsStatus = () => Object.fromEntries(API_KEY_PROVIDERS.map((provider) => [provider.id, EMPTY_MODELS_STATUS]));
 import './settings-common.css';
 
 /**
@@ -62,16 +70,9 @@ export default function OpenRouterApiKeyModal({
     error: '',
   });
   const xaiModelCheckRequestRef = React.useRef(0);
-  const [sakanaApiKey, setSakanaApiKey] = useState('');
-  const [sakanaStatus, setSakanaStatus] = useState({ configured: false });
-  const [sakanaLoading, setSakanaLoading] = useState(false);
-  const [sakanaMessage, setSakanaMessage] = useState('');
-  const [sakanaModelsStatus, setSakanaModelsStatus] = useState({
-    checking: false,
-    count: null,
-    error: '',
-  });
-  const sakanaModelCheckRequestRef = React.useRef(0);
+  const [apiKeyStatus, setApiKeyStatus] = useState(initialApiKeyStatus);
+  const [apiKeyModelsStatus, setApiKeyModelsStatus] = useState(initialApiKeyModelsStatus);
+  const apiKeyModelCheckRequestRef = React.useRef({});
   const [selectedOAuthProvider, setSelectedOAuthProvider] = useState(OPENAI_CODEX_PROVIDER);
   const [oauthProviderTouched, setOauthProviderTouched] = useState(false);
   const genericMode = Boolean(capabilities?.genericMode);
@@ -79,9 +80,14 @@ export default function OpenRouterApiKeyModal({
   const oauthStatusByProvider = {
     [OPENAI_CODEX_PROVIDER]: codexStatus,
     [XAI_GROK_PROVIDER]: xaiStatus,
-    [SAKANA_FUGU_PROVIDER]: sakanaStatus,
+    ...apiKeyStatus,
   };
   const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
+  const configuredProvidersKey = configuredOAuthProviders.map((provider) => provider.id).join('|');
+  // Hosted mode lists every provider (disabled) so the desktop-only notice stays visible.
+  const selectableProviders = genericMode
+    ? CLOUD_ACCESS_PROVIDERS
+    : getAvailableCloudAccessProviders(capabilities);
   const codexOAuthSuccess = Boolean(
     !genericMode
     && codexStatus?.configured
@@ -95,13 +101,6 @@ export default function OpenRouterApiKeyModal({
     && !xaiModelsStatus.checking
     && xaiModelsStatus.count > 0
     && !xaiModelsStatus.error
-  );
-  const sakanaSuccess = Boolean(
-    !genericMode
-    && sakanaStatus?.configured
-    && !sakanaModelsStatus.checking
-    && sakanaModelsStatus.count > 0
-    && !sakanaModelsStatus.error
   );
   const oauthSuccessBannerStyle = {
     marginBottom: '1rem',
@@ -128,9 +127,7 @@ export default function OpenRouterApiKeyModal({
     }
   }, [
     isOpen,
-    codexStatus?.configured,
-    xaiStatus?.configured,
-    sakanaStatus?.configured,
+    configuredProvidersKey,
     oauthProviderTouched,
     selectedOAuthProvider,
   ]);
@@ -213,40 +210,49 @@ export default function OpenRouterApiKeyModal({
     }
   };
 
-  const verifySakanaFuguModels = async () => {
-    if (genericMode) {
-      sakanaModelCheckRequestRef.current += 1;
-      setSakanaModelsStatus({ checking: false, count: null, error: '' });
+  const setApiKeyProviderStatus = (providerId, status) => {
+    setApiKeyStatus((previous) => ({ ...previous, [providerId]: status }));
+  };
+
+  const setApiKeyProviderModelsStatus = (providerId, status) => {
+    setApiKeyModelsStatus((previous) => ({ ...previous, [providerId]: status }));
+  };
+
+  const cancelApiKeyModelChecks = () => {
+    for (const provider of API_KEY_PROVIDERS) {
+      apiKeyModelCheckRequestRef.current[provider.id] = (apiKeyModelCheckRequestRef.current[provider.id] || 0) + 1;
+    }
+  };
+
+  const verifyApiKeyProviderModels = async (providerId) => {
+    const provider = CLOUD_ACCESS_PROVIDERS.find((entry) => entry.id === providerId);
+    const requestId = (apiKeyModelCheckRequestRef.current[providerId] || 0) + 1;
+    apiKeyModelCheckRequestRef.current[providerId] = requestId;
+    if (genericMode || !provider) {
+      setApiKeyProviderModelsStatus(providerId, EMPTY_MODELS_STATUS);
       return false;
     }
-
-    const requestId = sakanaModelCheckRequestRef.current + 1;
-    sakanaModelCheckRequestRef.current = requestId;
-    setSakanaModelsStatus({ checking: true, count: null, error: '' });
+    setApiKeyProviderModelsStatus(providerId, { checking: true, count: null, error: '' });
     try {
-      const result = await cloudAccessAPI.getSakanaFuguModels();
-      if (sakanaModelCheckRequestRef.current !== requestId) {
+      const result = await cloudAccessAPI.getProviderModels(providerId);
+      if (apiKeyModelCheckRequestRef.current[providerId] !== requestId) {
         return null;
       }
       const models = Array.isArray(result.models) ? result.models : [];
       if (models.length === 0) {
-        setSakanaModelsStatus({
-          checking: false,
-          count: 0,
-          error: 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.',
-        });
+        setApiKeyProviderModelsStatus(providerId, { checking: false, count: 0, error: provider.noModelsMessage });
         return false;
       }
-      setSakanaModelsStatus({ checking: false, count: models.length, error: '' });
+      setApiKeyProviderModelsStatus(providerId, { checking: false, count: models.length, error: '' });
       return true;
     } catch (err) {
-      if (sakanaModelCheckRequestRef.current !== requestId) {
+      if (apiKeyModelCheckRequestRef.current[providerId] !== requestId) {
         return null;
       }
-      setSakanaModelsStatus({
+      setApiKeyProviderModelsStatus(providerId, {
         checking: false,
         count: null,
-        error: `Sakana Fugu API key is saved, but models could not be loaded: ${err.message || 'unknown error'}. Check the key and subscription access.`,
+        error: `${provider.label} API key is saved, but models could not be loaded: ${err.message || 'unknown error'}. Check the key and subscription access.`,
       });
       return false;
     }
@@ -274,10 +280,8 @@ export default function OpenRouterApiKeyModal({
       setXaiLoginBaselineUpdatedAt(0);
       xaiModelCheckRequestRef.current += 1;
       setXaiModelsStatus({ checking: false, count: null, error: '' });
-      setSakanaApiKey('');
-      setSakanaMessage('');
-      sakanaModelCheckRequestRef.current += 1;
-      setSakanaModelsStatus({ checking: false, count: null, error: '' });
+      cancelApiKeyModelChecks();
+      setApiKeyModelsStatus(initialApiKeyModelsStatus());
       setOauthProviderTouched(false);
       setSelectedOAuthProvider(chooseDefaultCloudAccessProvider(oauthStatusByProvider));
       let isCancelled = false;
@@ -326,38 +330,42 @@ export default function OpenRouterApiKeyModal({
           }
         }
       };
-      const loadSakanaStatus = async () => {
+      const loadApiKeyProviderStatus = async (providerId) => {
+        if (!isCloudProviderAvailable(capabilities, providerId)) {
+          setApiKeyProviderStatus(providerId, { configured: false });
+          return;
+        }
         try {
-          const status = await cloudAccessAPI.getSakanaFuguStatus();
+          const status = await cloudAccessAPI.getProviderStatus(providerId);
           if (!isCancelled) {
             const nextStatus = status.status || { configured: false };
-            setSakanaStatus(nextStatus);
+            setApiKeyProviderStatus(providerId, nextStatus);
             if (nextStatus.configured) {
-              verifySakanaFuguModels();
+              verifyApiKeyProviderModels(providerId);
             }
           }
         } catch {
           if (!isCancelled) {
-            setSakanaStatus({ configured: false });
-            setSakanaModelsStatus({ checking: false, count: null, error: '' });
+            setApiKeyProviderStatus(providerId, { configured: false });
+            setApiKeyProviderModelsStatus(providerId, EMPTY_MODELS_STATUS);
           }
         }
       };
 
       loadKeyStatus();
       loadCloudStatus();
-      loadSakanaStatus();
+      API_KEY_PROVIDERS.forEach((provider) => loadApiKeyProviderStatus(provider.id));
 
       return () => {
         isCancelled = true;
         codexModelCheckRequestRef.current += 1;
         xaiModelCheckRequestRef.current += 1;
-        sakanaModelCheckRequestRef.current += 1;
+        cancelApiKeyModelChecks();
       };
     }
     codexModelCheckRequestRef.current += 1;
     xaiModelCheckRequestRef.current += 1;
-    sakanaModelCheckRequestRef.current += 1;
+    cancelApiKeyModelChecks();
     setHasStoredKey(false);
     return undefined;
   }, [isOpen]);
@@ -372,7 +380,6 @@ export default function OpenRouterApiKeyModal({
     setXaiCallbackInput('');
     setXaiState('');
     setXaiRedirectUri('');
-    setSakanaApiKey('');
     onClose();
   };
 
@@ -683,65 +690,6 @@ export default function OpenRouterApiKeyModal({
     }
   };
 
-  const handleSaveSakanaKey = async () => {
-    if (!sakanaApiKey.trim()) {
-      setError('Please enter a Sakana Fugu API key');
-      return;
-    }
-    setSakanaLoading(true);
-    setSakanaMessage('');
-    setError('');
-    sakanaModelCheckRequestRef.current += 1;
-    try {
-      const result = await cloudAccessAPI.setSakanaFuguApiKey(sakanaApiKey.trim());
-      setSakanaStatus(result.status || { configured: true });
-      const models = Array.isArray(result.models) ? result.models : [];
-      if (models.length > 0) {
-        setSakanaModelsStatus({ checking: false, count: models.length, error: '' });
-        setSakanaMessage('Sakana Fugu API key saved and model list loaded.');
-        setSakanaApiKey('');
-        if (onCloudAccessChanged) {
-          onCloudAccessChanged(true, SAKANA_FUGU_PROVIDER, { modelsReady: true });
-        }
-      } else {
-        const modelsReady = await verifySakanaFuguModels();
-        setSakanaApiKey('');
-        setSakanaMessage(modelsReady
-          ? 'Sakana Fugu API key saved and model list loaded.'
-          : 'Sakana Fugu API key saved, but model loading needs attention.'
-        );
-        if (onCloudAccessChanged) {
-          onCloudAccessChanged(true, SAKANA_FUGU_PROVIDER, { modelsReady: Boolean(modelsReady) });
-        }
-      }
-    } catch (err) {
-      setError(err.message || 'Failed to save Sakana Fugu API key');
-    } finally {
-      setSakanaLoading(false);
-    }
-  };
-
-  const handleClearSakanaKey = async () => {
-    setSakanaLoading(true);
-    setSakanaMessage('');
-    setError('');
-    sakanaModelCheckRequestRef.current += 1;
-    try {
-      await cloudAccessAPI.clearSakanaFuguApiKey();
-      setSakanaApiKey('');
-      setSakanaStatus({ configured: false });
-      setSakanaModelsStatus({ checking: false, count: null, error: '' });
-      setSakanaMessage('Sakana Fugu API key cleared.');
-      if (onCloudAccessChanged) {
-        onCloudAccessChanged(false, SAKANA_FUGU_PROVIDER);
-      }
-    } catch (err) {
-      setError(err.message || 'Failed to clear Sakana Fugu API key');
-    } finally {
-      setSakanaLoading(false);
-    }
-  };
-
   if (!isOpen) return null;
 
   const reasonMessages = {
@@ -922,7 +870,7 @@ export default function OpenRouterApiKeyModal({
               className="input-dark"
               disabled={genericMode}
             >
-              {CLOUD_ACCESS_PROVIDERS.map((provider) => (
+              {selectableProviders.map((provider) => (
                 <option key={provider.id} value={provider.id}>
                   {provider.label}{oauthStatusByProvider[provider.id]?.configured ? ' (configured)' : ''}
                 </option>
@@ -1183,123 +1131,24 @@ export default function OpenRouterApiKeyModal({
             </>
           )}
 
-          {selectedOAuthProvider === SAKANA_FUGU_PROVIDER && (
-            <>
-              <h4 style={{ marginTop: '0.25rem', color: '#ff9f4a', fontSize: '0.95rem' }}>
-                Sakana Fugu API
-              </h4>
-              <p className="settings-hint">
-                Save your Sakana Fugu subscription API key to use Fugu or Fugu Ultra directly as a MOTO role provider.
-              </p>
-              {genericMode ? (
-                <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
-                  Sakana Fugu direct API access is desktop-only in this build. Hosted mode should use OpenRouter.
-                </div>
-              ) : sakanaStatus?.configured ? (
-                <div
-                  className={`test-result-banner ${
-                    sakanaModelsStatus.error
-                      ? 'test-result-banner--error'
-                      : (sakanaSuccess ? 'test-result-banner--success' : '')
-                  }`}
-                  style={{ marginBottom: '1rem' }}
-                >
-                  {sakanaModelsStatus.error
-                    ? 'Sakana Fugu API key is saved, but model access is not verified.'
-                    : 'Sakana Fugu API key is configured.'}
-                </div>
-              ) : (
-                <div className="test-result-banner" style={{ marginBottom: '1rem' }}>
-                  Sakana Fugu API key is not configured.
-                </div>
-              )}
-
-              {sakanaModelsStatus.checking && (
-                <div className="test-result-banner" style={{ marginBottom: '1rem' }}>
-                  Checking Sakana Fugu model list...
-                </div>
-              )}
-
-              {!sakanaModelsStatus.checking && sakanaModelsStatus.count > 0 && (
-                <div className="test-result-banner test-result-banner--success" style={oauthSuccessBannerStyle}>
-                  SUCCESS! Sakana Fugu connected. {sakanaModelsStatus.count} model{sakanaModelsStatus.count === 1 ? '' : 's'} available.
-                </div>
-              )}
-
-              {!sakanaModelsStatus.checking && sakanaModelsStatus.error && (
-                <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
-                  {sakanaModelsStatus.error}
-                </div>
-              )}
-
-              {sakanaMessage && (
-                <div
-                  className={getOAuthMessageBannerClass(sakanaMessage)}
-                  style={{ marginBottom: '1rem' }}
-                >
-                  {sakanaMessage}
-                </div>
-              )}
-
-              <div style={{ marginTop: '1rem' }}>
-                <label htmlFor="sakana-fugu-api-key" style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
-                  Sakana Fugu API Key
-                </label>
-                <SecretInput
-                  id="sakana-fugu-api-key"
-                  name="moto-sakana-fugu-api-key"
-                  value={sakanaApiKey}
-                  onChange={(e) => setSakanaApiKey(e.target.value)}
-                  placeholder="Paste Sakana Fugu API key"
-                  className="input-dark"
-                  disabled={genericMode || sakanaLoading}
-                  style={{ fontSize: '0.95rem' }}
-                />
-                <small className="hint-text hint-text--dim">
-                  Get a key from{' '}
-                  <a
-                    href="https://console.sakana.ai"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ color: '#18cc17' }}
-                  >
-                    console.sakana.ai
-                  </a>
-                  . MOTO stores it in the backend keyring.
-                </small>
-              </div>
-
-              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
-                <button
-                  onClick={handleSaveSakanaKey}
-                  disabled={sakanaLoading || genericMode || !sakanaApiKey.trim()}
-                  style={{
-                    flex: 1,
-                    padding: '0.75rem 1rem',
-                    backgroundColor: '#18cc17',
-                    border: 'none',
-                    borderRadius: '6px',
-                    color: '#fff',
-                    cursor: sakanaLoading || genericMode || !sakanaApiKey.trim() ? 'not-allowed' : 'pointer',
-                    opacity: sakanaLoading || genericMode || !sakanaApiKey.trim() ? 0.6 : 1,
-                    fontSize: '0.95rem',
-                    fontWeight: '500',
-                  }}
-                >
-                  {sakanaLoading ? 'Working...' : 'Save Sakana Key'}
-                </button>
-                {sakanaStatus?.configured && (
-                  <button
-                    onClick={handleClearSakanaKey}
-                    disabled={sakanaLoading}
-                    className="btn-ghost"
-                    style={{ flex: 1 }}
-                  >
-                    Clear Sakana Key
-                  </button>
-                )}
-              </div>
-            </>
+          {isApiKeyCloudProvider(selectedOAuthProvider) && (
+            <SubscriptionApiKeySection
+              key={selectedOAuthProvider}
+              providerId={selectedOAuthProvider}
+              genericMode={genericMode}
+              status={apiKeyStatus[selectedOAuthProvider] || { configured: false }}
+              modelsStatus={apiKeyModelsStatus[selectedOAuthProvider] || EMPTY_MODELS_STATUS}
+              verifyModels={() => verifyApiKeyProviderModels(selectedOAuthProvider)}
+              onStatusChange={(status) => setApiKeyProviderStatus(selectedOAuthProvider, status)}
+              onModelsStatusChange={(status) => {
+                apiKeyModelCheckRequestRef.current[selectedOAuthProvider] = (apiKeyModelCheckRequestRef.current[selectedOAuthProvider] || 0) + 1;
+                setApiKeyProviderModelsStatus(selectedOAuthProvider, status);
+              }}
+              onCloudAccessChanged={onCloudAccessChanged}
+              onError={setError}
+              successBannerStyle={oauthSuccessBannerStyle}
+              getMessageBannerClass={getOAuthMessageBannerClass}
+            />
           )}
         </div>
 

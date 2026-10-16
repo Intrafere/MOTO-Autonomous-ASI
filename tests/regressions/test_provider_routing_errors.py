@@ -37,7 +37,8 @@ from backend.shared.provider_errors import (
     ProviderRouteError,
     ProviderRouteIdentity,
 )
-from backend.shared.sakana_fugu_client import SakanaFuguEntitlementError
+from backend.shared.subscription_providers.errors import SubscriptionEntitlementError
+from backend.shared.subscription_providers.registry import get_api_key_subscription_client
 
 
 @pytest.fixture(autouse=True)
@@ -1088,20 +1089,23 @@ class APIClientManagerRouteContextTests(unittest.IsolatedAsyncioTestCase):
                 max_output_tokens=512,
             ),
         )
-        entitlement_error = SakanaFuguEntitlementError(
+        entitlement_error = SubscriptionEntitlementError(
             "subscription is not entitled",
+            provider="sakana_fugu",
+            provider_label="Sakana Fugu",
             error_code="not_entitled",
             status_code=403,
         )
 
         with (
-            patch(
-                "backend.shared.api_client_manager.sakana_fugu_client.generate_completion",
+            patch.object(
+                get_api_key_subscription_client("sakana_fugu"),
+                "generate_completion",
                 new=AsyncMock(side_effect=entitlement_error),
             ),
             patch.object(
                 manager,
-                "_broadcast_unrecoverable_sakana_fugu_error",
+                "_broadcast_unrecoverable_subscription_error",
                 new=AsyncMock(),
             ),
         ):

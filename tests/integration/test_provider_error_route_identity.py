@@ -34,6 +34,7 @@ from backend.shared.openai_codex_client import OAuthUsageLimitError
 from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterClient
 from backend.shared.provider_notification_store import list_provider_notifications
 from backend.shared.provider_route_identity import ROUTE_IDENTITY_FIELD_NAMES
+from backend.shared.subscription_providers.registry import get_api_key_subscription_client
 from backend.shared.workflow_start_guard import WorkflowStartGuard
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -1013,7 +1014,8 @@ class ProviderErrorRouteIdentityTests(IsolatedAsyncioTestCase):
         cases = (
             ("openai_codex_oauth", "OpenAI Codex", "openai_codex_client", "gpt-test-codex"),
             ("xai_grok_oauth", "xAI Grok", "xai_grok_client", "grok-test"),
-            ("sakana_fugu", "Sakana Fugu", "sakana_fugu_client", "fugu-test"),
+            ("sakana_fugu", "Sakana Fugu", None, "fugu-test"),
+            ("kimi_code", "Kimi Code", None, "k3"),
         )
         for provider, label, client_name, model in cases:
             with self.subTest(provider=provider):
@@ -1030,7 +1032,16 @@ class ProviderErrorRouteIdentityTests(IsolatedAsyncioTestCase):
                     "error_summary": "HTTP 503 service unavailable",
                 })
 
-                with mock.patch.object(api_manager_module, client_name, adapter):
+                patcher = (
+                    mock.patch.object(api_manager_module, client_name, adapter)
+                    if client_name
+                    else mock.patch.object(
+                        get_api_key_subscription_client(provider),
+                        "generate_completion",
+                        adapter.generate_completion,
+                    )
+                )
+                with patcher:
                     await self._generate(role_id="compiler_writer", task_id="comp_writer_001")
 
                 retries = self._retry_events()

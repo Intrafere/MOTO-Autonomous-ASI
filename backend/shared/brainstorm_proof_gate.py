@@ -14,6 +14,7 @@ from backend.shared.lean4_client import get_lean4_client, raise_for_lean_workspa
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.models import LeanCompileReceipt, ProofAttemptFeedback
+from backend.shared.prompt_feedback_budget import project_lean_feedback
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ def _format_attempts(attempts: list[ProofAttemptFeedback]) -> str:
             or attempt.raw_stderr
             or ("Lean accepted this attempt with no diagnostics." if attempt.success else "[none]")
         )
+        feedback_text, goal_text = project_lean_feedback(lean_feedback, attempt.goal_states)
         blocks.extend(
             [
                 f"ATTEMPT {attempt.attempt}:",
@@ -76,8 +78,8 @@ def _format_attempts(attempts: list[ProofAttemptFeedback]) -> str:
                 "Lean code:",
                 attempt.lean_code or "[none]",
                 "Lean / integrity feedback:",
-                lean_feedback,
-                f"Goal states: {attempt.goal_states or '[none]'}",
+                feedback_text,
+                f"Goal states: {goal_text or ('[shown in the Lean / integrity feedback above]' if attempt.goal_states else '[none]')}",
                 "---",
             ]
         )

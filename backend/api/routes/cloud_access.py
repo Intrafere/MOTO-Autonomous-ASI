@@ -16,11 +16,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config, system_config
-from backend.shared.credential_locks import sakana_credential_mutation
+from backend.shared.credential_locks import subscription_api_key_lock
 from backend.shared.oauth_pkce import generate_oauth_state
 from backend.shared.openai_codex_client import OpenAICodexAuthError, openai_codex_client
 from backend.shared.provider_notification_store import list_provider_notifications
-from backend.shared.sakana_fugu_client import SakanaFuguAuthError, SakanaFuguError, sakana_fugu_client
+from backend.shared.secret_store import SecretStoreError
+from backend.shared.subscription_providers.api_key_client import SubscriptionApiKeyClient
+from backend.shared.subscription_providers.errors import SubscriptionProviderError
+from backend.shared.subscription_providers.registry import api_key_subscription_clients
 from backend.shared.xai_grok_client import XAIGrokAuthError, xai_grok_client
 
 router = APIRouter(prefix="/api/cloud-access", tags=["cloud-access"])
@@ -99,8 +102,8 @@ class XAIGrokOAuthExchangeRequest(BaseModel):
     redirect_uri: Optional[str] = None
 
 
-class SakanaFuguApiKeyRequest(BaseModel):
-    api_key: str
+class SubscriptionApiKeyRequest(BaseModel):
+    api_key: str = Field(max_length=4096)
 
 
 class ProviderNotificationRecord(BaseModel):
@@ -187,12 +190,12 @@ def _ensure_desktop_xai_grok_allowed() -> None:
         )
 
 
-def _ensure_desktop_sakana_fugu_allowed() -> None:
+def _ensure_desktop_subscription_allowed(client: SubscriptionApiKeyClient) -> None:
     if system_config.generic_mode:
         raise HTTPException(
             status_code=501,
             detail=(
-                "Sakana Fugu direct subscription API access is currently desktop-only. "
+                f"{client.provider_label} direct subscription API access is currently desktop-only. "
                 "Hosted mode should use OpenRouter keys until direct provider support is designed."
             ),
         )
@@ -461,10 +464,17 @@ async def get_cloud_access_status() -> Dict[str, Any]:
         "xAI Grok",
         xai_grok_client.status(),
     )
-    sakana_status = {"configured": False} if system_config.generic_mode else await _safe_oauth_status(
-        "Sakana Fugu",
-        sakana_fugu_client.status(),
-    )
+    subscription_statuses = {}
+    for client in api_key_subscription_clients():
+        subscription_statuses[client.provider_id] = {
+            **(
+                {"configured": False}
+                if system_config.generic_mode
+                else await _safe_oauth_status(client.provider_label, client.status())
+            ),
+            "available": not system_config.generic_mode,
+            "desktop_only": True,
+        }
     return {
         "success": True,
         "generic_mode": system_config.generic_mode,
@@ -483,11 +493,7 @@ async def get_cloud_access_status() -> Dict[str, Any]:
                 "available": not system_config.generic_mode,
                 "desktop_only": True,
             },
-            "sakana_fugu": {
-                **sakana_status,
-                "available": not system_config.generic_mode,
-                "desktop_only": True,
-            },
+            **subscription_statuses,
         },
     }
 
@@ -706,49 +712,74 @@ async def clear_xai_grok_oauth() -> Dict[str, Any]:
     return {"success": True, "message": "xAI Grok login cleared"}
 
 
-@router.get("/sakana-fugu/status")
-async def get_sakana_fugu_status() -> Dict[str, Any]:
-    """Return Sakana Fugu API-key status."""
-    if system_config.generic_mode:
-        return {"success": True, "status": {"configured": False, "available": False, "desktop_only": True}}
-    return {"success": True, "status": await sakana_fugu_client.status()}
+def _register_api_key_subscription_routes(client: SubscriptionApiKeyClient) -> None:
+    """Mount status, key, model, clear, and (when supported) usage routes for one provider."""
+    provider_id = client.provider_id
+    label = client.provider_label
+    slug = client.settings.metadata.api_slug
+    lock = subscription_api_key_lock(provider_id)
+
+    async def get_status() -> Dict[str, Any]:
+        if system_config.generic_mode:
+            return {"success": True, "status": {"configured": False, "available": False, "desktop_only": True}}
+        return {"success": True, "status": await client.status()}
+
+    async def set_api_key(request: SubscriptionApiKeyRequest) -> Dict[str, Any]:
+        _ensure_desktop_subscription_allowed(client)
+        async with lock:
+            try:
+                validation = await client.validate_candidate(request.api_key)
+                client.set_api_key(request.api_key, region_id=validation.region_id)
+            except (ValueError, SubscriptionProviderError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except SecretStoreError as exc:
+                logger.warning("%s API key could not be saved to the keyring: %s", label, type(exc).__name__)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"The {label} API key could not be saved to the system keyring.",
+                ) from exc
+            await api_client_manager.reset_provider_fallbacks(provider_id)
+            return {
+                "success": True,
+                "provider": provider_id,
+                "status": await client.status(),
+                "models": validation.models,
+            }
+
+    async def get_models() -> Dict[str, Any]:
+        _ensure_desktop_subscription_allowed(client)
+        try:
+            models = await client.list_models()
+        except SubscriptionProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"success": True, "models": models}
+
+    async def clear_api_key() -> Dict[str, Any]:
+        _ensure_desktop_subscription_allowed(client)
+        async with lock:
+            await client.clear_api_key()
+        return {"success": True, "message": f"{label} API key cleared"}
+
+    async def get_usage() -> Dict[str, Any]:
+        _ensure_desktop_subscription_allowed(client)
+        try:
+            usage = await client.usage()
+        except SubscriptionProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"success": True, "provider": provider_id, "usage": usage}
+
+    get_status.__doc__ = f"Return {label} API-key status."
+    set_api_key.__doc__ = f"Validate and store a {label} API key in the desktop keyring."
+    get_models.__doc__ = f"Return available {label} models for the configured API key."
+    clear_api_key.__doc__ = f"Clear the stored {label} API key."
+    get_usage.__doc__ = f"Return {label} subscription quota usage and reset times."
+    router.add_api_route(f"/{slug}/status", get_status, methods=["GET"], name=f"get_{provider_id}_status")
+    router.add_api_route(f"/{slug}/api-key", set_api_key, methods=["POST"], name=f"set_{provider_id}_api_key")
+    router.add_api_route(f"/{slug}/models", get_models, methods=["GET"], name=f"get_{provider_id}_models")
+    router.add_api_route(f"/{slug}", clear_api_key, methods=["DELETE"], name=f"clear_{provider_id}_api_key")
+    if client.settings.supports_usage:
+        router.add_api_route(f"/{slug}/usage", get_usage, methods=["GET"], name=f"get_{provider_id}_usage")
 
 
-@router.post("/sakana-fugu/api-key")
-@sakana_credential_mutation
-async def set_sakana_fugu_api_key(request: SakanaFuguApiKeyRequest) -> Dict[str, Any]:
-    """Store a Sakana Fugu API key in the desktop keyring."""
-    _ensure_desktop_sakana_fugu_allowed()
-    try:
-        key = request.api_key.strip()
-        models = await sakana_fugu_client.list_models(api_key=key)
-        sakana_fugu_client.set_api_key(key)
-    except (ValueError, SakanaFuguAuthError, SakanaFuguError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await api_client_manager.reset_provider_fallbacks("sakana_fugu")
-    return {
-        "success": True,
-        "provider": "sakana_fugu",
-        "status": await sakana_fugu_client.status(),
-        "models": models,
-    }
-
-
-@router.get("/sakana-fugu/models")
-async def get_sakana_fugu_models() -> Dict[str, Any]:
-    """Return available Sakana Fugu models for the configured API key."""
-    _ensure_desktop_sakana_fugu_allowed()
-    try:
-        models = await sakana_fugu_client.list_models()
-    except SakanaFuguAuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"success": True, "models": models}
-
-
-@router.delete("/sakana-fugu")
-@sakana_credential_mutation
-async def clear_sakana_fugu_api_key() -> Dict[str, Any]:
-    """Clear the stored Sakana Fugu API key."""
-    _ensure_desktop_sakana_fugu_allowed()
-    await sakana_fugu_client.clear_api_key()
-    return {"success": True, "message": "Sakana Fugu API key cleared"}
+for _subscription_client in api_key_subscription_clients():
+    _register_api_key_subscription_routes(_subscription_client)

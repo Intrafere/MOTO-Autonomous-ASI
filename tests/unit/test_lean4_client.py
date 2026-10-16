@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from backend.shared import lean_workspace_paths
+from backend.shared import lean4_client, lean_workspace_paths
 from backend.shared.lean4_client import (
     LEAN_WORKSPACE_PATH_TOO_LONG,
     LEAN_WORKSPACE_SETUP_FAILED,
@@ -59,6 +59,7 @@ class Lean4ClientWorkspaceTests(unittest.IsolatedAsyncioTestCase):
                     ["exe", "cache", "get"],
                     ["exe", "cache", "get"],
                     ["env", str(root / "lean.exe"), "MOTOProofWorkspace.lean"],
+                    ["exe", "cache", "clean"],
                 ],
             )
 
@@ -89,6 +90,7 @@ class Lean4ClientWorkspaceTests(unittest.IsolatedAsyncioTestCase):
                     ["update"],
                     ["exe", "cache", "get"],
                     ["env", str(root / "lean.exe"), "MOTOProofWorkspace.lean"],
+                    ["exe", "cache", "clean"],
                 ],
             )
 
@@ -250,6 +252,135 @@ class Lean4WorkspaceRepairTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(LeanWorkspaceRepairRequiredError):
                     await recover_lean_workspace(client)
             ensure.assert_not_awaited()
+
+    def _installed_workspace(self, root: Path) -> Path:
+        workspace = root / "workspace"
+        (workspace / ".lake" / "packages" / "mathlib" / ".git").mkdir(parents=True)
+        (workspace / "lake-manifest.json").write_text('{"packages": []}', encoding="utf-8")
+        return workspace
+
+    async def test_installed_mathlib_is_kept_instead_of_updated_to_newest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            client = self._client(root, self._installed_workspace(root))
+            calls: list[list[str]] = []
+
+            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
+                calls.append(args)
+                return 0, "", ""
+
+            client._run_process = fake_run_process  # type: ignore[method-assign]
+            with mock.patch.object(lean4_client.shutil, "which", side_effect=lambda name: name if name == "git" else None):
+                self.assertTrue(await client.ensure_workspace())
+
+            self.assertEqual(
+                [call[1:] for call in calls],
+                [
+                    ["status", "--porcelain", "--untracked-files=normal"],
+                    ["exe", "cache", "get"],
+                    ["env", str(root / "lean.exe"), "MOTOProofWorkspace.lean"],
+                    ["exe", "cache", "clean"],
+                ],
+            )
+
+    async def test_interrupted_checkout_is_restored_without_redownloading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            client = self._client(root, self._installed_workspace(root))
+            calls: list[list[str]] = []
+            statuses = [" M Mathlib.lean\n?? Mathlib/New.lean\n", ""]
+
+            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
+                calls.append(args)
+                if args[1] == "status":
+                    return 0, statuses.pop(0), ""
+                return 0, "", ""
+
+            client._run_process = fake_run_process  # type: ignore[method-assign]
+            with mock.patch.object(lean4_client.shutil, "which", side_effect=lambda name: name if name == "git" else None):
+                self.assertTrue(await client.ensure_workspace())
+
+            self.assertEqual(
+                [call[1:] for call in calls],
+                [
+                    ["status", "--porcelain", "--untracked-files=normal"],
+                    ["reset", "--hard", "--quiet", "HEAD"],
+                    ["clean", "-fd", "--quiet"],
+                    ["status", "--porcelain", "--untracked-files=normal"],
+                    ["exe", "cache", "get"],
+                    ["env", str(root / "lean.exe"), "MOTOProofWorkspace.lean"],
+                    ["exe", "cache", "clean"],
+                ],
+            )
+
+    async def test_unrestorable_checkout_is_wiped_and_reinstalled_on_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = self._installed_workspace(root)
+            client = self._client(root, workspace)
+            calls: list[list[str]] = []
+            disk_full = True
+
+            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
+                calls.append(args)
+                if args[1] == "status":
+                    return 0, "?? Mathlib/New.lean\n", ""
+                if args[1] == "reset":
+                    return 128, "", "fatal: Unable to create '.git/index.lock': File exists."
+                if args[1:] == ["update"]:
+                    if disk_full:
+                        return 1, "", "error: No space left on device"
+                    (workspace / ".lake" / "packages" / "mathlib").mkdir(parents=True)
+                return 0, "", ""
+
+            client._run_process = fake_run_process  # type: ignore[method-assign]
+            with mock.patch.object(lean4_client.shutil, "which", side_effect=lambda name: name if name == "git" else None):
+                self.assertFalse(await client.ensure_workspace())
+                self.assertFalse((workspace / ".lake").exists())
+                with self.assertRaises(LeanWorkspaceRepairRequiredError):
+                    client.require_workspace()
+
+                # Space freed mid-session: the per-round retry reinstalls without a restart.
+                disk_full = False
+                calls.clear()
+                await recover_lean_workspace(client)
+
+            self.assertEqual(
+                [call[1:] for call in calls],
+                [
+                    ["update"],
+                    ["exe", "cache", "get"],
+                    ["env", str(root / "lean.exe"), "MOTOProofWorkspace.lean"],
+                    ["exe", "cache", "clean"],
+                ],
+            )
+            client.require_workspace()
+
+    def test_interrupted_checkout_output_counts_as_stale_lake_state(self) -> None:
+        output = (
+            "info: mathlib: checking out revision 'e91b128'\n"
+            "error: Your local changes to the following files would be overwritten by checkout:\n"
+            "error: external command 'git' exited with code 1"
+        )
+        self.assertTrue(Lean4Client._is_stale_lake_state(output))
+        self.assertFalse(Lean4Client._is_stale_lake_state("error: could not resolve host github.com"))
+
+    async def test_mathlib_downloads_go_to_a_moto_owned_cache_that_is_pruned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            client = Lean4Client(lean_path="", workspace_dir=str(workspace))
+            with mock.patch.dict(lean4_client.os.environ, {}, clear=False):
+                lean4_client.os.environ.pop("MATHLIB_CACHE_DIR", None)
+                self.assertEqual(client.mathlib_cache_dir, workspace.resolve() / ".moto_mathlib_cache")
+                self.assertTrue(client._owns_mathlib_cache_dir())
+
+            operator_dir = Path(tmpdir) / "operator_cache"
+            run_process = mock.AsyncMock(return_value=(0, "", ""))
+            client._run_process = run_process  # type: ignore[method-assign]
+            with mock.patch.dict(lean4_client.os.environ, {"MATHLIB_CACHE_DIR": str(operator_dir)}):
+                self.assertEqual(client.mathlib_cache_dir, operator_dir)
+                await client._prune_mathlib_cache("lake")
+            run_process.assert_not_awaited()
 
     def test_workspace_failure_result_becomes_the_typed_repair_error(self) -> None:
         raise_for_lean_workspace_failure(Lean4Result(success=False, error_output="error: unsolved goals"))

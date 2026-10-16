@@ -37,12 +37,13 @@ from backend.shared.openai_codex_client import (
     OAuthUsageLimitError,
     openai_codex_client,
 )
-from backend.shared.sakana_fugu_client import (
-    SakanaFuguEntitlementError,
-    SakanaFuguError,
-    SakanaFuguUsageLimitError,
-    sakana_fugu_client,
+from backend.shared.subscription_providers.errors import (
+    SubscriptionEntitlementError,
+    SubscriptionProviderError,
+    SubscriptionUsageLimitError,
 )
+from backend.shared.subscription_providers.metadata import CLOUD_PROVIDER_IDS, CLOUD_PROVIDERS
+from backend.shared.subscription_providers.registry import get_api_key_subscription_client
 from backend.shared.xai_grok_client import (
     XAIGrokError,
     XAIGrokSpendingLimitError,
@@ -84,7 +85,7 @@ from backend.shared.provider_route_identity import (
 )
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
-from backend.shared.response_extraction import extract_response_text
+from backend.shared.response_extraction import drop_unfinished_thinking, extract_response_text
 from backend.shared.token_tracker import token_tracker
 from backend.shared.utils import count_tokens
 from backend.shared.workflow_start_guard import workflow_start_guard
@@ -341,6 +342,13 @@ def _extract_error_message_from_json(value: Any) -> tuple[Optional[str], Optiona
     return (str(code).strip() if code is not None else None), None
 
 
+_PROVIDER_ERROR_MESSAGE_PREFIXES = tuple(
+    prefix
+    for provider in CLOUD_PROVIDERS
+    for prefix in (f"{provider.label} completion failed:", f"{provider.label} failed:")
+)
+
+
 def oauth_live_activity_error_message(error: Exception) -> str:
     """Best-effort visible OAuth provider error summary for live activity."""
     raw = str(error)
@@ -356,14 +364,7 @@ def oauth_live_activity_error_message(error: Exception) -> str:
             detail = f"{code}: {message}" if code else message
             return _cap_oauth_live_error_text(detail)
 
-    for prefix in (
-        "OpenAI Codex completion failed:",
-        "OpenAI Codex failed:",
-        "xAI Grok completion failed:",
-        "xAI Grok failed:",
-        "Sakana Fugu completion failed:",
-        "Sakana Fugu failed:",
-    ):
+    for prefix in _PROVIDER_ERROR_MESSAGE_PREFIXES:
         if raw.startswith(prefix):
             raw = raw[len(prefix):].strip()
             break
@@ -992,49 +993,58 @@ class APIClientManager:
         )
         await self._broadcast("openai_codex_oauth_error", stored_payload)
 
-    async def _broadcast_unrecoverable_sakana_fugu_error(
+    async def _broadcast_unrecoverable_subscription_error(
         self,
         *,
+        provider: str,
         role_id: str,
         model: str,
         error: Exception,
         task_id: str = "",
     ) -> None:
-        """Notify the UI when a Sakana Fugu role cannot recover through fallback."""
-        notification_key = f"sakana_fugu:{role_id}:unrecoverable_sakana_fugu_error:{model}"
+        """Notify the UI when an API-key subscription role cannot recover through fallback."""
+        client = get_api_key_subscription_client(provider)
+        if client is None:
+            return
+        label = client.provider_label
+        reason = f"unrecoverable_{provider}_error"
+        notification_key = f"{provider}:{role_id}:{reason}:{model}"
         if notification_key in self._oauth_error_notified:
             return
         self._oauth_error_notified.add(notification_key)
         payload = {
             "role_id": role_id,
             "model": model,
-            "provider": "sakana_fugu",
-            "provider_label": "Sakana Fugu",
-            "reason": "unrecoverable_sakana_fugu_error",
+            "provider": provider,
+            "provider_label": label,
+            "reason": reason,
             "recoverable": False,
             "workflow_mode": _retry_workflow_mode(role_id),
             "message": (
-                "Sakana Fugu failed and no LM Studio fallback is configured. "
-                "Please check your Sakana Fugu API key in OpenRouter/OAuth and retry."
+                f"{label} failed and no LM Studio fallback is configured. "
+                f"Please check your {label} API key in OpenRouter/OAuth and retry."
             ),
             "error_summary": redact_log_text(str(error), 700),
             "oauth_error_message": oauth_live_activity_error_message(error),
         }
+        terminal_guidance = str(getattr(error, "terminal_guidance", "") or "")
+        if terminal_guidance:
+            payload["terminal_guidance"] = terminal_guidance
         payload = _merge_route_fields(payload, self.route_identity_for_role(
             role_id,
             workflow_mode=payload["workflow_mode"],
             error=error,
             model=model,
-            provider="sakana_fugu",
+            provider=provider,
             route_kind="primary",
             task_id=task_id,
         ))
         stored_payload = await asyncio.to_thread(
             record_provider_notification,
-            "sakana_fugu_error",
+            "subscription_provider_error",
             payload,
         )
-        await self._broadcast("sakana_fugu_error", stored_payload)
+        await self._broadcast("subscription_provider_error", stored_payload)
 
     async def _broadcast_unrecoverable_xai_grok_error(
         self,
@@ -2009,11 +2019,11 @@ class APIClientManager:
         self._oauth_cooldown_fallback_roles.discard(role_id)
         
         # Set initial fallback state based on provider
-        if config.provider in {"openrouter", "openai_codex_oauth", "xai_grok_oauth", "sakana_fugu"}:
+        if config.provider == "openrouter" or config.provider in CLOUD_PROVIDER_IDS:
             self._role_fallback_state[role_id] = config.provider
         else:
             self._role_fallback_state[role_id] = "lm_studio"
-        
+
         # Routine role registration is frequent (especially when restoring workflows).
         # Keep the details available for diagnostics without flooding normal startup logs.
         if config.provider == "openrouter":
@@ -2021,15 +2031,9 @@ class APIClientManager:
             provider_str = f" via {config.openrouter_provider}" if config.openrouter_provider else ""
             fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
             logger.debug(f"Configured role '{role_id}': provider=openrouter, model={or_model}{provider_str}{fallback_str}")
-        elif config.provider == "openai_codex_oauth":
+        elif config.provider in CLOUD_PROVIDER_IDS:
             fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
-            logger.debug(f"Configured role '{role_id}': provider=openai_codex_oauth, model={config.model_id}{fallback_str}")
-        elif config.provider == "xai_grok_oauth":
-            fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
-            logger.debug(f"Configured role '{role_id}': provider=xai_grok_oauth, model={config.model_id}{fallback_str}")
-        elif config.provider == "sakana_fugu":
-            fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
-            logger.debug(f"Configured role '{role_id}': provider=sakana_fugu, model={config.model_id}{fallback_str}")
+            logger.debug(f"Configured role '{role_id}': provider={config.provider}, model={config.model_id}{fallback_str}")
         else:
             logger.debug(f"Configured role '{role_id}': provider=lm_studio, model={config.model_id}")
 
@@ -2843,7 +2847,7 @@ class APIClientManager:
             API response dict
         """
         try:
-            return await self._generate_completion_once_routed(
+            response = await self._generate_completion_once_routed(
                 task_id=task_id,
                 role_id=role_id,
                 model=model,
@@ -2855,6 +2859,8 @@ class APIClientManager:
                 tool_choice=tool_choice,
                 **kwargs,
             )
+            drop_unfinished_thinking(response, context=task_id)
+            return response
         except (ProviderRouteError, ProviderContextLengthError) as error:
             if error.route.role_id == role_id and error.route.task_id == task_id:
                 raise
@@ -3347,11 +3353,7 @@ class APIClientManager:
                 self._role_fallback_state[role_id] = "openrouter"
             elif (
                 role_config
-                and role_config.provider in {
-                    "openai_codex_oauth",
-                    "xai_grok_oauth",
-                    "sakana_fugu",
-                }
+                and role_config.provider in CLOUD_PROVIDER_IDS
                 and fallback_state == "lm_studio"
                 and role_id in self._oauth_cooldown_fallback_roles
                 and not self.is_provider_cooling_down(role_config.provider)
@@ -3890,9 +3892,13 @@ class APIClientManager:
                             ) from e
                         raise
         
-        if fallback_state == "sakana_fugu" and role_config:
-            sakana_model = role_config.model_id
-            active_cooldown = self.get_provider_cooldown("sakana_fugu")
+        subscription_client = get_api_key_subscription_client(fallback_state) if role_config else None
+        if subscription_client is not None and role_config:
+            subscription_provider = subscription_client.provider_id
+            subscription_label = subscription_client.provider_label
+            subscription_settings = subscription_client.settings
+            subscription_model = role_config.model_id
+            active_cooldown = self.get_provider_cooldown(subscription_provider)
             if active_cooldown:
                 if role_config.lm_studio_fallback_id:
                     async with self._state_lock:
@@ -3902,13 +3908,14 @@ class APIClientManager:
                         self._cooldown_payload_for_role(
                             active_cooldown,
                             role_id=role_id,
-                            model=sakana_model,
+                            model=subscription_model,
                             task_id=task_id,
                         ),
                         fallback_model=role_config.lm_studio_fallback_id,
                     )
                     logger.warning(
-                        "Sakana Fugu cooldown active for role '%s'; using LM Studio fallback model %s until reset",
+                        "%s cooldown active for role '%s'; using LM Studio fallback model %s until reset",
+                        subscription_label,
                         role_id,
                         role_config.lm_studio_fallback_id,
                     )
@@ -3918,31 +3925,31 @@ class APIClientManager:
                         self._cooldown_payload_for_role(
                             active_cooldown,
                             role_id=role_id,
-                            model=sakana_model,
+                            model=subscription_model,
                             task_id=task_id,
                         )
                     )
                     raise ProviderCooldownError(
-                        provider="sakana_fugu",
-                        provider_label="Sakana Fugu",
+                        provider=subscription_provider,
+                        provider_label=subscription_label,
                         role_id=role_id,
-                        model=sakana_model,
+                        model=subscription_model,
                         resets_at=active_cooldown.get("cooldown_until") or active_cooldown.get("resets_at"),
                         resets_in_seconds=active_cooldown.get("resets_in_seconds"),
                         plan_type=str(active_cooldown.get("plan_type") or ""),
                         message=str(active_cooldown.get("message") or ""),
                     )
             start_time = time.time()
-            use_sakana = not (
+            use_subscription = not (
                 model == role_config.lm_studio_fallback_id
                 and self._role_fallback_state.get(role_id) == "lm_studio"
             )
-            if use_sakana:
+            if use_subscription:
               try:
-                logger.debug("Role %s using Sakana Fugu: %s", role_id, sakana_model)
+                logger.debug("Role %s using %s: %s", role_id, subscription_label, subscription_model)
                 result = await self._with_hung_connection_watchdog(
-                    sakana_fugu_client.generate_completion(
-                        model=sakana_model,
+                    subscription_client.generate_completion(
+                        model=subscription_model,
                         messages=messages,
                         temperature=temperature,
                         max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
@@ -3953,25 +3960,26 @@ class APIClientManager:
                         retry_callback=self._provider_retry_callback(
                             role_id,
                             task_id=task_id,
-                            configured_model=sakana_model,
+                            configured_model=subscription_model,
                             configured_provider=role_config.provider,
                         ),
                     ),
                     role_id=role_id,
-                    model=sakana_model,
-                    provider="Sakana Fugu",
-                    provider_id="sakana_fugu",
+                    model=subscription_model,
+                    provider=subscription_label,
+                    provider_id=subscription_provider,
                     route_kind="primary",
                     task_id=task_id,
                 )
                 duration_ms = (time.time() - start_time) * 1000
                 if not result.get("choices"):
                     logger.error(
-                        "Sakana Fugu response missing 'choices' after %.0fms - %s",
+                        "%s response missing 'choices' after %.0fms - %s",
+                        subscription_label,
                         duration_ms,
                         _response_shape_for_logging(result),
                     )
-                    raise ValueError(f"Sakana Fugu response missing 'choices' after {duration_ms:.0f}ms")
+                    raise ValueError(f"{subscription_label} response missing 'choices' after {duration_ms:.0f}ms")
 
                 response_content = extract_response_text(result, context=task_id)
                 tokens_used = None
@@ -3980,7 +3988,7 @@ class APIClientManager:
                     _pt = result["usage"].get("prompt_tokens")
                     _ct = result["usage"].get("completion_tokens")
                     if _pt is not None and _ct is not None:
-                        token_tracker.track(sakana_model, _pt, _ct)
+                        token_tracker.track(subscription_model, _pt, _ct)
                         await self._broadcast("token_usage_updated", token_tracker.get_stats())
 
                 result = self._annotate_response_with_call_metadata(
@@ -3988,9 +3996,9 @@ class APIClientManager:
                     task_id=task_id,
                     role_id=role_id,
                     configured_model=requested_model,
-                    actual_model=sakana_model,
+                    actual_model=subscription_model,
                     configured_provider=role_config.provider,
-                    actual_provider="sakana_fugu",
+                    actual_provider=subscription_provider,
                     boosted=False,
                     boost_mode=None,
                     openrouter_reasoning_effort=role_reasoning_effort,
@@ -4001,8 +4009,8 @@ class APIClientManager:
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
-                        model=sakana_model,
-                        provider="sakana_fugu",
+                        model=subscription_model,
+                        provider=subscription_provider,
                         prompt=full_prompt,
                         response=response_content,
                         tokens_used=tokens_used,
@@ -4012,38 +4020,38 @@ class APIClientManager:
                         phase=self._current_autonomous_phase,
                     )
 
-                await self._track_model_usage(sakana_model)
-                self._clear_retryable_provider_backoff("sakana_fugu", role_id, sakana_model)
-                recent_cooldown = self._provider_recent_expired_cooldowns.get("sakana_fugu")
+                await self._track_model_usage(subscription_model)
+                self._clear_retryable_provider_backoff(subscription_provider, role_id, subscription_model)
+                recent_cooldown = self._provider_recent_expired_cooldowns.get(subscription_provider)
                 if recent_cooldown is not None:
                     self._provider_resume_pending.setdefault(
-                        ("sakana_fugu", role_id, sakana_model),
+                        (subscription_provider, role_id, subscription_model),
                         {
                             **recent_cooldown,
-                            "provider": "sakana_fugu",
-                            "provider_label": "Sakana Fugu",
+                            "provider": subscription_provider,
+                            "provider_label": subscription_label,
                             "role_id": role_id,
-                            "model": sakana_model,
+                            "model": subscription_model,
                             "workflow_mode": _retry_workflow_mode(role_id),
                         },
                     )
                 await self._confirm_provider_usage_limit_resumed(
-                    provider="sakana_fugu",
-                    provider_label="Sakana Fugu",
+                    provider=subscription_provider,
+                    provider_label=subscription_label,
                     role_id=role_id,
-                    model=sakana_model,
+                    model=subscription_model,
                     task_id=task_id,
                 )
                 return result
-              except SakanaFuguUsageLimitError as e:
+              except SubscriptionUsageLimitError as e:
                 duration_ms = (time.time() - start_time) * 1000
                 if self._autonomous_logger_callback:
                     full_prompt = self._prompt_for_logging(messages)
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
-                        model=sakana_model,
-                        provider="sakana_fugu",
+                        model=subscription_model,
+                        provider=subscription_provider,
                         prompt=full_prompt,
                         response="",
                         tokens_used=None,
@@ -4055,7 +4063,7 @@ class APIClientManager:
                 cooldown_payload = self._mark_provider_cooldown(
                     e,
                     role_id=role_id,
-                    model=sakana_model,
+                    model=subscription_model,
                     task_id=task_id,
                 )
                 if role_config.lm_studio_fallback_id:
@@ -4067,7 +4075,8 @@ class APIClientManager:
                         fallback_model=role_config.lm_studio_fallback_id,
                     )
                     logger.warning(
-                        "Sakana Fugu usage limit reached for role '%s'; falling back to LM Studio model %s until provider reset",
+                        "%s usage limit reached for role '%s'; falling back to LM Studio model %s until provider reset",
+                        subscription_label,
                         role_id,
                         role_config.lm_studio_fallback_id,
                     )
@@ -4075,43 +4084,58 @@ class APIClientManager:
                 else:
                     await self._broadcast_provider_usage_limit(cooldown_payload)
                     raise ProviderCooldownError(
-                        provider=str(getattr(e, "provider", "") or "sakana_fugu"),
-                        provider_label=str(getattr(e, "provider_label", "") or "Sakana Fugu"),
+                        provider=str(getattr(e, "provider", "") or subscription_provider),
+                        provider_label=str(getattr(e, "provider_label", "") or subscription_label),
                         role_id=role_id,
-                        model=sakana_model,
+                        model=subscription_model,
                         resets_at=cooldown_payload.get("cooldown_until") or e.resets_at,
                         resets_in_seconds=cooldown_payload.get("resets_in_seconds") or e.resets_in_seconds,
                         plan_type=e.plan_type,
                         message=str(cooldown_payload.get("message") or str(e)),
                     ) from e
-              except SakanaFuguEntitlementError as e:
-                await self._broadcast_unrecoverable_sakana_fugu_error(
-                    role_id=role_id,
-                    model=sakana_model,
-                    error=e,
-                    task_id=task_id,
-                )
-                raise self._as_provider_repair_error(
-                    provider="sakana_fugu",
-                    provider_label="Sakana Fugu",
-                    role_id=role_id,
-                    model=sakana_model,
-                    error=e,
-                    reason="entitlement_required",
-                    terminal_guidance=(
-                        "Repair or upgrade the Sakana Fugu subscription entitlement, "
-                        "then retry the workflow."
-                    ),
-                ) from e
-              except SakanaFuguError as e:
+              except SubscriptionEntitlementError as e:
+                if (
+                    role_config.lm_studio_fallback_id
+                    and subscription_settings.entitlement_with_fallback == "fallback"
+                ):
+                    async with self._state_lock:
+                        self._role_fallback_state[role_id] = "lm_studio"
+                    logger.warning(
+                        "%s entitlement failed for role '%s'; falling back to LM Studio model %s",
+                        subscription_label,
+                        role_id,
+                        role_config.lm_studio_fallback_id,
+                    )
+                    model = role_config.lm_studio_fallback_id
+                else:
+                    await self._broadcast_unrecoverable_subscription_error(
+                        provider=subscription_provider,
+                        role_id=role_id,
+                        model=subscription_model,
+                        error=e,
+                        task_id=task_id,
+                    )
+                    raise self._as_provider_repair_error(
+                        provider=subscription_provider,
+                        provider_label=subscription_label,
+                        role_id=role_id,
+                        model=subscription_model,
+                        error=e,
+                        reason="entitlement_required",
+                        terminal_guidance=e.terminal_guidance or (
+                            f"Repair or upgrade the {subscription_label} subscription entitlement, "
+                            "then retry the workflow."
+                        ),
+                    ) from e
+              except SubscriptionProviderError as e:
                 duration_ms = (time.time() - start_time) * 1000
                 if self._autonomous_logger_callback:
                     full_prompt = self._prompt_for_logging(messages)
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
-                        model=sakana_model,
-                        provider="sakana_fugu",
+                        model=subscription_model,
+                        provider=subscription_provider,
                         prompt=full_prompt,
                         response="",
                         tokens_used=None,
@@ -4127,7 +4151,8 @@ class APIClientManager:
                         async with self._state_lock:
                             self._role_fallback_state[role_id] = "lm_studio"
                     logger.warning(
-                        "Sakana Fugu failed for role '%s'; falling back to LM Studio model %s",
+                        "%s failed for role '%s'; falling back to LM Studio model %s",
+                        subscription_label,
                         role_id,
                         role_config.lm_studio_fallback_id,
                     )
@@ -4136,32 +4161,33 @@ class APIClientManager:
                     if _is_provider_context_length_error(e):
                         raise _typed_provider_context_error(
                             e,
-                            provider="sakana_fugu",
-                            model=sakana_model,
+                            provider=subscription_provider,
+                            model=subscription_model,
                         ) from e
                     if is_transient_model_call_error(e):
                         raise self._as_retryable_provider_error(
-                            provider="sakana_fugu",
-                            provider_label="Sakana Fugu",
+                            provider=subscription_provider,
+                            provider_label=subscription_label,
                             role_id=role_id,
-                            model=sakana_model,
+                            model=subscription_model,
                             error=e,
                             route_kind="primary",
                             task_id=task_id,
                             configured_provider=role_config.provider,
-                            configured_model=sakana_model,
+                            configured_model=subscription_model,
                         ) from e
-                    await self._broadcast_unrecoverable_sakana_fugu_error(
+                    await self._broadcast_unrecoverable_subscription_error(
+                        provider=subscription_provider,
                         role_id=role_id,
-                        model=sakana_model,
+                        model=subscription_model,
                         error=e,
                         task_id=task_id,
                     )
                     raise self._as_provider_repair_error(
-                        provider="sakana_fugu",
-                        provider_label="Sakana Fugu",
+                        provider=subscription_provider,
+                        provider_label=subscription_label,
                         role_id=role_id,
-                        model=sakana_model,
+                        model=subscription_model,
                         error=e,
                     ) from e
               except Exception as e:
@@ -4171,8 +4197,8 @@ class APIClientManager:
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
-                        model=sakana_model,
-                        provider="sakana_fugu",
+                        model=subscription_model,
+                        provider=subscription_provider,
                         prompt=full_prompt,
                         response="",
                         tokens_used=None,
@@ -4184,10 +4210,15 @@ class APIClientManager:
                 if is_retryable_model_output_error(e):
                     raise
                 if role_config.lm_studio_fallback_id:
-                    async with self._state_lock:
-                        self._role_fallback_state[role_id] = "lm_studio"
+                    if (
+                        subscription_settings.generic_error_fallback == "permanent"
+                        or not is_transient_model_call_error(e)
+                    ):
+                        async with self._state_lock:
+                            self._role_fallback_state[role_id] = "lm_studio"
                     logger.warning(
-                        "Sakana Fugu error for role '%s': %s; falling back to LM Studio model %s",
+                        "%s error for role '%s': %s; falling back to LM Studio model %s",
+                        subscription_label,
                         role_id,
                         e,
                         role_config.lm_studio_fallback_id,
@@ -4197,34 +4228,35 @@ class APIClientManager:
                     if _is_provider_context_length_error(e):
                         raise _typed_provider_context_error(
                             e,
-                            provider="sakana_fugu",
-                            model=sakana_model,
+                            provider=subscription_provider,
+                            model=subscription_model,
                         ) from e
                     if is_transient_model_call_error(e):
                         raise self._as_retryable_provider_error(
-                            provider="sakana_fugu",
-                            provider_label="Sakana Fugu",
+                            provider=subscription_provider,
+                            provider_label=subscription_label,
                             role_id=role_id,
-                            model=sakana_model,
+                            model=subscription_model,
                             error=e,
                             route_kind="primary",
                             task_id=task_id,
                             configured_provider=role_config.provider,
-                            configured_model=sakana_model,
+                            configured_model=subscription_model,
                         ) from e
-                    await self._broadcast_unrecoverable_sakana_fugu_error(
+                    await self._broadcast_unrecoverable_subscription_error(
+                        provider=subscription_provider,
                         role_id=role_id,
-                        model=sakana_model,
+                        model=subscription_model,
                         error=e,
                         task_id=task_id,
                     )
                     if isinstance(e, (ProviderRepairRequiredError, ProviderContextLengthError)):
                         raise
                     raise self._as_provider_repair_error(
-                        provider="sakana_fugu",
-                        provider_label="Sakana Fugu",
+                        provider=subscription_provider,
+                        provider_label=subscription_label,
                         role_id=role_id,
-                        model=sakana_model,
+                        model=subscription_model,
                         error=e,
                     ) from e
 

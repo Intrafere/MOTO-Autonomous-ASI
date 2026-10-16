@@ -1,3 +1,16 @@
+import {
+  getCloudAccessProvider,
+  KIMI_CODE_REASONING_EFFORT_OPTIONS,
+  SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
+  XAI_GROK_REASONING_EFFORT_OPTIONS,
+} from './oauthProviders';
+
+export {
+  KIMI_CODE_REASONING_EFFORT_OPTIONS,
+  SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
+  XAI_GROK_REASONING_EFFORT_OPTIONS,
+};
+
 export const DEFAULT_CONTEXT_WINDOW = '';
 export const DEFAULT_MAX_OUTPUT_TOKENS = '';
 export const DEFAULT_OPENROUTER_REASONING_EFFORT = 'auto';
@@ -9,18 +22,6 @@ export const OPENROUTER_REASONING_EFFORT_OPTIONS = [
   { value: 'medium', label: 'medium' },
   { value: 'low', label: 'low' },
   { value: 'minimal', label: 'minimal' },
-  { value: 'none', label: 'none / disabled' },
-];
-export const SAKANA_FUGU_REASONING_EFFORT_OPTIONS = [
-  { value: 'auto', label: 'Auto (xhigh)' },
-  { value: 'xhigh', label: 'xhigh (maximum)' },
-  { value: 'high', label: 'high' },
-];
-export const XAI_GROK_REASONING_EFFORT_OPTIONS = [
-  { value: 'auto', label: 'Auto (high)' },
-  { value: 'high', label: 'high' },
-  { value: 'medium', label: 'medium' },
-  { value: 'low', label: 'low' },
   { value: 'none', label: 'none / disabled' },
 ];
 const AUTO_ENDPOINT_OUTLIER_RATIO = 0.75;
@@ -325,8 +326,16 @@ export function computeXAIGrokAutoSettings(model) {
   };
 }
 
-export function computeSakanaFuguAutoSettings(model) {
-  return computeCloudAccessAutoSettings(model, 'Sakana Fugu');
+// Auto-fill for any cloud subscription provider, chosen by its registry entry.
+export function computeCloudProviderAutoSettings(providerId, model) {
+  const provider = getCloudAccessProvider(providerId);
+  if (provider?.autoSettings === 'codex') {
+    return computeCodexAutoSettings(model);
+  }
+  if (provider?.autoSettings === 'xai') {
+    return computeXAIGrokAutoSettings(model);
+  }
+  return computeCloudAccessAutoSettings(model, provider?.label || 'OpenRouter/OAuth');
 }
 
 export function hasEndpointMetadata(providerData) {
@@ -376,14 +385,13 @@ export function getOpenRouterProviderTitle(providerName) {
 
 export function normalizeOpenRouterReasoningEffort(value, provider = 'openrouter') {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (provider === 'openai_codex_oauth' && normalized === 'max') return 'max';
-  if (provider === 'xai_grok_oauth') {
-    if (['xhigh', 'max', 'maximum', 'highest'].includes(normalized)) return 'high';
-    if (normalized === 'minimal') return 'low';
-    if (XAI_GROK_REASONING_EFFORT_OPTIONS.some((option) => option.value === normalized)) {
+  const reasoning = getCloudAccessProvider(provider)?.reasoning;
+  if (reasoning?.control === 'codex' && normalized === 'max') return 'max';
+  if (reasoning?.control === 'options') {
+    if (reasoning.options.some((option) => option.value === normalized)) {
       return normalized;
     }
-    return DEFAULT_OPENROUTER_REASONING_EFFORT;
+    return reasoning.aliases?.[normalized] || DEFAULT_OPENROUTER_REASONING_EFFORT;
   }
   if (OPENROUTER_REASONING_EFFORT_OPTIONS.some((option) => option.value === normalized)) {
     return normalized;

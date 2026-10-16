@@ -14,6 +14,7 @@ from backend.shared.boost_manager import boost_manager
 from backend.shared.config import rag_config, system_config
 from backend.shared.embedding_readiness import check_lm_studio_embedding_ready
 from backend.shared.lm_studio_client import lm_studio_client
+from backend.shared.subscription_providers.metadata import CLOUD_PROVIDER_IDS
 from backend.shared.proof_search.search_service import proof_search_service
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.runtime_settings import (
@@ -81,7 +82,7 @@ async def _openrouter_oauth_status() -> dict[str, Any]:
     openrouter_configured = bool(rag_config.openrouter_api_key)
     oauth_configured = any(
         bool((providers.get(provider_id) or {}).get("configured"))
-        for provider_id in ("openai_codex_oauth", "xai_grok_oauth", "sakana_fugu")
+        for provider_id in CLOUD_PROVIDER_IDS
     )
     active = openrouter_configured or oauth_configured
     return {
