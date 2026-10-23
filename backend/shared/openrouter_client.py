@@ -12,6 +12,11 @@ import re
 import time
 from typing import Awaitable, Callable, List, Dict, Any, Optional
 
+from backend.shared.chat_completion_stream import (
+    ChatCompletionStreamAccumulator,
+    is_event_stream,
+    iter_sse_data,
+)
 from backend.shared.config import system_config
 from backend.shared.free_model_manager import supports_text_chat_model
 from backend.shared.log_redaction import redact_log_text
@@ -154,6 +159,41 @@ def _safe_error_json(response: Any) -> Dict[str, Any]:
     except (AttributeError, TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+async def _read_completion_stream(
+    response: httpx.Response,
+    stream: ChatCompletionStreamAccumulator,
+) -> None:
+    """Feed a streamed completion into ``stream``.
+
+    A transport drop re-raises unless the stream already settled: a finished
+    answer is kept, and a reported upstream error keeps its own classification.
+    The body is read to its end after ``[DONE]`` so the connection can be reused.
+    """
+    events = iter_sse_data(response)
+    try:
+        async for event_data in events:
+            if not stream.done_seen:
+                stream.feed(event_data)
+    except httpx.TransportError:
+        if not (stream.terminal or stream.failed):
+            raise
+        logger.warning(
+            "OpenRouter stream dropped after %s; keeping it.",
+            "the completion finished" if stream.terminal else "an upstream error was reported",
+        )
+    finally:
+        await events.aclose()
+
+
+def _stream_upstream(stream: ChatCompletionStreamAccumulator) -> Dict[str, str]:
+    """The upstream host, request id and any reported error a stream carried so far."""
+    return _reported_upstream(
+        stream.error_body()
+        if stream.failed
+        else {"id": stream.response_id, "provider": stream.provider}
+    )
 
 
 class OpenRouterClient:
@@ -649,8 +689,9 @@ class OpenRouterClient:
         payload = {
             "model": model,
             "messages": messages,
+            "stream": True,
         }
-        
+
         # Only add temperature if the model supports it
         # OpenAI o-series reasoning models (o1, o4-mini, etc.) do not support temperature
         if not self._is_reasoning_model_without_temperature(model):
@@ -741,14 +782,35 @@ class OpenRouterClient:
                 provider_request_id=reported.get("request_id", ""),
             )
 
-        for attempt in range(self.MAX_RETRIES):
+        def completed(data: Dict[str, Any]) -> Dict[str, Any]:
+            if provider_auto_fallback_from:
+                data["_moto_openrouter_provider_auto_fallback"] = {
+                    "from_provider": provider_auto_fallback_from,
+                }
+            return data
+
+        attempt_limit = self.MAX_RETRIES
+        attempt = -1
+        while attempt + 1 < attempt_limit:
+            attempt += 1
+            stream = ChatCompletionStreamAccumulator()
             try:
-                response = await self.client.post(
+                # Streamed tokens and OpenRouter's keepalive comments keep a long
+                # call alive. A non-streaming call has its 200 committed as soon as
+                # the provider accepts it, so a later upstream timeout can only
+                # arrive as an error-only body with no choices.
+                async with self.client.stream(
+                    "POST",
                     f"{self.BASE_URL}/chat/completions",
                     json=payload,
-                    headers=self._get_headers()
-                )
-                
+                    headers=self._get_headers(),
+                ) as response:
+                    streamed = response.status_code < 400 and is_event_stream(response)
+                    if streamed:
+                        await _read_completion_stream(response, stream)
+                    else:
+                        await response.aread()
+
                 # Check for credit exhaustion (402 Payment Required)
                 if response.status_code == 402:
                     error_text = sanitize_provider_error_text(response.text)
@@ -764,6 +826,60 @@ class OpenRouterClient:
                     )
                 
                 response.raise_for_status()
+                if streamed:
+                    if stream.terminal:
+                        return completed(stream.result(model))
+                    upstream = _stream_upstream(stream)
+                    if stream.failed:
+                        upstream_detail = _upstream_error_detail(upstream)
+                        retry_reason = "invalid_response"
+                        summary = (
+                            "OpenRouter stream returned an error before the completion finished"
+                            + (f" ({upstream_detail})." if upstream_detail else ".")
+                        )
+                        outcome = "returned an error before the completion finished"
+                        cause: httpx.TransportError = httpx.ReadError(
+                            "OpenRouter stream reported an upstream error",
+                            request=response.request,
+                        )
+                    elif stream.malformed_chunks:
+                        retry_reason = "invalid_response"
+                        summary = "OpenRouter stream contained unreadable data, so part of the answer may be missing."
+                        outcome = "contained unreadable data"
+                        cause = httpx.ReadError(
+                            "OpenRouter stream contained unreadable data",
+                            request=response.request,
+                        )
+                    else:
+                        retry_reason = "connection_error"
+                        summary = "OpenRouter stream ended before the completion finished."
+                        outcome = "ended before the completion finished"
+                        cause = httpx.RemoteProtocolError(
+                            "OpenRouter stream ended before the completion finished",
+                            request=response.request,
+                        )
+                    logger.warning(
+                        "OpenRouter stream did not complete for model %s (attempt %s/%s, "
+                        "failed=%s, done=%s, chunks=%s, malformed=%s, upstream_host=%s, "
+                        "upstream_code=%s).",
+                        redact_log_text(model, 160),
+                        attempt + 1,
+                        self.MAX_RETRIES,
+                        stream.failed,
+                        stream.done_seen,
+                        stream.valid_chunks,
+                        stream.malformed_chunks,
+                        upstream["upstream_host"] or "unreported",
+                        upstream["upstream_error_code"] or "none",
+                    )
+                    if attempt < self.MAX_RETRIES - 1:
+                        await wait_before_retry(attempt, retry_reason, summary, upstream)
+                        continue
+                    raise ProviderRouteError(
+                        f"OpenRouter stream {outcome} after {self.MAX_RETRIES} attempts.",
+                        route=current_route(upstream),
+                        cause=cause,
+                    )
                 try:
                     data = response.json()
                     choices = data.get("choices") if isinstance(data, dict) else None
@@ -810,11 +926,7 @@ class OpenRouterClient:
                                 request=response.request,
                             ),
                         )
-                    if provider_auto_fallback_from and isinstance(data, dict):
-                        data["_moto_openrouter_provider_auto_fallback"] = {
-                            "from_provider": provider_auto_fallback_from,
-                        }
-                    return data
+                    return completed(data)
                 except (json.JSONDecodeError, ValueError) as json_err:
                     # OpenRouter returned 2xx but body is not valid JSON.
                     # This is typically a gateway/CDN error page, truncated stream,
@@ -939,6 +1051,9 @@ class OpenRouterClient:
                             redact_log_text(provider_auto_fallback_from, 120),
                             redact_log_text(model, 160),
                         )
+                        # The one-time auto-routing retry never spends the last attempt.
+                        if attempt == attempt_limit - 1:
+                            attempt_limit += 1
                         continue
                     raise OpenRouterNoEndpointsError(
                         model=model,
@@ -1050,6 +1165,8 @@ class OpenRouterClient:
                 # Use repr(e) to get detailed exception info even if str(e) is empty
                 error_type = type(e).__name__
                 error_detail = repr(e) if not str(e) else str(e)
+                # A mid-stream drop still names the host and request id already streamed.
+                upstream = _stream_upstream(stream)
                 logger.warning(
                     f"OpenRouter connection error for model '{model}' (attempt {attempt + 1}/{self.MAX_RETRIES}): "
                     f"[{error_type}] {error_detail}"
@@ -1059,11 +1176,12 @@ class OpenRouterClient:
                         attempt,
                         "connection_error",
                         f"[{error_type}] {error_detail}",
+                        upstream,
                     )
                     continue
                 raise ProviderRouteError(
                     f"OpenRouter connection failed after {self.MAX_RETRIES} attempts: [{error_type}] {error_detail}",
-                    route=current_route(),
+                    route=current_route(upstream),
                     cause=e,
                 ) from e
                 

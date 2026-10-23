@@ -74,6 +74,19 @@ class ProviderRecoveryPolicy:
                 wait_seconds=failure.retry_after_seconds,
                 reason=failure.kind.value,
             )
+        if failure.kind == FailureKind.INVALID_REQUEST:
+            # A rejected request setting is specific to that request shape and is not
+            # cleared by a manual reset, so a fallback serves only the failed call.
+            if has_fallback and failure.fallback_eligible:
+                return ProviderRecoveryDecision(
+                    RecoveryAction.FALLBACK,
+                    fallback_mode=FallbackMode.CALL_ONLY,
+                    reason=failure.kind.value,
+                )
+            return ProviderRecoveryDecision(
+                RecoveryAction.REPAIR_REQUIRED,
+                reason=failure.kind.value,
+            )
         if has_fallback and failure.fallback_eligible:
             return ProviderRecoveryDecision(
                 RecoveryAction.FALLBACK,

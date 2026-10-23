@@ -102,6 +102,10 @@ class ApiKeyProviderProfile:
     OpenAI-compatible API.
     """
 
+    # True when the provider takes a prompt-cache key derived from a stable
+    # role/run scope, so the router resolves and passes one to ``generate_completion``.
+    uses_cache_scope: bool = False
+
     def __init__(self, settings: ApiKeyProviderSettings) -> None:
         self.settings = settings
 
@@ -125,6 +129,21 @@ class ApiKeyProviderProfile:
 
     def apply_temperature(self, payload: Dict[str, Any], temperature: float, *, model: str) -> None:
         payload["temperature"] = temperature
+
+    def apply_output_limit(self, payload: Dict[str, Any], max_tokens: Optional[int], *, model: str) -> None:
+        """Set the Chat Completions output cap."""
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
+
+    def apply_stream_options(self, payload: Dict[str, Any]) -> None:
+        """Add provider options to a streamed Chat Completions request."""
+
+    def apply_prompt_cache(self, payload: Dict[str, Any], cache_scope: Optional[str], *, model: str) -> None:
+        """Attach the provider's prompt-cache routing key for a stable caller scope.
+
+        ``cache_scope`` is an opaque in-process identity (never sent as-is). Only
+        profiles with ``uses_cache_scope`` receive one.
+        """
 
     def prepare_chat_messages(
         self,

@@ -1327,11 +1327,32 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         self.assertIn("closed the Codex websocket stream", activity["error_summary"])
         self.assertIn("close_code=1011", activity["error_summary"])
         self.assertIn("remote outcome is unknown", activity["error_summary"])
-        self.assertIn("closed this connection on its side", activity["error_summary"])
-        self.assertIn("How to fix: lower this role's reasoning effort in Settings", activity["error_summary"])
-        self.assertIn("How to fix", activity["message"])
+        self.assertIn("dropped this connection after less than a minute", activity["error_summary"])
+        self.assertIn("transient fault", activity["error_summary"])
+        self.assertIn("no settings change is needed", activity["error_summary"])
+        self.assertNotIn("lower this role's reasoning effort", activity["error_summary"])
+        self.assertNotIn("lower this role's reasoning effort", activity["message"])
         self.assertNotIn("hidden-token", activity["error_summary"])
         self.assertNotIn("secret partial", activity["error_summary"])
+
+    def test_transport_drop_guidance_only_blames_thinking_time_near_the_stream_limit(self) -> None:
+        early_ws = OpenAICodexClient._transport_drop_guidance("websocket", 77.7)
+        early_sse = OpenAICodexClient._transport_drop_guidance("sse", 300.0)
+        for guidance in (early_ws, early_sse):
+            self.assertIn("transient fault", guidance)
+            self.assertIn("no settings change is needed", guidance)
+            self.assertNotIn("lower this role's reasoning effort", guidance)
+            self.assertNotIn("15 minutes", guidance)
+        self.assertIn("dropped this connection after about 1 minute", early_ws)
+        self.assertIn("dropped this HTTP stream after about 5 minutes", early_sse)
+
+        late_ws = OpenAICodexClient._transport_drop_guidance("websocket", 890.0)
+        late_sse = OpenAICodexClient._transport_drop_guidance("sse", 905.0)
+        for guidance in (late_ws, late_sse):
+            self.assertIn("How to fix: lower this role's reasoning effort in Settings", guidance)
+            self.assertNotIn("transient fault", guidance)
+        self.assertIn("closed this connection on its side after about 15 minutes", late_ws)
+        self.assertIn("OpenAI ends these streams at about 15 minutes", late_sse)
 
     async def test_websocket_close_after_terminal_uses_confirmed_response(self) -> None:
         from websockets.exceptions import ConnectionClosedOK

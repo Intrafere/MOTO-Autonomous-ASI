@@ -11,13 +11,14 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import httpx
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
+from backend.shared.chat_completion_stream import iter_sse_data, split_sse_data
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.oauth_pkce import generate_pkce_pair
 from backend.shared.openrouter_client import sanitize_provider_error_text
@@ -133,6 +134,9 @@ class OpenAICodexClient:
     WEBSOCKET_OPEN_TIMEOUT_SECONDS = 30.0
     WEBSOCKET_PING_INTERVAL_SECONDS = 20.0
     WEBSOCKET_PING_TIMEOUT_SECONDS = 60.0
+    # A stream cut this long after it started is plausibly the provider's
+    # roughly-15-minute stream limit; an earlier cut is a transient fault.
+    STREAM_CUTOFF_GUIDANCE_SECONDS = 600.0
     # Handshake statuses that mean the backend does not serve this transport.
     WEBSOCKET_UNSUPPORTED_STATUS_CODES = frozenset({404, 405, 426, 501})
     # Error events that require a fresh connection rather than a provider repair.
@@ -853,25 +857,6 @@ class OpenAICodexClient:
             )
         return {"effort": effort}
 
-    @staticmethod
-    def _iter_sse_data(raw_body: str) -> List[str]:
-        events: List[str] = []
-        current_data_lines: List[str] = []
-        for line in raw_body.splitlines():
-            stripped = line.rstrip("\r")
-            if not stripped:
-                if current_data_lines:
-                    events.append("\n".join(current_data_lines))
-                    current_data_lines = []
-                continue
-            if stripped.startswith(":"):
-                continue
-            if stripped.startswith("data:"):
-                current_data_lines.append(stripped[5:].lstrip())
-        if current_data_lines:
-            events.append("\n".join(current_data_lines))
-        return events
-
     @classmethod
     def _decode_response_body(cls, raw_body: str) -> Dict[str, Any]:
         body = raw_body.strip()
@@ -893,7 +878,7 @@ class OpenAICodexClient:
             logger.debug("OpenAI Codex response body is not plain JSON; parsing stream events")
 
         state = cls._new_stream_state()
-        for event_data in cls._iter_sse_data(body):
+        for event_data in split_sse_data(body):
             cls._consume_stream_event_data(event_data, state)
         return cls._finalize_stream_state(state)
 
@@ -1079,23 +1064,6 @@ class OpenAICodexClient:
         if state["output_text_parts"] and not response_data.get("output_text"):
             response_data["output_text"] = "".join(state["output_text_parts"])
         return response_data
-
-    @classmethod
-    async def _iter_stream_data(cls, response: httpx.Response) -> AsyncIterator[str]:
-        data_lines: List[str] = []
-        async for line in response.aiter_lines():
-            stripped = line.rstrip("\r")
-            if not stripped:
-                if data_lines:
-                    yield "\n".join(data_lines)
-                    data_lines = []
-                continue
-            if stripped.startswith(":"):
-                continue
-            if stripped.startswith("data:"):
-                data_lines.append(stripped[5:].lstrip())
-        if data_lines:
-            yield "\n".join(data_lines)
 
     @staticmethod
     def _extract_output(response: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
@@ -1292,11 +1260,26 @@ class OpenAICodexClient:
                 return int(code)
         return None
 
-    @staticmethod
-    def _transport_drop_guidance(transport: str, elapsed: float) -> str:
-        """Plain-language cause and repair hint for a stream cut before completion."""
+    @classmethod
+    def _transport_drop_guidance(cls, transport: str, elapsed: float) -> str:
+        """Plain-language cause and repair hint for a stream cut before completion.
+
+        Only a cut near the provider's known stream limit is a thinking-time
+        problem worth a settings change; an earlier cut is a transient fault
+        that the retry handles, so the guidance must not steer the user into
+        lowering reasoning effort for it.
+        """
         minutes = max(1, round(elapsed / 60.0))
-        duration = "under a minute" if elapsed < 45 else f"about {minutes} minute{'s' if minutes != 1 else ''}"
+        duration = "less than a minute" if elapsed < 45 else f"about {minutes} minute{'s' if minutes != 1 else ''}"
+        if elapsed < cls.STREAM_CUTOFF_GUIDANCE_SECONDS:
+            stream_name = "connection" if transport == "websocket" else "HTTP stream"
+            return (
+                f"What this means: OpenAI's Codex service dropped this {stream_name} after {duration} "
+                "while the model was still working. A drop this early is a transient fault at OpenAI or on "
+                "the network path, not a sign that this request needs too much thinking time, so no settings "
+                "change is needed. MOTO is sending the request again. If every retry drops at the same point, "
+                "route this role through a different provider."
+            )
         if transport == "websocket":
             cause = (
                 "What this means: OpenAI's Codex service closed this connection on its side after "
@@ -1546,7 +1529,7 @@ class OpenAICodexClient:
                         return self._decode_response_body(raw_body), response.status_code, ""
 
                     try:
-                        async for event_data in self._iter_stream_data(response):
+                        async for event_data in iter_sse_data(response):
                             self._consume_stream_event_data(event_data, state)
                     except httpx.TransportError as exc:
                         if state["terminal_seen"]:

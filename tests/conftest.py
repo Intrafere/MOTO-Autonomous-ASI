@@ -149,6 +149,33 @@ def _block_real_codex_websocket_transport():
     yield
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _block_real_openrouter_http():
+    """Keep OpenRouter faked: a test serves it through ``httpx.MockTransport``.
+
+    Completions stream through ``client.stream``, so a test that stubs only
+    ``client.post`` would otherwise reach the real API with a fake key.
+    """
+    httpx = _import_runtime_module("httpx")
+    if httpx is None:
+        yield
+        return
+    real_handle = httpx.AsyncHTTPTransport.handle_async_request
+
+    async def _refuse_openrouter(self, request):
+        host = request.url.host or ""
+        if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
+            raise AssertionError(
+                "A test reached the real OpenRouter API; serve it through "
+                "httpx.MockTransport on the client instance."
+            )
+        return await real_handle(self, request)
+
+    httpx.AsyncHTTPTransport.handle_async_request = _refuse_openrouter
+    yield
+    httpx.AsyncHTTPTransport.handle_async_request = real_handle
+
+
 @pytest.fixture(autouse=True)
 def _isolate_installation_identity_store(monkeypatch):
     """Keep the installation-global identity out of the developer's OS keyring.

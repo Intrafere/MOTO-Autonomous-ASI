@@ -199,6 +199,39 @@ def _success_response():
     )
 
 
+def _install_openrouter_transport(client, replies):
+    """Serve ``client`` through ``httpx.MockTransport`` and return its captured requests.
+
+    ``replies`` is either a list consumed one reply per request (running past its end
+    fails the test) or a single reply served for every request. A reply is an
+    ``httpx.Response``, copied fresh for each request, or an exception to raise.
+    """
+    script = list(replies) if isinstance(replies, list) else None
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if script is None:
+            reply = replies
+        elif len(requests) <= len(script):
+            reply = script[len(requests) - 1]
+        else:
+            raise AssertionError(
+                f"OpenRouter received request {len(requests)} but only "
+                f"{len(script)} replies were scripted."
+            )
+        if isinstance(reply, BaseException):
+            raise reply
+        return httpx.Response(
+            reply.status_code,
+            headers=reply.headers,
+            content=reply.content,
+        )
+
+    client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return requests
+
+
 class OpenRouterUpstreamReportTests(unittest.TestCase):
     def test_safe_error_json_ignores_html_gateway_body(self):
         response = _openrouter_response(
@@ -281,7 +314,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
             request=request,
             json={"error": {"message": "context_length_exceeded"}},
         )
-        client.client.post = AsyncMock(return_value=response)
+        _install_openrouter_transport(client, response)
         client.MAX_RETRIES = 1
         try:
             with self.assertRaises(ProviderContextLengthError) as raised:
@@ -299,7 +332,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
     async def test_openrouter_timeout_is_typed(self):
         client = OpenRouterClient("test-key")
         request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
-        client.client.post = AsyncMock(side_effect=httpx.ReadTimeout("slow", request=request))
+        _install_openrouter_transport(client, httpx.ReadTimeout("slow", request=request))
         client.MAX_RETRIES = 1
         try:
             with self.assertRaises(ProviderRouteError) as raised:
@@ -327,7 +360,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                 json={"choices": [{"message": {"content": "recovered"}}]},
             ),
         ]
-        client.client.post = AsyncMock(side_effect=responses)
+        sent = _install_openrouter_transport(client, responses)
         client.MAX_RETRIES = 3
         retry_callback = AsyncMock()
         try:
@@ -338,7 +371,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                 retry_callback=retry_callback,
             )
             self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
-            self.assertEqual(client.client.post.await_count, 2)
+            self.assertEqual(len(sent), 2)
             retry_callback.assert_awaited_once()
             self.assertEqual(
                 retry_callback.await_args.args[0]["reason"],
@@ -355,7 +388,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
             request=request,
             json={"error": {"message": "upstream provider timeout"}},
         )
-        client.client.post = AsyncMock(return_value=response)
+        sent = _install_openrouter_transport(client, response)
         client.MAX_RETRIES = 3
         retry_callback = AsyncMock()
         try:
@@ -366,7 +399,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                     max_tokens=10,
                     retry_callback=retry_callback,
                 )
-            self.assertEqual(client.client.post.await_count, 3)
+            self.assertEqual(len(sent), 3)
             self.assertEqual(retry_callback.await_count, 2)
             self.assertTrue(is_transient_model_call_error(raised.exception))
             self.assertFalse(is_non_retryable_model_error(raised.exception))
@@ -389,7 +422,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                 json={"choices": [{"message": {"content": "recovered"}}]},
             ),
         ]
-        client.client.post = AsyncMock(side_effect=responses)
+        sent = _install_openrouter_transport(client, responses)
         retry_callback = AsyncMock()
         try:
             response = await client.generate_completion(
@@ -399,7 +432,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                 retry_callback=retry_callback,
             )
             self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
-            self.assertEqual(client.client.post.await_count, 2)
+            self.assertEqual(len(sent), 2)
             retry_callback.assert_awaited_once()
             self.assertEqual(
                 retry_callback.await_args.args[0]["reason"],
@@ -410,7 +443,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_openrouter_empty_choices_retry_payload_reports_auto_upstream_route(self):
         client = OpenRouterClient("test-key")
-        client.client.post = AsyncMock(side_effect=[
+        _install_openrouter_transport(client, [
             _openrouter_response(200, json=UPSTREAM_ERROR_BODY),
             _success_response(),
         ])
@@ -439,7 +472,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_openrouter_empty_choices_retry_payload_reports_pinned_host(self):
         client = OpenRouterClient("test-key")
-        client.client.post = AsyncMock(side_effect=[
+        _install_openrouter_transport(client, [
             _openrouter_response(200, json={"id": "gen-test-0002"}),
             _success_response(),
         ])
@@ -466,8 +499,8 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_openrouter_empty_choices_exhaustion_route_carries_upstream_host(self):
         client = OpenRouterClient("test-key")
-        client.client.post = AsyncMock(
-            return_value=_openrouter_response(200, json=UPSTREAM_ERROR_BODY)
+        _install_openrouter_transport(
+            client, _openrouter_response(200, json=UPSTREAM_ERROR_BODY)
         )
         client.MAX_RETRIES = 2
         try:
@@ -494,7 +527,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_openrouter_auto_fallback_marks_subsequent_retry_payloads(self):
         client = OpenRouterClient("test-key")
-        client.client.post = AsyncMock(side_effect=[
+        _install_openrouter_transport(client, [
             _openrouter_response(
                 404,
                 json={"error": {"code": 404, "message": "No endpoints found for vendor/test-free:free."}},
@@ -527,7 +560,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_openrouter_auto_fallback_exhaustion_route_keeps_fallback_origin(self):
         client = OpenRouterClient("test-key")
-        client.client.post = AsyncMock(side_effect=[
+        _install_openrouter_transport(client, [
             _openrouter_response(
                 404,
                 json={"error": {"code": 404, "message": "No endpoints found for vendor/test-free:free."}},
@@ -556,7 +589,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_openrouter_non_json_retry_reports_no_upstream_host(self):
         client = OpenRouterClient("test-key")
-        client.client.post = AsyncMock(side_effect=[
+        _install_openrouter_transport(client, [
             _openrouter_response(
                 200,
                 text="<html>gateway hiccup</html>",
@@ -582,7 +615,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_openrouter_http_error_retry_and_route_report_upstream_host(self):
         client = OpenRouterClient("test-key")
-        client.client.post = AsyncMock(return_value=_openrouter_response(
+        _install_openrouter_transport(client, _openrouter_response(
             503,
             json={
                 "id": "gen-test-0004",
@@ -618,7 +651,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_openrouter_paid_rate_limit_retry_reports_upstream_host(self):
         client = OpenRouterClient("test-key")
-        client.client.post = AsyncMock(side_effect=[
+        _install_openrouter_transport(client, [
             _openrouter_response(429, json=UPSTREAM_ERROR_BODY),
             _success_response(),
         ])
@@ -639,7 +672,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_openrouter_direct_retry_wait_receives_same_route_payload(self):
         client = OpenRouterClient("test-key")
-        client.client.post = AsyncMock(side_effect=[
+        _install_openrouter_transport(client, [
             _openrouter_response(200, json=UPSTREAM_ERROR_BODY),
             _success_response(),
         ])
@@ -677,7 +710,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                 }
             },
         )
-        client.client.post = AsyncMock(return_value=response)
+        sent = _install_openrouter_transport(client, response)
         client.MAX_RETRIES = 3
         retry_callback = AsyncMock()
         try:
@@ -692,7 +725,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                         max_tokens=10,
                         retry_callback=retry_callback,
                     )
-            self.assertEqual(client.client.post.await_count, 3)
+            self.assertEqual(len(sent), 3)
             self.assertEqual(retry_callback.await_count, 2)
             self.assertEqual(
                 retry_callback.await_args_list[0].args[0]["reason"],
@@ -737,7 +770,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                 }
             },
         )
-        client.client.post = AsyncMock(return_value=response)
+        _install_openrouter_transport(client, response)
         client.MAX_RETRIES = 2
         retry_callback = AsyncMock()
         try:
@@ -778,7 +811,7 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                 }
             },
         )
-        client.client.post = AsyncMock(return_value=response)
+        _install_openrouter_transport(client, response)
         client.MAX_RETRIES = 1
         try:
             with self.assertRaises(ProviderRouteError) as raised:

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import copy
+import json
 import tempfile
 import time
 from types import SimpleNamespace
@@ -77,44 +77,64 @@ SUBMITTER_2_IDENTITY = (
 )
 
 
-def _response(status_code: int, **kwargs: Any) -> Callable[[], httpx.Response]:
-    def build() -> httpx.Response:
-        return httpx.Response(
-            status_code,
-            request=httpx.Request("POST", OPENROUTER_URL),
-            **kwargs,
-        )
+ResponseFactory = Callable[[httpx.Request], httpx.Response]
+
+
+def _response(status_code: int, **kwargs: Any) -> ResponseFactory:
+    def build(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, **kwargs)
 
     return build
 
 
-def _success(content: str = "recovered") -> Callable[[], httpx.Response]:
+def _success(content: str = "recovered") -> ResponseFactory:
     return _response(200, json={"choices": [{"message": {"content": content}}]})
 
 
-def _connect_error() -> httpx.Response:
-    raise httpx.ConnectError("synthetic offline", request=httpx.Request("POST", OPENROUTER_URL))
+def _connect_error(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("synthetic offline", request=request)
+
+
+def _event_stream(*chunks: Dict[str, Any], comments: tuple[str, ...] = (), done: bool = True) -> ResponseFactory:
+    """A ``text/event-stream`` completion: keepalive comments, then ``data:`` chunks."""
+    frames = [f": {comment}\n\n" for comment in comments]
+    frames.extend(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    if done:
+        frames.append("data: [DONE]\n\n")
+    return _response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content="".join(frames).encode("utf-8"),
+    )
 
 
 class ScriptedOpenRouterTransport:
-    """Fake OpenRouter HTTP transport scripted per requested model.
+    """Fake OpenRouter HTTP endpoint scripted per requested model.
 
-    Each model has an ordered list of response factories; the last one repeats.
+    Served through ``httpx.MockTransport`` on each client's ``client`` so the
+    adapter's real streamed request path runs. Each model has an ordered list
+    of response factories; the last one repeats.
     """
 
     def __init__(self) -> None:
-        self._scripts: Dict[str, List[Callable[[], httpx.Response]]] = {}
+        self._scripts: Dict[str, List[ResponseFactory]] = {}
         self.requests: List[Dict[str, Any]] = []
 
-    def script(self, model: str, *responses: Callable[[], httpx.Response]) -> None:
+    def script(self, model: str, *responses: ResponseFactory) -> None:
         self._scripts[model] = list(responses)
 
-    async def post(self, url: str, *, json: Dict[str, Any], headers: Dict[str, str]) -> httpx.Response:
-        # The adapter mutates its request payload on auto-fallback; keep each send.
-        self.requests.append(copy.deepcopy(json))
-        queue = self._scripts[json["model"]]
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST" and str(request.url) == OPENROUTER_URL, request.url
+        # Decoding the sent bytes snapshots each send; the adapter mutates its
+        # request payload on auto-fallback.
+        payload = json.loads(request.content)
+        self.requests.append(payload)
+        queue = self._scripts[payload["model"]]
         factory = queue.pop(0) if len(queue) > 1 else queue[0]
-        return factory()
+        return factory(request)
+
+    def http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handle))
 
     @property
     def models(self) -> List[str]:
@@ -183,7 +203,7 @@ class ProviderErrorRouteIdentityTests(IsolatedAsyncioTestCase):
 
     def _openrouter_client(self, api_key: str) -> OpenRouterClient:
         client = OpenRouterClient(api_key)
-        client.client.post = self.transport.post
+        client.client = self.transport.http_client()
         self._clients.append(client)
         return client
 
@@ -319,6 +339,81 @@ class ProviderErrorRouteIdentityTests(IsolatedAsyncioTestCase):
             list(self.manager._retryable_provider_backoff_state),
             ["openrouter|aggregator_submitter_2|vendor/test-free:free|transient_provider_error"],
         )
+
+    async def test_openrouter_stream_error_retries_carry_mode_role_model_and_upstream_host(self) -> None:
+        self._configure_role()
+        # OpenRouter reports a mid-stream upstream failure as an SSE chunk with a
+        # top-level error and finish_reason "error" after its keepalive comment.
+        self.transport.script(
+            MODEL,
+            _event_stream(
+                {
+                    "id": "gen-stream-test",
+                    "provider": "Nvidia",
+                    "error": {"code": 504, "message": "A Timeout Occurred"},
+                    "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "error"}],
+                },
+                comments=("OPENROUTER PROCESSING",),
+                done=False,
+            ),
+            _event_stream(
+                {
+                    "id": "gen-stream-ok",
+                    "provider": "Nvidia",
+                    "model": MODEL,
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": "streamed "}}],
+                },
+                {"id": "gen-stream-ok", "choices": [{"index": 0, "delta": {"content": "answer"}}]},
+                {"id": "gen-stream-ok", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                comments=("OPENROUTER PROCESSING",),
+            ),
+        )
+
+        result = await self._generate()
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "streamed answer")
+        self.assertEqual(result["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(self.transport.models, [MODEL] * 2)
+        for request in self.transport.requests:
+            self.assertIs(request["stream"], True)
+            self.assertEqual(request["provider"], {"ignore": ["Venice"]})
+
+        identity = (
+            "[Autonomous · Submitter 2 · vendor/test-free:free via OpenRouter · host auto → Nvidia]"
+        )
+        summary = (
+            "OpenRouter stream returned an error before the completion finished "
+            "(upstream 504: A Timeout Occurred)."
+        )
+        (payload,) = self._retry_events()
+        self._assert_route_identity(
+            payload,
+            workflow_mode="autonomous",
+            role_id=ROLE,
+            role_label="Submitter 2",
+            model=MODEL,
+            provider="openrouter",
+            provider_label="OpenRouter",
+            route_kind="primary",
+            task_id=TASK,
+            configured_host_provider="",
+            host_routing="auto",
+            effective_host_provider="Nvidia",
+            provider_request_id="gen-stream-test",
+            route_identity=identity,
+        )
+        self.assertNotIn("Nvidia", payload["notification_key"])
+        self.assertEqual(payload["reason"], "invalid_response")
+        self.assertEqual(payload["retry_attempt"], 1)
+        self.assertEqual(payload["retry_layer"], "adapter")
+        self.assertEqual(payload["error_summary"], summary)
+        self.assertEqual(
+            payload["message"],
+            f"{identity} OpenRouter server-side error: {summary} OpenRouter API call "
+            "will retry after a 2-second cooldown (retry 1).",
+        )
+        self.assertEqual([call.args[0] for call in self.sleep.await_args_list], [2.0])
+        self.assertEqual(self.manager._retryable_provider_backoff_state, {})
 
     async def test_upstream_without_metadata_names_request_id(self) -> None:
         self._configure_role()

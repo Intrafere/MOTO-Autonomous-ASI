@@ -1,6 +1,7 @@
 import {
   refreshCloudProviderStates,
   refreshOpenRouterCredentialState,
+  resolveOpenRouterKeyPresence,
 } from './credentialProviderRefresh';
 import { cloudAccessAPI, openRouterAPI } from '../services/api';
 import { CLOUD_ACCESS_PROVIDERS } from './oauthProviders';
@@ -123,4 +124,39 @@ test('does not update state after shouldApply returns false', async () => {
 
   expect(setHasOpenRouterKey).not.toHaveBeenCalled();
   expect(setOpenRouterModels).not.toHaveBeenCalled();
+});
+
+describe('resolveOpenRouterKeyPresence', () => {
+  test('a verified key is present and verified', () => {
+    expect(resolveOpenRouterKeyPresence({ has_key: true, validation_state: 'valid' })).toEqual({
+      hasKey: true,
+      verified: true,
+      unreachable: false,
+    });
+  });
+
+  test('a stored key OpenRouter could not be reached to verify stays present', () => {
+    expect(resolveOpenRouterKeyPresence({ has_key: true, validation_state: 'unreachable' })).toEqual({
+      hasKey: true,
+      verified: false,
+      unreachable: true,
+    });
+  });
+
+  test('a stored key the backend has not verified yet stays present', () => {
+    expect(resolveOpenRouterKeyPresence({ has_key: true, validation_state: 'unknown' })).toEqual({
+      hasKey: true,
+      verified: false,
+      unreachable: false,
+    });
+  });
+
+  test('a key OpenRouter rejected counts as absent', () => {
+    expect(resolveOpenRouterKeyPresence({ has_key: true, validation_state: 'invalid' }).hasKey).toBe(false);
+  });
+
+  test('no key and an unreadable status count as absent', () => {
+    expect(resolveOpenRouterKeyPresence({ has_key: false, validation_state: 'missing' }).hasKey).toBe(false);
+    expect(resolveOpenRouterKeyPresence(undefined)).toEqual({ hasKey: false, verified: false, unreachable: false });
+  });
 });

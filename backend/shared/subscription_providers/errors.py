@@ -20,11 +20,14 @@ class SubscriptionProviderError(RuntimeError):
         provider_label: str,
         status_code: Optional[int] = None,
         error_code: str = "",
+        terminal_guidance: str = "",
     ) -> None:
         self.provider = provider
         self.provider_label = provider_label
         self.status_code = status_code
         self.error_code = error_code
+        # Plain-language repair advice shown instead of the generic credential hint.
+        self.terminal_guidance = terminal_guidance
         super().__init__(message)
 
 
@@ -79,14 +82,24 @@ class SubscriptionEntitlementError(SubscriptionRequestError):
         error_code: str = "",
         terminal_guidance: str = "",
     ) -> None:
-        self.terminal_guidance = terminal_guidance
         super().__init__(
             message or f"The {provider_label} subscription is not entitled to this request.",
             provider=provider,
             provider_label=provider_label,
             status_code=status_code,
             error_code=error_code,
+            terminal_guidance=terminal_guidance,
         )
+
+
+class SubscriptionParameterRejectedError(SubscriptionRequestError):
+    """The provider rejected a request setting MOTO sent.
+
+    The rejection is deterministic for that request shape and is a MOTO
+    compatibility problem, not a credential, plan, or availability problem, so it is
+    never retried against the provider and never moves a role to its fallback
+    permanently.
+    """
 
 
 class SubscriptionContextLimitError(SubscriptionRequestError):

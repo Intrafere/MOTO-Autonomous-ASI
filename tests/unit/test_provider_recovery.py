@@ -56,6 +56,8 @@ def _failure(kind: FailureKind, **kwargs) -> ProviderFailure:
         (FailureKind.CONTEXT_LIMIT, True, RecoveryAction.CONTEXT_OVERFLOW, None),
         (FailureKind.OUTPUT_LIMIT, True, RecoveryAction.OUTPUT_RECOVERY, None),
         (FailureKind.AUTHENTICATION, False, RecoveryAction.REPAIR_REQUIRED, None),
+        (FailureKind.INVALID_REQUEST, False, RecoveryAction.REPAIR_REQUIRED, None),
+        (FailureKind.INVALID_REQUEST, True, RecoveryAction.FALLBACK, FallbackMode.CALL_ONLY),
     ],
 )
 def test_recovery_policy_matrix(kind, fallback, action, mode):
