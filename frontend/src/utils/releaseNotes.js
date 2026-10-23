@@ -29,6 +29,7 @@ export const releaseNotes = {
           'Tool-using roles on **Kimi Code**, including the HighSpeed model, no longer fail on follow-up turns.',
           'If **Kimi Code** rejects a request setting, MOTO now says this is a MOTO compatibility problem rather than a problem with your key or plan, and does not retry it.',
           'When an **OpenAI Codex** stream is cut early, Live Activity now explains it as a temporary fault that needs no settings change; only cuts near the 15-minute limit suggest lowering reasoning effort.',
+          'When MOTO cannot reach **OpenAI Codex** at all (Wi-Fi down, DNS, VPN or proxy), Live Activity now says so and points at this computer\'s network instead of blaming OpenAI, and it no longer claims your network was healthy when a stream drops.',
           'A saved **OpenRouter** key is kept when OpenRouter cannot be reached to check it, instead of sending you back through setup.',
         ],
       },
