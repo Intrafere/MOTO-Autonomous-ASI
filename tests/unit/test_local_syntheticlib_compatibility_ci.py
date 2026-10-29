@@ -268,6 +268,7 @@ def test_gitignore_allowlists_only_public_compatibility_members() -> None:
     assert "!syntheticlib-trade/compatibility/*" not in gitignore.splitlines()
     assert "PLANS/" in gitignore.splitlines()
     assert not any(line.startswith("!PLANS") for line in gitignore.splitlines())
+    assert "backend/data/*" in gitignore.splitlines()
 
 
 def test_run_reports_child_command_failure(tmp_path: Path) -> None:

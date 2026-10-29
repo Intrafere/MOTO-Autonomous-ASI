@@ -3,7 +3,9 @@
 Mirrors .github/workflows/ci.yml (Python tests, Windows native lifecycle, and
 frontend build jobs), the SyntheticLib release-evidence workflow (including its pytest-only
 test environment), and CodeQL code scanning, which GitHub's default setup only
-runs on pull requests into main. Every step runs even after a failure, and the
+runs on pull requests into main. It starts by installing or refreshing the
+publish-safety pre-push hook and running that check on HEAD. Every step runs even
+after a failure, and the
 summary names each step that passed, failed, or was skipped.
 
 Not mirrored: CI's clean ``npm ci`` install; the frontend steps use the existing
@@ -128,6 +130,11 @@ class Step:
 def build_steps(python: str = sys.executable, npm: Optional[str] = None) -> tuple[Step, ...]:
     npm = npm or shutil.which("npm") or "npm"
     return (
+        Step(
+            "publish-safety",
+            "Nothing private in the commits to push",
+            (python, "-m", "scripts.check_publish_safety", "--install"),
+        ),
         Step("pip-check", "Python dependency consistency", (python, "-m", "pip", "check")),
         Step(
             "artifacts",

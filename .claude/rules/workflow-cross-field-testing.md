@@ -54,6 +54,17 @@ support graph.
   security-extended suite), failing on any alert `origin/main` lacks. CodeQL default setup only
   scans pull requests into `main`; CI's `codeql-new-alerts` job repeats this on `dev/*` pushes.
   Never call a branch ready while a check failed or was skipped.
+- Publishing private material is irreversible: GitHub serves every pushed commit by SHA even
+  after a force-push. `scripts/check_publish_safety.py --install` (the first `npm run test:github`
+  step) installs a self-contained pre-push hook plus a `.gitignore` snapshot into the clone's
+  shared `.git/hooks` (chaining any existing hook), so every branch and worktree is checked. It
+  inspects exactly what the push uploads beyond what the push URL, or an explicitly configured
+  `moto.publishSafety.publicRemotes` remote, advertises on branches/tags (tracking refs never
+  count; unreachable targets and unfetched tips fail closed) and blocks private or ignored paths
+  (data-root and private-note names are reserved at any depth), unreadable binaries, credentials,
+  real home paths, personal emails, and text or details copied from local private plans; its own
+  repository must pass it (enforced by a test). Never bypass it with `--no-verify`; remove the
+  content from the commits instead.
 - No GitHub check may first run after a merge to `main`: every workflow also triggers on
   pull requests and `dev/**` pushes (enforced by a test). `tests/conftest.py` guards that need
   MOTO runtime modules stand down when those modules' dependencies are not installed.
