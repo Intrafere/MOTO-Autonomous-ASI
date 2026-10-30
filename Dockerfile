@@ -18,7 +18,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MOTO_GENERIC_MODE=true \
     HOST=0.0.0.0 \
     PORT=8000 \
-    MOTO_DATA_ROOT=/app/backend/data
+    MOTO_DATA_ROOT=/app/backend/data \
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache
 
 WORKDIR /app
 
@@ -39,11 +40,14 @@ RUN sed -i 's/\r$//' /app/docker/entrypoint.sh \
     && chmod +x /app/docker/entrypoint.sh \
     && mkdir -p /app/backend/data \
     && python - <<'PY'
+import tiktoken
 from fastembed import TextEmbedding
 
 from backend.shared.fastembed_provider import FASTEMBED_MODEL_NAME
+from backend.shared.utils import TIKTOKEN_ENCODING_NAME
 
 TextEmbedding(model_name=FASTEMBED_MODEL_NAME)
+tiktoken.get_encoding(TIKTOKEN_ENCODING_NAME)
 PY
 
 EXPOSE 8000

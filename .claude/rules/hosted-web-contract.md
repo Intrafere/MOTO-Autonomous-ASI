@@ -24,6 +24,7 @@ The Web Team consumes MOTO as a pre-built image. They never commit into the MOTO
 
 - The MOTO repo provides the canonical hosted container files: `Dockerfile`, `.dockerignore`, and `docker/entrypoint.sh`.
 - Those files define the API-only `python:3.12-slim` generic-mode runtime contract. Image publish, rollout, and redeploy automation still belong to the separate Web Team repo.
+- The image build pre-caches the FastEmbed model and the tiktoken `cl100k_base` encoding (`TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache`, outside `MOTO_DATA_ROOT`), so `count_tokens()` never downloads the encoding on the event loop in a new sandbox.
 
 ## The `generic_mode` Flag
 
