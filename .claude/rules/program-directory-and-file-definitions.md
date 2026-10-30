@@ -508,9 +508,9 @@ project-root/
 
 ### Hosted Runtime
 
-- `Dockerfile`: Canonical hosted generic-mode image definition. Uses the Debian/glibc `python:3.12-slim` baseline, installs `requirements-generic.txt`, preloads the FastEmbed model, and starts the API-only backend contract.
+- `Dockerfile`: Canonical hosted generic-mode image definition. Uses the Debian/glibc `python:3.12-slim` baseline, installs `requirements-generic.txt`, preloads the FastEmbed model and the tiktoken `cl100k_base` encoding (into `TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache`), and starts the API-only backend contract.
 - `.dockerignore`: Keeps desktop launchers, frontend assets, tests, local runtime data/logs, and dev-only metadata out of the hosted image build context.
-- `docker/entrypoint.sh`: Minimal hosted startup wrapper. Defaults `MOTO_GENERIC_MODE=true`, `HOST=0.0.0.0`, `PORT=8000`, `MOTO_DATA_ROOT=/app/backend/data`, creates runtime directories, and then delegates to `python -m backend.api.main`.
+- `docker/entrypoint.sh`: Minimal hosted startup wrapper. Defaults `MOTO_GENERIC_MODE=true`, `HOST=0.0.0.0`, `PORT=8000`, `MOTO_DATA_ROOT=/app/backend/data`, `TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache`, creates runtime directories, and then delegates to `python -m backend.api.main`.
 
 ### Shared Resources
 
