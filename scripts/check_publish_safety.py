@@ -806,11 +806,12 @@ def format_violations(violations: Sequence[Violation]) -> str:
 _HOOK_SCRIPT = f"""#!/bin/sh
 # {HOOK_MARKER}: installed by `python -m scripts.check_publish_safety --install`.
 # Refuses pushes that would publish private plans, runtime data, or credentials.
-# A pre-push hook that was here before runs first, with the same input.
+# A pre-push hook that was here before runs first, with the same input. Like git,
+# skip it when it is not executable.
 hook_dir=$(cd "$(dirname "$0")" && pwd)
 input=$(cat)
-if [ -f "$hook_dir/{CHAINED_HOOK_NAME}" ]; then
-  printf '%s\\n' "$input" | "$hook_dir/{CHAINED_HOOK_NAME}" "$@" || exit $?
+if [ -f "$hook_dir/{CHAINED_HOOK_NAME}" ] && [ -x "$hook_dir/{CHAINED_HOOK_NAME}" ]; then
+  {{ [ -z "$input" ] || printf '%s\\n' "$input"; }} | "$hook_dir/{CHAINED_HOOK_NAME}" "$@" || exit $?
 fi
 # Git passes no refs when the push uploads nothing (up to date, or rejected).
 [ -n "$input" ] || exit 0
@@ -868,7 +869,10 @@ def install(cwd: Path) -> str:
                 f"merge them into {chained}, delete {hook}, and run --install again."
             )
         hook.replace(chained)
-        message += f" The existing pre-push hook now runs first from {chained}."
+        if os.access(chained, os.X_OK):
+            message += f" The existing pre-push hook now runs first from {chained}."
+        else:
+            message += f" The existing pre-push hook moved to {chained}; it is not executable, so git still skips it."
     hook.write_bytes(_HOOK_SCRIPT.encode("utf-8"))
     hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return message

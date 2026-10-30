@@ -9,6 +9,8 @@
   ``0`` disables) prints its node ID and every thread's stack, then ends the
   process instead of looping forever. Production workflows are intentionally unbounded, so a test
   that drives one without a stop condition would otherwise never finish.
+* Warm-up: the token-counting encoding loads once before the first test, so a
+  cold-cache download never lands inside one test's time budget.
 
 The SyntheticLib release workflow runs its dependency-free tests with only pytest
 installed, so the guards that need MOTO's runtime modules stand down when those
@@ -121,6 +123,20 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         bind_runtime_roots(*_original_roots)
     if _session_root is not None:
         shutil.rmtree(_session_root, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _warm_tokenizer():
+    """Load the token-counting encoding once, before any test starts its clock.
+
+    On a cold cache (a fresh CI runner) tiktoken downloads the encoding on first
+    use, which can take seconds; otherwise whichever test counts tokens first pays
+    for that download inside its own time budget.
+    """
+    utils = _import_runtime_module("backend.shared.utils")
+    if utils is not None:
+        utils.count_tokens("warm-up")
+    yield
 
 
 @pytest.fixture(autouse=True, scope="session")

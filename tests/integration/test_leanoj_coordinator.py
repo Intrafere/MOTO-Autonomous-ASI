@@ -1777,6 +1777,7 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         coordinator._call_json = fake_call_json  # type: ignore[method-assign]
 
+        # Hang guard only: submitter 2 never returns, so serial submitters would block here.
         await leanoj_module.asyncio.wait_for(
             coordinator._brainstorm_until_path_check(  # type: ignore[attr-defined]
                 request,
@@ -1784,7 +1785,7 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 sufficiency_interval=10,
                 force_after_max=True,
             ),
-            timeout=2,
+            timeout=10,
         )
 
         self.assertIn("leanoj_brainstorm_submitter_2", submitter_calls)

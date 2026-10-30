@@ -28,8 +28,9 @@ support graph.
   roots faked, blocked, or isolated unless a test explicitly owns that integration.
 - `tests/conftest.py` binds every pytest session not already isolated by a harness to a
   temporary runtime root, fails the session on any write into the real `backend/data` or
-  `backend/logs`, and ends the pytest process with every thread's stack when a test exceeds
-  `MOTO_TEST_TIMEOUT_SECONDS` (default 600; `0` disables); tests must not depend
+  `backend/logs`, loads the token-counting encoding once before the first test (so a cold-cache
+  download never lands inside one test's time budget), and ends the pytest process with every
+  thread's stack when a test exceeds `MOTO_TEST_TIMEOUT_SECONDS` (default 600; `0` disables); tests must not depend
   on a developer's live data, runtime settings, or proof-search index.
 - Record safely unobservable interactions as `blocked`; never report synthetic coverage
   as a real-code pass.
@@ -57,7 +58,8 @@ support graph.
 - Publishing private material is irreversible: GitHub serves every pushed commit by SHA even
   after a force-push. `scripts/check_publish_safety.py --install` (the first `npm run test:github`
   step) installs a self-contained pre-push hook plus a `.gitignore` snapshot into the clone's
-  shared `.git/hooks` (chaining any existing hook), so every branch and worktree is checked. It
+  shared `.git/hooks` (chaining any existing hook, which, like git, runs only if executable), so
+  every branch and worktree is checked. It
   inspects exactly what the push uploads beyond what the push URL, or an explicitly configured
   `moto.publishSafety.publicRemotes` remote, advertises on branches/tags (tracking refs never
   count; unreachable targets and unfetched tips fail closed) and blocks private or ignored paths

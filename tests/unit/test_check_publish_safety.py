@@ -1,7 +1,9 @@
 import io
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import time
 
@@ -295,6 +297,18 @@ def _publish(repo: Path, ref: str = "main") -> None:
     _run(["push", "-q", "--no-verify", "origin", f"HEAD:refs/heads/{ref}"], repo)
 
 
+def _write_hook(path: Path, script: str, executable: bool = True) -> None:
+    # Hook installers such as `git lfs install` write executable hooks; git skips the rest.
+    path.write_text(script, encoding="utf-8", newline="\n")
+    mode = path.stat().st_mode
+    exec_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    path.chmod(mode | exec_bits if executable else mode & ~exec_bits)
+
+
+def _push(repo: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "push", "origin", "HEAD:refs/heads/main"], cwd=repo, capture_output=True, text=True)
+
+
 def _check(repo: Path, tips=("HEAD",), target=None, references=()):
     shas = [_run(["rev-parse", tip], repo).stdout.strip() for tip in tips]
     target = target or _run(["remote", "get-url", "--push", "origin"], repo).stdout.strip()
@@ -578,22 +592,48 @@ def test_an_existing_hook_is_chained_and_both_see_the_pushed_refs(remote_pair) -
     hooks = repo / ".git" / "hooks"
     hooks.mkdir(parents=True, exist_ok=True)
     # Like `git lfs pre-push`, this hook reads all of git's input.
-    (hooks / "pre-push").write_text('#!/bin/sh\ncat > "$(dirname "$0")/seen.txt"\nexit 0\n', encoding="utf-8")
+    _write_hook(hooks / "pre-push", '#!/bin/sh\ncat > "$(dirname "$0")/seen.txt"\nexit 0\n')
     assert "runs first" in guard.install(repo)
     assert guard.hook_installed(repo)
     _commit(repo, {"PLANS/plan.md": "private\n"})
-    push = subprocess.run(["git", "push", "origin", "HEAD:refs/heads/main"], cwd=repo, capture_output=True, text=True)
+    push = _push(repo)
     assert push.returncode != 0
     assert "PLANS/plan.md" in push.stderr
     assert "refs/heads/main" in (hooks / "seen.txt").read_text(encoding="utf-8")
     # Pushes that upload nothing get empty input from git and must not be refused.
     _run(["reset", "-q", "--hard", "HEAD~1"], repo)
-    up_to_date = subprocess.run(["git", "push", "origin", "HEAD:refs/heads/main"], cwd=repo, capture_output=True, text=True)
+    (hooks / "seen.txt").unlink()
+    up_to_date = _push(repo)
     assert up_to_date.returncode == 0, up_to_date.stderr
+    # If git runs the hooks here, the earlier one sees git's empty input, not a stray blank line.
+    seen = hooks / "seen.txt"
+    assert not seen.exists() or seen.read_text(encoding="utf-8") == ""
     # A tool re-adding the same hook (git lfs update --force) does not block a reinstall.
-    (hooks / "pre-push").write_bytes((hooks / guard.CHAINED_HOOK_NAME).read_bytes())
+    _write_hook(hooks / "pre-push", (hooks / guard.CHAINED_HOOK_NAME).read_text(encoding="utf-8"))
     guard.install(repo)
     assert guard.hook_installed(repo)
+
+
+def test_a_non_executable_existing_hook_stays_skipped_like_git_skips_it(remote_pair) -> None:
+    if os.name == "nt" or shutil.which("sh") is None:
+        pytest.skip("needs POSIX file modes and a POSIX shell to run git hooks")
+    repo, _ = remote_pair
+    _commit(repo, {"README.md": "public\n"})
+    _publish(repo)
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    # Git never ran this hook, so the guard must not start running it (or fail on it).
+    _write_hook(hooks / "pre-push", '#!/bin/sh\ntouch "$(dirname "$0")/ran.txt"\nexit 1\n', executable=False)
+    assert "not executable" in guard.install(repo)
+    _commit(repo, {"PLANS/plan.md": "private\n"})
+    refused = _push(repo)
+    assert refused.returncode != 0
+    assert "PLANS/plan.md" in refused.stderr
+    _run(["reset", "-q", "--hard", "HEAD~1"], repo)
+    _commit(repo, {"docs/public.md": "public\n"})
+    clean = _push(repo)
+    assert clean.returncode == 0, clean.stderr
+    assert not (hooks / "ran.txt").exists()
 
 
 def test_install_refuses_any_hooks_path_without_changing_it(remote_pair, tmp_path: Path, monkeypatch) -> None:
