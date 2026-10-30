@@ -328,7 +328,7 @@ project-root/
 │   ├── run_codeql.py                    # `npm run test:codeql`: GitHub's CodeQL analyses on a clean tree export, failing on alerts origin/main lacks; also CI's dev-push job
 │   ├── check_publish_safety.py          # Self-contained pre-push guard (--install puts it in .git/hooks; first test:github step): blocks pushes of private plans/text, runtime data, ignored or binary files, credentials, home paths, personal emails
 │   ├── run_github_checks.py             # `npm run test:github`: pre-push parity for publish safety, every ci.yml check, release evidence, and CodeQL with a pass/fail summary
-│   ├── run_npm_audit.py                 # CI/local production npm audit: fails on high/critical findings, retries only failed advisory-service requests
+│   ├── run_npm_audit.py                 # CI/local frontend npm audit (development packages included, matching the launcher's audit): fails on high/critical findings, retries only failed advisory-service requests
 │   └── run_local_syntheticlib_compatibility_ci.py # Runs deterministic release-generation parity from allowlisted implementation/orchestration inputs without mutating the real repository or partially replacing retained output
 │
 ├── frontend/
