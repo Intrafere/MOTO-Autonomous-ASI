@@ -1,8 +1,10 @@
+import inspect
 import json
 from pathlib import Path
 import subprocess
 import sys
 
+import moto_launcher
 from scripts.run_npm_audit import ATTEMPTS, AUDIT_ARGS, RETRY_DELAYS_SECONDS, run_audit
 
 
@@ -119,3 +121,13 @@ def test_utf8_report_is_decoded_as_utf8_on_every_platform(capsys) -> None:
 
     assert run_audit(Path("."), npm="npm", run=run_real_child, sleep=lambda _: None) == 0
     assert "npm audit passed" in capsys.readouterr().out
+
+
+def test_ci_audits_every_package_the_launcher_warns_users_about() -> None:
+    # The launcher audits development packages too (users install them), so an
+    # advisory there must fail CI before it reaches a user's launch window.
+    launcher_audit = inspect.getsource(moto_launcher.run_frontend_npm_audit)
+    assert '"--audit-level=high"' in launcher_audit
+    assert "--omit" not in launcher_audit
+    assert "--audit-level=high" in AUDIT_ARGS
+    assert not any(arg.startswith(("--omit", "--only", "--production")) for arg in AUDIT_ARGS)

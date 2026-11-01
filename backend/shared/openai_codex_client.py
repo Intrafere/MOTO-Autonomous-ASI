@@ -11,13 +11,14 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import httpx
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
+from backend.shared.chat_completion_stream import iter_sse_data, split_sse_data
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.oauth_pkce import generate_pkce_pair
 from backend.shared.openrouter_client import sanitize_provider_error_text
@@ -133,6 +134,21 @@ class OpenAICodexClient:
     WEBSOCKET_OPEN_TIMEOUT_SECONDS = 30.0
     WEBSOCKET_PING_INTERVAL_SECONDS = 20.0
     WEBSOCKET_PING_TIMEOUT_SECONDS = 60.0
+    # A stream cut this long after it started is plausibly the provider's
+    # roughly-15-minute stream limit; an earlier cut is a transient fault.
+    STREAM_CUTOFF_GUIDANCE_SECONDS = 600.0
+    # Transport errors raised before any byte reached the provider. These are
+    # local connectivity failures (DNS, refused, unreachable, proxy, connect
+    # timeout), never a server-side stream close, and must be explained as such.
+    CONNECT_PHASE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError)
+    _DNS_FAILURE_MARKERS = (
+        "getaddrinfo",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
+        "no address associated",
+        "name resolution",
+    )
     # Handshake statuses that mean the backend does not serve this transport.
     WEBSOCKET_UNSUPPORTED_STATUS_CODES = frozenset({404, 405, 426, 501})
     # Error events that require a fresh connection rather than a provider repair.
@@ -853,25 +869,6 @@ class OpenAICodexClient:
             )
         return {"effort": effort}
 
-    @staticmethod
-    def _iter_sse_data(raw_body: str) -> List[str]:
-        events: List[str] = []
-        current_data_lines: List[str] = []
-        for line in raw_body.splitlines():
-            stripped = line.rstrip("\r")
-            if not stripped:
-                if current_data_lines:
-                    events.append("\n".join(current_data_lines))
-                    current_data_lines = []
-                continue
-            if stripped.startswith(":"):
-                continue
-            if stripped.startswith("data:"):
-                current_data_lines.append(stripped[5:].lstrip())
-        if current_data_lines:
-            events.append("\n".join(current_data_lines))
-        return events
-
     @classmethod
     def _decode_response_body(cls, raw_body: str) -> Dict[str, Any]:
         body = raw_body.strip()
@@ -893,7 +890,7 @@ class OpenAICodexClient:
             logger.debug("OpenAI Codex response body is not plain JSON; parsing stream events")
 
         state = cls._new_stream_state()
-        for event_data in cls._iter_sse_data(body):
+        for event_data in split_sse_data(body):
             cls._consume_stream_event_data(event_data, state)
         return cls._finalize_stream_state(state)
 
@@ -1079,23 +1076,6 @@ class OpenAICodexClient:
         if state["output_text_parts"] and not response_data.get("output_text"):
             response_data["output_text"] = "".join(state["output_text_parts"])
         return response_data
-
-    @classmethod
-    async def _iter_stream_data(cls, response: httpx.Response) -> AsyncIterator[str]:
-        data_lines: List[str] = []
-        async for line in response.aiter_lines():
-            stripped = line.rstrip("\r")
-            if not stripped:
-                if data_lines:
-                    yield "\n".join(data_lines)
-                    data_lines = []
-                continue
-            if stripped.startswith(":"):
-                continue
-            if stripped.startswith("data:"):
-                data_lines.append(stripped[5:].lstrip())
-        if data_lines:
-            yield "\n".join(data_lines)
 
     @staticmethod
     def _extract_output(response: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
@@ -1292,22 +1272,70 @@ class OpenAICodexClient:
                 return int(code)
         return None
 
-    @staticmethod
-    def _transport_drop_guidance(transport: str, elapsed: float) -> str:
-        """Plain-language cause and repair hint for a stream cut before completion."""
+    @classmethod
+    def _is_connect_phase_failure(cls, exc: BaseException, state: Dict[str, Any]) -> bool:
+        """True when the request never reached the provider (no connection, no events)."""
+        return isinstance(exc, cls.CONNECT_PHASE_ERRORS) and not state.get("valid_events")
+
+    @classmethod
+    def _connect_failure_detail(cls, exc: BaseException, detail: str) -> str:
+        """Plain-language explanation for a request that could not open a connection.
+
+        Nothing was sent, so OpenAI never saw the request; the cause is on this
+        computer or its network path (Wi-Fi, VPN, proxy, DNS). The text must not
+        blame the provider or suggest a reasoning-effort change.
+        """
+        host = cls.CODEX_BASE_URL.split("://", 1)[-1].split("/", 1)[0]
+        text = str(exc).lower()
+        if isinstance(exc, httpx.ConnectTimeout):
+            cause = f"the connection attempt to {host} timed out"
+        elif isinstance(exc, httpx.ProxyError):
+            cause = f"the configured proxy could not connect to {host}"
+        elif any(marker in text for marker in cls._DNS_FAILURE_MARKERS):
+            cause = f"the DNS lookup for {host} failed"
+        else:
+            cause = f"the connection to {host} was refused or unreachable"
+        return (
+            f"MOTO could not open a connection to OpenAI's Codex service: {cause}. Nothing was sent, so "
+            "OpenAI never saw this request. What this means: this is almost always a problem on this computer "
+            "or its network rather than at OpenAI, such as Wi-Fi or Ethernet being disconnected, a VPN or "
+            "proxy change, or DNS not resolving. How to fix: check this computer's network connection. MOTO "
+            f"keeps retrying and resumes on its own once the connection returns. Detail: {detail}"
+        )
+
+    @classmethod
+    def _transport_drop_guidance(cls, transport: str, elapsed: float) -> str:
+        """Plain-language cause and repair hint for a stream cut before completion.
+
+        MOTO cannot tell from its end which side dropped an open stream, so the
+        text never asserts that the user's network was healthy. Only a cut near
+        the provider's known stream limit is a thinking-time problem worth a
+        settings change; an earlier cut is a transient fault that the retry
+        handles, so the guidance must not steer the user into lowering
+        reasoning effort for it.
+        """
         minutes = max(1, round(elapsed / 60.0))
-        duration = "under a minute" if elapsed < 45 else f"about {minutes} minute{'s' if minutes != 1 else ''}"
+        duration = "less than a minute" if elapsed < 45 else f"about {minutes} minute{'s' if minutes != 1 else ''}"
+        stream_name = "connection" if transport == "websocket" else "HTTP stream"
+        if elapsed < cls.STREAM_CUTOFF_GUIDANCE_SECONDS:
+            return (
+                f"What this means: the {stream_name} to OpenAI's Codex service was lost after {duration} "
+                "while the model was still working, before OpenAI reported completion. MOTO cannot tell from "
+                "this end whether OpenAI, the network path, or this computer's own connection (Wi-Fi, VPN) "
+                "dropped it. A drop this early is not a sign that this request needs too much thinking time, "
+                "so no reasoning-effort change is needed. MOTO is sending the request again. If this computer's "
+                "network dropped at the same moment, that is the cause; if every retry drops at the same point "
+                "on a stable connection, route this role through a different provider."
+            )
         if transport == "websocket":
             cause = (
-                "What this means: OpenAI's Codex service closed this connection on its side after "
-                f"{duration} while the model was still working. This is a server-side connection refresh "
-                "at OpenAI, not a problem with your computer, your network, or MOTO's connection, which was healthy."
+                f"What this means: this connection to OpenAI's Codex service ended after {duration} while "
+                "the model was still working, which matches the limit OpenAI applies to long streams."
             )
         else:
             cause = (
-                "What this means: OpenAI's Codex service closed this HTTP stream on its side after "
-                f"{duration} while the model was still working. OpenAI ends these streams at about 15 minutes; "
-                "this is not a problem with your computer or network."
+                f"What this means: this HTTP stream to OpenAI's Codex service ended after {duration} while "
+                "the model was still working. OpenAI ends these streams at about 15 minutes."
             )
         return (
             f"{cause} MOTO will send the request again, but a request that needs more thinking time than "
@@ -1546,7 +1574,7 @@ class OpenAICodexClient:
                         return self._decode_response_body(raw_body), response.status_code, ""
 
                     try:
-                        async for event_data in self._iter_stream_data(response):
+                        async for event_data in iter_sse_data(response):
                             self._consume_stream_event_data(event_data, state)
                     except httpx.TransportError as exc:
                         if state["terminal_seen"]:
@@ -1569,19 +1597,16 @@ class OpenAICodexClient:
                     f"[{type(exc).__name__}] {exc}",
                     max_chars=self.LIVE_ERROR_DETAIL_LIMIT,
                 )
-                terminal_seen = bool(state["terminal_seen"])
-                outcome = (
-                    "A terminal completion was received."
-                    if terminal_seen
-                    else "No terminal completion was received; the remote outcome is unknown."
-                )
-                safe_detail = (
-                    f"A remote peer or network intermediary closed the Codex {transport} stream after "
-                    f"{elapsed:.1f}s. {outcome} Detail: {detail}"
-                )
-                if terminal_seen:
+                if state["terminal_seen"]:
                     return self._finalize_stream_state(state), 200, ""
-                safe_detail = f"{safe_detail} {self._transport_drop_guidance(transport, elapsed)}"
+                if self._is_connect_phase_failure(exc, state):
+                    safe_detail = self._connect_failure_detail(exc, detail)
+                else:
+                    safe_detail = (
+                        f"The Codex {transport} stream was lost after {elapsed:.1f}s. No terminal completion "
+                        f"was received; the remote outcome is unknown. Detail: {detail} "
+                        f"{self._transport_drop_guidance(transport, elapsed)}"
+                    )
                 if attempt < max_attempts - 1:
                     delay = self._retry_delay(attempt)
                     await self._notify_stream_retry(

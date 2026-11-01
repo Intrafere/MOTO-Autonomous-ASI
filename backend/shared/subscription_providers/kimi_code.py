@@ -7,6 +7,11 @@ as another client. The key is not a Kimi Platform (pay-as-you-go) key.
 Wire format: streamed OpenAI-compatible Chat Completions. Kimi documents
 ``reasoning_effort`` (low/high/max) and ``thinking: {type: disabled}`` there, and
 requires assistant tool-call turns to carry back their ``reasoning_content``.
+Kimi fixes temperature, top_p, n, and the penalties per model and rejects any
+other value, so MOTO sends none of them; like Kimi's own client it sends
+``max_completion_tokens``, asks for streamed usage, and sends a stable digest as
+``prompt_cache_key`` so repeated long prefixes stay in Kimi's prompt cache. With thinking disabled,
+Kimi serves K3-family requests with K2.8 Preview; HighSpeed cannot disable it.
 
 Errors are identified by message text. Usage-window errors (5-hour, weekly,
 monthly) carry no reset time, so the reset is read from ``GET /usages``; without
@@ -16,6 +21,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime
+import hashlib
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -26,6 +32,7 @@ from backend.shared.openrouter_client import sanitize_provider_error_text
 from backend.shared.subscription_providers.errors import (
     SubscriptionContextLimitError,
     SubscriptionEntitlementError,
+    SubscriptionParameterRejectedError,
     SubscriptionProviderError,
     SubscriptionUsageLimitError,
 )
@@ -40,6 +47,7 @@ from backend.shared.subscription_providers.profile import (
 _EFFORTS = ("auto", "max", "high", "low", "none")
 _HIGHSPEED_MODEL = "kimi-for-coding-highspeed"
 _TOOL_REASONING_CACHE_SIZE = 512
+_CACHE_KEY_DOMAIN = "moto-kimi-prompt-cache-v1"
 
 KIMI_CODE_SETTINGS = ApiKeyProviderSettings(
     metadata=get_cloud_provider("kimi_code"),
@@ -79,6 +87,11 @@ _USAGE_WINDOW_MARKERS: Tuple[Tuple[str, str], ...] = (
     ("weekly usage limit", "weekly"),
     ("monthly usage limit", "monthly"),
 )
+_PARAMETER_REJECTION_GUIDANCE = (
+    "MOTO sent a request setting that Kimi Code does not accept. This is a MOTO compatibility "
+    "problem, not a problem with your Kimi Code API key or plan. Switch this role to another "
+    "provider in Settings for now, and report the setting named in the error so MOTO can be updated."
+)
 _POOL_WINDOWS: Tuple[Tuple[str, str, str], ...] = (
     # (key fragment, window, label)
     ("5h", "five_hour", "5-hour window"),
@@ -111,6 +124,8 @@ class _KimiUsageWindowError(SubscriptionEntitlementError):
 
 
 class KimiCodeProfile(ApiKeyProviderProfile):
+    uses_cache_scope = True
+
     def __init__(self, settings: ApiKeyProviderSettings) -> None:
         super().__init__(settings)
         # tool_call_id -> reasoning_content, kept in memory only so assistant
@@ -134,6 +149,35 @@ class KimiCodeProfile(ApiKeyProviderProfile):
             return "none"
         return None
 
+    def apply_temperature(self, payload: Dict[str, Any], temperature: float, *, model: str) -> None:
+        # Kimi fixes the temperature for each model and thinking mode and rejects any
+        # other value ("only 1 is allowed for this model"), so MOTO's temperature
+        # policy cannot apply here and Kimi's own value is used.
+        return None
+
+    def apply_output_limit(self, payload: Dict[str, Any], max_tokens: Optional[int], *, model: str) -> None:
+        # max_tokens is deprecated on Kimi; its own client sends only max_completion_tokens.
+        if max_tokens:
+            payload["max_completion_tokens"] = int(max_tokens)
+
+    def apply_stream_options(self, payload: Dict[str, Any]) -> None:
+        # Without this Kimi may stream no usage, which MOTO's token accounting needs.
+        payload["stream_options"] = {"include_usage": True}
+
+    def apply_prompt_cache(self, payload: Dict[str, Any], cache_scope: Optional[str], *, model: str) -> None:
+        # Kimi Code asks coding agents for a stable per-session key so repeated long
+        # prefixes hit its prompt cache instead of spending the shared plan quota.
+        # The scope (role plus owning run) can embed a prompt-derived session name, so
+        # only a one-way digest is sent; it is deterministic, so a resumed run keeps
+        # its key. Kimi's cache is also lost when the reasoning effort changes.
+        if cache_scope:
+            payload["prompt_cache_key"] = self.cache_key_for_scope(cache_scope)
+
+    @staticmethod
+    def cache_key_for_scope(cache_scope: str) -> str:
+        digest = hashlib.sha256(f"{_CACHE_KEY_DOMAIN}\0{cache_scope}".encode("utf-8")).hexdigest()
+        return f"moto-{digest[:32]}"
+
     def apply_reasoning(self, payload: Dict[str, Any], effort: Optional[str], *, model: str, wire: str) -> None:
         if effort == "none":
             payload["thinking"] = {"type": "disabled"}
@@ -147,21 +191,31 @@ class KimiCodeProfile(ApiKeyProviderProfile):
     ) -> List[Dict[str, Any]]:
         if not any(self._is_tool_call_turn(message) for message in messages):
             return messages
+        always_thinking = str(payload.get("model") or "") == _HIGHSPEED_MODEL
         prepared: List[Dict[str, Any]] = []
         missing_reasoning = False
         for message in messages:
-            if not self._is_tool_call_turn(message) or message.get("reasoning_content"):
+            if not self._is_tool_call_turn(message):
                 prepared.append(message)
                 continue
-            reasoning = next(
-                (self._tool_reasoning[call_id] for call_id in self._tool_call_ids(message) if call_id in self._tool_reasoning),
-                None,
-            )
-            if reasoning is None:
-                missing_reasoning = True
-                prepared.append(message)
-            else:
-                prepared.append({**message, "reasoning_content": reasoning})
+            outbound = dict(message)
+            if outbound.get("content") in ("", None):
+                # Kimi rejects empty text content; a tool-call turn without content is accepted.
+                outbound.pop("content", None)
+            if not outbound.get("reasoning_content"):
+                reasoning = next(
+                    (self._tool_reasoning[call_id] for call_id in self._tool_call_ids(outbound) if call_id in self._tool_reasoning),
+                    None,
+                )
+                if reasoning is not None:
+                    outbound["reasoning_content"] = reasoning
+                elif always_thinking:
+                    # HighSpeed cannot turn thinking off; send the empty reasoning
+                    # Kimi's own client uses for a turn that produced none.
+                    outbound["reasoning_content"] = ""
+                else:
+                    missing_reasoning = True
+            prepared.append(outbound)
         if missing_reasoning:
             # Kimi rejects thinking-enabled tool follow-ups that lack the original
             # reasoning (for example after a restart); answer this turn without thinking.
@@ -197,6 +251,13 @@ class KimiCodeProfile(ApiKeyProviderProfile):
             if isinstance(message, str) and message.strip():
                 return message.strip()
         return response.text or ""
+
+    def _has_error_type(self, response: httpx.Response, error_type: str) -> bool:
+        payload = self.response_payload(response)
+        return any(
+            isinstance(item.get("type"), str) and item["type"].strip().lower() == error_type
+            for item in self.iter_error_objects(payload)
+        )
 
     def is_transient_response(self, response: httpx.Response) -> bool:
         if response.status_code in self.settings.transient_status_codes:
@@ -249,6 +310,24 @@ class KimiCodeProfile(ApiKeyProviderProfile):
                 status_code=status,
                 error_code="model_not_entitled",
                 terminal_guidance=entitlement_guidance,
+            )
+
+        # A 400 invalid_request_error that is not a limit or entitlement case means Kimi
+        # rejected something MOTO sent (for example "invalid temperature: only 1 is
+        # allowed for this model"). Risk-control rejections are about the content, not
+        # a MOTO setting, so they keep the generic path.
+        if (
+            status == 400
+            and "high risk" not in lowered
+            and self._has_error_type(response, "invalid_request_error")
+        ):
+            return SubscriptionParameterRejectedError(
+                f"{label} rejected a request setting: {safe}",
+                provider=self.provider_id,
+                provider_label=label,
+                status_code=status,
+                error_code="invalid_request_parameter",
+                terminal_guidance=_PARAMETER_REJECTION_GUIDANCE,
             )
         return None
 

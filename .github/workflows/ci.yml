@@ -159,7 +159,7 @@ jobs:
           python-version: "3.11"
 
       # Retries only a failed advisory-service request; vulnerabilities fail at once.
-      - name: Audit production frontend dependencies
+      - name: Audit frontend dependencies
         working-directory: .
         run: python -m scripts.run_npm_audit
 

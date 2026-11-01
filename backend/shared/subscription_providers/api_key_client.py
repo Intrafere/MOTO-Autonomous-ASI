@@ -9,7 +9,6 @@ Completions shape the rest of MOTO consumes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import logging
 import os
 import random
@@ -18,6 +17,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
+from backend.shared.chat_completion_stream import ChatCompletionStreamAccumulator, iter_sse_data
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.openrouter_client import sanitize_provider_error_text
 from backend.shared.provider_recovery.runtime import assured_retry_wait
@@ -59,6 +59,7 @@ class CandidateValidation:
 class _ChatStreamResult:
     terminal: bool
     data: Dict[str, Any]
+    unreadable: bool = False
 
 
 class SubscriptionApiKeyClient:
@@ -593,11 +594,12 @@ class SubscriptionApiKeyClient:
         reasoning_effort: Optional[str],
         tools: Optional[List[Dict[str, Any]]],
         tool_choice: Optional[Any],
+        cache_scope: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"model": model}
         self.profile.apply_temperature(payload, temperature, model=model)
-        if max_tokens:
-            payload["max_tokens"] = int(max_tokens)
+        self.profile.apply_output_limit(payload, max_tokens, model=model)
+        self.profile.apply_prompt_cache(payload, cache_scope, model=model)
         effort = self.profile.normalize_reasoning_effort(reasoning_effort, model=model)
         self.profile.apply_reasoning(payload, effort, model=model, wire="chat")
         if response_format:
@@ -688,83 +690,45 @@ class SubscriptionApiKeyClient:
 
     # --- streamed Chat Completions --------------------------------------------------------------
     async def _consume_chat_stream(self, response: httpx.Response, model: str) -> _ChatStreamResult:
-        content_parts: List[str] = []
-        reasoning_parts: List[str] = []
-        tool_calls: Dict[int, Dict[str, Any]] = {}
-        finish_reason: Optional[str] = None
-        usage: Dict[str, Any] = {}
-        response_id = ""
-        response_model = ""
-        created: Optional[int] = None
-        async for line in response.aiter_lines():
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if not data:
-                continue
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except ValueError:
-                continue
-            if not isinstance(chunk, dict):
-                continue
-            if isinstance(chunk.get("error"), dict) or isinstance(chunk.get("error"), str):
-                error = chunk["error"]
-                message = error.get("message") if isinstance(error, dict) else error
-                raise SubscriptionRequestError(
-                    f"{self.provider_label} completion failed: {self._detail(str(message or ''))}",
-                    provider=self.provider_id,
-                    provider_label=self.provider_label,
-                )
-            response_id = response_id or str(chunk.get("id") or "")
-            response_model = response_model or str(chunk.get("model") or "")
-            created = created or chunk.get("created")
-            if isinstance(chunk.get("usage"), dict):
-                usage = chunk["usage"]
-            for choice in chunk.get("choices") or []:
-                if not isinstance(choice, dict):
-                    continue
-                if isinstance(choice.get("usage"), dict):
-                    usage = choice["usage"]
-                delta = choice.get("delta") or {}
-                if isinstance(delta.get("content"), str):
-                    content_parts.append(delta["content"])
-                reasoning = delta.get("reasoning_content")
-                if not isinstance(reasoning, str):
-                    reasoning = delta.get("reasoning")
-                if isinstance(reasoning, str):
-                    reasoning_parts.append(reasoning)
-                for call in delta.get("tool_calls") or []:
-                    if not isinstance(call, dict):
-                        continue
-                    slot = tool_calls.setdefault(
-                        int(call.get("index", len(tool_calls)) or 0),
-                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
-                    )
-                    slot["id"] = call.get("id") or slot["id"]
-                    function = call.get("function") or {}
-                    if function.get("name"):
-                        slot["function"]["name"] = function["name"]
-                    if isinstance(function.get("arguments"), str):
-                        slot["function"]["arguments"] += function["arguments"]
-                if choice.get("finish_reason"):
-                    finish_reason = str(choice["finish_reason"])
+        """Reassemble a streamed completion with the shared provider-neutral reader.
 
-        message: Dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
-        if reasoning_parts:
-            message["reasoning_content"] = "".join(reasoning_parts)
-        if tool_calls:
-            message["tool_calls"] = [tool_calls[index] for index in sorted(tool_calls)]
-        data_out = {
-            "id": response_id,
-            "created": created,
-            "model": response_model or model,
-            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-            "usage": usage,
-        }
-        return _ChatStreamResult(terminal=finish_reason is not None, data=data_out)
+        A reported error raises at once. A finished answer survives a later transport
+        drop, and the body is read past ``[DONE]`` so the connection can be reused.
+        """
+        stream = ChatCompletionStreamAccumulator()
+        events = iter_sse_data(response)
+        try:
+            async for event_data in events:
+                if stream.done_seen:
+                    continue
+                stream.feed(event_data)
+                if stream.failed:
+                    message = stream.error_body()["error"].get("message")
+                    raise SubscriptionRequestError(
+                        f"{self.provider_label} completion failed: {self._detail(str(message or ''))}",
+                        provider=self.provider_id,
+                        provider_label=self.provider_label,
+                    )
+        except httpx.TransportError:
+            if not stream.terminal:
+                raise
+            logger.warning("%s stream dropped after the completion finished; keeping it.", self.provider_label)
+        finally:
+            await events.aclose()
+        if stream.malformed_chunks:
+            logger.warning(
+                "%s stream contained %s unreadable chunk(s); raw data omitted.",
+                self.provider_label,
+                stream.malformed_chunks,
+            )
+        data = stream.result(model)
+        for choice in data["choices"]:
+            # Kimi streams reasoning as reasoning_content, which its profile re-attaches
+            # to tool-call turns; reasoning sent under the generic key is kept there too.
+            reasoning = choice["message"].pop("reasoning", None)
+            if reasoning is not None:
+                choice["message"].setdefault("reasoning_content", reasoning)
+        return _ChatStreamResult(terminal=stream.terminal, data=data, unreadable=bool(stream.malformed_chunks))
 
     async def _generate_via_chat_stream(
         self,
@@ -774,6 +738,7 @@ class SubscriptionApiKeyClient:
     ) -> Dict[str, Any]:
         model = request["model"]
         payload = {**self._chat_payload(**request), "stream": True}
+        self.profile.apply_stream_options(payload)
         max_retries = self.settings.max_retries
         for attempt in range(max_retries):
             try:
@@ -825,13 +790,18 @@ class SubscriptionApiKeyClient:
                 continue
             if result.terminal:
                 return self._normalize_chat_completion(result.data, model, "chat.completions.stream")
+            incomplete = (
+                "the response stream contained unreadable data, so part of the answer may be missing"
+                if result.unreadable
+                else "the response stream ended before the provider completed the answer"
+            )
             if attempt >= max_retries - 1:
-                raise self._request_failed("the response stream ended before the provider completed the answer")
+                raise self._request_failed(incomplete)
             await self._wait_before_retry(
                 attempt=attempt,
                 delay=self._retry_delay(attempt),
                 reason="stream_incomplete",
-                error_summary="The response stream ended before the provider completed the answer.",
+                error_summary=f"{incomplete.capitalize()}.",
                 retry_model=model,
                 retry_callback=retry_callback,
             )
@@ -850,6 +820,7 @@ class SubscriptionApiKeyClient:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         retry_callback: Optional[RetryCallback] = None,
+        cache_scope: Optional[str] = None,
     ) -> Dict[str, Any]:
         await self._ensure_region()
         request = {
@@ -861,6 +832,7 @@ class SubscriptionApiKeyClient:
             "reasoning_effort": reasoning_effort,
             "tools": tools,
             "tool_choice": tool_choice,
+            "cache_scope": cache_scope,
         }
         if self.settings.wire_api == "chat_completions_stream":
             return await self._generate_via_chat_stream(retry_callback=retry_callback, **request)

@@ -55,6 +55,23 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
         self.assertIsNone(normalize("medium", model="fugu"))
         self.assertIsNone(normalize("none", model="fugu"))
 
+    def test_chat_payload_never_carries_a_prompt_cache_key(self) -> None:
+        self.assertFalse(SAKANA_FUGU_PROFILE.uses_cache_scope)
+        payload = _sakana_client()._chat_payload(
+            model="fugu",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.0,
+            max_tokens=100,
+            response_format=None,
+            reasoning_effort=None,
+            tools=None,
+            tool_choice=None,
+            cache_scope="aggregator_submitter_1\nrun-1",
+        )
+        self.assertNotIn("prompt_cache_key", payload)
+        self.assertEqual(payload["max_tokens"], 100)
+        self.assertEqual(payload["temperature"], 0.0)
+
     def test_normalize_responses_to_chat_shape(self) -> None:
         payload = {
             "id": "resp_123",

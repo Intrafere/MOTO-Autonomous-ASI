@@ -1324,14 +1324,136 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(activity["reason"], "connection_error")
         self.assertEqual(activity["retry_attempt"], 1)
         self.assertEqual(activity["provider"], "openai_codex_oauth")
-        self.assertIn("closed the Codex websocket stream", activity["error_summary"])
+        self.assertIn("Codex websocket stream was lost", activity["error_summary"])
         self.assertIn("close_code=1011", activity["error_summary"])
         self.assertIn("remote outcome is unknown", activity["error_summary"])
-        self.assertIn("closed this connection on its side", activity["error_summary"])
-        self.assertIn("How to fix: lower this role's reasoning effort in Settings", activity["error_summary"])
-        self.assertIn("How to fix", activity["message"])
+        self.assertIn("was lost after less than a minute", activity["error_summary"])
+        self.assertIn("cannot tell from this end", activity["error_summary"])
+        self.assertIn("no reasoning-effort change is needed", activity["error_summary"])
+        self.assertNotIn("lower this role's reasoning effort", activity["error_summary"])
+        self.assertNotIn("lower this role's reasoning effort", activity["message"])
+        self.assertNotIn("not a problem with your computer", activity["error_summary"])
+        self.assertNotIn("was healthy", activity["error_summary"])
         self.assertNotIn("hidden-token", activity["error_summary"])
         self.assertNotIn("secret partial", activity["error_summary"])
+
+    def test_transport_drop_guidance_never_asserts_whose_side_dropped_the_stream(self) -> None:
+        early_ws = OpenAICodexClient._transport_drop_guidance("websocket", 77.7)
+        early_sse = OpenAICodexClient._transport_drop_guidance("sse", 300.0)
+        late_ws = OpenAICodexClient._transport_drop_guidance("websocket", 890.0)
+        late_sse = OpenAICodexClient._transport_drop_guidance("sse", 905.0)
+        for guidance in (early_ws, early_sse, late_ws, late_sse):
+            self.assertNotIn("not a problem with your computer", guidance)
+            self.assertNotIn("was healthy", guidance)
+            self.assertNotIn("on its side", guidance)
+        for guidance in (early_ws, early_sse):
+            self.assertIn("cannot tell from this end", guidance)
+            self.assertIn("no reasoning-effort change is needed", guidance)
+            self.assertNotIn("lower this role's reasoning effort", guidance)
+            self.assertNotIn("15 minutes", guidance)
+        self.assertIn("connection to OpenAI's Codex service was lost after about 1 minute", early_ws)
+        self.assertIn("HTTP stream to OpenAI's Codex service was lost after about 5 minutes", early_sse)
+        for guidance in (late_ws, late_sse):
+            self.assertIn("How to fix: lower this role's reasoning effort in Settings", guidance)
+            self.assertNotIn("cannot tell from this end", guidance)
+        self.assertIn("ended after about 15 minutes", late_ws)
+        self.assertIn("OpenAI ends these streams at about 15 minutes", late_sse)
+
+    def test_connect_failure_detail_names_the_local_cause_and_never_blames_openai(self) -> None:
+        cases = [
+            (httpx.ConnectError("[Errno 11001] getaddrinfo failed"), "the DNS lookup for chatgpt.com failed"),
+            (httpx.ConnectError("[Errno 10061] connection refused"), "refused or unreachable"),
+            (httpx.ConnectTimeout("timed out"), "the connection attempt to chatgpt.com timed out"),
+            (httpx.ProxyError("407 proxy auth"), "the configured proxy could not connect to chatgpt.com"),
+        ]
+        for exc, expected_cause in cases:
+            with self.subTest(exc=type(exc).__name__):
+                detail = OpenAICodexClient._connect_failure_detail(exc, f"[{type(exc).__name__}] {exc}")
+                self.assertIn("MOTO could not open a connection to OpenAI's Codex service", detail)
+                self.assertIn(expected_cause, detail)
+                self.assertIn("Nothing was sent, so OpenAI never saw this request", detail)
+                self.assertIn("check this computer's network connection", detail)
+                self.assertNotIn("closed this", detail)
+                self.assertNotIn("lower this role's reasoning effort", detail)
+                self.assertNotIn("not a problem with your computer", detail)
+
+    async def test_dns_failure_is_reported_as_local_connectivity_and_retried(self) -> None:
+        client = OpenAICodexClient()
+        calls = 0
+        activities = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise httpx.ConnectError("[Errno 11001] getaddrinfo failed", request=request)
+            stream = (
+                'data: {"type":"response.completed","response":{"id":"resp_2",'
+                '"status":"completed","output_text":"recovered"}}\n\n'
+            )
+            return httpx.Response(200, content=stream, request=request)
+
+        async def retry_callback(payload):
+            activities.append(payload)
+
+        await client.client.aclose()
+        client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
+            mock.patch("backend.shared.openai_codex_client.asyncio.sleep", return_value=None),
+        ):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+                retry_callback=retry_callback,
+            )
+        await client.client.aclose()
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+        self.assertEqual(len(activities), 1)
+        activity = activities[0]
+        self.assertEqual(activity["reason"], "connection_error")
+        self.assertEqual(activity["retry_attempt"], 1)
+        self.assertIn("MOTO could not open a connection to OpenAI's Codex service", activity["error_summary"])
+        self.assertIn("the DNS lookup for chatgpt.com failed", activity["error_summary"])
+        self.assertIn("Nothing was sent", activity["error_summary"])
+        self.assertIn("check this computer's network connection", activity["message"])
+        self.assertIn("getaddrinfo failed", activity["error_summary"])
+        self.assertNotIn("stream was lost", activity["error_summary"])
+        self.assertNotIn("remote outcome is unknown", activity["error_summary"])
+        self.assertNotIn("OpenAI's Codex service closed", activity["error_summary"])
+        self.assertNotIn("lower this role's reasoning effort", activity["message"])
+
+    async def test_persistent_dns_failure_exhausts_as_retryable_transport_failure(self) -> None:
+        from backend.shared.openai_codex_client import OpenAICodexRequestError
+
+        client = OpenAICodexClient()
+        calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            raise httpx.ConnectError("[Errno 11001] getaddrinfo failed", request=request)
+
+        await client.client.aclose()
+        client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
+            mock.patch("backend.shared.openai_codex_client.asyncio.sleep", return_value=None),
+        ):
+            with self.assertRaises(OpenAICodexRequestError) as raised:
+                await client.generate_completion(
+                    model="gpt-5.5",
+                    messages=[{"role": "user", "content": "user"}],
+                )
+        await client.client.aclose()
+
+        self.assertEqual(calls, client._max_attempts())
+        self.assertEqual(raised.exception.failure_kind, "transport_exhausted")
+        self.assertIn("MOTO could not open a connection to OpenAI's Codex service", str(raised.exception))
+        self.assertIn("the DNS lookup for chatgpt.com failed", str(raised.exception))
+        self.assertNotIn("not a problem with your computer", str(raised.exception))
 
     async def test_websocket_close_after_terminal_uses_confirmed_response(self) -> None:
         from websockets.exceptions import ConnectionClosedOK

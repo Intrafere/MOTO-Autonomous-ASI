@@ -90,6 +90,7 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from './utils/openRouterSelection';
 import { CLOUD_ACCESS_PROVIDERS, getCloudAccessProvider, isCloudAccessProvider } from './utils/oauthProviders';
+import { resolveOpenRouterKeyPresence } from './utils/credentialProviderRefresh';
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
@@ -1188,9 +1189,11 @@ function App() {
       oauthConfigured = false;
     }
 
-    const finalHasOpenRouterKey = Boolean(
-      keyStatus.has_key && keyStatus.validation_state === 'valid'
-    );
+    const keyPresence = resolveOpenRouterKeyPresence(keyStatus);
+    const finalHasOpenRouterKey = keyPresence.hasKey;
+    if (keyPresence.unreachable) {
+      console.warn('OpenRouter could not be reached to verify the stored API key; keeping it until the connection returns.');
+    }
     if (keyStatusOk) {
       setHasOpenRouterKey(finalHasOpenRouterKey);
       setHasCloudAccess(finalHasOpenRouterKey || oauthConfigured);
@@ -1310,9 +1313,7 @@ function App() {
         ) {
           keyStatus = await openRouterAPI.validateCurrentApiKey();
         }
-        const hasKey = Boolean(
-          keyStatus.has_key && keyStatus.validation_state === 'valid'
-        );
+        const { hasKey } = resolveOpenRouterKeyPresence(keyStatus);
         setHasOpenRouterKey(hasKey);
         try {
           const cloudStatus = await cloudAccessAPI.getStatus();
@@ -3975,6 +3976,7 @@ function App() {
       capabilities: nextCapabilities,
       lmAvailable,
       hasOpenRouterKey: keyPresent,
+      hasCloudAccess: cloudAccessPresent,
       keyStatusReachable,
       hasUsableLmStudioChatModel,
       hasLmStudioEmbeddingModel,

@@ -45,7 +45,8 @@ project-root/
 │   │   ├── prompt_feedback_budget.py    # Pure whole-entry newest-suffix model-feedback fitter plus bounded per-attempt Lean diagnostic projection
 │   │   ├── models.py                    # Pydantic models (includes ModelConfig with per-role supercharge_enabled, BoostConfig, WorkflowTask)
 │   │   ├── lm_studio_client.py          # LM Studio HTTP API client + same-base numeric :# instance sharing
-│   │   ├── openrouter_client.py         # OpenRouter HTTP API client (credit exhaustion, transient malformed-completion retries, and model/endpoint metadata)
+│   │   ├── openrouter_client.py         # OpenRouter HTTP API client (streamed completions, credit exhaustion, transient malformed-completion retries, and model/endpoint metadata)
+│   │   ├── chat_completion_stream.py    # Provider-neutral SSE framing and streamed Chat Completions reassembly (errors returned as data); used by OpenRouter, Codex, and Kimi Code
 │   │   ├── openai_codex_client.py       # Desktop-only OpenAI Codex/ChatGPT OAuth client, Codex backend adapter (Responses WebSocket transport first, HTTP/SSE fallback), and Codex model metadata normalizer
 │   │   ├── xai_grok_client.py           # Desktop-only xAI Grok/SuperGrok OAuth client; splits untimed spending limits from timed 429 usage windows
 │   │   ├── subscription_providers/       # Cloud subscription registry: dependency-free metadata (all cloud providers), shared API-key client, Sakana Fugu and Kimi Code profiles, recovery-adapter registry
@@ -325,8 +326,9 @@ project-root/
 ├── scripts/
 │   ├── check_syntheticlib_trade_contract.py # Explicitly generates or read-only verifies the closed MOTO compatibility evidence set
 │   ├── run_codeql.py                    # `npm run test:codeql`: GitHub's CodeQL analyses on a clean tree export, failing on alerts origin/main lacks; also CI's dev-push job
-│   ├── run_github_checks.py             # `npm run test:github`: pre-push parity for every ci.yml check, release evidence, and CodeQL with a pass/fail summary
-│   ├── run_npm_audit.py                 # CI/local production npm audit: fails on high/critical findings, retries only failed advisory-service requests
+│   ├── check_publish_safety.py          # Self-contained pre-push guard (--install puts it in .git/hooks; first test:github step): blocks pushes of private plans/text, runtime data, ignored or binary files, credentials, home paths, personal emails
+│   ├── run_github_checks.py             # `npm run test:github`: pre-push parity for publish safety, every ci.yml check, release evidence, and CodeQL with a pass/fail summary
+│   ├── run_npm_audit.py                 # CI/local frontend npm audit (development packages included, matching the launcher's audit): fails on high/critical findings, retries only failed advisory-service requests
 │   └── run_local_syntheticlib_compatibility_ci.py # Runs deterministic release-generation parity from allowlisted implementation/orchestration inputs without mutating the real repository or partially replacing retained output
 │
 ├── frontend/
@@ -506,16 +508,17 @@ project-root/
 
 ### Hosted Runtime
 
-- `Dockerfile`: Canonical hosted generic-mode image definition. Uses the Debian/glibc `python:3.12-slim` baseline, installs `requirements-generic.txt`, preloads the FastEmbed model, and starts the API-only backend contract.
+- `Dockerfile`: Canonical hosted generic-mode image definition. Uses the Debian/glibc `python:3.12-slim` baseline, installs `requirements-generic.txt`, preloads the FastEmbed model and the tiktoken `cl100k_base` encoding (into `TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache`), and starts the API-only backend contract.
 - `.dockerignore`: Keeps desktop launchers, frontend assets, tests, local runtime data/logs, and dev-only metadata out of the hosted image build context.
-- `docker/entrypoint.sh`: Minimal hosted startup wrapper. Defaults `MOTO_GENERIC_MODE=true`, `HOST=0.0.0.0`, `PORT=8000`, `MOTO_DATA_ROOT=/app/backend/data`, creates runtime directories, and then delegates to `python -m backend.api.main`.
+- `docker/entrypoint.sh`: Minimal hosted startup wrapper. Defaults `MOTO_GENERIC_MODE=true`, `HOST=0.0.0.0`, `PORT=8000`, `MOTO_DATA_ROOT=/app/backend/data`, `TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache`, creates runtime directories, and then delegates to `python -m backend.api.main`.
 
 ### Shared Resources
 
 - `config.py`: RAGConfig, SystemConfig (context windows, chunk sizes, max output tokens, `generic_mode` flag)
 - `models.py`: Pydantic models (ModelConfig with per-role `supercharge_enabled`, BoostConfig, WorkflowTask, ModelUsageTracker, FinalAnswerState)
 - `lm_studio_client.py`: LM Studio HTTP client (completions, embeddings, model listing, same-base numeric `:#` instance sharing for independent calls); generic-mode inference and embeddings bypass it, though shared legacy diagnostics may still exist
-- `openrouter_client.py`: OpenRouter HTTP client (credit exhaustion detection, bounded transient/missing-choices retries, fallback, model/provider endpoint metadata, and redacted upstream host/request-id reporting into route identity, with upstream error detail added to no-choices retry text)
+- `openrouter_client.py`: OpenRouter HTTP client (streamed completions reassembled into the non-streaming shape, credit exhaustion detection, bounded transient/missing-choices retries, fallback, model/provider endpoint metadata, and redacted upstream host/request-id reporting into route identity, with upstream error detail added to no-choices retry text)
+- `chat_completion_stream.py`: Standard-library/httpx-only SSE framer and Chat Completions chunk accumulator. It merges content, reasoning, refusals and tool-call fragments by index, keeps usage and the upstream error as data, and treats only a non-error `finish_reason` as a completed answer. OpenRouter, the Codex SSE path, and Kimi Code's streamed reader (`api_key_client.py`) all use it.
 - `openai_codex_client.py`: Desktop-only OpenAI Codex/ChatGPT OAuth token lifecycle, incrementally consumed Responses stream adapter (WebSocket transport first, HTTP/SSE fallback) with strict terminal-state validation (and unsupported output-limit/temperature knob removal), plus Codex model context/output metadata normalization; not the regular OpenAI API-key billing path
 - `xai_grok_client.py`: Desktop-only xAI Grok/SuperGrok OAuth client; untimed spending/subscription limits stay repair-required, while timed 429 usage windows use JSON body reset or Retry-After and other transients remain retryable
 - `subscription_providers/`: `metadata.py` is the single dependency-free list of cloud providers (id, label, auth kind, slug, capability flag, `max`-effort support) from which model validation, route labels, error markers, locks, and status sets derive; `api_key_client.py` is the shared OpenAI-compatible API-key client (env-then-keyring key, region detection with non-secret persistence, honest MOTO User-Agent, bounded retries through `assured_retry_wait`, streamed or Responses-then-Chat wires, key scrubbing in errors); `profile.py`/`errors.py` define provider profiles and typed errors; `sakana_fugu.py` and `kimi_code.py` hold each provider's endpoints, models, request shaping, and error classifier; `registry.py` instantiates clients and registers recovery adapters.

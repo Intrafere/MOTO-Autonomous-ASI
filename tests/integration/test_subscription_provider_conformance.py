@@ -31,6 +31,7 @@ from backend.shared.subscription_providers.errors import (
     SubscriptionAuthError,
     SubscriptionContextLimitError,
     SubscriptionEntitlementError,
+    SubscriptionParameterRejectedError,
     SubscriptionRequestError,
     SubscriptionUsageLimitError,
 )
@@ -160,6 +161,7 @@ class SubscriptionProviderConformanceTests(IsolatedAsyncioTestCase):
                     (SubscriptionEntitlementError, "entitlement", FailureKind.ENTITLEMENT),
                     (SubscriptionAuthError, "rejected the key", FailureKind.AUTHENTICATION),
                     (SubscriptionContextLimitError, "context_length_exceeded", FailureKind.CONTEXT_LIMIT),
+                    (SubscriptionParameterRejectedError, "rejected a request setting", FailureKind.INVALID_REQUEST),
                     (SubscriptionRequestError, "connection failed after retries: HTTP 503", FailureKind.TRANSIENT_TRANSPORT),
                     (SubscriptionRequestError, "completion failed: bad request", FailureKind.UNKNOWN_HARD),
                 )
@@ -302,6 +304,97 @@ class SubscriptionProviderConformanceTests(IsolatedAsyncioTestCase):
                 self.assertEqual(ctx.exception.reason, "entitlement_required")
                 events = [call.args[0] for call in broadcast.await_args_list]
                 self.assertIn("subscription_provider_error", events)
+
+    async def test_rejected_request_setting_requires_guided_repair_without_a_credential_hint(self) -> None:
+        guidance = "MOTO sent a setting this provider does not accept; switch this role to another provider."
+        for provider_id, client in self.providers():
+            with self.subTest(provider=provider_id):
+                manager = self.manager_for(provider_id)
+                rejected = _error(
+                    SubscriptionParameterRejectedError, provider_id, "rejected a request setting: invalid temperature",
+                    status_code=400, terminal_guidance=guidance,
+                )
+                generate = mock.AsyncMock(side_effect=rejected)
+                with (
+                    mock.patch.object(client, "generate_completion", generate),
+                    mock.patch.object(manager, "_broadcast", new=mock.AsyncMock()) as broadcast,
+                    mock.patch(
+                        "backend.shared.api_client_manager.record_provider_notification",
+                        side_effect=lambda _event, payload: payload,
+                    ),
+                ):
+                    with self.assertRaises(ProviderRepairRequiredError) as ctx:
+                        await self.generate(manager)
+                generate.assert_awaited_once()
+                self.assertEqual(ctx.exception.terminal_guidance, guidance)
+                notice = next(call.args[1] for call in broadcast.await_args_list if call.args[0] == "subscription_provider_error")
+                self.assertIn(guidance, notice["message"])
+                self.assertNotIn("API key", notice["message"])
+                self.assertEqual(notice["terminal_guidance"], guidance)
+                self.assertIn(
+                    f"{provider_id}:agg_sub1:unrecoverable_{provider_id}_error:model-x",
+                    manager._oauth_error_notified,
+                )
+
+    async def test_unguided_failure_keeps_the_credential_hint(self) -> None:
+        for provider_id, client in self.providers():
+            with self.subTest(provider=provider_id):
+                manager = self.manager_for(provider_id)
+                failure = _error(SubscriptionRequestError, provider_id, "completion failed: bad request", status_code=400)
+                with (
+                    mock.patch.object(client, "generate_completion", mock.AsyncMock(side_effect=failure)),
+                    mock.patch.object(manager, "_broadcast", new=mock.AsyncMock()) as broadcast,
+                    mock.patch(
+                        "backend.shared.api_client_manager.record_provider_notification",
+                        side_effect=lambda _event, payload: payload,
+                    ),
+                ):
+                    with self.assertRaises(ProviderRepairRequiredError) as ctx:
+                        await self.generate(manager)
+                notice = next(call.args[1] for call in broadcast.await_args_list if call.args[0] == "subscription_provider_error")
+                self.assertIn(f"check your {client.provider_label} API key", notice["message"])
+                self.assertNotIn("terminal_guidance", notice)
+                self.assertIn("credential", ctx.exception.terminal_guidance)
+
+    async def test_rejected_request_setting_uses_the_fallback_for_one_call_only(self) -> None:
+        for provider_id, client in self.providers():
+            with self.subTest(provider=provider_id):
+                manager = self.manager_for(provider_id, fallback="local-fallback")
+                rejected = _error(
+                    SubscriptionParameterRejectedError, provider_id, "rejected a request setting: invalid temperature",
+                    status_code=400, terminal_guidance="Switch this role to another provider.",
+                )
+                generate = mock.AsyncMock(side_effect=rejected)
+                with (
+                    mock.patch.object(client, "generate_completion", generate),
+                    mock.patch(
+                        "backend.shared.api_client_manager.lm_studio_client.generate_completion",
+                        new=mock.AsyncMock(return_value={"choices": [{"message": {"content": "fallback"}}]}),
+                    ) as lm_studio,
+                    mock.patch.object(manager, "_broadcast", new=mock.AsyncMock()) as broadcast,
+                ):
+                    await self.generate(manager)
+                    self.assertEqual(manager.get_fallback_state("agg_sub1"), provider_id)
+                    await self.generate(manager)
+                self.assertEqual(generate.await_count, 2)
+                self.assertEqual(lm_studio.await_count, 2)
+                self.assertEqual(lm_studio.await_args.kwargs["model"], "local-fallback")
+                self.assertNotIn("subscription_provider_error", [call.args[0] for call in broadcast.await_args_list])
+
+    async def test_other_non_transient_failures_still_move_the_role_to_the_fallback(self) -> None:
+        for provider_id, client in self.providers():
+            with self.subTest(provider=provider_id):
+                manager = self.manager_for(provider_id, fallback="local-fallback")
+                failure = _error(SubscriptionRequestError, provider_id, "completion failed: bad request", status_code=400)
+                with (
+                    mock.patch.object(client, "generate_completion", mock.AsyncMock(side_effect=failure)),
+                    mock.patch(
+                        "backend.shared.api_client_manager.lm_studio_client.generate_completion",
+                        new=mock.AsyncMock(return_value={"choices": [{"message": {"content": "fallback"}}]}),
+                    ),
+                ):
+                    await self.generate(manager)
+                self.assertEqual(manager.get_fallback_state("agg_sub1"), "lm_studio")
 
     async def test_transient_and_context_failures_keep_their_recovery_paths(self) -> None:
         for provider_id, client in self.providers():

@@ -204,7 +204,11 @@ git commit -m "update"
 
 ### 3. Push and Create PR
 
+Install the publish-safety pre-push hook once per clone. It refuses a push that would publish
+private planning files, runtime data, credentials, or local paths:
+
 ```bash
+python -m scripts.check_publish_safety --install
 git push origin your-branch-name
 ```
 

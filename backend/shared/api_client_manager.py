@@ -39,6 +39,7 @@ from backend.shared.openai_codex_client import (
 )
 from backend.shared.subscription_providers.errors import (
     SubscriptionEntitlementError,
+    SubscriptionParameterRejectedError,
     SubscriptionProviderError,
     SubscriptionUsageLimitError,
 )
@@ -1012,6 +1013,9 @@ class APIClientManager:
         if notification_key in self._oauth_error_notified:
             return
         self._oauth_error_notified.add(notification_key)
+        # Typed guidance names the real fix (plan, model, or a MOTO setting); only an
+        # untyped failure falls back to the generic credential hint.
+        terminal_guidance = redact_log_text(str(getattr(error, "terminal_guidance", "") or ""), 1800)
         payload = {
             "role_id": role_id,
             "model": model,
@@ -1021,13 +1025,16 @@ class APIClientManager:
             "recoverable": False,
             "workflow_mode": _retry_workflow_mode(role_id),
             "message": (
-                f"{label} failed and no LM Studio fallback is configured. "
-                f"Please check your {label} API key in OpenRouter/OAuth and retry."
+                f"{label} could not serve this request. {terminal_guidance}"
+                if terminal_guidance
+                else (
+                    f"{label} failed and no LM Studio fallback is configured. "
+                    f"Please check your {label} API key in OpenRouter/OAuth and retry."
+                )
             ),
             "error_summary": redact_log_text(str(error), 700),
             "oauth_error_message": oauth_live_activity_error_message(error),
         }
-        terminal_guidance = str(getattr(error, "terminal_guidance", "") or "")
         if terminal_guidance:
             payload["terminal_guidance"] = terminal_guidance
         payload = _merge_route_fields(payload, self.route_identity_for_role(
@@ -2534,6 +2541,32 @@ class APIClientManager:
                 return ""
         return ""
 
+    async def _subscription_cache_kwargs(
+        self,
+        subscription_client: Any,
+        role_id: str,
+        workflow_mode_hint: Optional[str],
+    ) -> Dict[str, str]:
+        """Return the prompt-cache scope for providers that key their cache on one.
+
+        The scope joins the exact role ID with the owning workflow run so one role's
+        repeated long-prefix calls share a stable key across Stop/Start while a new
+        run gets its own. The owner follows the active workflow, as retry activity
+        does, because Autonomous reuses the child Aggregator/Compiler role IDs. It
+        stays in-process: the provider profile hashes it, since run identities such
+        as Autonomous session names derive from the user prompt. Providers without a
+        cache key get no argument at all.
+        """
+        if not getattr(subscription_client.profile, "uses_cache_scope", False):
+            return {}
+        workflow_mode = (
+            workflow_mode_hint
+            or _retry_workflow_mode(role_id)
+            or self._assistant_workflow_mode_for_role(role_id)
+        )
+        run_id = await self._assistant_run_id_for_workflow(workflow_mode)
+        return {"cache_scope": f"{role_id}\n{run_id}"}
+
     @staticmethod
     def _append_assistant_memory_block(prompt: str, assistant_context: str) -> str:
         return (
@@ -2612,7 +2645,8 @@ class APIClientManager:
     ) -> Dict[str, Any]:
         """Generate a completion, optionally wrapping the role with Supercharge."""
         disable_supercharge = bool(kwargs.pop("_moto_disable_supercharge", False))
-        assistant_workflow_mode_override = kwargs.pop("_moto_assistant_workflow_mode", None)
+        # Stays in kwargs: the routed call also reads it to scope a provider prompt-cache key.
+        assistant_workflow_mode_override = kwargs.get("_moto_assistant_workflow_mode")
         async with self._state_lock:
             role_config = self._role_model_configs.get(role_id)
 
@@ -2896,6 +2930,7 @@ class APIClientManager:
         consume_boost_count = kwargs.pop("_moto_consume_boost_count", True)
         strict_boost = kwargs.pop("_moto_strict_boost", False)
         reasoning_effort_override = kwargs.pop("_moto_reasoning_effort_override", None)
+        workflow_mode_hint = kwargs.pop("_moto_assistant_workflow_mode", None)
         requested_model = model
         async with self._state_lock:
             initial_role_config = self._role_model_configs.get(role_id)
@@ -3947,6 +3982,9 @@ class APIClientManager:
             if use_subscription:
               try:
                 logger.debug("Role %s using %s: %s", role_id, subscription_label, subscription_model)
+                subscription_cache = await self._subscription_cache_kwargs(
+                    subscription_client, role_id, workflow_mode_hint
+                )
                 result = await self._with_hung_connection_watchdog(
                     subscription_client.generate_completion(
                         model=subscription_model,
@@ -3957,6 +3995,7 @@ class APIClientManager:
                         reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
+                        **subscription_cache,
                         retry_callback=self._provider_retry_callback(
                             role_id,
                             task_id=task_id,
@@ -4147,14 +4186,19 @@ class APIClientManager:
                 if is_retryable_model_output_error(e):
                     raise
                 if role_config.lm_studio_fallback_id:
-                    if not is_transient_model_call_error(e):
+                    # A rejected request setting belongs to this request shape, not to the
+                    # credential or account, and resetting fallbacks cannot fix it, so only
+                    # this call uses the fallback and later calls try the provider again.
+                    call_only = isinstance(e, SubscriptionParameterRejectedError)
+                    if not call_only and not is_transient_model_call_error(e):
                         async with self._state_lock:
                             self._role_fallback_state[role_id] = "lm_studio"
                     logger.warning(
-                        "%s failed for role '%s'; falling back to LM Studio model %s",
+                        "%s failed for role '%s'; falling back to LM Studio model %s%s",
                         subscription_label,
                         role_id,
                         role_config.lm_studio_fallback_id,
+                        " for this call only" if call_only else "",
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
@@ -4189,6 +4233,7 @@ class APIClientManager:
                         role_id=role_id,
                         model=subscription_model,
                         error=e,
+                        terminal_guidance=str(getattr(e, "terminal_guidance", "") or ""),
                     ) from e
               except Exception as e:
                 duration_ms = (time.time() - start_time) * 1000

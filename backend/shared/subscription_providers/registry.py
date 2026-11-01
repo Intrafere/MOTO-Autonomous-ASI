@@ -16,6 +16,7 @@ from backend.shared.subscription_providers.errors import (
     SubscriptionAuthError,
     SubscriptionContextLimitError,
     SubscriptionEntitlementError,
+    SubscriptionParameterRejectedError,
     SubscriptionProviderError,
     SubscriptionUsageLimitError,
 )
@@ -73,6 +74,8 @@ class SubscriptionProviderAdapter:
             kind = FailureKind.ENTITLEMENT
         elif isinstance(error, SubscriptionAuthError):
             kind = FailureKind.AUTHENTICATION
+        elif isinstance(error, SubscriptionParameterRejectedError):
+            kind = FailureKind.INVALID_REQUEST
         elif isinstance(error, SubscriptionProviderError) and "connection failed after retries" in detail:
             kind = FailureKind.TRANSIENT_TRANSPORT
         else:

@@ -9,6 +9,8 @@
   ``0`` disables) prints its node ID and every thread's stack, then ends the
   process instead of looping forever. Production workflows are intentionally unbounded, so a test
   that drives one without a stop condition would otherwise never finish.
+* Warm-up: the token-counting encoding loads once before the first test, so a
+  cold-cache download never lands inside one test's time budget.
 
 The SyntheticLib release workflow runs its dependency-free tests with only pytest
 installed, so the guards that need MOTO's runtime modules stand down when those
@@ -124,6 +126,20 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _warm_tokenizer():
+    """Load the token-counting encoding once, before any test starts its clock.
+
+    On a cold cache (a fresh CI runner) tiktoken downloads the encoding on first
+    use, which can take seconds; otherwise whichever test counts tokens first pays
+    for that download inside its own time budget.
+    """
+    utils = _import_runtime_module("backend.shared.utils")
+    if utils is not None:
+        utils.count_tokens("warm-up")
+    yield
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _block_real_codex_websocket_transport():
     """Keep provider transports faked: Codex websocket turns are opt-in per test.
 
@@ -147,6 +163,33 @@ def _block_real_codex_websocket_transport():
     OpenAICodexClient.websocket_transport_enabled = False
     OpenAICodexClient._open_websocket = _refuse_real_websocket
     yield
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _block_real_openrouter_http():
+    """Keep OpenRouter faked: a test serves it through ``httpx.MockTransport``.
+
+    Completions stream through ``client.stream``, so a test that stubs only
+    ``client.post`` would otherwise reach the real API with a fake key.
+    """
+    httpx = _import_runtime_module("httpx")
+    if httpx is None:
+        yield
+        return
+    real_handle = httpx.AsyncHTTPTransport.handle_async_request
+
+    async def _refuse_openrouter(self, request):
+        host = request.url.host or ""
+        if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
+            raise AssertionError(
+                "A test reached the real OpenRouter API; serve it through "
+                "httpx.MockTransport on the client instance."
+            )
+        return await real_handle(self, request)
+
+    httpx.AsyncHTTPTransport.handle_async_request = _refuse_openrouter
+    yield
+    httpx.AsyncHTTPTransport.handle_async_request = real_handle
 
 
 @pytest.fixture(autouse=True)

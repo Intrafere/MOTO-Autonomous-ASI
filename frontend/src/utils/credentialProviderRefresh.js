@@ -16,6 +16,21 @@ function applyIfCurrent(shouldApply, setter, ...args) {
 
 export const EMPTY_CLOUD_PROVIDER_STATE = Object.freeze({ configured: false, models: [], error: '' });
 
+// Presence of the global OpenRouter key for startup and readiness gates. A stored
+// key that OpenRouter could not be reached to verify (no internet, OpenRouter
+// outage) is still present: only a key the backend confirmed invalid, or no key
+// at all, counts as absent, so an offline user is never asked to re-enter a key
+// they already saved.
+export function resolveOpenRouterKeyPresence(status) {
+  const stored = Boolean(status?.has_key);
+  const state = status?.validation_state;
+  return {
+    hasKey: stored && state !== 'invalid',
+    verified: stored && state === 'valid',
+    unreachable: stored && state === 'unreachable',
+  };
+}
+
 function connectedLabel(provider) {
   return provider.authKind === 'api_key'
     ? `${provider.label} API key is saved`

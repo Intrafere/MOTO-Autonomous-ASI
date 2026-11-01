@@ -8,8 +8,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# The hosted Dockerfile bakes this encoding into TIKTOKEN_CACHE_DIR at build time.
+TIKTOKEN_ENCODING_NAME = "cl100k_base"
 
-def count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
+
+def count_tokens(text: str, encoding_name: str = TIKTOKEN_ENCODING_NAME) -> int:
     """Count tokens in text using tiktoken."""
     try:
         encoding = tiktoken.get_encoding(encoding_name)

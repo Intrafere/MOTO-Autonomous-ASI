@@ -1,4 +1,8 @@
-"""Audit production frontend dependencies, retrying only failed registry requests.
+"""Audit frontend dependencies, retrying only failed registry requests.
+
+Development packages are audited too: the desktop launcher installs them and runs
+its own ``npm audit --audit-level=high`` over them, so an advisory there warns
+users and must fail here first.
 
 `npm audit` exits 1 both when it finds vulnerabilities at the audit level and
 when the registry's advisory endpoint fails ("audit endpoint returned an
@@ -26,7 +30,7 @@ from typing import Any, Callable, Optional, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-AUDIT_ARGS = ("audit", "--omit=dev", "--audit-level=high", "--offline=false")
+AUDIT_ARGS = ("audit", "--audit-level=high", "--offline=false")
 ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (15, 45)
 _FAILING_SEVERITIES = ("high", "critical")
