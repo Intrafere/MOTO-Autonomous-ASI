@@ -1,0 +1,142 @@
+.translation-language-switch {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 30px;
+  font-size: 0.82rem;
+}
+
+/* Global label/select rules make labels block-level and selects full width;
+   the switch sits inline inside toolbars, so reset both here. */
+.translation-language-switch__label {
+  display: inline;
+  margin: 0;
+  color: var(--text-secondary, #9d9db0);
+  font-weight: 650;
+}
+
+.translation-language-switch__select {
+  width: auto;
+  height: 30px;
+  max-width: 14rem;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 0.35rem;
+  background: rgba(15, 23, 42, 0.65);
+  color: inherit;
+  font: inherit;
+  padding: 0 0.5rem;
+  cursor: pointer;
+}
+
+.translation-language-switch__select option {
+  background: var(--surface-2, #1a1a22);
+  color: var(--text-primary, #e4e4ec);
+}
+
+/* Languages not finished for this item yet: still selectable, shown greyed out. */
+.translation-language-switch__select option.translation-language-switch__option--unready {
+  color: var(--text-muted, #6b6b7e);
+}
+
+.translation-language-switch__select:focus-visible {
+  outline: 2px solid #18cc17;
+  outline-offset: 2px;
+}
+
+.translation-language-switch__request {
+  height: 30px;
+  border: 1px solid rgba(24, 204, 23, 0.45);
+  border-radius: 0.35rem;
+  background: rgba(24, 204, 23, 0.1);
+  color: #1eff1c;
+  font: inherit;
+  font-weight: 650;
+  padding: 0 0.6rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.translation-language-switch__request:hover:not(:disabled) {
+  background: rgba(24, 204, 23, 0.18);
+}
+
+.translation-language-switch__request:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.translation-language-switch__request:focus-visible {
+  outline: 2px solid #18cc17;
+  outline-offset: 2px;
+}
+
+.translation-language-switch__request-note {
+  color: var(--text-secondary, #9d9db0);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.translation-language-switch__request-note--error {
+  color: #ff7676;
+}
+
+.translation-status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.translation-status-chip--complete {
+  color: #1eff1c;
+  background: rgba(30, 255, 28, 0.12);
+  border-color: rgba(30, 255, 28, 0.32);
+}
+
+.translation-status-chip--pending {
+  color: #f0c36d;
+  background: rgba(240, 195, 109, 0.12);
+  border-color: rgba(240, 195, 109, 0.28);
+}
+
+.translation-status-chip--loading,
+.translation-status-chip--unavailable,
+.translation-status-chip--waiting {
+  color: var(--text-secondary, #9d9db0);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.translation-status-chip--error {
+  color: #ff7676;
+  background: rgba(255, 80, 80, 0.12);
+  border-color: rgba(255, 80, 80, 0.3);
+}
+
+.translation-pending-notice {
+  margin: 0 0 0.85rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid rgba(240, 195, 109, 0.28);
+  border-left-width: 3px;
+  border-radius: 0.4rem;
+  background: rgba(240, 195, 109, 0.08);
+  color: var(--text-primary, #e4e4ec);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.translation-pending-notice--paused {
+  border-color: rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.translation-pending-notice--repair {
+  border-color: rgba(255, 80, 80, 0.3);
+  background: rgba(255, 80, 80, 0.08);
+}

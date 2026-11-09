@@ -18,6 +18,7 @@ from backend.shared.path_safety import (
     validate_single_path_component,
 )
 from backend.shared.config import system_config
+from backend.shared.atomic_json import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -197,8 +198,7 @@ class SessionManager:
             }
             
             metadata_path = self._session_path / "session_metadata.json"
-            async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(metadata, indent=2))
+            await asyncio.to_thread(atomic_write_text, metadata_path, json.dumps(metadata, indent=2))
             
             logger.info(f"Session initialized: {self._session_id}")
             logger.info(f"Session path: {self._session_path}")
@@ -275,8 +275,7 @@ class SessionManager:
         metadata["last_updated"] = datetime.now().isoformat()
         
         # Save
-        async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(metadata, indent=2))
+        await asyncio.to_thread(atomic_write_text, metadata_path, json.dumps(metadata, indent=2))
 
     async def update_metadata(self, updates: Dict[str, Any]) -> None:
         """Public wrapper for updating session metadata fields."""

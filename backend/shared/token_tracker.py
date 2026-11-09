@@ -6,6 +6,8 @@ import logging
 import time
 from typing import Dict, Any, Optional
 
+from backend.shared.background_call_scope import current_background_service
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,6 +38,9 @@ class TokenTracker:
 
     def track(self, model_id: str, prompt_tokens: int, completion_tokens: int) -> None:
         """Record token usage for one successful API call."""
+        # Background services (Auto Top-p Translate) keep their own usage counters.
+        if current_background_service():
+            return
         self._total_input += prompt_tokens
         self._total_output += completion_tokens
         if model_id not in self._by_model:

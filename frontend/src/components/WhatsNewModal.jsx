@@ -1,10 +1,19 @@
 import React, { useRef } from 'react';
 import useModalDialogFocus from '../hooks/useModalDialogFocus';
 import { MOTO_GITHUB_URL, releaseNotes } from '../utils/releaseNotes';
+import TopPTranslationGraphic from './TopPTranslationGraphic';
 import './settings-common.css';
 import './WhatsNewModal.css';
 
 const RELEASE_NOTE_LINK = /^\[([^\]]+)\]\((https:\/\/[^\s)]+)\)$/;
+// Illustrations a release-notes section can name in its `graphic` field.
+const SECTION_GRAPHICS = {
+  'top-p-translation': TopPTranslationGraphic,
+};
+const SECTION_TONE_CLASSES = {
+  warning: ' whats-new-section--warning',
+  feature: ' whats-new-section--feature',
+};
 
 function renderHighlightedText(text) {
   return text.split(/(\*\*[^*]+\*\*|\[[^\]]+\]\(https:\/\/[^\s)]+\))/g).filter(Boolean).map((part, index) => {
@@ -36,12 +45,17 @@ export default function WhatsNewModal({ version, onClose }) {
           <p id="whats-new-summary">{notes?.summary || 'You’re running a new version of MOTO. Visit the project on GitHub for the latest changes and release details.'}</p>
         </header>
         <div className="whats-new-body">
-          {notes?.sections.map((section) => (
-            <section className={`whats-new-section${section.tone === 'warning' ? ' whats-new-section--warning' : ''}`} key={section.title}>
-              <h3>{section.title}</h3>
-              <ul>{section.items.map((item) => <li key={item}>{renderHighlightedText(item)}</li>)}</ul>
-            </section>
-          ))}
+          {notes?.sections.map((section) => {
+            const Graphic = SECTION_GRAPHICS[section.graphic];
+            return (
+              <section className={`whats-new-section${SECTION_TONE_CLASSES[section.tone] || ''}`} key={section.title}>
+                <h3>{section.title}</h3>
+                {section.intro && <p className="whats-new-section__intro">{renderHighlightedText(section.intro)}</p>}
+                {Graphic && <Graphic />}
+                <ul>{section.items.map((item) => <li key={item}>{renderHighlightedText(item)}</li>)}</ul>
+              </section>
+            );
+          })}
         </div>
         <footer className="whats-new-footer">
           <a href={MOTO_GITHUB_URL} target="_blank" rel="noopener noreferrer">Explore MOTO on GitHub ↗</a>

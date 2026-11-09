@@ -1,12 +1,23 @@
 import React, { useState } from 'react';
 import { getSyntheticLibPresentation } from '../utils/syntheticLibPresentation';
+import { AUTO_TRANSLATE_NAME } from '../hooks/useAutoTranslate';
+
+const PENDING_STATUSES = new Set([
+  'starting',
+  'not ready',
+  'outdated',
+  'coming soon',
+  'translating',
+  'paused',
+  'waiting',
+]);
 
 function statusClass(status) {
   const normalized = String(status || '').toLowerCase();
   if (normalized === 'active' || normalized === 'ready') return 'connectivity-status--ready';
-  if (normalized === 'error') return 'connectivity-status--error';
+  if (normalized === 'error' || normalized === 'repair required') return 'connectivity-status--error';
   if (normalized === 'disabled') return 'connectivity-status--disabled';
-  if (normalized === 'starting' || normalized === 'not ready' || normalized === 'outdated' || normalized === 'coming soon') return 'connectivity-status--pending';
+  if (PENDING_STATUSES.has(normalized)) return 'connectivity-status--pending';
   return 'connectivity-status--inactive';
 }
 
@@ -75,8 +86,10 @@ export default function ConnectivityPanel({
   onOpenSyntheticLib4,
   onOpenAgentMemory,
   onOpenWolfram,
+  onOpenAutoTranslate,
   onToggleAgentMemory,
   onToggleWolfram,
+  onToggleAutoTranslate,
   anyWorkflowRunning = false,
 }) {
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -89,6 +102,7 @@ export default function ConnectivityPanel({
     : (inference.lm_studio?.status || (isStarting ? 'starting' : 'inactive'));
   const memoryStatus = skills.agent_conversation_memory || {};
   const wolframStatus = skills.wolfram_alpha || {};
+  const autoTranslateStatus = skills.auto_translate || {};
   const skillFallbackStatus = isStarting ? 'starting' : 'inactive';
   const syntheticLibPresentation = getSyntheticLibPresentation(
     capabilities?.syntheticLibProductState,
@@ -146,7 +160,7 @@ export default function ConnectivityPanel({
           </section>
 
           <section className="connectivity-section">
-            <div className="connectivity-section__title">Skills And Enhancements Connectivity</div>
+            <div className="connectivity-section__title">Skills And Enhancements</div>
             {syntheticLibPresentation.showComingSoon ? (
               <ConnectivityRow
                 checkbox
@@ -187,6 +201,17 @@ export default function ConnectivityPanel({
               onToggle={onToggleAgentMemory}
               onOpen={onOpenAgentMemory}
               title={anyWorkflowRunning ? 'Stop the active workflow before changing run-level feature toggles' : 'Configure local proof-history memory for Assistant workflow-memory search'}
+            />
+            {/* Translation runs beside workflows as a background service, so its
+                toggle stays available while a workflow is running. */}
+            <ConnectivityRow
+              checkbox
+              label={AUTO_TRANSLATE_NAME}
+              status={autoTranslateStatus.status || (isStarting ? 'starting' : 'disabled')}
+              checked={autoTranslateStatus.enabled}
+              onToggle={onToggleAutoTranslate}
+              onOpen={onOpenAutoTranslate}
+              title="Translate papers, proofs, and other outputs into your chosen languages with Top-p Exploration"
             />
           </section>
 

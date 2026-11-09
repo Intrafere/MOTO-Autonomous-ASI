@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { downloadTextFile } from '../../utils/downloadHelpers';
-import { getNoveltyGroupAnchorIds } from '../../utils/proofPresentation';
+import { getNoveltyGroupAnchorIds, getProofTranslationParts } from '../../utils/proofPresentation';
+import useTranslatedDocuments from '../../hooks/useTranslatedDocuments';
+import TranslationLanguageSwitch from '../translation/TranslationLanguageSwitch';
+import TranslationPendingNotice from '../translation/TranslationPendingNotice';
 import '../autonomous/MathematicalProofs.css';
 
 function formatDate(isoString) {
@@ -48,18 +51,38 @@ function formatSolverName(solver) {
   return String(solver || 'Proof Solver').replace(/^LeanOJ\b/, 'Proof Solver');
 }
 
-function getCurrentProofDisplay(proof) {
+function isStatementThePrompt(proof) {
   const prompt = String(proof.user_prompt || '').trim();
-  const statement = String(proof.theorem_statement || '').trim();
+  return Boolean(prompt && String(proof.theorem_statement || '').trim() === prompt);
+}
+
+function getCurrentProofDisplay(proof, translatedStatement = null) {
+  const prompt = String(proof.user_prompt || '').trim();
+  const statement = String(translatedStatement ?? proof.theorem_statement ?? '').trim();
   const sourceTitle = String(proof.source_title || '').trim();
-  const statementIsPrompt = Boolean(prompt && statement === prompt);
   const sourceIsPrompt = Boolean(prompt && sourceTitle === prompt);
   return {
-    title: statementIsPrompt
+    title: isStatementThePrompt(proof)
       ? (proof.theorem_name || (proof.proof_kind === 'final' ? 'Final verified submission' : 'Verified proof'))
       : (statement || proof.theorem_name || proof.proof_id),
     summary: sourceIsPrompt ? '' : sourceTitle,
   };
+}
+
+// Prose fields Auto Top-p Translate may translate here; Lean code, ids, theorem
+// names, and metadata always stay original. A statement that repeats the run
+// prompt is never shown, so it is never sent for translation either.
+const LEANOJ_TRANSLATION_FIELDS = ['theorem_statement', 'novelty_reasoning', 'novelty_group_claim'];
+
+function getProofTranslationKey(proof) {
+  return `proof:leanoj:${proof.library_id || proof.proof_id}`;
+}
+
+function getLeanOJProofTranslationParts(proof) {
+  const fields = isStatementThePrompt(proof)
+    ? LEANOJ_TRANSLATION_FIELDS.filter((field) => field !== 'theorem_statement')
+    : LEANOJ_TRANSLATION_FIELDS;
+  return getProofTranslationParts(proof, fields);
 }
 
 export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0 }) {
@@ -121,6 +144,22 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
     }
     return proofs;
   }, [filter, proofs]);
+  const translationDocuments = useMemo(
+    () => proofs.map((proof) => ({
+      docKey: getProofTranslationKey(proof),
+      kind: 'proof',
+      title: proof.theorem_name || proof.proof_id,
+      profile: 'fields',
+      parts: getLeanOJProofTranslationParts(proof),
+    })),
+    [proofs]
+  );
+  const translation = useTranslatedDocuments(translationDocuments);
+  // Translated prose when this proof's translation is ready; otherwise the original.
+  const getDisplayedProofText = (proof, field) => {
+    const translated = translation.byKey[getProofTranslationKey(proof)]?.parts?.[field];
+    return typeof translated === 'string' ? translated : proof[field];
+  };
   const handleDownloadLean = (proof) => {
     if (!proof.lean_code) return;
     downloadTextFile(proof.lean_code, `${proof.theorem_name || proof.proof_id}.lean`);
@@ -237,7 +276,11 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
           {visibleProofs.map((proof) => {
             const isExpanded = expandedProofId === proof.library_id;
             const badge = getProofBadge(proof);
-            const display = getCurrentProofDisplay(proof);
+            const display = getCurrentProofDisplay(proof, getDisplayedProofText(proof, 'theorem_statement'));
+            const noveltyReasoning = getDisplayedProofText(proof, 'novelty_reasoning');
+            const noveltyGroupClaim = getDisplayedProofText(proof, 'novelty_group_claim');
+            // Each proof has its own language choice; the default comes from the translation window.
+            const proofTranslation = translation.forKey(getProofTranslationKey(proof));
             return (
               <article key={proof.library_id} className={`math-proof-card ${badge.cardClass}`}>
                 <div className="math-proof-card-header">
@@ -257,6 +300,7 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
                   </div>
 
                   <div className="math-proof-card-actions">
+                    <TranslationLanguageSwitch translation={proofTranslation} className="math-proof-language" />
                     <button
                       type="button"
                       className="math-proof-download math-proof-download--compact"
@@ -288,6 +332,7 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
                   <span>Attempts: {proof.attempt_count || 0}</span>
                   <span>Verified: {formatDate(proof.created_at)}</span>
                 </div>
+                {isExpanded && <TranslationPendingNotice translation={proofTranslation} />}
 
                 {isExpanded && (
                   <div className="math-proof-details">
@@ -323,10 +368,10 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
                       </div>
                     )}
 
-                    {proof.novelty_reasoning && (
+                    {noveltyReasoning && (
                       <div className="math-proof-detail-block">
                         <strong>Novelty Reasoning</strong>
-                        <div>{proof.novelty_reasoning}</div>
+                        <div>{noveltyReasoning}</div>
                       </div>
                     )}
 
@@ -337,7 +382,7 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
                           ? 'Finite verified proof group'
                           : 'Accepted Lean statement alone'}
                       </div>
-                      {proof.novelty_group_claim && <div>{proof.novelty_group_claim}</div>}
+                      {noveltyGroupClaim && <div>{noveltyGroupClaim}</div>}
                       {proof.novelty_scope === 'group' && proof.novelty_group_proof_ids?.length > 0 && (
                         <div>Ranked with: {proof.novelty_group_proof_ids.join(', ')}</div>
                       )}

@@ -296,7 +296,7 @@ def sanitize_model_output_for_retry_context(raw: str, max_chars: int = 2000) -> 
     return content or RETRY_CONTEXT_EMPTY_PLACEHOLDER
 
 
-def sanitize_json_response(raw_content: str) -> str:
+def sanitize_json_response(raw_content: str, *, escape_newline_latex_commands: bool = True) -> str:
     """
     Sanitize JSON response to handle LaTeX expressions and invalid escape sequences.
     
@@ -323,7 +323,12 @@ def sanitize_json_response(raw_content: str) -> str:
     
     Args:
         raw_content: Raw string from LLM
-        
+        escape_newline_latex_commands: When False, skip only the pre-escapes of
+            LaTeX commands that start with ``\\n`` (\\nabla, \\newline, \\notin,
+            \\neq, \\neg, \\not, \\nu), so a JSON ``\\n`` line break before a word
+            such as "using" stays a line break. For callers whose model text
+            carries no raw LaTeX math (it is masked as placeholders).
+
     Returns:
         Sanitized JSON string ready for parsing
     """
@@ -713,7 +718,11 @@ def sanitize_json_response(raw_content: str) -> str:
         (r'(?<!\\)\\underline', r'\\\\underline'),
         (r'(?<!\\)\\uparrow', r'\\\\uparrow'),
     ]
-    
+    if not escape_newline_latex_commands:
+        dangerous_latex_commands = [
+            entry for entry in dangerous_latex_commands if not entry[0].startswith(r'(?<!\\)\\n')
+        ]
+
     sanitized = content
     
     # Apply pre-escaping for dangerous LaTeX commands
@@ -921,16 +930,19 @@ def sanitize_json_response(raw_content: str) -> str:
     return sanitized
 
 
-def parse_json(response_content: str) -> dict:
+def parse_json(response_content: str, *, escape_newline_latex_commands: bool = True) -> dict:
     """
     Parse JSON response from LLM with sanitization.
-    
+
     Handles common LLM output quirks like reasoning tokens, markdown blocks,
     control tokens, and LaTeX escape sequences.
-    
+
     Args:
         response_content: Raw response string to parse
-        
+        escape_newline_latex_commands: Passed to ``sanitize_json_response``;
+            False keeps JSON ``\\n`` escapes before words such as "using" or
+            "neg..." as line breaks instead of reading them as LaTeX commands.
+
     Returns:
         Parsed JSON dict
         
@@ -961,7 +973,10 @@ def parse_json(response_content: str) -> dict:
     
     # Sanitize and parse
     try:
-        sanitized_content = sanitize_json_response(response_content)
+        sanitized_content = sanitize_json_response(
+            response_content,
+            escape_newline_latex_commands=escape_newline_latex_commands,
+        )
         result = json.loads(sanitized_content)
     except ValueError as e:
         # Handle explicit "No JSON found" errors from sanitization

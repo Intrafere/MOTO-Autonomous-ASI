@@ -63,6 +63,21 @@ test.each(['openai_codex_oauth', 'openrouter'])('normalizes max against the actu
   }
 });
 
+test('keeps a compiler prompt typed while the backend prompt lookup is pending across a tab switch', async () => {
+  compilerAPI.getPrompt.mockImplementation(() => new Promise(() => {}));
+  const props = { activeTab: 'compiler-interface', capabilities: { genericMode: false, lmStudioEnabled: true } };
+
+  const firstMount = render(<CompilerInterface {...props} />);
+  fireEvent.change(screen.getByLabelText('Compiler-Directing Prompt:'), { target: { value: 'typed before lookup finished' } });
+  firstMount.unmount();
+
+  render(<CompilerInterface {...props} />);
+
+  await waitFor(() => {
+    expect(screen.getByLabelText('Compiler-Directing Prompt:')).toHaveValue('typed before lookup finished');
+  });
+});
+
 test('keeps single paper writer start and output controls available in the prompt composer', async () => {
   render(
     <CompilerInterface

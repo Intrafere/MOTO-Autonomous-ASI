@@ -46,6 +46,19 @@ from backend.aggregator.validation.contradiction_checker import contradiction_ch
 logger = logging.getLogger(__name__)
 
 
+class BatchValidationContractError(RuntimeError):
+    """A dual/triple validator reply that cannot be used as one decision per submission.
+
+    This is operational, never a decision: no submission is accepted or rejected
+    because of it. The coordinator restores the batch to the queue and validates
+    those submissions one at a time.
+    """
+
+    def __init__(self, message: str, *, batch_size: int) -> None:
+        super().__init__(message)
+        self.batch_size = batch_size
+
+
 class ValidatorAgent:
     """
     Validator agent that validates submissions sequentially.
@@ -757,22 +770,17 @@ class ValidatorAgent:
             )
             call_metadata = api_client_manager.extract_call_metadata(response)
             
-            if not response or not response.get("choices"):
-                logger.error("Batch validator: No choices in response")
-                # Notify task completed (failed but still completed)
+            def contract_error(message: str) -> BatchValidationContractError:
+                logger.error("Batch validator: %s", message)
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
-                return [
-                    ValidationResult(
-                        submission_id=s.submission_id,
-                        decision="reject",
-                        reasoning="Validation LLM error: no response",
-                        summary="Internal error",
-                        json_valid=False
-                    )
-                    for s in submissions
-                ]
-            
+                return BatchValidationContractError(message, batch_size=batch_size)
+
+            if not response or not response.get("choices"):
+                raise contract_error(
+                    f"The validator returned no reply for a batch of {batch_size} submissions."
+                )
+
             # Extract content
             message = response["choices"][0]["message"]
             llm_output = extract_message_text(message)
@@ -787,64 +795,43 @@ class ValidatorAgent:
                 if retry_call_metadata:
                     call_metadata = retry_call_metadata
                 if parsed is None:
-                    return [
-                        ValidationResult(
-                            submission_id=s.submission_id,
-                            decision="reject",
-                            reasoning=f"Validator JSON error: {e}",
-                            summary="Validator output error",
-                            json_valid=False,
-                            metadata={"llm_call": call_metadata}
-                        )
-                        for s in submissions
-                    ]
+                    raise contract_error(
+                        f"The validator's batch reply was not valid JSON after a repair attempt ({e})."
+                    )
+            if not isinstance(parsed, dict):
+                raise contract_error("The validator's batch reply was not a JSON object.")
 
-            # Extract decisions from parsed response
+            # Deterministic contract checks before any decision is used:
+            # exactly one well-formed, correctly numbered decision per submission.
             decisions_list = parsed.get("decisions", [])
-            
-            if len(decisions_list) != batch_size:
-                logger.error(
-                    f"Batch validator: Expected {batch_size} decisions, got {len(decisions_list)}"
+            if not isinstance(decisions_list, list) or len(decisions_list) != batch_size:
+                count = len(decisions_list) if isinstance(decisions_list, list) else "no"
+                raise contract_error(
+                    f"Expected {batch_size} decisions for this batch, got {count}."
                 )
-                return [
-                    ValidationResult(
-                        submission_id=s.submission_id,
-                        decision="reject",
-                        reasoning=f"Invalid batch response: wrong number of decisions",
-                        summary="Validator response format error",
-                        json_valid=False
-                    )
-                    for s in submissions
-                ]
-            # Verify submission_number fields match expected order
-            for i in range(batch_size):
+            for i, decision_data in enumerate(decisions_list):
                 expected_number = i + 1  # 1-indexed
-                actual_number = decisions_list[i].get("submission_number")
+                if not isinstance(decision_data, dict):
+                    raise contract_error(f"Decision {expected_number} was not a JSON object.")
+                actual_number = decision_data.get("submission_number")
                 if actual_number != expected_number:
-                    logger.error(
-                        f"Batch validator: Decision order mismatch at position {i}: "
-                        f"submission_number={actual_number}, expected {expected_number}. "
-                        f"LLM returned decisions out of order."
+                    raise contract_error(
+                        f"Decision order mismatch at position {i}: submission_number="
+                        f"{actual_number!r}, expected {expected_number}."
                     )
-                    # Reject entire batch for safety
-                    return [
-                        ValidationResult(
-                            submission_id=s.submission_id,
-                            decision="reject",
-                            reasoning=f"Validator response format error: decisions returned out of order",
-                            summary="Internal error - decision ordering mismatch",
-                            json_valid=False
-                        )
-                        for s in submissions
-                    ]
-            
+                if decision_data.get("decision") not in ("accept", "reject"):
+                    raise contract_error(
+                        f"Decision {expected_number} has decision="
+                        f"{decision_data.get('decision')!r}, expected accept or reject."
+                    )
+
             # Create validation results using verified order
             results = []
             for i, submission in enumerate(submissions):
                 decision_data = decisions_list[i]
-                
+
                 # Extract summary with fallback for rejections
-                decision = decision_data.get("decision", "reject")
+                decision = decision_data["decision"]
                 reasoning = decision_data.get("reasoning", "")
                 summary = decision_data.get("summary", "").strip()
                 
@@ -903,6 +890,7 @@ class ValidatorAgent:
             ContextAllocationError,
             RetryableProviderError,
             ProviderRepairRequiredError,
+            BatchValidationContractError,
         ):
             raise
         except Exception as e:
@@ -922,16 +910,10 @@ class ValidatorAgent:
                     output_reserve=rag_config.validator_max_output_tokens,
                 ) from e
             logger.error(f"Batch quality assessment failed: {e}", exc_info=True)
-            return [
-                ValidationResult(
-                    submission_id=s.submission_id,
-                    decision="reject",
-                    reasoning=f"Quality assessment error: {e}",
-                    summary="Internal error",
-                    json_valid=False
-                )
-                for s in submissions
-            ]
+            raise BatchValidationContractError(
+                f"Batch validation could not complete ([{type(e).__name__}] {e}).",
+                batch_size=len(submissions),
+            ) from e
     
     async def _retry_batch_json_parse(
         self, 

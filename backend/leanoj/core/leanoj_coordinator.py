@@ -95,6 +95,7 @@ from backend.shared.proof_search.assistant_coordinator import assistant_proof_se
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.token_tracker import token_tracker
 from backend.shared.utils import count_tokens
+from backend.shared.atomic_json import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +371,7 @@ class LeanOJCoordinator:
         self.solution_path_manager = None
         self._control_generation = 0
         self._control_lock = asyncio.Lock()
+        self._persist_lock = asyncio.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -894,10 +896,10 @@ class LeanOJCoordinator:
                 )
         base = self._sessions_base_dir()
         if base.exists():
-            shutil.rmtree(base)
+            await asyncio.to_thread(shutil.rmtree, base)
         partial_base = self._partial_proofs_base_dir()
         if partial_base.exists():
-            shutil.rmtree(partial_base)
+            await asyncio.to_thread(shutil.rmtree, partial_base)
         await leanoj_context_manager.clear_all()
 
         self._running = False
@@ -2182,8 +2184,10 @@ class LeanOJCoordinator:
             return
 
         theorem_statement = str(proof_payload.get("theorem_statement") or "").strip()
-        lean_code = str(proof_payload.get("lean_code") or "").strip()
-        if not theorem_statement or not lean_code:
+        # Keep the exact checked bytes: the compile receipt hashes them, and
+        # Lean's checked source always ends with a newline.
+        lean_code = str(proof_payload.get("lean_code") or "")
+        if not theorem_statement or not lean_code.strip():
             return
 
         subproof_id = f"brainstorm_proof_{self._state.brainstorm_acceptance_events + 1}_{uuid.uuid4().hex[:6]}"
@@ -3567,8 +3571,7 @@ class LeanOJCoordinator:
     async def _write_master_proof(self, content: str, *, summary: str = "") -> None:
         path = self._master_proof_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(path, "w", encoding="utf-8") as f:
-            await f.write(content or "")
+        await asyncio.to_thread(atomic_write_text, path, content or "")
         self._set_master_proof_metadata(content or "", summary=summary, increment_version=True)
 
     async def _read_master_proof_old_attempt_before_redo(self) -> str:
@@ -3585,8 +3588,7 @@ class LeanOJCoordinator:
     async def _write_master_proof_old_attempt_before_redo(self, content: str) -> None:
         path = self._master_proof_old_attempt_before_redo_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(path, "w", encoding="utf-8") as f:
-            await f.write(content or "")
+        await asyncio.to_thread(atomic_write_text, path, content or "")
 
     async def _append_master_proof_edit(self, record: dict[str, Any]) -> None:
         path = self._master_proof_edit_log_path()
@@ -3710,9 +3712,8 @@ class LeanOJCoordinator:
     @staticmethod
     async def _write_jsonl_records(path: Path, records: list[dict[str, Any]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(path, "w", encoding="utf-8") as f:
-            for record in records:
-                await f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        payload = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+        await asyncio.to_thread(atomic_write_text, path, payload)
 
     def _select_master_proof_seed(self, request: LeanOJStartRequest) -> str:
         for proof in reversed(self._partial_proofs):
@@ -5863,26 +5864,30 @@ class LeanOJCoordinator:
         await self._broadcast("leanoj_status_updated", self.get_status())
 
     async def _persist_state(self) -> None:
-        session_dir = self._session_dir()
-        session_dir.mkdir(parents=True, exist_ok=True)
-        self._ensure_accepted_idea_records()
-        payload = self.get_status()
-        if self._request is not None:
-            payload["request"] = self._request.model_dump(mode="json")
-        payload["task_sequences"] = dict(self._task_sequences)
-        payload["completed_task_ids"] = sorted(self.completed_task_ids)
-        await leanoj_context_manager.write_session_artifacts(
-            session_id=self._state.session_id,
-            accepted_ideas=self._accepted_ideas,
-            accepted_idea_records=self._accepted_idea_records,
-            verified_subproofs=self._verified_subproof_dicts(),
-            partial_proofs=self._partial_proofs,
-            failed_subproofs=self._failed_context_dicts(),
-            final_attempts=self._final_attempts,
-            final_cycle_packets=self._final_cycle_packets,
-        )
-        async with aiofiles.open(session_dir / "state.json", "w", encoding="utf-8") as f:
-            await f.write(json.dumps(payload, indent=2))
+        # Parallel submitter and validator tasks persist concurrently; serialize
+        # so each state.json publication is one complete, ordered snapshot.
+        async with self._persist_lock:
+            session_dir = self._session_dir()
+            session_dir.mkdir(parents=True, exist_ok=True)
+            self._ensure_accepted_idea_records()
+            payload = self.get_status()
+            if self._request is not None:
+                payload["request"] = self._request.model_dump(mode="json")
+            payload["task_sequences"] = dict(self._task_sequences)
+            payload["completed_task_ids"] = sorted(self.completed_task_ids)
+            await leanoj_context_manager.write_session_artifacts(
+                session_id=self._state.session_id,
+                accepted_ideas=self._accepted_ideas,
+                accepted_idea_records=self._accepted_idea_records,
+                verified_subproofs=self._verified_subproof_dicts(),
+                partial_proofs=self._partial_proofs,
+                failed_subproofs=self._failed_context_dicts(),
+                final_attempts=self._final_attempts,
+                final_cycle_packets=self._final_cycle_packets,
+            )
+            await asyncio.to_thread(
+                atomic_write_text, session_dir / "state.json", json.dumps(payload, indent=2)
+            )
 
     def _session_dir(self) -> Path:
         session_id = self._state.session_id or "latest"

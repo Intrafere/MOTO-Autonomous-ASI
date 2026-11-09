@@ -5,8 +5,12 @@ import {
   getLeanOJProofPresentation,
   getNoveltyGroupAnchorIds,
   sanitizeDomId,
+  getProofTranslationParts,
 } from '../../utils/proofPresentation';
 import { formatRunPromptPreview } from '../../utils/researchRunHistory';
+import useTranslatedDocuments from '../../hooks/useTranslatedDocuments';
+import TranslationLanguageSwitch from '../translation/TranslationLanguageSwitch';
+import TranslationPendingNotice from '../translation/TranslationPendingNotice';
 import '../autonomous/FinalAnswerLibrary.css';
 import '../autonomous/ProofLibrary.css';
 
@@ -34,6 +38,17 @@ function getLeanOJProofCardId(proof) {
 
 function getLeanOJRunKey(proof) {
   return proof.run_id || proof.session_id || `orphan:${proof.proof_id}`;
+}
+
+// Only the prose fields this view displays are translated; Lean code, templates,
+// ids, theorem names, and metadata always stay original.
+const LEANOJ_LIBRARY_TRANSLATION_FIELDS = ['theorem_statement', 'novelty_group_claim'];
+const NO_TRANSLATION_DOCUMENTS = [];
+
+const LEANOJ_TRANSLATE_ALL_MODES = ['leanoj'];
+
+function getProofTranslationKey(proof) {
+  return `proof:leanoj:${proof.library_id || proof.proof_id}`;
 }
 
 function matchesSelectedLeanOJProof(proof, selectedProofId, selectedSessionId = '', selectedRunId = '') {
@@ -158,6 +173,35 @@ export default function LeanOJProofLibrary({
     final: proofs.filter((proof) => proof.proof_kind === 'final').length,
     subproof: proofs.filter((proof) => proof.proof_kind === 'subproof').length,
   }), [proofs]);
+
+  // Library proofs are translated when opened: only the expanded, fully loaded entry.
+  const expandedListProof = useMemo(
+    () => (expandedId ? proofs.find((proof) => getLeanOJProofCardId(proof) === expandedId) || null : null),
+    [expandedId, proofs]
+  );
+  const translationDocuments = useMemo(() => {
+    if (
+      !expandedListProof
+      || !expandedProof
+      || loadingContentId === expandedId
+      || String(expandedProof.proof_id || '') !== String(expandedListProof.proof_id || '')
+    ) {
+      return NO_TRANSLATION_DOCUMENTS;
+    }
+    return [{
+      docKey: getProofTranslationKey(expandedListProof),
+      kind: 'proof',
+      title: expandedProof.theorem_name || expandedProof.proof_id,
+      profile: 'fields',
+      parts: getProofTranslationParts(expandedProof, LEANOJ_LIBRARY_TRANSLATION_FIELDS),
+    }];
+  }, [expandedId, expandedListProof, expandedProof, loadingContentId]);
+  const translation = useTranslatedDocuments(translationDocuments);
+  // Translated prose for this card's opened entry when ready; otherwise `original`.
+  const getDisplayedProofText = (listProof, field, original) => {
+    const translated = translation.byKey[getProofTranslationKey(listProof)]?.parts?.[field];
+    return typeof translated === 'string' ? translated : original;
+  };
 
   const handleExpand = async (proof) => {
     const id = getLeanOJProofCardId(proof);
@@ -392,6 +436,8 @@ export default function LeanOJProofLibrary({
                       const id = getLeanOJProofCardId(proof);
                       const cardDomId = sanitizeDomId(id, 'leanoj-proof-card');
                       const detailsDomId = sanitizeDomId(id, 'leanoj-proof-details');
+                      // Each proof has its own language choice; the default comes from the translation window.
+                      const proofTranslation = translation.forKey(getProofTranslationKey(proof));
                       const isExpanded = expandedId === id;
                       const badge = getLeanOJProofPresentation(proof);
 
@@ -403,6 +449,7 @@ export default function LeanOJProofLibrary({
                                 {proof.theorem_name || proof.proof_id}
                               </h4>
                               <div className="proof-card-actions">
+                                <TranslationLanguageSwitch translation={proofTranslation} className="proof-language" />
                                 <button
                                   type="button"
                                   className="proof-header-download"
@@ -445,7 +492,7 @@ export default function LeanOJProofLibrary({
                             </div>
 
                             <p className="proof-statement">
-                              {truncate(proof.theorem_statement, 320)}
+                              {truncate(getDisplayedProofText(proof, 'theorem_statement', proof.theorem_statement), 320)}
                             </p>
 
                             {proof.source_title && (
@@ -462,6 +509,7 @@ export default function LeanOJProofLibrary({
                           </div>
 
                             <div id={detailsDomId} className="answer-content" role="region" aria-label={`Details for ${proof.theorem_name || proof.proof_id}`} hidden={!isExpanded}>
+                            {isExpanded && <TranslationPendingNotice translation={proofTranslation} translateAllModes={LEANOJ_TRANSLATE_ALL_MODES} />}
                             {isExpanded && (
                               loadingContentId === id ? (
                                 <div className="library-loading" style={{ padding: '20px' }}>
@@ -472,7 +520,7 @@ export default function LeanOJProofLibrary({
                                 <div className="proof-expanded-content">
                                   <div className="proof-detail-section">
                                     <h4>Proof Work</h4>
-                                    <p>{expandedProof.theorem_statement}</p>
+                                    <p>{getDisplayedProofText(proof, 'theorem_statement', expandedProof.theorem_statement)}</p>
                                   </div>
 
                                   {expandedProof.lean_template && (
@@ -496,7 +544,9 @@ export default function LeanOJProofLibrary({
                                         ? 'Finite verified proof group'
                                         : 'Accepted Lean statement alone'}
                                     </p>
-                                    {expandedProof.novelty_group_claim && <p>{expandedProof.novelty_group_claim}</p>}
+                                    {expandedProof.novelty_group_claim && (
+                                      <p>{getDisplayedProofText(proof, 'novelty_group_claim', expandedProof.novelty_group_claim)}</p>
+                                    )}
                                     {expandedProof.novelty_scope === 'group' && expandedProof.novelty_group_proof_ids?.length > 0 && (
                                       <p>Ranked with: {expandedProof.novelty_group_proof_ids.join(', ')}</p>
                                     )}

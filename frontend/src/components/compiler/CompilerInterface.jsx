@@ -7,10 +7,11 @@ import {
 } from '../../utils/openRouterSelection';
 import TextFileUploader from '../TextFileUploader';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
-import { readPromptDraft, readPromptDraftSync, savePromptDraft } from '../../utils/promptDraftStorage';
+import usePromptDraft from '../../hooks/usePromptDraft';
 import '../autonomous/AutonomousResearch.css';
 
 const COMPILER_PROMPT_STORAGE_KEY = 'compiler_prompt';
+const loadPersistedCompilerPrompt = async () => (await compilerAPI.getPrompt()).data?.prompt || '';
 const LEGACY_WRITER_CAMEL_PREFIX = ['high', 'Context'].join('');
 
 const isMeaningfulWriterSetting = (value, suffix) => {
@@ -48,10 +49,10 @@ function CompilerInterface({
   developerModeEnabled = false,
   connectivityStatus = null,
 }) {
-  const [compilerPrompt, setCompilerPrompt] = useState(() => (
-    readPromptDraftSync(COMPILER_PROMPT_STORAGE_KEY)
-  ));
-  const [compilerPromptDraftLoaded, setCompilerPromptDraftLoaded] = useState(false);
+  const [compilerPrompt, setCompilerPrompt] = usePromptDraft(
+    COMPILER_PROMPT_STORAGE_KEY,
+    loadPersistedCompilerPrompt
+  );
   const [status, setStatus] = useState({ is_running: false });
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState(null);
@@ -140,46 +141,6 @@ function CompilerInterface({
   useEffect(() => {
     localStorage.setItem('compiler_allowed_outputs', JSON.stringify(allowedOutputs));
   }, [allowedOutputs]);
-
-  useEffect(() => {
-    if (compilerPromptDraftLoaded) {
-      savePromptDraft(COMPILER_PROMPT_STORAGE_KEY, compilerPrompt);
-    }
-  }, [compilerPrompt, compilerPromptDraftLoaded]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const hydrateCompilerPrompt = async () => {
-      try {
-        const savedDraft = await readPromptDraft(COMPILER_PROMPT_STORAGE_KEY);
-        if (savedDraft && !cancelled) {
-          setCompilerPrompt((current) => (
-            current.trim() ? current : savedDraft
-          ));
-        }
-
-        const response = await compilerAPI.getPrompt();
-        const persistedPrompt = response.data?.prompt || '';
-        if (!persistedPrompt.trim() || cancelled) {
-          return;
-        }
-        setCompilerPrompt((current) => (
-          current.trim() ? current : persistedPrompt
-        ));
-      } catch (error) {
-        console.debug('Could not hydrate manual Compiler prompt:', error);
-      } finally {
-        if (!cancelled) {
-          setCompilerPromptDraftLoaded(true);
-        }
-      }
-    };
-
-    hydrateCompilerPrompt();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     if (proofOutputsAvailable || !allowedOutputs.mathematicalProofs) {

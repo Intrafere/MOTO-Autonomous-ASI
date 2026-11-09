@@ -200,6 +200,7 @@ class OpenRouterClient:
     """Client for OpenRouter API."""
     
     BASE_URL = "https://openrouter.ai/api/v1"
+    DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
     MAX_RETRIES = 3
     RETRY_DELAY = 2.0  # seconds
     RATE_LIMIT_COOLDOWN = 3600.0  # 1 hour in seconds
@@ -1197,7 +1198,7 @@ class OpenRouterClient:
         
         Args:
             texts: List of texts to embed
-            model: Embedding model (default: openai/text-embedding-3-small)
+            model: Embedding model (default: DEFAULT_EMBEDDING_MODEL)
         
         Returns:
             List of embedding vectors
@@ -1210,7 +1211,7 @@ class OpenRouterClient:
         if not texts:
             return []
         
-        embedding_model = model or "openai/text-embedding-3-small"
+        embedding_model = model or self.DEFAULT_EMBEDDING_MODEL
         
         # Check if embedding model is rate-limited (for free models)
         if self._is_free_model(embedding_model):

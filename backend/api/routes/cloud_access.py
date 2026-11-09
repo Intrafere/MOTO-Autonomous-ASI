@@ -218,7 +218,11 @@ def _resolve_xai_grok_redirect_uri(requested_redirect_uri: Optional[str]) -> str
     try:
         _xai_grok_callback_binding(default_redirect_uri)
     except ValueError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.error("xAI Grok OAuth redirect binding is invalid: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="xAI Grok OAuth callback binding is misconfigured.",
+        ) from exc
     if requested_redirect_uri and requested_redirect_uri != default_redirect_uri:
         raise HTTPException(
             status_code=400,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_EMPTY_PROOF_FEEDBACK,
+  LEAN_OUT_OF_MEMORY_NOT_A_PROOF_RESULT,
   LEAN_WORKSPACE_NOT_A_PROOF_RESULT,
   LEAN_WORKSPACE_REPAIR_TITLE,
   buildLeanWorkspaceRepairNotification,
@@ -19,6 +20,14 @@ describe('formatProofLeanResponse', () => {
     expect(formatProofLeanResponse(legacyEvent)).toBe(LEAN_WORKSPACE_NOT_A_PROOF_RESULT);
     expect(formatProofLeanResponse({ error_summary: 'LEAN 4 WORKSPACE ERROR: broken' }))
       .toBe(LEAN_WORKSPACE_NOT_A_PROOF_RESULT);
+  });
+
+  it('says a Lean run that ran out of memory is a RAM problem on this computer', () => {
+    const result = formatProofLeanResponse({
+      error_summary: 'LEAN 4 WORKSPACE ERROR: Lean 4 ran out of memory while loading Mathlib.',
+    });
+    expect(result).toBe(LEAN_OUT_OF_MEMORY_NOT_A_PROOF_RESULT);
+    expect(result).toContain('free memory (RAM)');
   });
 
   it('keeps ordinary Lean feedback, verified results, and timeout hints', () => {
@@ -56,5 +65,17 @@ describe('Lean workspace repair stop', () => {
     expect(formatLeanWorkspaceRepairActivity(event)).toBe(
       `${LEAN_WORKSPACE_REPAIR_TITLE}: ${event.message} ${event.terminal_guidance}`,
     );
+  });
+
+  it('uses the backend title so a memory shortage is not called a broken setup', () => {
+    const memoryEvent = {
+      ...event,
+      title: 'Not enough free memory (RAM) for Lean 4',
+      lean_workspace_failure: 'lean_out_of_memory',
+    };
+    expect(formatLeanWorkspaceRepairActivity(memoryEvent))
+      .toMatch(/^Not enough free memory \(RAM\) for Lean 4: /);
+    expect(buildLeanWorkspaceRepairNotification(memoryEvent).title)
+      .toBe('Not enough free memory (RAM) for Lean 4');
   });
 });

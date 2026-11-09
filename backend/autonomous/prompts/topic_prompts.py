@@ -38,7 +38,15 @@ DIRECT-SOLUTION PREFERENCE:
 - If the true answer is that the user's question is impossible or has no valid solution as stated, that counts as directly answering the whole question
 - If a whole-question attack is absolutely not possible in one superintelligence brainstorm, choose the next best necessary piece, or another genuinely novel incremental or indirect route, whose resolution would plausibly advance the original question
 - Use broader exploratory or background-heavy avenues only when they open a genuinely novel route toward that whole question
-- Do not choose an avenue merely because it is easier, practical, broad, or interesting if a more direct rigorous route to the user's full prompt exists
+- Do not choose an avenue merely because it is easier, practical, survey-like, or interesting if a more direct rigorous route to the user's full prompt exists
+
+KEEP THE BRAINSTORM FREE TO SOLVE:
+The brainstorm that follows is the smartest phase of this system: many parallel submitters, a validator, and repeated review rounds do the real solving there, proposing, comparing, combining, and discarding approaches. Your topic aims that brainstorm at the right territory; it must not decide the answer in advance.
+- Be clear about WHAT to attack, and leave HOW to solve it and WHAT the answer turns out to be open
+- Do not state a presumed final answer, a single predetermined construction or method, or a guaranteed solution path as the topic
+- Choose a framing broad enough that, if the most obvious approach inside it fails, the brainstorm can pivot to other approaches, refute the premise, or reach a different conclusion within the same topic
+- Prefer open forms such as "determine whether...", "find or characterize...", or "what mechanisms or designs could..." over committed forms such as "prove X via method Y" or "build design Z", unless that exact statement is the user's own question
+- Stay focused on the research goal: broad means room for competing approaches, not vagueness
 
 DECISION OPTIONS:
 1. NEW_TOPIC - Create a brand new brainstorm topic to explore
@@ -69,6 +77,7 @@ CRITICAL REQUIREMENTS:
 - Consider the existing paper library to avoid redundant explorations
 - Prefer the avenue with the strongest justified direct-answer potential for the user's whole prompt
 - Treat piecewise, incremental, or indirect topics as acceptable when they are genuinely novel and plausibly advance the route to solving the full user question
+- Keep a new topic prompt open about method and answer so the brainstorm can find, compare, and change its route
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -102,8 +111,8 @@ EXAMPLES:
 New Topic:
 {
   "action": "new_topic",
-  "topic_prompt": "Design a fault-tolerant coordination mechanism that directly preserves safety and liveness during network partitions, with explicit failure assumptions and a validation plan",
-  "reasoning": "This topic directly attacks the user's distributed-protocol objective through a concrete mechanism and verification route rather than retreating to a broad survey of consensus systems."
+  "topic_prompt": "Determine which fault-tolerant coordination mechanisms, alone or combined, can preserve both safety and liveness during network partitions, under explicit failure assumptions; if none can, characterize the obstruction",
+  "reasoning": "This topic directly attacks the user's whole distributed-protocol objective while leaving the brainstorm free to compare quorum, consensus, and reconciliation approaches, or to discover an impossibility, instead of committing in advance to one design or retreating to a broad survey of consensus systems."
 }
 
 Continue Existing:
@@ -143,6 +152,9 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 YOUR TASK:
 Validate whether the proposed topic selection represents the best use of research resources for obtaining the strongest credible, genuinely novel, rigorous direct solution to the user's exact objective.
 
+BRAINSTORM FREEDOM:
+The brainstorm that follows is the smartest phase of this system: many parallel submitters, a validator, and repeated review rounds do the real solving there. A topic should aim that brainstorm at the right territory, clear about WHAT to attack but open about HOW to solve it and WHAT the answer turns out to be. A topic that presupposes its own answer, or locks the brainstorm into one predetermined construction, method, or solution path, leaves the brainstorm stuck if that path fails. Do not reject a topic merely because it is broader than a narrower alternative, as long as it stays focused on the user's goal.
+
 VALIDATION CRITERIA:
 
 ACCEPT the topic selection if:
@@ -154,6 +166,7 @@ ACCEPT the topic selection if:
 6. The choice aggressively addresses the user's whole question where possible
 7. If it is piecewise, incremental, or indirect, it is genuinely novel and plausibly advances the full question
 8. It prefers a direct route when one is credible; otherwise it pursues a genuinely novel incremental or indirect route with a plausible path toward the answer
+9. NEW_TOPIC: The topic prompt is clear about what to attack while leaving the method and the answer open, so the brainstorm can explore, pivot, or refute approaches
 
 REJECT the topic selection if:
 1. NEW_TOPIC: The topic duplicates an existing brainstorm or completed paper
@@ -164,11 +177,12 @@ REJECT the topic selection if:
 6. It retreats to an easier adjacent/practical/background route that adds no genuine novelty toward the user's question
 7. It proposes a piecewise topic without showing a plausible path from that piece toward solving the full user question
 8. It has no plausible path, direct or indirect, toward answering the user's question
+9. NEW_TOPIC: The topic prompt presupposes its own answer or locks the brainstorm into a single predetermined construction, method, or solution path that would leave it stuck if that path fails (unless that exact statement is the user's own question)
 
 REJECTION FEEDBACK FORMAT:
 If rejecting, provide CONCRETE, ACTIONABLE guidance:
 
-"REJECTION REASON: [Duplicate Topic|Should Complete|Weak Connections|Ignores Better Avenue|etc.]
+"REJECTION REASON: [Duplicate Topic|Should Complete|Weak Connections|Ignores Better Avenue|Locks Solution Path|etc.]
 
 ISSUE: [What's wrong with the proposed selection]
 
@@ -249,6 +263,8 @@ You may:
 - Synthesize lessons from multiple candidates into a stronger question
 - Continue an existing brainstorm if the candidates reveal it is worth continuing
 - Propose something entirely new if the candidates missed a critical avenue
+
+Whichever you choose, a new topic prompt must stay an open question that leaves the brainstorm free to choose and change its approach.
 
 {candidate_questions}
 """)

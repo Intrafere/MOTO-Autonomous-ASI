@@ -117,6 +117,14 @@ async def test_real_monitor_honors_force_without_restarting_child(monkeypatch, t
     monkeypatch.setattr(module.api_client_manager, "set_autonomous_phase", lambda _: None)
     monkeypatch.setattr(module.shared_training_memory, "insights", [])
     monkeypatch.setattr(module.shared_training_memory, "reload_insights_from_current_path", AsyncMock())
+    # The loop repoints the shared-training singleton at this test's temporary
+    # brainstorm file; restore its path state so later tests never inherit it.
+    for attribute in ("_file_path", "_uses_default_path", "_root_generation"):
+        monkeypatch.setattr(
+            module.shared_training_memory,
+            attribute,
+            getattr(module.shared_training_memory, attribute),
+        )
     monkeypatch.setattr(module.brainstorm_memory, "_get_database_path", lambda _: db)
     monkeypatch.setattr(module.brainstorm_memory, "get_metadata", AsyncMock(return_value=SimpleNamespace(topic_prompt="prompt")))
     monkeypatch.setattr(module.brainstorm_memory, "get_database_content", AsyncMock(return_value="source"))

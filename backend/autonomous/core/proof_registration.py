@@ -229,6 +229,22 @@ async def _broadcast_duplicate_proof(
     await broadcast_fn("proof_registration_duplicate", event_payload)
 
 
+def ensure_compile_receipt_binds_source(
+    lean_code: str,
+    compile_receipt: Optional[LeanCompileReceipt],
+) -> None:
+    """Reject a compile receipt that was not issued for exactly these source bytes.
+
+    Callers must register the checker's exact checked source (which ends with a
+    newline), never a stripped or otherwise re-formatted copy.
+    """
+    if compile_receipt is None:
+        return
+    from backend.shared.lean_source_evidence import source_sha256
+    if compile_receipt.checked_source_sha256 != source_sha256(lean_code):
+        raise ValueError("Compile receipt does not bind the Lean source being registered")
+
+
 async def register_verified_lean_proof(
     *,
     proof_database,
@@ -270,11 +286,7 @@ async def register_verified_lean_proof(
     Historical theorem/code matches are evidence for the validator, not a
     shortcut that can suppress or pre-classify the current-run occurrence.
     """
-    if compile_receipt is not None:
-        checked_hash = compile_receipt.checked_source_sha256
-        from backend.shared.lean_source_evidence import source_sha256
-        if checked_hash != source_sha256(lean_code):
-            raise ValueError("Compile receipt does not bind the Lean source being registered")
+    ensure_compile_receipt_binds_source(lean_code, compile_receipt)
 
     if novelty_classification is None:
         active_session_id = getattr(

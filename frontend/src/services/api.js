@@ -3,6 +3,7 @@
  */
 
 import { getCloudAccessProvider } from '../utils/oauthProviders';
+import { AUTO_TRANSLATE_NAME } from '../hooks/useAutoTranslate';
 
 const API_BASE = import.meta.env.VITE_MOTO_API_BASE || '/api';
 const PROOF_STATUS_READY_CACHE_MS = 5000;
@@ -1663,6 +1664,118 @@ export const connectivityAPI = {
     });
     if (!response.ok) await throwFromResponse(response, 'Failed to update connectivity toggles');
     return response.json();
+  },
+};
+
+// Accepts viewer documents ({ docKey, kind, title, profile, parts: { name: text } })
+// or the backend shape, and sends only non-empty text parts.
+function toTranslationDocumentPayload(document) {
+  const rawParts = Array.isArray(document?.parts)
+    ? document.parts.map((part) => [part?.name, part?.text])
+    : Object.entries(document?.parts || {});
+  return {
+    doc_key: String(document?.doc_key ?? document?.docKey ?? ''),
+    kind: document?.kind || 'other',
+    title: String(document?.title || '').slice(0, 300),
+    profile: document?.profile === 'fields' ? 'fields' : 'document',
+    parts: rawParts
+      .filter(([name, text]) => typeof name === 'string' && name && typeof text === 'string' && text.trim())
+      .map(([name, text]) => ({ name, text })),
+  };
+}
+
+export const translationAPI = {
+  async getStatus() {
+    return requestJson(
+      `${API_BASE}/translation/status`,
+      { cache: 'no-store' },
+      `Failed to get ${AUTO_TRANSLATE_NAME} status`,
+    );
+  },
+
+  async getSettings() {
+    return requestJson(
+      `${API_BASE}/translation/settings`,
+      { cache: 'no-store' },
+      `Failed to get ${AUTO_TRANSLATE_NAME} settings`,
+    );
+  },
+
+  async saveSettings(settings) {
+    return requestJson(`${API_BASE}/translation/settings`, {
+      method: 'PUT',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    }, `Failed to save ${AUTO_TRANSLATE_NAME} settings`);
+  },
+
+  async control(action) {
+    return requestJson(`${API_BASE}/translation/control`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    }, `Failed to update ${AUTO_TRANSLATE_NAME}`);
+  },
+
+  async getLanguages() {
+    return requestJson(
+      `${API_BASE}/translation/languages`,
+      { cache: 'no-store' },
+      'Failed to get translation languages',
+    );
+  },
+
+  async probeLanguages() {
+    return requestJson(`${API_BASE}/translation/languages/probe`, {
+      method: 'POST',
+      cache: 'no-store',
+    }, 'Failed to check translator model languages');
+  },
+
+  // `request` saves the user's request: the documents keep translating after the viewer closes.
+  // It is sent only when set, so plain registrations stay valid for backends without it.
+  async registerDocuments({ language, viewing = true, request = false, documents = [] } = {}) {
+    return requestJson(`${API_BASE}/translation/documents`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        language: language ?? null,
+        viewing: Boolean(viewing),
+        ...(request ? { request: true } : {}),
+        documents: documents.map(toTranslationDocumentPayload),
+      }),
+    }, 'Failed to register documents for translation');
+  },
+
+  // `viewing` refreshes the looked-up documents' viewing priority.
+  async lookupDocuments({ language, docHashes = [], viewing = false } = {}) {
+    return requestJson(`${API_BASE}/translation/documents/lookup`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language, doc_hashes: docHashes, viewing: Boolean(viewing) }),
+    }, 'Failed to look up translations');
+  },
+
+  // Read-only: each document's progress in every selected language. Never registers,
+  // views, or requests a document.
+  async documentProgress({ documents = [] } = {}) {
+    return requestJson(`${API_BASE}/translation/documents/progress`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documents: documents.map(toTranslationDocumentPayload) }),
+    }, 'Failed to read translation progress');
+  },
+
+  async clearCache() {
+    return requestJson(`${API_BASE}/translation/cache?confirm=true`, {
+      method: 'DELETE',
+      cache: 'no-store',
+    }, 'Failed to clear stored translations');
   },
 };
 

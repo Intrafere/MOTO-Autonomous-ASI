@@ -19,6 +19,8 @@ import {
 } from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 import { readBooleanStorage } from '../../utils/safeStorage';
+import { viewedPdfMetadata } from '../../utils/translatedDownloads';
+import useViewedTranslations from '../../hooks/useViewedTranslations';
 
 const LiveTier3Progress = ({ api, status, capabilities }) => {
   const [paperData, setPaperData] = useState(null);
@@ -26,6 +28,7 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
   const [autoScroll, setAutoScroll] = useState(true);
   const [isExpanded, setIsExpanded] = useState(true);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const { reportView, downloadFor } = useViewedTranslations();
   const [isResetting, setIsResetting] = useState(false);
   const containerRef = useRef(null);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
@@ -119,8 +122,8 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
 
   const handleDownloadRaw = () => {
     if (!paperData?.content) return;
-    const filename = sanitizeFilename(paperData.title || 'tier3_final_answer');
-    downloadRawText(paperData.content, filename, paperData.outline, 'paper');
+    const download = downloadFor(paperData.content, sanitizeFilename(paperData.title || 'tier3_final_answer'));
+    downloadRawText(download.content, download.filename, paperData.outline, 'paper');
   };
 
   const handleDownloadPdf = async () => {
@@ -131,18 +134,18 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
 
     if (!paperData?.content) return;
 
-    const filename = sanitizeFilename(paperData.title || 'tier3_final_answer');
-    const metadata = {
+    const download = downloadFor(paperData.content, sanitizeFilename(paperData.title || 'tier3_final_answer'));
+    const metadata = viewedPdfMetadata({
       title: paperData.title || 'Final Answer',
       wordCount: paperData.word_count,
       date: new Date().toLocaleDateString(),
       models: null,
-    };
+    }, download);
 
     await downloadPDFViaBackend(
-      paperData.content,
+      download.content,
       metadata,
-      filename,
+      download.filename,
       paperData.outline || null,
       () => setIsDownloadingPdf(true),
       () => setIsDownloadingPdf(false),
@@ -348,10 +351,13 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
                 <h4>{paperData.title || 'Final Answer Content'}</h4>
                 <PaperProofViewer
                   documentId={`tier3:${paperData.session_id || status?.session_id || ''}:${paperData.paper_id || paperData.chapter_index || paperData.title || 'final'}`}
+                  translationKind="live_paper"
+                  translationTitle={paperData.title || 'Final Answer'}
                   prefixContent={paperData.outline ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n` : ''}
                   content={prependDisclaimer(paperData.content, 'paper')}
                   metrics={paperData}
                   className="live-tier3-latex-renderer"
+                  onTranslationView={reportView}
                 />
               </div>
             ) : (

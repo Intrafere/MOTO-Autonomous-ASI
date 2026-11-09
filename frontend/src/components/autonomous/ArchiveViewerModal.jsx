@@ -111,7 +111,7 @@ export default function ArchiveViewerModal({ answerId, onClose }) {
             <>
               {activeTab === 'papers' && (
                 selectedPaper ? (
-                  <PaperDetailView paper={selectedPaper} onBack={() => setSelectedPaper(null)} />
+                  <PaperDetailView paper={selectedPaper} answerId={answerId} onBack={() => setSelectedPaper(null)} />
                 ) : (
                   <PapersListView papers={papers} onSelectPaper={loadPaperDetails} />
                 )
@@ -157,7 +157,8 @@ function PapersListView({ papers, onSelectPaper }) {
   );
 }
 
-function PaperDetailView({ paper, onBack }) {
+function PaperDetailView({ paper, answerId, onBack }) {
+  const paperId = paper.paper_id || paper.metadata?.paper_id || '';
   return (
     <div>
       <button onClick={onBack} className="archive-back-btn">
@@ -176,6 +177,9 @@ function PaperDetailView({ paper, onBack }) {
           <h3 className="archive-section-heading">Paper Content</h3>
           <div className="archive-content-viewer">
             <PaperProofViewer
+              documentId={`archive:${answerId}:${paperId}`}
+              translationTitle={paper.metadata?.title || ''}
+              translationEnabled={Boolean(paper.content)}
               prefixContent={paper.outline ? `${paper.outline}\n\n${'='.repeat(80)}\n\n` : ''}
               content={paper.content}
               metrics={paper}

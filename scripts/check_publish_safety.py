@@ -94,6 +94,7 @@ _RUNTIME_FOLDERS = frozenset({
     "auto_sessions", "auto_brainstorms", "auto_papers", "auto_final_answer", "manual_proofs",
     "manual_proof_runs", "leanoj_sessions", "leanoj_artifacts", "leanoj_partial_proofs", "chroma_db",
     "solution_paths", "syntheticlib_trade", "lean4_workspace", "user_uploads",
+    "auto_translations",
 })
 _RUNTIME_FILES = frozenset({
     "runtime_settings.json", "provider_notifications.json", "rag_shared_training.txt",

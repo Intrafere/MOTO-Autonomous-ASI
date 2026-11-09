@@ -71,6 +71,25 @@ def _resolve_boost_api_key(api_key: Optional[str], *, allow_current_override: bo
     )
 
 
+def _validate_boost_limits(config: BoostConfig) -> None:
+    """Reject limits that would make every boosted call fail at dispatch time.
+
+    A zero max-output setting raises inside the boost route, which the
+    primary-route fallback logs as a generic boost error; Boost then silently
+    never applies while the UI shows it enabled.
+    """
+    if int(config.boost_max_output_tokens or 0) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Boost requires a positive max output token setting.",
+        )
+    if int(config.boost_context_window or 0) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Boost requires a positive context window setting.",
+        )
+
+
 @router.post("/api/boost/enable")
 async def enable_boost(config: BoostConfig) -> Dict[str, Any]:
     """
@@ -83,6 +102,7 @@ async def enable_boost(config: BoostConfig) -> Dict[str, Any]:
         Status and boost configuration
     """
     try:
+        _validate_boost_limits(config)
         explicit_api_key = (config.openrouter_api_key or "").strip()
         effective_api_key = _resolve_boost_api_key(explicit_api_key)
         
@@ -144,6 +164,7 @@ async def update_boost_model(config: BoostConfig) -> Dict[str, Any]:
         Status and updated configuration
     """
     try:
+        _validate_boost_limits(config)
         # Validate that boost is currently enabled
         if not boost_manager.boost_config or not boost_manager.boost_config.enabled:
             raise HTTPException(

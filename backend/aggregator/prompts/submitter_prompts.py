@@ -92,7 +92,7 @@ DIRECT-SOLUTION PREFERENCE:
 
 META-PHASE EXCEPTION:
 If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, follow that requested output format exactly:
-- For TOPIC EXPLORATION PHASE, propose one candidate brainstorm question optimized to directly answer the user's whole prompt if answered, or to target a novel piece, incremental step, or indirect route toward it when a whole-answer route is not possible in one shot
+- For TOPIC EXPLORATION PHASE, propose one candidate brainstorm question optimized to directly answer the user's whole prompt if answered, or to target a novel piece, incremental step, or indirect route toward it when a whole-answer route is not possible in one shot; keep it clear about what to attack but open about method and answer, because the later brainstorm is the main solving phase and must stay free to explore, pivot, or refute approaches rather than being locked into a presumed solution path
 - For PAPER TITLE EXPLORATION PHASE, propose one candidate paper title optimized for communicating the paper's direct answer-bearing content
 - In these meta-phases, do NOT solve the underlying problem or write the paper unless the user prompt explicitly asks for that; the direct-solution preference means the candidate should point toward or communicate direct resolution
 

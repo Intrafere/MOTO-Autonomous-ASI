@@ -20,7 +20,9 @@ import PaperBatchPruneControls, {
 } from './PaperBatchPruneControls';
 import { autonomousAPI } from '../../services/api';
 import { isProofRunBusy, useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
+import useViewedTranslations from '../../hooks/useViewedTranslations';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
+import { viewedPdfMetadata } from '../../utils/translatedDownloads';
 import { websocket } from '../../services/websocket';
 
 const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities }) => {
@@ -33,6 +35,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
   const [deleteAllPrunedConfirm, setDeleteAllPrunedConfirm] = useState(false);
   const [deletingAllPruned, setDeletingAllPruned] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const { reportView, downloadFor } = useViewedTranslations();
   const [currentPrunedPapers, setCurrentPrunedPapers] = useState([]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [selectedPaperKeys, setSelectedPaperKeys] = useState(() => new Set());
@@ -212,7 +215,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       });
     } catch (error) {
       console.error('Failed to load paper content:', error);
-      setExpandedContent({ content: 'Failed to load content', outline: '', title: '' });
+      setExpandedContent({ content: 'Failed to load content', outline: '', title: '', loadFailed: true });
     } finally {
       setLoading(false);
     }
@@ -267,11 +270,11 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       return;
     }
     
-    const filename = sanitizeFilename(`${paper.is_pruned ? 'pruned_' : ''}${paper.paper_id}_${paper.title}`);
-    const content = expandedContent.content || '';
-    const outline = expandedContent.outline || '';
-    
-    downloadRawText(content, filename, outline);
+    const download = downloadFor(
+      expandedContent.content || '',
+      sanitizeFilename(`${paper.is_pruned ? 'pruned_' : ''}${paper.paper_id}_${paper.title}`),
+    );
+    downloadRawText(download.content, download.filename, expandedContent.outline || '');
   };
 
   const handleProofCheck = (e, paper) => {
@@ -314,18 +317,21 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       return;
     }
 
-    const filename = sanitizeFilename(`${paper.is_pruned ? 'pruned_' : ''}${paper.paper_id}_${paper.title}`);
-    const metadata = {
+    const download = downloadFor(
+      expandedContent.content || '',
+      sanitizeFilename(`${paper.is_pruned ? 'pruned_' : ''}${paper.paper_id}_${paper.title}`),
+    );
+    const metadata = viewedPdfMetadata({
       title: expandedContent.title || paper.title,
       wordCount: paper.word_count,
       date: paper.created_at ? new Date(paper.created_at).toLocaleDateString() : new Date().toLocaleDateString(),
       models: paper.model_usage ? Object.keys(paper.model_usage).join(', ') : null,
-    };
+    }, download);
 
     await downloadPDFViaBackend(
-      expandedContent.content || '',
+      download.content,
       metadata,
-      filename,
+      download.filename,
       expandedContent.outline || null,
       () => setIsGeneratingPDF(true),
       () => setIsGeneratingPDF(false),
@@ -695,10 +701,14 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
                       <h4>Paper Content</h4>
                       <PaperProofViewer
                         documentId={`paper:${paper.session_id || expandedContent.session_id || ''}:${paper.paper_id}`}
+                        translationTitle={paper.title || ''}
+                        // Placeholders (load failure, no content) are never sent for translation.
+                        translationEnabled={Boolean(expandedContent.content) && !expandedContent.loadFailed}
                         prefixContent={expandedContent.outline ? `${expandedContent.outline}\n\n${'='.repeat(80)}\n\n` : ''}
                         content={expandedContent.content || 'No content available'}
                         metrics={{ ...paper, ...expandedContent }}
                         className="paper-content-renderer"
+                        onTranslationView={reportView}
                       />
                     </div>
                   ) : (

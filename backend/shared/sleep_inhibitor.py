@@ -15,8 +15,22 @@ logger = logging.getLogger(__name__)
 
 POWER_REQUEST_CONTEXT_VERSION = 0
 POWER_REQUEST_CONTEXT_SIMPLE_STRING = 0x00000001
+POWER_REQUEST_DISPLAY_REQUIRED = 0
 POWER_REQUEST_SYSTEM_REQUIRED = 1
 POWER_REQUEST_EXECUTION_REQUIRED = 3
+# Set in this order and cleared in reverse. Windows requires a system-required
+# request alongside a display-required one. The display request matters on
+# Modern Standby PCs, where an idle screen-off begins standby.
+POWER_REQUEST_TYPES = (
+    POWER_REQUEST_SYSTEM_REQUIRED,
+    POWER_REQUEST_EXECUTION_REQUIRED,
+    POWER_REQUEST_DISPLAY_REQUIRED,
+)
+_POWER_REQUEST_LABELS = {
+    POWER_REQUEST_SYSTEM_REQUIRED: "system-required",
+    POWER_REQUEST_EXECUTION_REQUIRED: "execution-required",
+    POWER_REQUEST_DISPLAY_REQUIRED: "display-required",
+}
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 POWER_REQUEST_REASON = "MOTO has active autonomous or proof work"
 
@@ -111,7 +125,7 @@ class WindowsPowerRequestApi:
 
 
 class SleepInhibitor:
-    """Keep Windows awake while logical workflow owners are active.
+    """Keep Windows awake, with the display on, while logical workflow owners are active.
 
     Public methods update desired state only. A persistent worker serializes
     create/set/clear/close operations so FastAPI callers never wait on native
@@ -132,8 +146,7 @@ class SleepInhibitor:
         self._worker: Optional[threading.Thread] = None
         self._desired_active = False
         self._handle: Optional[int] = None
-        self._system_required = False
-        self._execution_required = False
+        self._active_requests: tuple[int, ...] = ()
         self._last_error = 0
         self._worker_generation = 0
 
@@ -150,55 +163,37 @@ class SleepInhibitor:
         api: PowerRequestApi,
         handle: int,
         *,
-        system_required: bool,
-        execution_required: bool,
+        active_requests: tuple[int, ...],
     ) -> int:
         last_error = 0
-        if execution_required and not api.clear(handle, POWER_REQUEST_EXECUTION_REQUIRED):
-            last_error = api.last_error()
-            logger.warning(
-                "Unable to clear Windows execution-required request (error=%s)",
-                last_error,
-            )
-        if system_required and not api.clear(handle, POWER_REQUEST_SYSTEM_REQUIRED):
-            last_error = api.last_error()
-            logger.warning(
-                "Unable to clear Windows system-required request (error=%s)",
-                last_error,
-            )
+        for request_type in reversed(active_requests):
+            if not api.clear(handle, request_type):
+                last_error = api.last_error()
+                logger.warning(
+                    "Unable to clear Windows %s request (error=%s)",
+                    _POWER_REQUEST_LABELS[request_type],
+                    last_error,
+                )
         if not api.close(handle):
             last_error = api.last_error()
             logger.warning("Unable to close Windows Power Request handle (error=%s)", last_error)
         return last_error
 
-    def _create_request(self) -> tuple[Optional[int], bool, bool, int]:
+    def _create_request(self) -> tuple[Optional[int], tuple[int, ...], int]:
+        """Create one handle holding every request type, or roll back and report the error."""
         api = self._get_power_api()
         handle = api.create(POWER_REQUEST_REASON)
         if handle is None:
-            return None, False, False, api.last_error()
+            return None, (), api.last_error()
 
-        system_required = api.set(handle, POWER_REQUEST_SYSTEM_REQUIRED)
-        if not system_required:
-            error = api.last_error()
-            self._cleanup_request(
-                api,
-                handle,
-                system_required=False,
-                execution_required=False,
-            )
-            return None, False, False, error
-
-        execution_required = api.set(handle, POWER_REQUEST_EXECUTION_REQUIRED)
-        if not execution_required:
-            error = api.last_error()
-            self._cleanup_request(
-                api,
-                handle,
-                system_required=True,
-                execution_required=False,
-            )
-            return None, False, False, error
-        return handle, True, True, 0
+        active_requests: tuple[int, ...] = ()
+        for request_type in POWER_REQUEST_TYPES:
+            if not api.set(handle, request_type):
+                error = api.last_error()
+                self._cleanup_request(api, handle, active_requests=active_requests)
+                return None, (), error
+            active_requests += (request_type,)
+        return handle, active_requests, 0
 
     def _run_worker(self, generation: int) -> None:
         while True:
@@ -209,14 +204,13 @@ class SleepInhibitor:
                     return
                 desired_active = self._desired_active
                 handle = self._handle
-                system_required = self._system_required
-                execution_required = self._execution_required
+                active_requests = self._active_requests
 
             if desired_active and handle is None:
                 try:
-                    new_handle, new_system, new_execution, error = self._create_request()
+                    new_handle, new_requests, error = self._create_request()
                 except Exception:
-                    new_handle, new_system, new_execution, error = None, False, False, 0
+                    new_handle, new_requests, error = None, (), 0
                     logger.exception("Unable to establish Windows Power Request")
 
                 with self._lock:
@@ -225,8 +219,7 @@ class SleepInhibitor:
                     )
                     if still_desired and new_handle is not None:
                         self._handle = new_handle
-                        self._system_required = new_system
-                        self._execution_required = new_execution
+                        self._active_requests = new_requests
                         self._last_error = 0
                     elif still_desired:
                         self._last_error = error
@@ -234,11 +227,10 @@ class SleepInhibitor:
                     self._cleanup_request(
                         self._get_power_api(),
                         new_handle,
-                        system_required=new_system,
-                        execution_required=new_execution,
+                        active_requests=new_requests,
                     )
                 if still_desired and new_handle is not None:
-                    logger.info("Windows idle-sleep and execution inhibition active")
+                    logger.info("Windows idle-sleep, execution, and display inhibition active")
                     continue
                 if not still_desired:
                     self._state_changed.set()
@@ -258,14 +250,12 @@ class SleepInhibitor:
                     if self._handle != handle:
                         continue
                     self._handle = None
-                    self._system_required = False
-                    self._execution_required = False
+                    self._active_requests = ()
                 try:
                     error = self._cleanup_request(
                         self._get_power_api(),
                         handle,
-                        system_required=system_required,
-                        execution_required=execution_required,
+                        active_requests=active_requests,
                     )
                 except Exception:
                     error = 0
@@ -276,7 +266,7 @@ class SleepInhibitor:
                         generation == self._worker_generation and self._desired_active
                     )
                 logger.info(
-                    "Windows idle-sleep and execution inhibition released"
+                    "Windows idle-sleep, execution, and display inhibition released"
                 )
                 if reactivation_needed:
                     self._state_changed.set()
@@ -349,21 +339,22 @@ class SleepInhibitor:
     @property
     def native_active(self) -> bool:
         with self._lock:
-            return (
-                self._handle is not None
-                and self._system_required
-                and self._execution_required
-            )
+            return self._handle is not None and self._active_requests == POWER_REQUEST_TYPES
 
     @property
     def system_required_active(self) -> bool:
         with self._lock:
-            return self._system_required
+            return POWER_REQUEST_SYSTEM_REQUIRED in self._active_requests
 
     @property
     def execution_required_active(self) -> bool:
         with self._lock:
-            return self._execution_required
+            return POWER_REQUEST_EXECUTION_REQUIRED in self._active_requests
+
+    @property
+    def display_required_active(self) -> bool:
+        with self._lock:
+            return POWER_REQUEST_DISPLAY_REQUIRED in self._active_requests
 
     @property
     def last_error(self) -> int:

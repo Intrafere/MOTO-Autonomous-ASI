@@ -17,6 +17,8 @@ import {
 } from '../../utils/downloadHelpers';
 import { buildResearchRunGroups, formatRunPromptPreview } from '../../utils/researchRunHistory';
 import { isProofRunBusy, useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
+import useViewedTranslations from '../../hooks/useViewedTranslations';
+import { viewedPdfMetadata } from '../../utils/translatedDownloads';
 import { websocket } from '../../services/websocket';
 import './FinalAnswerLibrary.css';
 import './AutonomousResearch.css';
@@ -50,6 +52,7 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
   const [expandedId, setExpandedId] = useState(null);
   const [expandedContent, setExpandedContent] = useState(null);
   const [loadingContentId, setLoadingContentId] = useState(null);
+  const { reportView, downloadFor } = useViewedTranslations();
   const [searchTerm, setSearchTerm] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
@@ -310,6 +313,7 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
         content: 'Failed to load content',
         outline: '',
         title: paper.title,
+        loadFailed: true,
       });
     } finally {
       setLoadingContentId(null);
@@ -325,12 +329,11 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
     }
 
     const filenamePrefix = paper.is_pruned ? 'pruned_' : '';
-    const filename = sanitizeFilename(`${filenamePrefix}${paper.session_id}_${paper.paper_id}_${paper.title}`);
-    downloadRawText(
+    const download = downloadFor(
       expandedContent.content || '',
-      filename,
-      expandedContent.outline || ''
+      sanitizeFilename(`${filenamePrefix}${paper.session_id}_${paper.paper_id}_${paper.title}`),
     );
+    downloadRawText(download.content, download.filename, expandedContent.outline || '');
   };
 
   const handleDownloadPDF = async (e, paper) => {
@@ -347,18 +350,21 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
     }
 
     const filenamePrefix = paper.is_pruned ? 'pruned_' : '';
-    const filename = sanitizeFilename(`${filenamePrefix}${paper.session_id}_${paper.paper_id}_${paper.title}`);
-    const metadata = {
+    const download = downloadFor(
+      expandedContent.content || '',
+      sanitizeFilename(`${filenamePrefix}${paper.session_id}_${paper.paper_id}_${paper.title}`),
+    );
+    const metadata = viewedPdfMetadata({
       title: expandedContent.title || paper.title,
       wordCount: paper.word_count,
       date: paper.created_at ? new Date(paper.created_at).toLocaleDateString() : new Date().toLocaleDateString(),
       models: paper.model_usage ? Object.keys(paper.model_usage).join(', ') : null,
-    };
+    }, download);
 
     await downloadPDFViaBackend(
-      expandedContent.content || '',
+      download.content,
       metadata,
-      filename,
+      download.filename,
       expandedContent.outline || null,
       () => setGeneratingPdfId(paper.history_id),
       () => setGeneratingPdfId(null),
@@ -779,10 +785,16 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
                               <div className="paper-section">
                                 <h4>Paper Content</h4>
                                 <PaperProofViewer
+                                  documentId={`paper:${paper.session_id}:${paper.paper_id}`}
+                                  translationTitle={expandedContent.title || paper.title || ''}
+                                  // Placeholders (load failure, no content) are never sent for translation.
+                                  translationEnabled={Boolean(expandedContent.content) && !expandedContent.loadFailed}
+                                  translateAllModes={['autonomous']}
                                   prefixContent={expandedContent.outline ? `${expandedContent.outline}\n\n${'='.repeat(80)}\n\n` : ''}
                                   content={expandedContent.content || 'No content available'}
                                   metrics={{ ...paper, ...expandedContent }}
                                   className="paper-content-renderer"
+                                  onTranslationView={reportView}
                                 />
                               </div>
                             ) : (

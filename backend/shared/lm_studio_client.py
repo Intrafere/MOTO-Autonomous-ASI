@@ -54,7 +54,8 @@ class LMStudioClient:
     EMBEDDING_BATCH_SIZE = 100  # Process embeddings in batches of 100
     EMBEDDING_TIMEOUT = None  # No timeout - continuous runtime
     MAX_RETRIES = 1  # Fail fast when LM Studio unavailable (OpenRouter fallback)
-    RETRY_DELAY = 0.5  # seconds (not used when MAX_RETRIES=1)
+    RETRY_DELAY = 0.5  # seconds; doubles per retry when a caller asks for more attempts
+    MAX_EMBEDDING_RETRY_DELAY = 15.0  # seconds
     
     # Rate limiting semaphores
     _embedding_semaphore = asyncio.Semaphore(2)  # Max 2 concurrent embedding requests
@@ -690,10 +691,15 @@ class LMStudioClient:
         model: str = None,
         quiet: bool = False,
         retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        max_attempts: Optional[int] = None,
     ) -> List[List[float]]:
         """
         Get embeddings using LM Studio API with rate limiting.
         Optimized with batching, retry logic, and performance metrics.
+
+        ``max_attempts`` defaults to failing fast (``MAX_RETRIES``) so an absent
+        LM Studio does not delay the first embedding; callers that must stay on
+        LM Studio pass more attempts and get exponential backoff between them.
         """
         if not texts:
             return []
@@ -723,6 +729,7 @@ class LMStudioClient:
                         embedding_model,
                         quiet=quiet,
                         retry_callback=retry_callback,
+                        max_attempts=max_attempts,
                     )
                     all_embeddings.extend(batch_embeddings)
                 
@@ -741,7 +748,7 @@ class LMStudioClient:
                 log_method = logger.debug if quiet else logger.error
                 log_method(
                     f"Failed to get embeddings after {elapsed:.2f}s "
-                    f"({len(texts)} texts): {e}"
+                    f"({len(texts)} texts): [{type(e).__name__}] {e}"
                 )
                 raise
     
@@ -751,9 +758,11 @@ class LMStudioClient:
         model: str,
         quiet: bool = False,
         retry_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        max_attempts: Optional[int] = None,
     ) -> List[List[float]]:
         """Get embeddings with retry logic for transient failures."""
-        for attempt in range(1, self.MAX_RETRIES + 1):
+        attempts = max(1, int(max_attempts or self.MAX_RETRIES))
+        for attempt in range(1, attempts + 1):
             try:
                 payload = {
                     "model": model,
@@ -774,12 +783,16 @@ class LMStudioClient:
                 ]
                 return embeddings
                 
-            except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
-                if attempt < self.MAX_RETRIES:
+            except (httpx.TransportError, httpx.HTTPStatusError) as e:
+                if attempt < attempts:
+                    retry_after = min(
+                        self.RETRY_DELAY * (2 ** (attempt - 1)),
+                        self.MAX_EMBEDDING_RETRY_DELAY,
+                    )
                     log_method = logger.debug if quiet else logger.warning
                     log_method(
-                        f"Embedding attempt {attempt}/{self.MAX_RETRIES} failed: {e}. "
-                        f"Retrying in {self.RETRY_DELAY}s..."
+                        f"Embedding attempt {attempt}/{attempts} failed: "
+                        f"[{type(e).__name__}] {e}. Retrying in {retry_after}s..."
                     )
                     if retry_callback is not None:
                         await retry_callback({
@@ -787,8 +800,8 @@ class LMStudioClient:
                             "provider_label": "LM Studio",
                             "model": model,
                             "retry_attempt": attempt,
-                            "max_attempts": self.MAX_RETRIES,
-                            "retry_after_seconds": self.RETRY_DELAY,
+                            "max_attempts": attempts,
+                            "retry_after_seconds": retry_after,
                             "reason": "embedding_retry",
                             "error_summary": redact_log_text(
                                 f"[{type(e).__name__}] {e}",
@@ -802,8 +815,8 @@ class LMStudioClient:
                                 "provider_label": "LM Studio",
                                 "model": model,
                                 "retry_attempt": attempt,
-                                "max_attempts": self.MAX_RETRIES,
-                                "retry_after_seconds": self.RETRY_DELAY,
+                                "max_attempts": attempts,
+                                "retry_after_seconds": retry_after,
                                 "reason": "embedding_retry",
                                 "error_summary": redact_log_text(
                                     f"[{type(e).__name__}] {e}",
@@ -814,11 +827,13 @@ class LMStudioClient:
                         )
                 else:
                     log_method = logger.debug if quiet else logger.error
-                    log_method(f"Embedding failed after {self.MAX_RETRIES} attempts: {e}")
+                    log_method(
+                        f"Embedding failed after {attempts} attempts: [{type(e).__name__}] {e}"
+                    )
                     raise
             except Exception as e:
                 log_method = logger.debug if quiet else logger.error
-                log_method(f"Embedding failed with unexpected error: {e}")
+                log_method(f"Embedding failed with unexpected error: [{type(e).__name__}] {e}")
                 raise
         raise RuntimeError("Embedding retry loop exhausted without returning or raising")
     

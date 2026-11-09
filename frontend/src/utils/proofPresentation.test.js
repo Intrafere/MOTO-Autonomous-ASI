@@ -5,6 +5,8 @@ import {
   classifyProofNovelty,
   formatProofProvenance,
   getProofLiveContextRiskWarnings,
+  getProofTranslationParts,
+  PROOF_TRANSLATION_FIELDS,
   sanitizeDomId,
 } from './proofPresentation';
 
@@ -114,5 +116,36 @@ describe('proof presentation', () => {
     }, {
       status: 'active',
     }).expected_run_id).toBe('proof-creation-run');
+  });
+});
+
+describe('proof translation parts', () => {
+  const proof = {
+    proof_id: 'proof_001',
+    theorem_name: 'add_zero_right',
+    theorem_statement: 'For every natural number $n$, $n + 0 = n$.',
+    formal_sketch: '   ',
+    novelty_reasoning: 'Known identity.',
+    novelty_group_claim: null,
+    lean_code: 'theorem add_zero_right (n : Nat) : n + 0 = n := rfl',
+  };
+
+  test('keeps only non-empty prose fields and never Lean code or identifiers', () => {
+    expect(PROOF_TRANSLATION_FIELDS).toEqual([
+      'theorem_statement',
+      'formal_sketch',
+      'novelty_reasoning',
+      'novelty_group_claim',
+    ]);
+    expect(getProofTranslationParts(proof)).toEqual({
+      theorem_statement: 'For every natural number $n$, $n + 0 = n$.',
+      novelty_reasoning: 'Known identity.',
+    });
+  });
+
+  test('limits the parts to the fields a view displays', () => {
+    expect(getProofTranslationParts(proof, ['theorem_statement'])).toEqual({
+      theorem_statement: 'For every natural number $n$, $n + 0 = n$.',
+    });
   });
 });

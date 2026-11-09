@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 PROVIDER_NOTIFICATIONS_FILENAME = "provider_notifications.json"
 MAX_PROVIDER_NOTIFICATIONS = 20
 PROVIDER_NOTIFICATION_TTL_SECONDS = 7 * 24 * 60 * 60
+PROVIDER_NOTIFICATION_WORKFLOW_MODES = frozenset(
+    {"autonomous", "aggregator", "compiler", "leanoj", "manual_proof_check", "translation"}
+)
+# Auto Top-p Translate runs beside the workflows and retries without a cap, so
+# its notifications are capped separately and are evicted first, keeping room
+# for the workflow notifications that page reloads recover.
+BACKGROUND_NOTIFICATION_WORKFLOW_MODE = "translation"
+MAX_BACKGROUND_PROVIDER_NOTIFICATIONS = 5
 # Route identity fields stored right after ``model``. ``route_identity`` holds
 # the composed display prefix and must fit it byte-for-byte (composer cap 480).
 _ROUTE_IDENTITY_TEXT_LIMITS = (
@@ -104,7 +112,29 @@ def _clean_notifications(notifications: list[Any]) -> list[dict[str, Any]]:
             if cooldown_until and cooldown_until <= int(now):
                 continue
         cleaned.append(item)
-    return cleaned[-MAX_PROVIDER_NOTIFICATIONS:]
+    return _trim_notifications(cleaned)
+
+
+def _is_background_notification(notification: dict[str, Any]) -> bool:
+    return notification.get("workflow_mode") == BACKGROUND_NOTIFICATION_WORKFLOW_MODE
+
+
+def _trim_notifications(notifications: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the newest background notifications within their own cap, then fit the total.
+
+    Over the total cap, background (translation) notifications are evicted
+    before any workflow notification, oldest first.
+    """
+    background = [index for index, item in enumerate(notifications) if _is_background_notification(item)]
+    dropped = set(background[:-MAX_BACKGROUND_PROVIDER_NOTIFICATIONS])
+    kept = [item for index, item in enumerate(notifications) if index not in dropped]
+    while len(kept) > MAX_PROVIDER_NOTIFICATIONS:
+        oldest_background = next(
+            (index for index, item in enumerate(kept) if _is_background_notification(item)),
+            0,
+        )
+        del kept[oldest_background]
+    return kept
 
 
 def _safe_string(value: Any, max_chars: int = 700) -> str:
@@ -163,8 +193,7 @@ def record_provider_notification(event_type: str, payload: Dict[str, Any]) -> di
         "notification_kind": _safe_string(payload.get("notification_kind"), 80) or "oauth",
         "workflow_mode": (
             _safe_string(payload.get("workflow_mode"), 40)
-            if _safe_string(payload.get("workflow_mode"), 40)
-            in {"autonomous", "aggregator", "compiler", "leanoj", "manual_proof_check"}
+            if _safe_string(payload.get("workflow_mode"), 40) in PROVIDER_NOTIFICATION_WORKFLOW_MODES
             else ""
         ),
         "run_id": _safe_string(payload.get("run_id"), 160),
@@ -216,14 +245,21 @@ def record_provider_notification(event_type: str, payload: Dict[str, Any]) -> di
             if item.get("notification_key") != notification_key and item.get("id") != notification_id
         ]
         notifications.append(notification)
-        stored_payload["notifications"] = notifications[-MAX_PROVIDER_NOTIFICATIONS:]
-        persisted = _write_payload(stored_payload)
+        trimmed = _trim_notifications(notifications)
+        # A background notification can be trimmed in the same write that adds it.
+        retained = any(item is notification for item in trimmed)
+        stored_payload["notifications"] = trimmed
+        written = _write_payload(stored_payload)
+        persisted = written and retained
 
     notification["persistence_status"] = "durable" if persisted else "degraded"
     notification["persistence_degraded"] = not persisted
     if not persisted:
         persistence_detail = (
-            "Live activity was delivered, but durable recovery storage was unavailable."
+            "Live activity was delivered, but recovery storage keeps workflow notifications "
+            "first, so this background notification was not stored."
+            if written
+            else "Live activity was delivered, but durable recovery storage was unavailable."
         )
         notification["persistence_detail"] = persistence_detail
         notification["activity_detail"] = persistence_detail

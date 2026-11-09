@@ -13,6 +13,7 @@ from backend.shared.models import (
     CompilerStartRequest,
     ProofCheckRequest,
     ProofSettingsUpdateRequest,
+    ProofStatusResponse,
     SubmitterConfig,
 )
 
@@ -495,6 +496,68 @@ class ProofStatusReadinessTests(IsolatedAsyncioTestCase):
         self.assertTrue(payload["manual_check_ready"])
         self.assertEqual(payload["workspace_state"], "not_started")
         self.assertEqual(payload["manual_check_message"], "Lean 4 will finish preparing before verification.")
+
+    async def _status_for_failed_workspace(self, *, failure_kind: str, retry_available: bool) -> dict:
+        previous_lean_enabled = proofs_route.system_config.lean4_enabled
+        previous_smt_enabled = proofs_route.system_config.smt_enabled
+        proofs_route.system_config.lean4_enabled = True
+        proofs_route.system_config.smt_enabled = False
+
+        class FailedLeanClient:
+            def get_workspace_status(self):
+                return {
+                    "state": "failed",
+                    "ready": False,
+                    "error": "LEAN 4 WORKSPACE ERROR: setup failed.",
+                    "failure_kind": failure_kind,
+                    "retry_available": retry_available,
+                }
+
+            def get_cached_version(self):
+                return ""
+
+            def get_mathlib_commit(self):
+                return ""
+
+            def is_server_active(self):
+                return False
+
+        try:
+            with mock.patch.object(
+                proofs_route,
+                "_get_manual_check_status",
+                mock.AsyncMock(return_value=(True, "")),
+            ):
+                with mock.patch.object(proofs_route, "get_lean4_client", return_value=FailedLeanClient()):
+                    payload = await proofs_route.get_proofs_status()
+        finally:
+            proofs_route.system_config.lean4_enabled = previous_lean_enabled
+            proofs_route.system_config.smt_enabled = previous_smt_enabled
+        ProofStatusResponse(**payload)
+        return payload
+
+    async def test_retryable_workspace_failure_keeps_manual_checks_queueable(self) -> None:
+        # Queuing a check restarts Lean setup, so a failed setup never needs a restart.
+        payload = await self._status_for_failed_workspace(
+            failure_kind="lean_out_of_memory",
+            retry_available=True,
+        )
+
+        self.assertTrue(payload["manual_check_ready"])
+        self.assertTrue(payload["workspace_retry_available"])
+        self.assertEqual(payload["workspace_failure_kind"], "lean_out_of_memory")
+        self.assertIn("LEAN 4 WORKSPACE ERROR: setup failed.", payload["manual_check_message"])
+        self.assertIn("retries Lean 4 setup first", payload["manual_check_message"])
+
+    async def test_too_long_workspace_path_still_blocks_manual_checks(self) -> None:
+        payload = await self._status_for_failed_workspace(
+            failure_kind="lean_workspace_path_too_long",
+            retry_available=False,
+        )
+
+        self.assertFalse(payload["manual_check_ready"])
+        self.assertFalse(payload["workspace_retry_available"])
+        self.assertEqual(payload["manual_check_message"], "LEAN 4 WORKSPACE ERROR: setup failed.")
 
     async def test_manual_aggregator_snapshot_does_not_fall_back_to_autonomous_config(self) -> None:
         autonomous_snapshot = {

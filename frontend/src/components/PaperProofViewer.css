@@ -7,6 +7,13 @@
   margin-bottom: 0.85rem;
 }
 
+.paper-proof-viewer-controls {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
 .paper-proof-view-toggle {
   display: inline-flex;
   gap: 0.25rem;

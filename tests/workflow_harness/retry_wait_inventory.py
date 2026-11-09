@@ -209,6 +209,14 @@ WAIT_POLICIES: tuple[WaitPolicy, ...] = (
         "Cooperative event-loop yield after non-blocking enqueue.",
     ),
     _policy(
+        "backend/shared/translation/service.py",
+        "TranslationService._debounce",
+        1,
+        WaitClassification.NON_RETRY,
+        "Auto Top-p Translate scan and Translate all enumeration debounce that coalesces bursts of requests "
+        "into one run; not a retry.",
+    ),
+    _policy(
         "backend/aggregator/core/coordinator.py",
         "Coordinator._validator_loop",
         1,
@@ -291,7 +299,6 @@ WAIT_POLICIES: tuple[WaitPolicy, ...] = (
         1,
         WaitClassification.NON_RETRY,
         "Filesystem cleanup retry, outside provider/API Live Activity scope.",
-        call="time.sleep",
     ),
     _policy(
         "backend/autonomous/core/autonomous_coordinator.py",

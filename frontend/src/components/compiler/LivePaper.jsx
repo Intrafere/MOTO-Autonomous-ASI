@@ -10,6 +10,8 @@ import {
   sanitizeFilename,
 } from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
+import { viewedPdfMetadata } from '../../utils/translatedDownloads';
+import useViewedTranslations from '../../hooks/useViewedTranslations';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import ProofCheckModeModal from '../autonomous/ProofCheckModeModal';
 import ProofRunStatusControls from '../autonomous/ProofRunStatusControls';
@@ -29,6 +31,7 @@ function LivePaper({ capabilities }) {
   const [autoScroll, setAutoScroll] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const { reportView, downloadFor } = useViewedTranslations();
   const [proofActionMessage, setProofActionMessage] = useState('');
   const [proofCheckModalOpen, setProofCheckModalOpen] = useState(false);
   const [proofCheckStarting, setProofCheckStarting] = useState(false);
@@ -184,18 +187,18 @@ function LivePaper({ capabilities }) {
       return;
     }
 
-    const filename = sanitizeFilename('compiler_paper');
-    const metadata = {
+    const download = downloadFor(paper, sanitizeFilename('compiler_paper'));
+    const metadata = viewedPdfMetadata({
       title: 'Compiler Paper',
       wordCount: wordCount,
       date: new Date().toLocaleDateString(),
       models: null,
-    };
+    }, download);
 
     await downloadPDFViaBackend(
-      paper,
+      download.content,
       metadata,
-      filename,
+      download.filename,
       outline,
       () => setIsGeneratingPDF(true),
       () => setIsGeneratingPDF(false),
@@ -215,8 +218,8 @@ function LivePaper({ capabilities }) {
       return;
     }
     
-    const filename = sanitizeFilename('compiler_paper');
-    downloadRawText(paper, filename, outline, 'paper');
+    const download = downloadFor(paper, sanitizeFilename('compiler_paper'));
+    downloadRawText(download.content, download.filename, outline, 'paper');
   };
 
   const handleProofCheck = () => {
@@ -369,9 +372,13 @@ function LivePaper({ capabilities }) {
       <div className="paper-container" ref={paperContainerRef}>
         {paper ? (
           <PaperProofViewer
+            documentId="compiler:live-paper"
+            translationKind="live_paper"
+            translationTitle="Compiler Paper"
             content={prependDisclaimer(paper, 'paper')}
             metrics={paperMetrics}
             className="paper-content-renderer"
+            onTranslationView={reportView}
           />
         ) : (
           <div className="paper-empty">

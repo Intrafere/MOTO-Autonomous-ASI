@@ -341,10 +341,22 @@ function getLeanRuntimeUnavailableMessage(proofStatus) {
   if (versionUnavailable) {
     return 'Lean 4 executable is not available.';
   }
-  if (proofStatus.workspace_state === 'failed') {
+  // A retryable setup failure does not block checks: queuing one retries setup.
+  if (proofStatus.workspace_state === 'failed' && !proofStatus.workspace_retry_available) {
     return proofStatus.workspace_error || 'Lean 4 workspace preparation failed.';
   }
   return '';
+}
+
+const LEAN_SETUP_RETRY_NOTICE = 'Starting a proof check retries Lean 4 setup first, so no restart is needed.';
+
+/** Tooltip note when the last Lean setup failed but a new check will retry it. */
+function getLeanSetupRetryNotice(proofStatus) {
+  if (proofStatus?.workspace_state !== 'failed' || !proofStatus.workspace_retry_available) {
+    return '';
+  }
+  const error = proofStatus.workspace_error || 'Lean 4 workspace preparation failed.';
+  return `${error} ${LEAN_SETUP_RETRY_NOTICE}`;
 }
 
 function canUseLocalProofRuntimeConfig(proofStatus, sourceType, sourceId) {
@@ -719,7 +731,7 @@ export function useProofCheckRuntime() {
         return proofStatus.manual_check_message || 'Manual proof checks are not ready yet.';
       }
     }
-    return '';
+    return getLeanSetupRetryNotice(proofStatus);
   }, [proofStatus]);
 
   const manualCheckReason = useMemo(() => {
@@ -738,7 +750,7 @@ export function useProofCheckRuntime() {
         return proofStatus.manual_check_message || 'Manual proof checks are not ready yet.';
       }
     }
-    return '';
+    return getLeanSetupRetryNotice(proofStatus);
   }, [proofStatus, hasCurrentProofRuntimeConfig]);
 
   return {

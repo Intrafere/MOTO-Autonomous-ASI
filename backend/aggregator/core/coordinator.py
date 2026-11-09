@@ -30,8 +30,9 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
 )
+from backend.shared.atomic_json import atomic_write_text
 from backend.aggregator.agents.submitter import SubmitterAgent, free_model_exhaustion_route_identity
-from backend.aggregator.agents.validator import ValidatorAgent
+from backend.aggregator.agents.validator import BatchValidationContractError, ValidatorAgent
 from backend.aggregator.core.context_allocator import ContextAllocationError
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.core.rag_manager import rag_manager
@@ -105,7 +106,11 @@ class Coordinator:
         self.cleanup_reviews_performed = 0
         self.removals_proposed = 0
         self.removals_executed = 0
-        
+
+        # Submissions restored after a malformed batch reply are validated one
+        # at a time; this counts how many single validations remain.
+        self._individual_validations_pending = 0
+
         # WebSocket broadcaster (set by FastAPI app)
         self.websocket_broadcaster: Optional[Callable] = None
         
@@ -199,8 +204,7 @@ class Coordinator:
         }
         try:
             self.stats_file_path.parent.mkdir(parents=True, exist_ok=True)
-            async with aiofiles.open(self.stats_file_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(stats, indent=2))
+            await asyncio.to_thread(atomic_write_text, self.stats_file_path, json.dumps(stats, indent=2))
             logger.debug("Saved stats to file")
         except Exception as e:
             logger.error(f"Failed to save stats: {e}")
@@ -321,6 +325,7 @@ class Coordinator:
         self.acceptance_count_offset = max(0, acceptance_count_offset)
         self.acceptance_cap_callback = acceptance_cap_callback
         self._acceptance_cap_reached = False
+        self._individual_validations_pending = 0
         self.solution_path_manager = solution_path_manager
         self.solution_path_acceptance_count_owner = solution_path_acceptance_count_owner
         self.proof_database_store = proof_database_store
@@ -881,9 +886,11 @@ class Coordinator:
                 await self._check_and_update_pause_state()
                 
                 # Get batch of up to 3 submissions from queue
-                submissions = await queue_manager.dequeue_batch(max_count=3)
+                submissions = await queue_manager.dequeue_batch(
+                    max_count=self._validation_batch_limit()
+                )
                 in_flight_submissions = submissions
-                
+
                 if not submissions:
                     logger.debug(f"Validator iteration {iteration} - queue empty, waiting...")
                     await asyncio.sleep(1)
@@ -900,7 +907,8 @@ class Coordinator:
                     logger.info("Skipping validator result processing after workflow stop/context overflow")
                     break
                 in_flight_submissions = []
-                
+                self._note_validations_done(len(submissions))
+
                 # Process results
                 for submission, result in zip(submissions, results):
                     if result.decision == "accept" or self._is_verified_brainstorm_proof_submission(submission):
@@ -916,6 +924,10 @@ class Coordinator:
             except asyncio.CancelledError:
                 logger.info(f"Validator loop cancelled at iteration {iteration}")
                 break
+            except BatchValidationContractError as e:
+                restored = in_flight_submissions
+                in_flight_submissions = []
+                await self._validate_restored_batch_individually(restored, e)
             except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
                 await queue_manager.prepend_batch(in_flight_submissions)
@@ -962,6 +974,9 @@ class Coordinator:
                 break
             except Exception as e:
                 logger.error(f"Validator loop error on iteration {iteration}: {e}", exc_info=True)
+                # Keep dequeued work: an unexpected error is not a decision.
+                await queue_manager.prepend_batch(in_flight_submissions)
+                in_flight_submissions = []
                 await api_client_manager.emit_and_wait_for_retry(
                     {
                         "provider": "unknown",
@@ -1040,9 +1055,11 @@ class Coordinator:
                     # Check queue size and update pause state BEFORE dequeuing (proactive pause)
                     await self._check_and_update_pause_state()
                     
-                    submissions = await queue_manager.dequeue_batch(max_count=3)
+                    submissions = await queue_manager.dequeue_batch(
+                        max_count=self._validation_batch_limit()
+                    )
                     in_flight_submissions = submissions
-                    
+
                     if not submissions:
                         # Queue empty - move to next round
                         break
@@ -1059,7 +1076,8 @@ class Coordinator:
                         logger.info("Skipping single-model validator result processing after workflow stop/context overflow")
                         break
                     in_flight_submissions = []
-                    
+                    self._note_validations_done(len(submissions))
+
                     for submission, result in zip(submissions, results):
                         if result.decision == "accept" or self._is_verified_brainstorm_proof_submission(submission):
                             await self._handle_acceptance(submission, result)
@@ -1082,6 +1100,10 @@ class Coordinator:
             except asyncio.CancelledError:
                 logger.info(f"Single-model workflow cancelled at round {round_number}")
                 break
+            except BatchValidationContractError as e:
+                restored = in_flight_submissions
+                in_flight_submissions = []
+                await self._validate_restored_batch_individually(restored, e)
             except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
                 await queue_manager.prepend_batch(in_flight_submissions)
@@ -1129,6 +1151,9 @@ class Coordinator:
                 break
             except Exception as e:
                 logger.error(f"Single-model workflow error at round {round_number}: {e}", exc_info=True)
+                # Keep dequeued work: an unexpected error is not a decision.
+                await queue_manager.prepend_batch(in_flight_submissions)
+                in_flight_submissions = []
                 await api_client_manager.emit_and_wait_for_retry(
                     {
                         "provider": "unknown",
@@ -1146,6 +1171,58 @@ class Coordinator:
         
         logger.warning(f"Single-model workflow EXITED after {round_number} rounds")
     
+    def _validation_batch_limit(self) -> int:
+        """Batch up to 3 submissions unless restored submissions need single validation."""
+        return 1 if self._individual_validations_pending > 0 else 3
+
+    def _note_validations_done(self, count: int) -> None:
+        self._individual_validations_pending = max(
+            0, self._individual_validations_pending - count
+        )
+
+    async def _validate_restored_batch_individually(
+        self,
+        submissions: List[Submission],
+        error: BatchValidationContractError,
+    ) -> None:
+        """Restore a batch whose validator reply broke the batch contract.
+
+        No decision was made, so nothing is accepted or rejected and no submitter
+        receives rejection feedback. The submissions go back to the front of the
+        queue in order and are validated one at a time, which has no multi-decision
+        contract and sees each earlier acceptance before judging the next one.
+        """
+        await queue_manager.prepend_batch(submissions)
+        self._individual_validations_pending = max(
+            self._individual_validations_pending, len(submissions)
+        )
+        logger.warning(
+            "Validator batch reply broke the batch contract; restored %d submissions "
+            "for one-at-a-time validation: %s",
+            len(submissions),
+            error,
+        )
+        await api_client_manager.emit_and_wait_for_retry(
+            {
+                "provider": self.validator_provider,
+                "provider_label": "Aggregator validator",
+                "model": self.validator_model,
+                "role_id": "aggregator_validator",
+                "retry_after_seconds": 1,
+                "reason": "validator_batch_contract",
+                "error_summary": str(error),
+                "message": (
+                    "Aggregator validator reply was not one decision per submission "
+                    f"({str(error).rstrip('.')}). No decision was recorded and no submitter "
+                    f"is penalized; these {len(submissions)} submissions are back in the queue "
+                    "and will be validated one at a time."
+                ),
+            },
+            role_id="aggregator_validator",
+            should_stop=lambda: not self.is_running,
+            error=error,
+        )
+
     async def _handle_acceptance(self, submission: Submission, result: ValidationResult) -> None:
         """Handle accepted submission."""
         next_total_acceptances = self.acceptance_count_offset + self.total_acceptances + 1
@@ -1310,8 +1387,10 @@ class Coordinator:
             return
 
         theorem_statement = str(proof_payload.get("theorem_statement") or "").strip()
-        lean_code = str(proof_payload.get("lean_code") or "").strip()
-        if not theorem_statement or not lean_code:
+        # Keep the exact checked bytes: the compile receipt hashes them, and
+        # Lean's checked source always ends with a newline.
+        lean_code = str(proof_payload.get("lean_code") or "")
+        if not theorem_statement or not lean_code.strip():
             return
 
         try:

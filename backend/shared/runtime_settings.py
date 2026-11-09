@@ -214,6 +214,29 @@ def set_subscription_endpoint_region(provider_id: str, region_id: str) -> None:
     _write_settings(payload)
 
 
+_AUTO_TRANSLATE_KEY = "auto_translate"
+
+
+def get_auto_translate_runtime_settings() -> Dict[str, Any] | None:
+    """Return the persisted Auto Top-p Translate settings payload, or ``None``."""
+    settings = _read_settings().get(_AUTO_TRANSLATE_KEY)
+    return dict(settings) if isinstance(settings, dict) else None
+
+
+def save_auto_translate_runtime_settings(payload: Dict[str, Any] | None) -> None:
+    """Persist (or with ``None``, remove) the Auto Top-p Translate settings payload.
+
+    The payload holds languages and translator role configs only; prompts and
+    model responses are never stored here.
+    """
+    settings = _read_settings()
+    if payload is None:
+        settings.pop(_AUTO_TRANSLATE_KEY, None)
+    else:
+        settings[_AUTO_TRANSLATE_KEY] = dict(payload)
+    _write_settings(settings)
+
+
 def get_persisted_connectivity_toggles() -> Dict[str, bool]:
     """Return persisted connectivity toggles, omitting fields not yet saved."""
     toggles = _read_settings().get("connectivity_toggles")

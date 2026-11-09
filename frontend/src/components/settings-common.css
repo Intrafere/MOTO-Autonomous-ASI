@@ -16,7 +16,16 @@
 /* Provider toggle button group */
 .provider-toggle-group {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+/* Cloud provider picker beside the provider buttons: moves to its own line
+   instead of overflowing when the settings column is narrow. */
+.provider-toggle-group .provider-toggle-select {
+  width: auto;
+  min-width: min(150px, 100%);
+  max-width: 100%;
 }
 
 .provider-toggle-btn {

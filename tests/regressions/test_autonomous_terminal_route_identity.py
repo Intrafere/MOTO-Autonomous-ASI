@@ -8,6 +8,11 @@ from backend.autonomous.memory.research_metadata import research_metadata
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import system_config
 from backend.shared.context_overflow import CONTEXT_OVERFLOW_STOP_MESSAGE
+from backend.shared.lean4_client import (
+    LEAN_OUT_OF_MEMORY_TITLE,
+    LEAN_WORKSPACE_OUT_OF_MEMORY,
+    LeanWorkspaceRepairRequiredError,
+)
 from backend.shared.models import AutonomousTerminalEvent
 from backend.shared.provider_errors import ProviderRepairRequiredError
 from backend.shared.provider_route_identity import route_identity_fields, with_route_identity
@@ -173,3 +178,31 @@ async def test_parent_provider_repair_notification_carries_route_identity(monkey
     assert payload["notification_key"] == (
         "openrouter:aggregator_submitter_2:spending_limit:vendor/test-model"
     )
+
+
+@pytest.mark.asyncio
+async def test_lean_out_of_memory_stop_names_the_memory_cause(monkeypatch):
+    coordinator = _coordinator()
+    events = []
+
+    async def capture(event_type, payload):
+        events.append((event_type, payload))
+
+    coordinator.set_broadcast_callback(capture)
+    monkeypatch.setattr(research_metadata, "get_stats", AsyncMock(return_value={}))
+    monkeypatch.setattr(research_metadata, "save_terminal_event", AsyncMock(return_value=True))
+    error = LeanWorkspaceRepairRequiredError(
+        failure_kind=LEAN_WORKSPACE_OUT_OF_MEMORY,
+        message="Lean 4 ran out of memory while loading Mathlib because this computer is low on free memory (RAM).",
+        terminal_guidance="Free memory, then press Start again.",
+    )
+
+    coordinator._mark_lean_workspace_repair_stop(error.to_payload())
+    await coordinator._broadcast_stopped_once()
+
+    assert coordinator._terminal_event.title == LEAN_OUT_OF_MEMORY_TITLE
+    event_type, payload = events[0]
+    assert event_type == "auto_research_stopped"
+    # The Live Activity line and the repair popup both name the memory cause.
+    assert "low on free memory (RAM)" in payload["message"]
+    assert payload["title"] == LEAN_OUT_OF_MEMORY_TITLE

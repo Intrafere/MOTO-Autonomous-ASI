@@ -33,6 +33,9 @@ def atomic_write_log_lines(path: Path, lines: Iterable[str]) -> None:
         if os.name == "posix":
             os.chmod(temporary_path, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            # fdopen owns the descriptor from here; closing it again below
+            # could close an unrelated file another thread has since opened.
+            descriptor = None
             handle.writelines(lines)
             handle.flush()
             os.fsync(handle.fileno())
@@ -40,9 +43,10 @@ def atomic_write_log_lines(path: Path, lines: Iterable[str]) -> None:
         if os.name == "posix":
             path.chmod(0o600)
     except Exception:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         temporary_path.unlink(missing_ok=True)
         raise

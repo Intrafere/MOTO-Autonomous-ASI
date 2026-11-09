@@ -22,6 +22,43 @@ const HOSTED_FEATURES = {
   ],
 };
 
+// Mirrors GET /api/translation/status while Auto Top-p Translate is off.
+const DISABLED_TRANSLATION_STATUS = {
+  success: true,
+  enabled: false,
+  paused: false,
+  batch_translation: false,
+  modes: ['autonomous', 'aggregator', 'compiler'],
+  max_parallel_jobs: 1,
+  state: 'disabled',
+  status_label: 'disabled',
+  message: 'Foreign Language Translation w/ Top-p is off.',
+  generation: 0,
+  languages: [],
+  queue: [],
+  active: [],
+  repair: null,
+  translate_all: {
+    requested: false,
+    state: 'off',
+    documents: 0,
+    complete_documents: 0,
+    translated_units: 0,
+    pending_units: 0,
+    message: '',
+  },
+  usage: {
+    calls: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    accepted_attempts: 0,
+    rejected_attempts: 0,
+    finalized_parts: 0,
+    check_failures: 0,
+  },
+  recent_activity: [],
+};
+
 const IDLE_STATUS = {
   is_running: false,
   current_tier: null,
@@ -64,9 +101,19 @@ function responseFor(method, path, state) {
         syntheticlib4: { status: 'Coming soon', enabled: false },
         agent_conversation_memory: { status: 'ready', enabled: true },
         wolfram_alpha: { status: 'inactive', enabled: false },
+        auto_translate: {
+          status: 'disabled',
+          enabled: false,
+          active: false,
+          message: 'Foreign Language Translation w/ Top-p is off.',
+          languages: [],
+          pending_units: 0,
+        },
       },
     };
   }
+  // The app-level translation provider reads status on mount and on WebSocket connect.
+  if (method === 'GET' && path === '/api/translation/status') return DISABLED_TRANSLATION_STATUS;
   if (method === 'GET' && path === '/api/update-notice') return { update_available: false };
   if (method === 'GET' && path === '/api/aggregator/models') return { models: [] };
   if (method === 'GET' && path === '/api/aggregator/status') return { is_running: false };

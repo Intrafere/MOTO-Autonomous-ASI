@@ -382,6 +382,120 @@ class Lean4WorkspaceRepairTests(unittest.IsolatedAsyncioTestCase):
                 await client._prune_mathlib_cache("lake")
             run_process.assert_not_awaited()
 
+    # Captured from `lake env lean MOTOProofWorkspace.lean` under a per-process
+    # memory cap (Lean 4.35, Windows): the forms Lean prints when Windows
+    # refuses its allocations.
+    _CORE_OLEAN_MEMORY_OUTPUT = (
+        "error: failed to read file 'c:\\elan\\toolchains\\leanprover--lean4---v4.35.0"
+        "\\lib\\lean\\Lean\\Elab\\InfoTree\\Main.olean'"
+    )
+    _MATHLIB_OLEAN_MEMORY_OUTPUT = (
+        "MOTOProofWorkspace.lean:1:0: error: failed to read file 'C:\\ws\\.lake\\packages\\mathlib"
+        "\\.lake\\build\\lib\\lean\\Mathlib\\Algebra\\Group\\Equiv\\Defs.olean.private'"
+    )
+
+    def test_memory_failure_output_is_recognized_without_catching_proof_errors(self) -> None:
+        for output in (
+            self._CORE_OLEAN_MEMORY_OUTPUT,
+            self._MATHLIB_OLEAN_MEMORY_OUTPUT,
+            "INTERNAL PANIC: out of memory",
+            "The paging file is too small for this operation to complete.",
+        ):
+            self.assertTrue(lean4_client.is_lean_memory_failure_output(output), output)
+        for output in (
+            "error: failed to read file 'C:\\ws\\Mathlib\\Defs.olean', invalid header",
+            "error: failed to read file 'C:\\ws\\Mathlib\\Defs.olean', incompatible header",
+            "Proof.lean:3:2: error: unsolved goals",
+            "Proof.lean:1:8: error: unknown identifier 'foo'",
+        ):
+            self.assertFalse(lean4_client.is_lean_memory_failure_output(output), output)
+
+    async def test_out_of_memory_setup_is_retryable_and_never_wipes_the_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = self._installed_workspace(root)
+            client = self._client(root, workspace)
+            calls: list[list[str]] = []
+            memory_short = True
+
+            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
+                calls.append(args)
+                if args[1] == "env" and memory_short:
+                    return 1, "", self._CORE_OLEAN_MEMORY_OUTPUT
+                return 0, "", ""
+
+            client._run_process = fake_run_process  # type: ignore[method-assign]
+            with mock.patch.object(lean4_client.shutil, "which", side_effect=lambda name: name if name == "git" else None):
+                self.assertFalse(await client.await_workspace_ready())
+
+                self.assertTrue((workspace / ".lake" / "packages" / "mathlib").exists())
+                status = client.get_workspace_status()
+                self.assertEqual(status["state"], "failed")
+                self.assertEqual(status["failure_kind"], lean4_client.LEAN_WORKSPACE_OUT_OF_MEMORY)
+                self.assertTrue(status["retry_available"])
+                self.assertIn("ran out of memory", status["error"])
+                self.assertNotIn("Mathlib cache/workspace repair failed", status["error"])
+                with self.assertRaises(LeanWorkspaceRepairRequiredError) as raised:
+                    client.require_workspace()
+                self.assertEqual(raised.exception.failure_kind, lean4_client.LEAN_WORKSPACE_OUT_OF_MEMORY)
+                self.assertIn("memory-heavy programs", raised.exception.terminal_guidance)
+                # Every Live Activity surface reads the title and message from here.
+                event = raised.exception.to_repair_event(
+                    workflow_mode="manual_proof_check", stopped_subject="Proof check"
+                )
+                self.assertEqual(event["title"], lean4_client.LEAN_OUT_OF_MEMORY_TITLE)
+                self.assertIn("low on free memory (RAM)", event["message"])
+                self.assertIn("not a proof error", event["message"])
+
+                # Memory freed mid-session: the next proof check retries setup in place.
+                memory_short = False
+                await recover_lean_workspace(client)
+
+            self.assertTrue(client.get_workspace_status()["ready"])
+            self.assertEqual(client.get_workspace_status()["failure_kind"], "")
+            self.assertNotIn(["update"], [call[1:] for call in calls])
+
+    async def test_out_of_memory_proof_check_stops_instead_of_becoming_proof_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            client = self._client(root, self._installed_workspace(root))
+            client._workspace_ready = True
+            client._workspace_bootstrap_state = "ready"
+            calls: list[list[str]] = []
+
+            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
+                calls.append(args)
+                return 1, self._MATHLIB_OLEAN_MEMORY_OUTPUT, ""
+
+            client._run_process = fake_run_process  # type: ignore[method-assign]
+            with mock.patch.object(lean4_client.system_config, "lean4_enabled", True):
+                result = await client.check_proof("theorem t : 1 = 1 := rfl")
+
+            self.assertFalse(result.success)
+            self.assertTrue(lean4_client.is_lean_memory_error_text(result.error_output))
+            self.assertEqual(len(calls), 1)  # no cache repair, refetch, or wipe
+            with mock.patch.object(lean4_client, "get_lean4_client", return_value=client):
+                with self.assertRaises(LeanWorkspaceRepairRequiredError) as raised:
+                    raise_for_lean_workspace_failure(result)
+            self.assertEqual(raised.exception.failure_kind, lean4_client.LEAN_WORKSPACE_OUT_OF_MEMORY)
+            self.assertTrue(client.get_workspace_status()["retry_available"])
+
+            # The verified install is kept, so the retry re-confirms without Lake work.
+            calls.clear()
+            await recover_lean_workspace(client)
+            self.assertEqual(calls, [])
+            self.assertTrue(client.get_workspace_status()["ready"])
+
+    async def test_backend_memory_error_during_setup_is_a_retryable_memory_failure(self) -> None:
+        client = Lean4Client(lean_path="", workspace_dir=tempfile.gettempdir())
+        client._ensure_workspace_locked = mock.AsyncMock(side_effect=MemoryError())  # type: ignore[method-assign]
+
+        self.assertFalse(await client.await_workspace_ready())
+
+        status = client.get_workspace_status()
+        self.assertEqual(status["failure_kind"], lean4_client.LEAN_WORKSPACE_OUT_OF_MEMORY)
+        self.assertTrue(status["retry_available"])
+
     def test_workspace_failure_result_becomes_the_typed_repair_error(self) -> None:
         raise_for_lean_workspace_failure(Lean4Result(success=False, error_output="error: unsolved goals"))
         with self.assertRaises(LeanWorkspaceRepairRequiredError) as raised:
@@ -390,6 +504,7 @@ class Lean4WorkspaceRepairTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(str(raised.exception).startswith("LEAN 4 WORKSPACE ERROR"))
         self.assertEqual(raised.exception.to_payload()["reason"], "lean_workspace_repair_required")
+        self.assertEqual(raised.exception.to_payload()["title"], lean4_client.LEAN_WORKSPACE_REPAIR_TITLE)
 
 
 class Lean4ExtractionTests(unittest.IsolatedAsyncioTestCase):

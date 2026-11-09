@@ -1641,10 +1641,10 @@ class ProofDatabase:
                 )
 
             commit_task = asyncio.create_task(commit(), name="proof-live-context-bulk-commit")
+            current = asyncio.current_task()
             try:
                 new_revision = await asyncio.shield(commit_task)
             except asyncio.CancelledError:
-                current = asyncio.current_task()
                 if current is not None:
                     current.uncancel()
                 try:

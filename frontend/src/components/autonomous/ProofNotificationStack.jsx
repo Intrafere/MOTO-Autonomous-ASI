@@ -141,19 +141,19 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
                 >
                   {tier.label}
                 </div>
-                <div
-                  style={{
-                    fontSize: scalePx(10),
-                    lineHeight: 1.4,
-                    color: isGroup ? '#c4b5fd' : '#bfdbfe',
-                    marginBottom: scalePx(5),
-                    fontWeight: 700,
-                  }}
-                >
-                  {isGroup
-                    ? `Ranking applies to a finite verified group${groupSize ? ` of ${groupSize} proofs` : ''}.`
-                    : 'Ranking applies to this accepted Lean statement alone.'}
-                </div>
+                {isGroup && (
+                  <div
+                    style={{
+                      fontSize: scalePx(10),
+                      lineHeight: 1.4,
+                      color: '#c4b5fd',
+                      marginBottom: scalePx(5),
+                      fontWeight: 700,
+                    }}
+                  >
+                    {`Ranking applies to a finite verified group${groupSize ? ` of ${groupSize} proofs` : ''}.`}
+                  </div>
+                )}
                 <div
                   style={{
                     fontSize: scalePx(10),

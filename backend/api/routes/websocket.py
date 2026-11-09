@@ -2,7 +2,7 @@
 WebSocket route for real-time updates.
 """
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
-from typing import List, Dict
+from typing import Any, Callable, List, Dict
 from datetime import datetime
 import logging
 import json
@@ -141,8 +141,40 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
+# In-process observers of broadcast events (for example Auto Top-p Translate
+# rescanning outputs after paper/proof events). Observers run synchronously on
+# the event loop, so they must be cheap and non-blocking.
+EventObserver = Callable[[str, Dict[str, Any]], None]
+_event_observers: List[EventObserver] = []
+
+
+def register_event_observer(callback: EventObserver) -> None:
+    """Register a callback invoked with ``(event_type, data)`` for every broadcast."""
+    if callback not in _event_observers:
+        _event_observers.append(callback)
+
+
+def unregister_event_observer(callback: EventObserver) -> None:
+    """Remove a previously registered broadcast observer."""
+    if callback in _event_observers:
+        _event_observers.remove(callback)
+
+
+def _notify_event_observers(event_type: str, data: Dict) -> None:
+    for observer in list(_event_observers):
+        try:
+            observer(event_type, data)
+        except Exception as exc:
+            logger.debug(
+                "WebSocket event observer failed for %s: %s",
+                event_type,
+                type(exc).__name__,
+            )
+
+
 # Broadcaster function to be used by coordinator
 async def broadcast_event(event_type: str, data: Dict):
     """Broadcast an event to all WebSocket clients."""
+    _notify_event_observers(event_type, data)
     await manager.broadcast(event_type, data)
 

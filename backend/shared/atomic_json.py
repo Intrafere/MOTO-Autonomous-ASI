@@ -24,6 +24,36 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Replace a UTF-8 text file through a unique sibling temp file.
+
+    Used for durable working documents (papers, outlines, accepted-submission
+    databases, session metadata) so a crash mid-write never leaves a truncated
+    or empty file behind: readers see the previous complete file or the new one.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+    _fsync_directory(path.parent)
+
+
 def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     """Write sorted JSON to a unique sibling temp file, fsync, then replace.
 

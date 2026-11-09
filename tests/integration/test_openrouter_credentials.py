@@ -161,6 +161,8 @@ class OpenRouterCredentialTests(IsolatedAsyncioTestCase):
             enabled=True,
             openrouter_api_key="candidate-boost-key",
             boost_model_id="example/model",
+            boost_context_window=8192,
+            boost_max_output_tokens=2048,
         )
         with mock.patch.object(
             OpenRouterClient,

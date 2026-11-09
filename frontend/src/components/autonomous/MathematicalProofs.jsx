@@ -3,6 +3,9 @@ import './MathematicalProofs.css';
 import ProofGraph from './ProofGraph';
 import ProofCheckModeModal from './ProofCheckModeModal';
 import ProofRunStatusControls from './ProofRunStatusControls';
+import TranslationLanguageSwitch from '../translation/TranslationLanguageSwitch';
+import TranslationPendingNotice from '../translation/TranslationPendingNotice';
+import useTranslatedDocuments from '../../hooks/useTranslatedDocuments';
 import { websocket } from '../../services/websocket';
 import {
   isProofRunBusy,
@@ -17,6 +20,7 @@ import {
   getNoveltyGroupAnchorIds,
   getNoveltyGroupSize,
   getProofLiveContextRiskWarnings,
+  getProofTranslationParts,
 } from '../../utils/proofPresentation';
 
 function formatDate(isoString) {
@@ -85,6 +89,10 @@ function getTierBadge(proof) {
     return { cardClass: 'gold', badgeClass: 'gold', label: 'Novel Proof' };
   }
   return { cardClass: 'known', badgeClass: 'known', label: 'Known Proof' };
+}
+
+function getProofTranslationKey(proofScope, proof) {
+  return `proof:${proofScope}:${proof.run_id || ''}:${proof.proof_id}`;
 }
 
 function isPromptNovelProof(proof) {
@@ -162,6 +170,9 @@ function MathematicalProofs({
         if (Number.isInteger(proofsResult.value.proof_set_revision)) {
           setProofSetRevision(proofsResult.value.proof_set_revision);
         }
+      } else if (proofsResult.reason instanceof TypeError) {
+        // fetch() rejects with a TypeError only when no HTTP response arrived.
+        setError('Failed to load proofs: the backend did not respond. It may be busy or restarting; use Refresh to try again.');
       } else {
         setError(`Failed to load proofs: ${proofsResult.reason?.message || 'Unknown error'}`);
       }
@@ -449,6 +460,23 @@ function MathematicalProofs({
     };
   }, [proofs]);
 
+  const translationDocuments = useMemo(
+    () => proofs.map((proof) => ({
+      docKey: getProofTranslationKey(proofScope, proof),
+      kind: 'proof',
+      title: proof.theorem_name || proof.proof_id,
+      profile: 'fields',
+      parts: getProofTranslationParts(proof),
+    })),
+    [proofs, proofScope]
+  );
+  const translation = useTranslatedDocuments(translationDocuments);
+  // Translated prose when this proof's translation is ready; otherwise the original.
+  const getDisplayedProofText = (proof, field) => {
+    const translated = translation.byKey[getProofTranslationKey(proofScope, proof)]?.parts?.[field];
+    return typeof translated === 'string' ? translated : proof[field];
+  };
+
   const visibleProofs = useMemo(() => {
     if (filter === 'novel') {
       return proofs.filter(isPromptNovelProof);
@@ -505,7 +533,7 @@ function MathematicalProofs({
     isProofRunBusy(sourceRunState) ||
     availableSources.length === 0
   );
-  const manualChecksDisabledReason = !effectiveProofStatus
+  const manualCheckButtonTitle = !effectiveProofStatus
     ? 'Loading proof runtime status...'
     : !effectiveProofStatus?.lean4_enabled
       ? 'Lean 4 proof checks are disabled.'
@@ -515,7 +543,7 @@ function MathematicalProofs({
       ? (manualCheckReason || 'Manual proof checks are not ready yet.')
       : availableSources.length === 0
         ? (manualSourceType === 'brainstorm' ? 'No brainstorms are available yet.' : 'No completed papers are available yet.')
-        : '';
+        : manualCheckReason;
 
   const handleSelectGraphProof = (proofId) => {
     setExpandedProofId(proofId);
@@ -930,7 +958,7 @@ function MathematicalProofs({
               className="math-proofs-run-check"
               onClick={() => setShowProofCheckMode(true)}
               disabled={manualChecksDisabled || manualCheckPending}
-              title={manualChecksDisabledReason || undefined}
+              title={manualCheckButtonTitle || undefined}
             >
               {manualCheckPending ? 'Queueing...' : 'Search For More Mathematical Proofs'}
             </button>
@@ -1101,6 +1129,12 @@ function MathematicalProofs({
             const riskWarnings = getProofLiveContextRiskWarnings(proof, dependencyState);
             const isMutationPending = liveContextPendingId === proof.proof_id;
             const isConfirming = liveContextConfirm?.proofId === proof.proof_id;
+            const theoremStatement = getDisplayedProofText(proof, 'theorem_statement');
+            const formalSketch = getDisplayedProofText(proof, 'formal_sketch');
+            const noveltyReasoning = getDisplayedProofText(proof, 'novelty_reasoning');
+            const noveltyGroupClaim = getDisplayedProofText(proof, 'novelty_group_claim');
+            // Each proof has its own language choice; the default comes from the translation window.
+            const proofTranslation = translation.forKey(getProofTranslationKey(proofScope, proof));
             return (
               <article
                 key={proof.proof_id}
@@ -1117,7 +1151,7 @@ function MathematicalProofs({
                         checked={selectedProofIds.has(proof.proof_id)}
                         onChange={() => toggleProofSelection(proof.proof_id)}
                         disabled={bulkLiveContextPending}
-                        aria-label={`Select proof ${proof.theorem_name || proof.theorem_statement} (${proof.proof_id})`}
+                        aria-label={`Select proof ${proof.theorem_name || theoremStatement} (${proof.proof_id})`}
                       />
                     </label>
                   )}
@@ -1135,13 +1169,14 @@ function MathematicalProofs({
                         </span>
                       )}
                     </div>
-                    <h3>{proof.theorem_statement}</h3>
+                    <h3>{theoremStatement}</h3>
                     <p className="math-proof-summary">
-                      {truncate(proof.novelty_reasoning || proof.formal_sketch || 'Lean 4 verified this proof.')}
+                      {truncate(noveltyReasoning || formalSketch || 'Lean 4 verified this proof.')}
                     </p>
                   </div>
 
                   <div className="math-proof-card-actions">
+                    <TranslationLanguageSwitch translation={proofTranslation} className="math-proof-language" />
                     <button
                       type="button"
                       className="math-proof-download math-proof-download--compact"
@@ -1168,6 +1203,7 @@ function MathematicalProofs({
                   {liveContext.isPruned && <span>Owning run: {liveContext.ownerRunId || 'Unknown'}</span>}
                   {liveContext.isPruned && <span>Pruned by: {liveContext.actorLabel}</span>}
                 </div>
+                {isExpanded && <TranslationPendingNotice translation={proofTranslation} />}
 
                 {liveContext.isPruned && (
                   <div className="proof-live-context-note">
@@ -1214,7 +1250,7 @@ function MathematicalProofs({
                     id={`proof-details-${proof.proof_id}`}
                     className="math-proof-details"
                     role="region"
-                    aria-label={`Details for ${proof.theorem_name || proof.theorem_statement}`}
+                    aria-label={`Details for ${proof.theorem_name || theoremStatement}`}
                   >
                     <div className="math-proof-actions">
                       <button
@@ -1279,17 +1315,17 @@ function MathematicalProofs({
                       </div>
                     )}
 
-                    {proof.formal_sketch && (
+                    {formalSketch && (
                       <div className="math-proof-detail-block">
                         <strong>Formal Sketch</strong>
-                        <div>{proof.formal_sketch}</div>
+                        <div>{formalSketch}</div>
                       </div>
                     )}
 
-                    {proof.novelty_reasoning && (
+                    {noveltyReasoning && (
                       <div className="math-proof-detail-block">
                         <strong>Novelty Review</strong>
-                        <div>{proof.novelty_reasoning}</div>
+                        <div>{noveltyReasoning}</div>
                       </div>
                     )}
 
@@ -1300,7 +1336,7 @@ function MathematicalProofs({
                           ? `Verified proof group (${getNoveltyGroupSize(proof)} proofs including this proof)`
                           : 'Accepted Lean statement alone'}
                       </div>
-                      {proof.novelty_group_claim && <div>{proof.novelty_group_claim}</div>}
+                      {noveltyGroupClaim && <div>{noveltyGroupClaim}</div>}
                       {proof.novelty_scope === 'group' && proof.novelty_group_proof_ids?.length > 0 && (
                         <div>Ranked with: {proof.novelty_group_proof_ids.join(', ')}</div>
                       )}
