@@ -14,6 +14,12 @@ class WebSocketService {
   }
 
   async connect() {
+    if (
+      this.ws
+      && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
     const attemptId = ++this.connectAttempt;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsPath = import.meta.env.VITE_MOTO_WS_PATH || '/ws';
@@ -107,6 +113,10 @@ class WebSocketService {
     if (this.reconnectTimer) return;
     
     this.reconnectTimer = setTimeout(() => {
+      // Release the handle before reconnecting: a failed attempt (ticket
+      // request error, socket closed before open) must be able to arm the
+      // next retry instead of finding this stale timer and giving up.
+      this.reconnectTimer = null;
       console.log('Attempting to reconnect...');
       this.connect();
     }, this.reconnectInterval);

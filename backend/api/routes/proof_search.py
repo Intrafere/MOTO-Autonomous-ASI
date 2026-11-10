@@ -29,7 +29,7 @@ async def get_proof_search_overview():
         overview = await proof_search_service.overview()
     except Exception as exc:
         logger.exception("Failed to build proof-search overview")
-        raise HTTPException(status_code=500, detail=f"Proof-search overview failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Proof-search overview failed.") from exc
     return overview.model_dump(mode="json")
 
 
@@ -40,7 +40,7 @@ async def get_latest_assistant_proof_pack():
         return assistant_proof_search_coordinator.get_latest_pack_payload()
     except Exception as exc:
         logger.exception("Failed to load latest Assistant proof pack")
-        raise HTTPException(status_code=500, detail=f"Assistant proof pack failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Assistant proof pack failed.") from exc
 
 
 @router.get(
@@ -89,7 +89,7 @@ async def search_proofs(request: PublicProofSearchRequest):
         response = await proof_search_service.search(request)
     except Exception as exc:
         logger.exception("Proof search failed")
-        raise HTTPException(status_code=500, detail=f"Proof search failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Proof search failed.") from exc
     return response.model_dump(mode="json")
 
 
@@ -115,7 +115,7 @@ async def get_proof_search_record(
         raise HTTPException(status_code=409, detail=f"Proof-search hydration rejected: {exc}") from exc
     except Exception as exc:
         logger.exception("Proof-search record hydration failed")
-        raise HTTPException(status_code=500, detail=f"Proof-search hydration failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Proof-search hydration failed.") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="Proof record not found")
     return record
@@ -128,6 +128,6 @@ async def reindex_proofs():
         overview = await proof_search_service.rebuild_index()
     except Exception as exc:
         logger.exception("Proof-search reindex failed")
-        raise HTTPException(status_code=500, detail=f"Proof-search reindex failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Proof-search reindex failed.") from exc
     return {"success": True, "overview": overview.model_dump(mode="json")}
 

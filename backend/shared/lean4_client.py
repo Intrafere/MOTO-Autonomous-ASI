@@ -41,6 +41,7 @@ from backend.shared.lean_workspace_paths import (
 )
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import LeanCompileReceipt, LeanImportEvidence
+from backend.shared.system_memory import describe_memory_snapshot, system_memory_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -177,13 +178,41 @@ LEAN_WORKSPACE_REPAIR_REQUIRED_REASON = "lean_workspace_repair_required"
 LEAN_WORKSPACE_REPAIR_TITLE = "Lean 4 setup needs repair"
 LEAN_WORKSPACE_PATH_TOO_LONG = "lean_workspace_path_too_long"
 LEAN_WORKSPACE_SETUP_FAILED = "lean_workspace_setup_failed"
+LEAN_WORKSPACE_OUT_OF_MEMORY = "lean_out_of_memory"
 _LEAN_WORKSPACE_DETAIL_LIMIT = 1800
 _LEAN_WORKSPACE_SETUP_MESSAGE = (
     "Lean 4 could not prepare its Mathlib workspace, so proofs cannot be checked."
 )
 _LEAN_WORKSPACE_SETUP_GUIDANCE = (
     "Check your internet connection and free disk space (Mathlib needs several GB), then "
-    "press Start again to retry Lean setup. Saved proof progress is kept."
+    "press Start or a proof-check button again to retry Lean setup; no restart is needed. "
+    "Saved proof progress is kept."
+)
+LEAN_OUT_OF_MEMORY_TITLE = "Not enough free memory (RAM) for Lean 4"
+_LEAN_OUT_OF_MEMORY_HEADLINE = "Lean 4 ran out of memory"
+_LEAN_OUT_OF_MEMORY_MESSAGE = (
+    f"{_LEAN_OUT_OF_MEMORY_HEADLINE} while loading Mathlib because this computer is low on "
+    "free memory (RAM), so proofs cannot be checked right now."
+)
+_LEAN_OUT_OF_MEMORY_NOT_A_PROOF = "It is not a proof error or a damaged Mathlib install."
+_LEAN_OUT_OF_MEMORY_GUIDANCE = (
+    "Free memory by closing or unloading memory-heavy programs (for example local AI model "
+    "apps with models loaded), then press Start or a proof-check button again. MOTO retries "
+    "Lean without a restart, and saved proof progress is kept."
+)
+_LEAN_DIAGNOSTIC_EXCERPT_LIMIT = 400
+# What Lean prints when Windows refuses its memory: it cannot read a compiled
+# module (`failed to read file '...olean'` with no header reason) or its runtime
+# reports the allocation failure directly. Header and checksum problems name a
+# reason after the path and stay cache problems.
+_LEAN_MEMORY_FAILURE_RE = re.compile(
+    r"failed to read file ['\"][^'\"\r\n]+\.[io]lean(?:\.[A-Za-z]+)?['\"](?!\s*,)"
+    r"|internal panic: out of memory"
+    r"|out of memory in 'new'"
+    r"|std::bad_alloc"
+    r"|not enough memory"
+    r"|paging file is too small",
+    re.IGNORECASE,
 )
 _LEAN_WORKSPACE_PATH_RESUME_GUIDANCE = (
     f"{WORKSPACE_PATH_FIX}, then relaunch MOTO and press Start again. "
@@ -217,11 +246,19 @@ class LeanWorkspaceRepairRequiredError(RuntimeError):
         self.workspace_path_length = workspace_path_length
         self.max_supported_length = max_supported_length
 
+    @property
+    def title(self) -> str:
+        """User-facing heading; a memory shortage is not a broken setup."""
+        if self.failure_kind == LEAN_WORKSPACE_OUT_OF_MEMORY:
+            return LEAN_OUT_OF_MEMORY_TITLE
+        return LEAN_WORKSPACE_REPAIR_TITLE
+
     def to_payload(self) -> dict[str, Any]:
         """Return the non-secret user-facing repair payload."""
         payload: dict[str, Any] = {
             "reason": self.reason,
             "lean_workspace_failure": self.failure_kind,
+            "title": self.title,
             "message": self.message,
             "problem": self.message,
             "terminal_guidance": self.terminal_guidance,
@@ -241,7 +278,6 @@ class LeanWorkspaceRepairRequiredError(RuntimeError):
             **self.to_payload(),
             "workflow_mode": workflow_mode,
             "notification_kind": "model_error",
-            "title": LEAN_WORKSPACE_REPAIR_TITLE,
             "message": (
                 f"{stopped_subject} stopped because Lean 4 cannot check proofs. {self.message}"
             ),
@@ -251,6 +287,16 @@ class LeanWorkspaceRepairRequiredError(RuntimeError):
 def is_lean_workspace_error_text(text: Any) -> bool:
     """True when stored Lean output is a workspace failure, not a proof result."""
     return str(text or "").lstrip().upper().startswith(_LEAN_WORKSPACE_ERROR_PREFIX)
+
+
+def is_lean_memory_error_text(text: Any) -> bool:
+    """True when a workspace failure says Lean ran out of memory."""
+    return is_lean_workspace_error_text(text) and _LEAN_OUT_OF_MEMORY_HEADLINE in str(text)
+
+
+def is_lean_memory_failure_output(output: Any) -> bool:
+    """True when raw Lean or Lake output shows the computer ran out of memory."""
+    return bool(_LEAN_MEMORY_FAILURE_RE.search(str(output or "")))
 
 # Lean emits "bad import" when an `import` statement references a module whose
 # .lean source doesn't exist. This is NOT an infrastructure error — it means the
@@ -407,6 +453,8 @@ class Lean4Client:
         self._workspace_bootstrap_state = "not_started"
         self._workspace_bootstrap_error = ""
         self._workspace_failure_detail = ""
+        self._workspace_failure_kind = ""
+        self._workspace_failure_message = ""
         # A too-long workspace path cannot change without moving MOTO and
         # relaunching, so it latches for the life of this process.
         self._workspace_path_problem: Optional[WorkspacePathProblem] = None
@@ -463,11 +511,18 @@ class Lean4Client:
             self._workspace_bootstrap_state = "not_started"
 
     def get_workspace_status(self) -> dict[str, Any]:
-        """Return cached workspace state without starting Lean or touching the filesystem."""
+        """Return cached workspace state without starting Lean or touching the filesystem.
+
+        Every failure except a too-long folder path is retryable in place: the
+        next proof check, workflow Start, or proof round tries setup again.
+        """
+        failed = self._workspace_bootstrap_state == "failed"
         return {
             "state": self._workspace_bootstrap_state,
             "ready": bool(self._workspace_ready and self._workspace_bootstrap_state == "ready"),
             "error": self._workspace_bootstrap_error or self._workspace_unhealthy_error,
+            "failure_kind": (self._workspace_failure_kind or LEAN_WORKSPACE_SETUP_FAILED) if failed else "",
+            "retry_available": failed and self._workspace_path_problem is None,
         }
 
     def start_workspace_bootstrap(self) -> asyncio.Task[bool]:
@@ -492,6 +547,8 @@ class Lean4Client:
 
         self._workspace_bootstrap_state = "starting"
         self._workspace_bootstrap_error = ""
+        self._workspace_failure_kind = ""
+        self._workspace_failure_message = ""
         task = asyncio.create_task(self._run_workspace_bootstrap())
         self._workspace_bootstrap_task = task
         return task
@@ -540,6 +597,21 @@ class Lean4Client:
                 workspace_path_length=problem.workspace_path_length,
                 max_supported_length=problem.max_supported_length,
             )
+        # The text check also covers results from another client instance
+        # (the LSP client's subprocess fallback keeps its own state).
+        if (
+            self._workspace_failure_kind == LEAN_WORKSPACE_OUT_OF_MEMORY
+            or is_lean_memory_error_text(error_output)
+        ):
+            return LeanWorkspaceRepairRequiredError(
+                failure_kind=LEAN_WORKSPACE_OUT_OF_MEMORY,
+                message=(
+                    self._workspace_failure_message
+                    or f"{_LEAN_OUT_OF_MEMORY_MESSAGE} {_LEAN_OUT_OF_MEMORY_NOT_A_PROOF}"
+                ),
+                terminal_guidance=_LEAN_OUT_OF_MEMORY_GUIDANCE,
+                detail=detail,
+            )
         return LeanWorkspaceRepairRequiredError(
             failure_kind=LEAN_WORKSPACE_SETUP_FAILED,
             message=_LEAN_WORKSPACE_SETUP_MESSAGE,
@@ -561,6 +633,7 @@ class Lean4Client:
                 ready = await self._ensure_workspace_locked()
             if not ready:
                 self._workspace_bootstrap_state = "failed"
+                self._workspace_failure_kind = self._workspace_failure_kind or LEAN_WORKSPACE_SETUP_FAILED
                 self._workspace_bootstrap_error = self._workspace_unhealthy_error or (
                     f"{_LEAN_WORKSPACE_ERROR_PREFIX}: Lean 4 workspace preparation failed."
                 )
@@ -568,16 +641,28 @@ class Lean4Client:
             await self._after_workspace_bootstrap()
             self._workspace_bootstrap_state = "ready"
             self._workspace_bootstrap_error = ""
+            self._clear_workspace_failure()
             return True
         except asyncio.CancelledError:
             self._workspace_bootstrap_state = "not_started"
             raise
+        except MemoryError:
+            # MOTO's own process could not allocate while preparing Lean; the
+            # install is untouched, so the next attempt retries the same steps.
+            # State is set first in case building the message fails as well.
+            self._workspace_ready = False
+            self._workspace_bootstrap_state = "failed"
+            self._workspace_failure_kind = LEAN_WORKSPACE_OUT_OF_MEMORY
+            self._mark_workspace_out_of_memory("MemoryError: not enough memory for the MOTO backend")
+            return False
         except Exception as exc:
             logger.exception("Lean 4 workspace bootstrap failed")
             self._workspace_ready = False
             self._workspace_bootstrap_state = "failed"
+            self._workspace_failure_kind = LEAN_WORKSPACE_SETUP_FAILED
             self._workspace_bootstrap_error = (
-                f"{_LEAN_WORKSPACE_ERROR_PREFIX}: Lean 4 workspace preparation failed: {exc}"
+                f"{_LEAN_WORKSPACE_ERROR_PREFIX}: Lean 4 workspace preparation failed: "
+                f"{type(exc).__name__}: {exc}"
             )
             return False
 
@@ -713,6 +798,9 @@ class Lean4Client:
                 cwd=self.workspace_dir,
                 timeout=timeout,
             )
+        except MemoryError:
+            # The backend itself could not allocate around the Lean run.
+            return -1, "", "MemoryError: not enough memory for the MOTO backend to run Lean 4"
         finally:
             try:
                 if temp_path.exists():
@@ -759,6 +847,8 @@ class Lean4Client:
             self._mark_workspace_path_too_long(self._workspace_path_problem, output)
             return
         self._workspace_ready = False
+        self._workspace_failure_kind = LEAN_WORKSPACE_SETUP_FAILED
+        self._workspace_failure_message = ""
         self._workspace_failure_detail = output or ""
         self._workspace_unhealthy_error = self._format_workspace_infrastructure_error(output)
         self._workspace_bootstrap_state = "failed"
@@ -767,6 +857,8 @@ class Lean4Client:
     def _mark_workspace_path_too_long(self, problem: WorkspacePathProblem, output: str = "") -> None:
         self._workspace_ready = False
         self._workspace_path_problem = problem
+        self._workspace_failure_kind = LEAN_WORKSPACE_PATH_TOO_LONG
+        self._workspace_failure_message = ""
         if output:
             self._workspace_failure_detail = output
         self._workspace_unhealthy_error = (
@@ -776,6 +868,55 @@ class Lean4Client:
         self._workspace_bootstrap_state = "failed"
         self._workspace_bootstrap_error = self._workspace_unhealthy_error
 
+    def _mark_workspace_out_of_memory(self, output: str, *, installation_verified: bool = False) -> None:
+        """Record that Lean could not get memory; the Mathlib install is not damaged.
+
+        Nothing is wiped or downloaded again. After a failed check on a verified
+        install the retry only re-confirms readiness, so the next check simply
+        runs Lean again once memory is free.
+        """
+        if self._workspace_path_problem is not None:
+            self._mark_workspace_path_too_long(self._workspace_path_problem, output)
+            return
+        memory_note = describe_memory_snapshot(system_memory_snapshot())
+        message = " ".join(
+            part
+            for part in (_LEAN_OUT_OF_MEMORY_MESSAGE, memory_note, _LEAN_OUT_OF_MEMORY_NOT_A_PROOF)
+            if part
+        )
+        excerpt = " ".join((output or "").split())[:_LEAN_DIAGNOSTIC_EXCERPT_LIMIT]
+        if not installation_verified:
+            self._workspace_ready = False
+        self._workspace_failure_kind = LEAN_WORKSPACE_OUT_OF_MEMORY
+        self._workspace_failure_message = message
+        self._workspace_failure_detail = output or ""
+        self._workspace_unhealthy_error = (
+            f"{_LEAN_WORKSPACE_ERROR_PREFIX}: {message} "
+            f"Lean reported: {excerpt or '[no output]'}"
+        )
+        self._workspace_bootstrap_state = "failed"
+        self._workspace_bootstrap_error = self._workspace_unhealthy_error
+        logger.warning("%s", self._workspace_unhealthy_error)
+
+    def _out_of_memory_result(self, output: str, *, raw_stderr: str = "", tactic_script: bool = False) -> Lean4Result:
+        """A check Lean could not run for lack of memory: a typed stop, never proof feedback."""
+        self._mark_workspace_out_of_memory(output, installation_verified=True)
+        error_output = self._workspace_unhealthy_error
+        if tactic_script:
+            return Lean4Result(
+                success=False,
+                error_output=error_output,
+                raw_stderr=raw_stderr,
+                tactic_error_slice=error_output,
+                failing_tactic_index=-1,
+            )
+        return Lean4Result(success=False, error_output=error_output, raw_stderr=raw_stderr)
+
+    def _clear_workspace_failure(self) -> None:
+        self._workspace_failure_kind = ""
+        self._workspace_failure_message = ""
+        self._workspace_failure_detail = ""
+
     async def _diagnose_path_failure(self, output: str) -> Optional[WorkspacePathProblem]:
         """Measure the cloned Mathlib tree when setup failed with a Windows path error."""
         if not _WINDOWS_PATH_ERROR_RE.search(output or ""):
@@ -783,6 +924,9 @@ class Lean4Client:
         return await asyncio.to_thread(measured_workspace_path_problem, self.workspace_dir)
 
     async def _record_workspace_setup_failure(self, output: str) -> None:
+        if is_lean_memory_failure_output(output):
+            self._mark_workspace_out_of_memory(output)
+            return
         problem = await self._diagnose_path_failure(output)
         if problem is not None:
             self._mark_workspace_path_too_long(problem, output)
@@ -904,14 +1048,18 @@ class Lean4Client:
             if self._latched_path_problem() is not None:
                 return False
             self._workspace_unhealthy_error = ""
+            self._clear_workspace_failure()
             self._workspace_ready = False
             await asyncio.to_thread(self._wipe_lake_directory)
             repaired = await self._ensure_workspace_locked()
             if not repaired:
-                self._mark_workspace_unhealthy(output)
+                # Keep a more specific failure the repair attempt recorded.
+                if self._workspace_failure_kind != LEAN_WORKSPACE_OUT_OF_MEMORY:
+                    self._mark_workspace_unhealthy(output)
             else:
                 self._workspace_bootstrap_state = "ready"
                 self._workspace_bootstrap_error = ""
+                self._clear_workspace_failure()
             return repaired
 
     async def get_version(self) -> str:
@@ -1149,6 +1297,10 @@ class Lean4Client:
             )
             if sanity_rc != 0:
                 sanity_output = self._combined_process_output(sanity_stdout, sanity_stderr)
+                # Checked first: a memory shortage must never wipe a good install.
+                if is_lean_memory_failure_output(sanity_output):
+                    self._mark_workspace_out_of_memory(sanity_output)
+                    return False
                 if self._is_workspace_infrastructure_error(sanity_output):
                     logger.warning(
                         "Lean 4 workspace sanity check failed — Mathlib cache is incomplete. "
@@ -1156,6 +1308,12 @@ class Lean4Client:
                         sanity_output[:500],
                     )
                     await asyncio.to_thread(self._wipe_lake_directory)
+                else:
+                    logger.warning(
+                        "Lean 4 workspace sanity check failed; setup will be retried by the next "
+                        "proof check or workflow Start. Details: %s",
+                        sanity_output[:500],
+                    )
                 self._mark_workspace_unhealthy(sanity_output)
                 return False
 
@@ -1530,6 +1688,8 @@ class Lean4Client:
                 timeout=timeout,
             )
             combined_output = self._combined_process_output(stdout, stderr)
+            if returncode != 0 and is_lean_memory_failure_output(combined_output):
+                return self._out_of_memory_result(combined_output, raw_stderr=stderr.strip())
             if self._is_workspace_infrastructure_error(combined_output):
                 repaired = await self._repair_workspace_after_infrastructure_error(combined_output)
                 if repaired:
@@ -1539,6 +1699,10 @@ class Lean4Client:
                         timeout=timeout,
                     )
                     combined_output = self._combined_process_output(stdout, stderr)
+                    if returncode != 0 and is_lean_memory_failure_output(combined_output):
+                        return self._out_of_memory_result(combined_output, raw_stderr=stderr.strip())
+                elif self._workspace_failure_kind == LEAN_WORKSPACE_OUT_OF_MEMORY:
+                    return self._workspace_unavailable_result()
                 if self._is_workspace_infrastructure_error(combined_output):
                     self._mark_workspace_unhealthy(combined_output)
                     return Lean4Result(
@@ -1705,6 +1869,10 @@ class Lean4Client:
                 timeout=timeout,
             )
             combined_output = self._combined_process_output(stdout, stderr)
+            if returncode != 0 and is_lean_memory_failure_output(combined_output):
+                return self._out_of_memory_result(
+                    combined_output, raw_stderr=stderr.strip(), tactic_script=True
+                )
             if self._is_workspace_infrastructure_error(combined_output):
                 repaired = await self._repair_workspace_after_infrastructure_error(combined_output)
                 if repaired:
@@ -1714,6 +1882,12 @@ class Lean4Client:
                         timeout=timeout,
                     )
                     combined_output = self._combined_process_output(stdout, stderr)
+                    if returncode != 0 and is_lean_memory_failure_output(combined_output):
+                        return self._out_of_memory_result(
+                            combined_output, raw_stderr=stderr.strip(), tactic_script=True
+                        )
+                elif self._workspace_failure_kind == LEAN_WORKSPACE_OUT_OF_MEMORY:
+                    return self._workspace_unavailable_result(tactic_script=True)
                 if self._is_workspace_infrastructure_error(combined_output):
                     self._mark_workspace_unhealthy(combined_output)
                     error_output = self._workspace_unhealthy_error
@@ -2334,6 +2508,8 @@ class Lean4LspClient(Lean4Client):
                     temp_filename=f"MOTOProofCheck_{uuid.uuid4().hex}.lean",
                     timeout=timeout,
                 )
+                if not result.success and is_lean_memory_failure_output(result.error_output):
+                    return self._out_of_memory_result(result.error_output)
                 if self._is_workspace_infrastructure_error(result.error_output):
                     await self._mark_unhealthy(result.error_output)
                     return await self._subprocess_fallback.check_proof(lean_code, timeout=timeout)
@@ -2464,6 +2640,8 @@ class Lean4LspClient(Lean4Client):
                     timeout=timeout,
                     tactic_ranges=tactic_ranges,
                 )
+                if not result.success and is_lean_memory_failure_output(result.error_output):
+                    return self._out_of_memory_result(result.error_output, tactic_script=True)
                 if self._is_workspace_infrastructure_error(result.error_output):
                     await self._mark_unhealthy(result.error_output)
                     return await self._subprocess_fallback._run_tactic_script_once(

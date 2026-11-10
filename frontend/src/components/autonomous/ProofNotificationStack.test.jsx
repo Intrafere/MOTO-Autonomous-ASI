@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import ProofNotificationStack from './ProofNotificationStack';
 
 describe('ProofNotificationStack', () => {
-  it('states that a standalone rank applies to the accepted Lean statement', () => {
+  it('shows a standalone discovery without a ranking-scope line', () => {
     render(
       <ProofNotificationStack
         notifications={[{
@@ -21,7 +21,8 @@ describe('ProofNotificationStack', () => {
       />
     );
 
-    expect(screen.getByText('Ranking applies to this accepted Lean statement alone.')).toBeInTheDocument();
+    expect(screen.getByText('A standalone theorem')).toBeInTheDocument();
+    expect(screen.queryByText(/Ranking applies/)).not.toBeInTheDocument();
   });
 
   it('shows the finite group scope and combined claim without breaking click or dismiss', () => {

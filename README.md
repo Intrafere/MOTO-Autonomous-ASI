@@ -1,6 +1,6 @@
 # MOTO Autonomous ASI
 ## Autonomous Prototype Superintelligence for Rigorous Research and Solution Generation, with Optional Lean 4 Proof Verification
-**Version: 1.1.09**
+**Version: 1.1.10**
 
 **Runtime & License**
 
@@ -55,7 +55,7 @@ Give the program a try — MOTO is as cool as it sounds. Windows has a one-click
 
 MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward, novelty-seeking S.T.E.M. research and solution system designed to run for days at a time after you press start, without user interaction. Mathematics, theorem discovery, and formal proof remain first-class capabilities whenever relevant. This program can support multiple simultaneous models working in parallel from local LM Studio, OpenRouter API keys, desktop OAuth providers such as OpenAI Codex/ChatGPT and xAI Grok/SuperGrok, or a mix of those providers.
 
-On Windows desktop, MOTO holds system-required and execution-required Power Requests while a top-level workflow is active and restores normal power behavior when it stops. The display may still turn off, and explicit Sleep, lid-close, Hibernate, shutdown, and critical-battery actions are not blocked. On Modern Standby systems running on battery, Windows may terminate these requests five minutes after the configured sleep timeout; use AC power for unattended long runs. Hosted/generic mode does not use this desktop power request.
+On Windows desktop, MOTO holds system-required, execution-required, and display-required Power Requests while a top-level workflow is active and restores normal power behavior when it stops. The display stays on during the run, because on Modern Standby PCs an idle screen-off begins standby; you can still switch the monitor off with its own button. Explicit Sleep, lid-close, Hibernate, shutdown, and critical-battery actions are not blocked. On Modern Standby systems running on battery, Windows may terminate these requests five minutes after the configured sleep timeout; use AC power for unattended long runs. Hosted/generic mode does not use this desktop power request.
 
 ### Key Features
 

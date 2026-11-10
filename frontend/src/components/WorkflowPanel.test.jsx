@@ -2,7 +2,8 @@ import React from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkflowPanel from './WorkflowPanel';
-import { proofSearchAPI, workflowAPI } from '../services/api';
+import { proofSearchAPI, translationAPI, workflowAPI } from '../services/api';
+import { AutoTranslateContext } from '../hooks/useAutoTranslate';
 
 const listeners = new Map();
 
@@ -59,6 +60,11 @@ vi.mock('../services/api', () => ({
   proofSearchAPI: {
     getAssistantLatestPack: vi.fn(),
     getProof: vi.fn(),
+  },
+  translationAPI: {
+    getStatus: vi.fn(),
+    registerDocuments: vi.fn(),
+    lookupDocuments: vi.fn(),
   },
 }));
 
@@ -129,6 +135,56 @@ test('renders Assistant Memory Bank proof tiles and opens hydrated proof preview
   });
   expect(await screen.findByText(/Hydrated proof history detail/i)).toBeInTheDocument();
   expect(screen.getByText(/theorem helper : True := by trivial/i)).toBeInTheDocument();
+});
+
+test('the opened proof history preview has a language menu and shows its translation', async () => {
+  const user = userEvent.setup();
+  translationAPI.registerDocuments.mockImplementation(async ({ documents }) => ({
+    success: true,
+    documents: documents.map((document) => ({
+      doc_key: document.docKey,
+      doc_hash: 'hash-history',
+      language: 'es',
+      status: 'complete',
+      translated_units: 2,
+      total_units: 2,
+      queue_position: null,
+      parts: { theorem_statement: 'teorema auxiliar : Verdadero', formal_sketch: 'Detalle traducido.' },
+      requested: false,
+      automatic: false,
+    })),
+  }));
+  const translationContext = {
+    available: true,
+    status: { enabled: true, state: 'translating' },
+    enabled: true,
+    languages: [{ key: 'es', name: 'Spanish', custom: false }],
+    displayLanguage: 'es',
+    setDisplayLanguage: vi.fn(),
+    refreshStatus: vi.fn(),
+    subscribeProgress: () => () => {},
+    recentActivity: [],
+  };
+
+  render(
+    <AutoTranslateContext.Provider value={translationContext}>
+      <WorkflowPanel isRunning={false} onOpenBoostSettings={vi.fn()} onOpenAssistantProof={vi.fn()} />
+    </AutoTranslateContext.Provider>
+  );
+  await user.click(await screen.findByRole('button', { name: /Memory.Helper/i }));
+
+  expect(await screen.findByText('teorema auxiliar : Verdadero')).toBeInTheDocument();
+  expect(screen.getByText('Detalle traducido.')).toBeInTheDocument();
+  expect(screen.getByLabelText('Language')).toHaveValue('es');
+  // Lean code stays untranslated.
+  expect(screen.getByText(/theorem helper : True := by trivial/i)).toBeInTheDocument();
+  const registered = translationAPI.registerDocuments.mock.calls.at(-1)[0];
+  expect(registered.documents[0]).toMatchObject({
+    docKey: 'proof:history:manual:proof_1',
+    kind: 'proof',
+    profile: 'fields',
+    parts: { theorem_statement: 'theorem helper : True', formal_sketch: 'Hydrated proof history detail.' },
+  });
 });
 
 test('shows Assistant memory disabled reason from latest-pack status', async () => {

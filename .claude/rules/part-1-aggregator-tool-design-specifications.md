@@ -52,7 +52,8 @@ validator decisions. Rejection activity should also make clear that rejections a
 normal and extended streaks can be expected on difficult problems. Batched validators
 retain one ordered decision, reasoning/summary, and stable identity for every item;
 malformed batch contracts are operational and preserve/requeue dequeued work rather
-than silently discarding it or fabricating semantic decisions.
+than silently discarding it or fabricating semantic decisions; the restored submissions
+are then validated one at a time.
 
 **Submission context injection**: Submitter context direct-injects first and offloads existing context to RAG when needed. Validator submissions under review are mandatory direct context; if a single or batch validation prompt still does not fit after normal allocation, or the provider rejects it as too large, the normal context-overflow lifecycle stops the affected workflow rather than indexing the pending submission as RAG.
 

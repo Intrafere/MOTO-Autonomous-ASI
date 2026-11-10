@@ -9,7 +9,8 @@ import LiveTier3Progress from './LiveTier3Progress';
 import TextFileUploader from '../TextFileUploader';
 import '../settings-common.css';
 import { getActivityClass as getSharedActivityClass, getActivityIcon as getSharedActivityIcon } from '../../utils/activityStyles';
-import { readPromptDraft, readPromptDraftSync, removePromptDraft, savePromptDraft } from '../../utils/promptDraftStorage';
+import { removePromptDraft } from '../../utils/promptDraftStorage';
+import usePromptDraft from '../../hooks/usePromptDraft';
 
 const AUTONOMOUS_PROMPT_STORAGE_KEY = 'autonomous_research_prompt';
 
@@ -38,10 +39,10 @@ const AutonomousResearchInterface = ({
   capabilities = {},
   api
 }) => {
-  const [researchPrompt, setResearchPrompt] = useState(() => {
-    return readPromptDraftSync(AUTONOMOUS_PROMPT_STORAGE_KEY);
-  });
-  const [researchPromptDraftLoaded, setResearchPromptDraftLoaded] = useState(false);
+  const [researchPrompt, setResearchPrompt] = usePromptDraft(
+    AUTONOMOUS_PROMPT_STORAGE_KEY,
+    api?.getPrompt ? async () => (await api.getPrompt())?.prompt || '' : null
+  );
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [showForceConfirm, setShowForceConfirm] = useState(false);
@@ -60,43 +61,6 @@ const AutonomousResearchInterface = ({
   const showRuntimeIndicator = isRunning || isStopping;
   const controlsLocked = isRunning || isStopping || startRequested;
   const visibleActivity = (activity || []).filter((item) => !HIDDEN_LIVE_ACTIVITY_EVENTS.has(item?.event));
-
-  // Save research prompt using IndexedDB for large drafts to avoid localStorage quota crashes.
-  useEffect(() => {
-    if (researchPromptDraftLoaded) {
-      savePromptDraft(AUTONOMOUS_PROMPT_STORAGE_KEY, researchPrompt);
-    }
-  }, [researchPrompt, researchPromptDraftLoaded]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const hydrateResearchPrompt = async () => {
-      try {
-        const savedDraft = await readPromptDraft(AUTONOMOUS_PROMPT_STORAGE_KEY);
-        let promptToHydrate = savedDraft || '';
-        if (!promptToHydrate.trim() && api?.getPrompt) {
-          const persisted = await api.getPrompt();
-          promptToHydrate = persisted?.prompt || '';
-        }
-        if (promptToHydrate && !cancelled) {
-          setResearchPrompt((current) => (
-            current.trim() ? current : promptToHydrate
-          ));
-        }
-      } catch (error) {
-        console.debug('Could not hydrate autonomous research prompt:', error);
-      } finally {
-        if (!cancelled) {
-          setResearchPromptDraftLoaded(true);
-        }
-      }
-    };
-
-    hydrateResearchPrompt();
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
 
   // Auto-scroll activity feed only when new items are added (not on mount/tab switch)
   useEffect(() => {

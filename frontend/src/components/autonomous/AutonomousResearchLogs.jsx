@@ -204,8 +204,8 @@ const AutonomousResearchLogs = ({ stats, events }) => {
           : 'Redundancy: No removal needed';
       case 'proof_framing_decided':
         return data.is_proof_amenable
-          ? 'Proof framing enabled for this run'
-          : 'Proof framing not applied for this run';
+          ? 'Submitter 1 (Main Submitter) chose proof framing for this run'
+          : 'Submitter 1 (Main Submitter) did not choose proof framing for this run';
       case 'proof_check_started':
         if (data.trigger === 'manual') {
           return `Manual proof check started for ${data.source_type} ${data.source_id}`;

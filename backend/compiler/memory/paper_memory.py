@@ -10,6 +10,7 @@ import logging
 import re
 
 from backend.shared.config import system_config
+from backend.shared.atomic_json import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,13 @@ THEOREMS_APPENDIX_END = "[HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTE
 APPENDIX_EMPTY_PLACEHOLDER = "[Theorems appendix - verified Lean 4 theorems not placed inline will appear here]"
 AI_SELF_REVIEW_SECTION_TITLE = "AI Self-Review and Limitations"
 AI_SELF_REVIEW_SECTION_HEADER = f"## {AI_SELF_REVIEW_SECTION_TITLE}"
+
+
+def format_live_paper_display(outline: str, paper: str) -> str:
+    """The Live Paper text the compiler paper route shows: the outline, when there is one, above the paper."""
+    if outline:
+        return f"OUTLINE:\n{'='*80}\n\n{outline}\n\n{'='*80}\n\nPAPER:\n{'='*80}\n\n{paper}"
+    return paper
 
 
 class PaperMemory:
@@ -83,8 +91,7 @@ class PaperMemory:
             # Create file if doesn't exist
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
             if not self.file_path.exists():
-                async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                    await f.write("")
+                await asyncio.to_thread(atomic_write_text, self.file_path, "")
             
             self._initialized = True
             logger.info("Paper memory initialized")
@@ -153,8 +160,7 @@ class PaperMemory:
         final_content = self._ensure_anchor(cleaned)
         
         # Write to file
-        async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-            await f.write(final_content)
+        await asyncio.to_thread(atomic_write_text, self.file_path, final_content)
         
         # Increment version
         self.version += 1
@@ -229,8 +235,7 @@ class PaperMemory:
         )
         
         async with self._lock:
-            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                await f.write(paper)
+            await asyncio.to_thread(atomic_write_text, self.file_path, paper)
             
             self.version += 1
             logger.info(f"Paper initialized with placeholders (version {self.version})")
@@ -269,8 +274,7 @@ class PaperMemory:
             # Replace the placeholder with the content (only once)
             new_paper = paper.replace(placeholder, content, 1)
             
-            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                await f.write(new_paper)
+            await asyncio.to_thread(atomic_write_text, self.file_path, new_paper)
             
             self.version += 1
             logger.info(f"Placeholder replaced (version {self.version})")
@@ -524,8 +528,7 @@ class PaperMemory:
             new_block = self._build_appendix_block(new_appendix_body)
             new_paper = paper[:start_idx] + new_block + paper[end_idx:]
             
-            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                await f.write(new_paper)
+            await asyncio.to_thread(atomic_write_text, self.file_path, new_paper)
             
             self.version += 1
             final_content = new_paper
@@ -773,8 +776,7 @@ class PaperMemory:
             new_paper = '\n'.join(new_paper_parts)
             
             # Write updated paper
-            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                await f.write(new_paper)
+            await asyncio.to_thread(atomic_write_text, self.file_path, new_paper)
             
             self.version += 1
             logger.info(f"Added missing placeholders to paper (version {self.version})")
@@ -876,8 +878,7 @@ class PaperMemory:
             if not body_content:
                 # Empty paper - just ensure anchor exists
                 if not has_anchor:
-                    async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                        await f.write(PAPER_ANCHOR)
+                    await asyncio.to_thread(atomic_write_text, self.file_path, PAPER_ANCHOR)
                     self.version += 1
                     return True
                 return False
@@ -918,8 +919,7 @@ class PaperMemory:
             new_paper = '\n'.join(new_paper_parts)
             
             # Write repaired paper
-            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                await f.write(new_paper)
+            await asyncio.to_thread(atomic_write_text, self.file_path, new_paper)
             
             self.version += 1
             logger.info(f"Repaired missing markers in paper (version {self.version})")

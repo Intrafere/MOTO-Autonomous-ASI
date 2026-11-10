@@ -215,7 +215,9 @@ def _assert_provider_retry_activity_persists(model: InvariantState) -> None:
         _fail(model, "Provider retry Live Activity disappeared after reload.")
 
 
-ROUTE_IDENTITY_WORKFLOW_MODES = frozenset({"autonomous", "aggregator", "compiler", "leanoj", "manual_proof_check"})
+ROUTE_IDENTITY_WORKFLOW_MODES = frozenset({
+    "autonomous", "aggregator", "compiler", "leanoj", "manual_proof_check", "translation",
+})
 _PLACEHOLDER_ROUTE_PROVIDERS = frozenset({"", "unknown", "configured_role", "provider"})
 _OPENROUTER_FAMILY_PROVIDERS = frozenset({"openrouter"})
 _OPENROUTER_HOST_ROUTING = frozenset({"pinned", "auto", "auto_fallback"})

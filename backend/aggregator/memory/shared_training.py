@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 
 from backend.shared.config import system_config, rag_config
+from backend.shared.atomic_json import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +33,7 @@ async def save_manual_aggregator_prompt(prompt: str) -> None:
         return
     path = get_manual_aggregator_prompt_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f"{path.name}.tmp")
-    async with aiofiles.open(temp_path, "w", encoding="utf-8") as handle:
-        await handle.write(prompt or "")
-    await asyncio.to_thread(temp_path.replace, path)
+    await asyncio.to_thread(atomic_write_text, path, prompt or "")
 
 
 async def load_manual_aggregator_prompt() -> str:
@@ -71,10 +69,7 @@ async def save_manual_main_submitter_config(config: Dict[str, object]) -> None:
     """Persist non-secret Main Submitter 1 settings for backend-restart handoff."""
     path = get_manual_main_submitter_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f"{path.name}.tmp")
-    async with aiofiles.open(temp_path, "w", encoding="utf-8") as handle:
-        await handle.write(json.dumps(config, ensure_ascii=False, indent=2))
-    await asyncio.to_thread(temp_path.replace, path)
+    await asyncio.to_thread(atomic_write_text, path, json.dumps(config, ensure_ascii=False, indent=2))
 
 
 async def load_manual_main_submitter_config() -> Dict[str, object]:
@@ -174,8 +169,7 @@ class SharedTrainingMemory:
             logger.info(f"Loaded {len(self.insights)} existing insights from shared training (submission count: {self.submission_count})")
         else:
             # Create empty file
-            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                await f.write("")
+            await asyncio.to_thread(atomic_write_text, self.file_path, "")
             logger.info("Created new shared training file")
     
     async def reload_insights_from_current_path(self) -> None:
@@ -472,8 +466,7 @@ class SharedTrainingMemory:
         if self.proof_appendix:
             full_content = f"{full_content.rstrip()}\n\n{self.proof_appendix}\n" if full_content.strip() else self.proof_appendix
         
-        async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-            await f.write(full_content)
+        await asyncio.to_thread(atomic_write_text, self.file_path, full_content)
         logger.debug(f"Saved {len(self.insights)} insights to shared training")
     
     async def get_submission_content(self, submission_number: int) -> Optional[str]:

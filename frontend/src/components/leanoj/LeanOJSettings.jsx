@@ -3,24 +3,13 @@ import { api, openRouterAPI } from '../../services/api';
 import {
   computeCloudProviderAutoSettings,
   computeOpenRouterAutoSettings,
-  DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
-  formatOpenRouterProviderLabel,
-  getOpenRouterProviderTitle,
-  getProviderNames,
-  getReasoningSupportInfo,
   hasEndpointMetadata,
-  normalizeOpenRouterReasoningEffort,
-  OPENROUTER_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import { refreshOpenRouterCredentialState } from '../../utils/credentialProviderRefresh';
 import useCloudAccessProviders from '../../hooks/useCloudAccessProviders';
-import {
-  chooseCloudAccessProvider,
-  isCloudAccessProvider,
-} from '../../utils/oauthProviders';
+import { isCloudAccessProvider } from '../../utils/oauthProviders';
 import {
   LEANOJ_PROFILES_STORAGE_KEY,
   LEANOJ_RECOMMENDED_PROFILES,
@@ -28,16 +17,14 @@ import {
   persistLeanOJSettings,
 } from '../../utils/leanojProfiles';
 import CloudProviderModelErrors from '../CloudProviderModelErrors';
-import CloudReasoningControl from '../CloudReasoningControl';
-import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
 import RawSettingsEditor from '../RawSettingsEditor';
+import { RoleModelEditor } from '../RoleModelEditor';
 import '../settings-common.css';
 
 const RAW_VIEW_EXIT_WARNING = 'Switching back to the GUI view will restore your last GUI settings/profile and discard raw-only changes. Continue?';
 const formatRawSettings = (value) => JSON.stringify(value, null, 2);
-const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer attempts, then run a 5th same-model call to choose or synthesize the best final answer. It uses 5x the API calls, so it is about 5x slower and 5x more costly, but can produce more intelligent answers.';
 
 const ROLE_EDITOR_GROUPS = [
   { key: 'validator', title: 'Validator', roleKeys: ['topic_validator', 'brainstorm_validator'] },
@@ -50,282 +37,6 @@ const toRoleConfig = (config = {}) => {
   return roleConfig;
 };
 
-function ModelSelector({
-  config,
-  onChange,
-  lmStudioModels,
-  openRouterModels,
-  cloudProviders,
-  modelProviders,
-  hasOpenRouterKey,
-  isRunning,
-  lmStudioEnabled,
-}) {
-  const provider = lmStudioEnabled ? (config.provider || 'lm_studio') : 'openrouter';
-  const oauthStatusByProvider = cloudProviders.statusByProvider;
-  const configuredOAuthProviders = cloudProviders.configuredProviders;
-  const models = provider === 'openrouter'
-    ? openRouterModels
-    : (isCloudAccessProvider(provider)
-      ? cloudProviders.modelsFor(provider)
-      : lmStudioModels);
-  const providers = provider === 'openrouter' && config.modelId
-    ? getProviderNames(modelProviders[config.modelId])
-    : [];
-  const reasoningInfo = provider === 'openrouter'
-    ? getReasoningSupportInfo(modelProviders[config.modelId], config.openrouterProvider || null)
-    : { hasEndpointMetadata: false, supportsReasoning: false };
-
-  return (
-    <>
-      <div className="settings-row">
-        <label>Provider</label>
-        {lmStudioEnabled ? (
-          <div className="provider-toggle-group">
-            <button
-              type="button"
-              className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
-              disabled={isRunning}
-              onClick={() => {
-                if (provider !== 'lm_studio') {
-                  onChange({
-                    ...config,
-                    provider: 'lm_studio',
-                    modelId: '',
-                    openrouterProvider: null,
-                    openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-                  });
-                }
-              }}
-            >
-              LM Studio
-            </button>
-            <button
-              type="button"
-              className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
-              disabled={isRunning || !hasOpenRouterKey}
-              onClick={() => {
-                if (provider !== 'openrouter') {
-                  onChange({
-                    ...config,
-                    provider: 'openrouter',
-                    modelId: '',
-                    openrouterProvider: null,
-                    openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-                  });
-                }
-              }}
-              title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
-            >
-              OpenRouter
-            </button>
-            <button
-              type="button"
-              className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
-              disabled={isRunning || configuredOAuthProviders.length === 0}
-              onClick={() => onChange({
-                ...config,
-                provider: chooseCloudAccessProvider(oauthStatusByProvider, provider),
-                modelId: '',
-                openrouterProvider: null,
-                openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-              })}
-              title={configuredOAuthProviders.length === 0 ? 'Set up a cloud provider login or API key first' : 'Use a configured cloud provider'}
-            >
-              Cloud
-            </button>
-            {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
-              <select
-                value={provider}
-                disabled={isRunning}
-                onChange={(event) => onChange({
-                  ...config,
-                  provider: event.target.value,
-                  modelId: '',
-                  openrouterProvider: null,
-                  openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-                })}
-                title="Select cloud provider"
-                className="input-dark"
-                style={{ width: 'auto', minWidth: '150px' }}
-              >
-                {configuredOAuthProviders.map((oauthProvider) => (
-                  <option key={oauthProvider.id} value={oauthProvider.id}>
-                    {oauthProvider.label}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-        ) : (
-          <small className="settings-hint">OpenRouter is required in this deployment.</small>
-        )}
-      </div>
-
-      <div className="settings-row">
-        <label>Model</label>
-        <select
-          value={config.modelId || ''}
-          disabled={isRunning}
-          onChange={(event) => onChange({ ...config, provider, modelId: event.target.value, openrouterProvider: null, openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT })}
-        >
-          <option value="">Select model...</option>
-          {config.modelId && !models.some((model) => model.id === config.modelId) && (
-            <option value={config.modelId}>{config.modelId} (configured)</option>
-          )}
-          {models.map((model) => {
-            const isFree = provider === 'openrouter' && model.pricing?.prompt === '0' && model.pricing?.completion === '0';
-            const contextInfo = model.context_length ? ` (${Math.round(model.context_length / 1000)}K)` : '';
-            return (
-              <option key={model.id} value={model.id}>
-                {(model.name || model.id)}{contextInfo}{isFree ? ' [FREE]' : ''}
-              </option>
-            );
-          })}
-        </select>
-      </div>
-
-      {provider === 'openrouter' && config.modelId && (
-        <div className="settings-row">
-          <label>Host Provider</label>
-          <select
-            className="openrouter-host-provider-select"
-            value={config.openrouterProvider || ''}
-            disabled={isRunning}
-            title={getOpenRouterProviderTitle(config.openrouterProvider)}
-            onChange={(event) => onChange({ ...config, provider, openrouterProvider: event.target.value || null })}
-          >
-            <option value="">Auto</option>
-            {providers.map((providerName) => (
-              <option key={providerName} value={providerName} title={getOpenRouterProviderTitle(providerName)}>
-                {formatOpenRouterProviderLabel(providerName)}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      {provider === 'openrouter' && config.modelId && (
-        <div className="settings-row">
-          <label>Reasoning Effort</label>
-          <select
-            value={normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort)}
-            disabled={isRunning}
-            onChange={(event) => onChange({ ...config, provider, openrouterReasoningEffort: event.target.value })}
-          >
-            {OPENROUTER_REASONING_EFFORT_OPTIONS.map(option => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-          <small className="settings-hint">
-            {reasoningInfo.hasEndpointMetadata && !reasoningInfo.supportsReasoning
-              ? 'This selected host does not advertise reasoning support; OpenRouter may ignore the setting.'
-              : 'Auto sends OpenRouter max reasoning effort by default.'}
-          </small>
-        </div>
-      )}
-
-      {isCloudAccessProvider(provider) && (
-        <CloudReasoningControl
-          provider={provider}
-          modelId={config.modelId}
-          models={models}
-          value={config.openrouterReasoningEffort}
-          disabled={isRunning}
-          onChange={(effort) => onChange({ ...config, provider, openrouterReasoningEffort: effort })}
-        />
-      )}
-
-      {provider !== 'lm_studio' && lmStudioEnabled && (
-        <div className="settings-row">
-          <label>LM Studio Fallback</label>
-          <select
-            value={config.lmStudioFallbackId || ''}
-            disabled={isRunning}
-            onChange={(event) => onChange({ ...config, provider, lmStudioFallbackId: event.target.value || null })}
-          >
-            <option value="">No fallback</option>
-            {lmStudioModels.map((model) => (
-              <option key={model.id} value={model.id}>{model.id}</option>
-            ))}
-          </select>
-        </div>
-      )}
-    </>
-  );
-}
-function RoleEditor(props) {
-  const { title, config, onChange, isRunning, developerModeEnabled = false, disabled = false } = props;
-  const controlsDisabled = isRunning || disabled;
-  const updateNumber = (key, value, fallback) => {
-    const parsed = parseInt(value, 10);
-    onChange({ ...config, [key]: Number.isFinite(parsed) && parsed > 0 ? parsed : fallback });
-  };
-
-  return (
-    <div
-      className={`submitter-config-section${config.provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
-      aria-disabled={disabled}
-      style={disabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}
-    >
-      <h4>{title}</h4>
-      {title === 'Assistant' && (
-        <p className="settings-info">
-          Runs in parallel during topic, brainstorm, path, master-proof edit, and final proof work to retrieve up to 7 relevant verified proof-memory supports from Session History Memory and SyntheticLib4 when enabled. Validators never receive Assistant context.
-        </p>
-      )}
-      {disabled && (
-        <p className="settings-hint">
-          Assistant requires Session History Memory. Enable it from Connectivity to edit or run this role.
-        </p>
-      )}
-      <ModelSelector {...props} isRunning={controlsDisabled} />
-      <div className="settings-row">
-        <label>Context Window</label>
-        <input
-          type="number"
-          min={4096}
-          step={1024}
-          value={config.contextWindow ?? DEFAULT_CONTEXT_WINDOW}
-          disabled={controlsDisabled}
-          onChange={(event) => updateNumber('contextWindow', event.target.value, '')}
-        />
-      </div>
-      <div className="settings-row">
-        <label>Max Output Tokens</label>
-        <input
-          type="number"
-          min={1000}
-          step={1000}
-          value={config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS}
-          disabled={controlsDisabled}
-          onChange={(event) => updateNumber('maxOutputTokens', event.target.value, '')}
-        />
-      </div>
-      {developerModeEnabled && (
-        <div className="settings-row settings-row--inline-checkbox">
-          <label className="settings-checkbox-label settings-checkbox-label--supercharge">
-            <input
-              type="checkbox"
-              checked={Boolean(config.superchargeEnabled)}
-              disabled={controlsDisabled}
-              onChange={(event) => onChange({ ...config, superchargeEnabled: event.target.checked })}
-            />
-            <HelpTooltip
-              label="Learn about Supercharge"
-              buttonContent="Supercharge"
-              buttonClassName="help-tooltip-btn--text"
-              popupClassName="help-tooltip-popup--fixed"
-              useFixedPosition
-            >
-              {SUPERCHARGE_TOOLTIP}
-            </HelpTooltip>
-          </label>
-        </div>
-      )}
-    </div>
-  );
-}
 export default function LeanOJSettings({
   settings,
   onSettingsChange,
@@ -943,7 +654,7 @@ export default function LeanOJSettings({
           <input type="number" min={1} max={10} disabled={isRunning} value={settings.submitterConfigs.length} onChange={(event) => setSubmitterCount(event.target.value)} />
         </div>
         {settings.submitterConfigs.map((submitter, index) => (
-          <RoleEditor
+          <RoleModelEditor
             key={submitter.submitterId || index}
             title={index === 0 ? 'Brainstorm Submitter 1 + Topic Generator' : `Brainstorm Submitter ${index + 1}`}
             config={submitter}
@@ -962,24 +673,39 @@ export default function LeanOJSettings({
 
       <div className="settings-section">
         <h3>Proof Solver Roles</h3>
-        {ROLE_EDITOR_GROUPS.map((group) => (
-          <div key={group.key}>
-            <RoleEditor
-              title={group.title}
-              config={settings.roles[group.roleKeys[0]]}
-              onChange={(next) => updateRoles(group.roleKeys, next)}
-              lmStudioModels={lmStudioModels}
-              openRouterModels={openRouterModels}
-              cloudProviders={cloudProviders}
-              modelProviders={modelProviders}
-              hasOpenRouterKey={hasOpenRouterKey}
-              isRunning={isRunning}
-              lmStudioEnabled={lmStudioEnabled}
-              developerModeEnabled={developerModeEnabled}
-              disabled={group.key === 'assistant' && !assistantMemoryEnabled}
-            />
-          </div>
-        ))}
+        {ROLE_EDITOR_GROUPS.map((group) => {
+          const isAssistant = group.key === 'assistant';
+          const roleDisabled = isAssistant && !assistantMemoryEnabled;
+          return (
+            <div key={group.key}>
+              <RoleModelEditor
+                title={group.title}
+                config={settings.roles[group.roleKeys[0]]}
+                onChange={(next) => updateRoles(group.roleKeys, next)}
+                lmStudioModels={lmStudioModels}
+                openRouterModels={openRouterModels}
+                cloudProviders={cloudProviders}
+                modelProviders={modelProviders}
+                hasOpenRouterKey={hasOpenRouterKey}
+                isRunning={isRunning}
+                lmStudioEnabled={lmStudioEnabled}
+                developerModeEnabled={developerModeEnabled}
+                disabled={roleDisabled}
+              >
+                {isAssistant && (
+                  <p className="settings-info">
+                    Runs in parallel during topic, brainstorm, path, master-proof edit, and final proof work to retrieve up to 7 relevant verified proof-memory supports from Session History Memory and SyntheticLib4 when enabled. Validators never receive Assistant context.
+                  </p>
+                )}
+                {roleDisabled && (
+                  <p className="settings-hint">
+                    Assistant requires Session History Memory. Enable it from Connectivity to edit or run this role.
+                  </p>
+                )}
+              </RoleModelEditor>
+            </div>
+          );
+        })}
       </div>
 
       <div className="settings-section">

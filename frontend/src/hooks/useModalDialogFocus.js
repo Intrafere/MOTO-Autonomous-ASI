@@ -49,8 +49,10 @@ export default function useModalDialogFocus({ active = true, dialogRef, initialF
         onEscapeRef.current?.();
       }
       if (event.key !== 'Tab') return;
-      const controls = dialogRef.current?.querySelectorAll(FOCUSABLE);
-      if (!controls?.length) return;
+      // Controls inside hidden content (inactive tab panels) cannot take focus.
+      const controls = Array.from(dialogRef.current?.querySelectorAll(FOCUSABLE) || [])
+        .filter((control) => !control.closest('[hidden]'));
+      if (!controls.length) return;
       const first = controls[0];
       const last = controls[controls.length - 1];
       if (event.shiftKey && document.activeElement === first) {

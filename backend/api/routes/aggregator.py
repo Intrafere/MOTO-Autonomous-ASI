@@ -20,6 +20,8 @@ from backend.shared.manual_proof_context import get_manual_proof_context_lock
 from backend.shared.workflow_start_guard import WorkflowLease, workflow_start_guard
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
+from backend.shared.translation.discovery import manual_aggregator_results_path
+from backend.shared.translation.service import translation_service
 from backend.aggregator.core.coordinator import coordinator
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.event_log import event_log
@@ -249,6 +251,17 @@ async def _ensure_manual_aggregator_memory_loaded_for_read() -> None:
         manual_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(manual_path, "w", encoding="utf-8") as handle:
             await handle.write("")
+
+
+def _reads_manual_aggregator_database() -> bool:
+    """Whether shared training memory reads the manual Aggregator database.
+
+    During an autonomous run it can hold an autonomous child database instead.
+    """
+    try:
+        return shared_training_memory.file_path.resolve() == manual_aggregator_results_path().resolve()
+    except OSError:
+        return False
 
 
 async def _ensure_manual_event_log_loaded_for_read() -> None:
@@ -610,12 +623,16 @@ async def get_prompt():
 
 @router.get("/results")
 async def get_results():
-    """Get all accepted submissions with formatting for display."""
+    """Get all accepted submissions with formatting for display.
+
+    ``manual_database`` is false while the results come from another
+    database than the manual Aggregator one (during an autonomous run).
+    """
     try:
         await _ensure_manual_aggregator_memory_loaded_for_read()
         # Return formatted results with submission separators for GUI display
         results = await coordinator.get_results_formatted()
-        return {"results": results}
+        return {"results": results, "manual_database": _reads_manual_aggregator_database()}
     except Exception as e:
         logger.error(f"Failed to get results: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -681,6 +698,7 @@ async def clear_all_submissions():
             await clear_manual_aggregator_prompt()
             await clear_manual_main_submitter_config()
             deleted_uploads = await _clear_uploaded_files()
+        translation_service.note_outputs_changed("aggregator_cleared")
         
         return {
             "status": "cleared",

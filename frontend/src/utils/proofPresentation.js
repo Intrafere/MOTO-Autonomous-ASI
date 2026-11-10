@@ -214,6 +214,27 @@ export function buildProofLiveContextMutation(proof = {}, {
   };
 }
 
+// Prose fields Auto Top-p Translate may translate (mirrors the backend
+// PROOF_TRANSLATION_FIELDS); Lean code, ids, theorem names, and metadata always
+// stay original. Views pass the subset they display.
+export const PROOF_TRANSLATION_FIELDS = Object.freeze([
+  'theorem_statement',
+  'formal_sketch',
+  'novelty_reasoning',
+  'novelty_group_claim',
+]);
+
+export function getProofTranslationParts(proof = {}, fields = PROOF_TRANSLATION_FIELDS) {
+  const parts = {};
+  fields.forEach((field) => {
+    const text = proof[field];
+    if (typeof text === 'string' && text.trim()) {
+      parts[field] = text;
+    }
+  });
+  return parts;
+}
+
 export function sanitizeDomId(value, prefix = 'proof') {
   const normalized = String(value ?? '')
     .normalize('NFKD')

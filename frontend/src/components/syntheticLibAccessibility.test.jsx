@@ -165,6 +165,7 @@ describe('SyntheticLib UI accessibility (axe)', () => {
       skills: {
         wolfram_alpha: { status: 'inactive', enabled: false },
         agent_conversation_memory: { status: 'ACTIVE', enabled: true },
+        auto_translate: { status: 'translating', enabled: true, active: true },
       },
     };
     const standard = render(
@@ -189,6 +190,25 @@ describe('SyntheticLib UI accessibility (axe)', () => {
       />,
     );
     await expectNoAxeViolations(developer.container);
+    developer.unmount();
+
+    // The Foreign Language Translation w/ Top-p toggle stays enabled while workflows run, beside
+    // the disabled run-level toggles.
+    const running = render(
+      <ConnectivityPanel
+        appMode="autonomous"
+        developerModeEnabled={false}
+        connectivityStatus={{
+          ...status,
+          skills: { ...status.skills, auto_translate: { status: 'repair required', enabled: true } },
+        }}
+        capabilities={{ lmStudioEnabled: true, syntheticLibProductState: 'coming_soon' }}
+        onModeChange={vi.fn()}
+        anyWorkflowRunning
+      />,
+    );
+    expect(screen.getByRole('checkbox', { name: 'Enable Foreign Language Translation w/ Top-p' })).not.toBeDisabled();
+    await expectNoAxeViolations(running.container);
   });
 
   test('solution path modal', async () => {

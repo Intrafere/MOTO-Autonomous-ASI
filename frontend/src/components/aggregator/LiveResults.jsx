@@ -1,21 +1,33 @@
 /**
  * LiveResults - Displays accepted aggregator submissions with LaTeX rendering.
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { api } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
 import ProofCheckModeModal from '../autonomous/ProofCheckModeModal';
 import ProofRunStatusControls from '../autonomous/ProofRunStatusControls';
+import TranslationLanguageSwitch from '../translation/TranslationLanguageSwitch';
+import TranslationPendingNotice from '../translation/TranslationPendingNotice';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
+import { downloadRawText } from '../../utils/downloadHelpers';
+import { viewedDownload } from '../../utils/translatedDownloads';
 import {
   isProofRunBusy,
   MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
   useProofCheckRuntime,
 } from '../../hooks/useProofCheckRuntime';
+import useTranslatedDocuments from '../../hooks/useTranslatedDocuments';
+
+const NO_RESULTS_TEXT = 'No accepted submissions yet.';
+const RESULTS_TRANSLATION_KEY = 'aggregator:results';
+const NO_TRANSLATION_DOCUMENTS = [];
 
 export default function LiveResults({ onClearPrompt = null }) {
   const [results, setResults] = useState('');
+  // False while an Autonomous run shows its own brainstorm database here; that content
+  // is not the manual Aggregator results, so it is not registered under their key.
+  const [manualDatabase, setManualDatabase] = useState(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [showLatex, setShowLatex] = useState(false); // Raw text by default for performance with large docs
   const [proofActionMessage, setProofActionMessage] = useState('');
@@ -58,16 +70,39 @@ export default function LiveResults({ onClearPrompt = null }) {
     };
   }, []);
 
+  const hasResults = Boolean(results && results !== NO_RESULTS_TEXT);
+  const translationDocuments = useMemo(
+    () => (hasResults && manualDatabase !== false
+      ? [{
+        docKey: RESULTS_TRANSLATION_KEY,
+        kind: 'aggregator_results',
+        title: 'Live Results',
+        profile: 'document',
+        parts: { content: results },
+      }]
+      : NO_TRANSLATION_DOCUMENTS),
+    [hasResults, manualDatabase, results]
+  );
+  const translation = useTranslatedDocuments(translationDocuments);
+  // The results' own language choice, kept even before there are results to translate.
+  const resultsTranslation = translation.forKey(RESULTS_TRANSLATION_KEY);
+  const translationEntry = translation.byKey[RESULTS_TRANSLATION_KEY];
+  const translatedResults = translationEntry?.status === 'complete' && typeof translationEntry.parts?.content === 'string'
+    ? translationEntry.parts.content
+    : null;
+  const displayedResults = translatedResults ?? results;
+
   useEffect(() => {
     if (autoScroll && resultsRef.current) {
       resultsRef.current.scrollTop = resultsRef.current.scrollHeight;
     }
-  }, [results, autoScroll]);
+  }, [displayedResults, autoScroll]);
 
   const fetchResults = async () => {
     try {
       const data = await api.getResults();
-      setResults(data.results || 'No accepted submissions yet.');
+      setResults(data.results || NO_RESULTS_TEXT);
+      setManualDatabase(typeof data.manual_database === 'boolean' ? data.manual_database : null);
     } catch (error) {
       console.error('Failed to fetch results:', error);
     }
@@ -100,21 +135,22 @@ export default function LiveResults({ onClearPrompt = null }) {
     }
   };
 
+  // Saves the language shown: the translation once it is complete, otherwise the original.
   const handleDownload = () => {
-    if (!results || results === 'No accepted submissions yet.') {
+    if (!hasResults) {
       alert('No results to download');
       return;
     }
-    
-    const blob = new Blob([prependDisclaimer(results, 'brainstorm')], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `aggregator_results_${new Date().toISOString().slice(0, 10)}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+
+    const shownTranslation = translatedResults !== null
+      ? { source: results, language: translation.language, content: translatedResults }
+      : null;
+    const download = viewedDownload(
+      shownTranslation,
+      results,
+      `aggregator_results_${new Date().toISOString().slice(0, 10)}`,
+    );
+    downloadRawText(download.content, download.filename, null, 'brainstorm');
   };
 
   const handleProofCheck = () => {
@@ -146,7 +182,6 @@ export default function LiveResults({ onClearPrompt = null }) {
     : proofCheckState?.status === 'running'
       ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
       : 'Search For More Mathematical Proofs';
-  const hasResults = Boolean(results && results !== 'No accepted submissions yet.');
   const proofCheckEnabled = hasResults && canQueueManualProofCheck('brainstorm', MANUAL_AGGREGATOR_PROOF_SOURCE_ID);
   const proofCheckTitle = proofCheckState?.status === 'running'
     ? 'A proof verification is already running for the manual Aggregator database.'
@@ -189,7 +224,9 @@ export default function LiveResults({ onClearPrompt = null }) {
         <button onClick={handleClearAll} className="danger">
           Clear All
         </button>
+        <TranslationLanguageSwitch translation={resultsTranslation} />
       </div>
+      <TranslationPendingNotice translation={resultsTranslation} />
 
       {proofActionMessage && (
         <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
@@ -213,7 +250,8 @@ export default function LiveResults({ onClearPrompt = null }) {
 
       <div className="results-container" ref={resultsRef}>
         <LatexRenderer
-          content={prependDisclaimer(results, 'brainstorm')}
+          documentId={translatedResults !== null ? `${RESULTS_TRANSLATION_KEY}:lang:${translation.language}` : undefined}
+          content={prependDisclaimer(displayedResults, 'brainstorm')}
           className="results-latex-renderer"
           showToggle={false}
           showLatex={showLatex}

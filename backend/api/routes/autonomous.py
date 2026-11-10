@@ -45,6 +45,7 @@ from backend.shared.log_redaction import redact_log_text
 from backend.shared.workflow_start_guard import WorkflowLease, workflow_start_guard
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
+from backend.shared.translation.service import translation_service
 
 logger = logging.getLogger(__name__)
 
@@ -1012,6 +1013,7 @@ async def prune_papers_batch(request: PaperPruneBatchRequest):
                 redact_log_text(exc, 240),
             )
 
+        translation_service.note_outputs_changed("autonomous_papers_pruned")
         return PaperPruneBatchResponse(
             pruned_count=len(committed),
             results=[
@@ -1279,6 +1281,7 @@ async def _clear_autonomous_research_impl(confirm: bool = False):
                 reason="autonomous_cleared",
             )
             await assistant_proof_search_coordinator.clear_cooldown_state()
+            translation_service.note_outputs_changed("autonomous_cleared")
             logger.info("Autonomous research data clear completed successfully")
             
             return {
@@ -1711,6 +1714,7 @@ async def delete_pruned_history_papers(session_id: str, confirm: bool = False):
         deleted_count = await scoped_paper_library.delete_all_pruned_papers()
         for paper in pruned_papers:
             await scoped_research_metadata.delete_paper(paper["paper_id"])
+        translation_service.note_outputs_changed("autonomous_pruned_papers_deleted")
         return {
             "success": True,
             "session_id": session_id,
@@ -2285,6 +2289,7 @@ async def delete_brainstorm(topic_id: str, confirm: bool = False):
             redact_log_text(topic_id, 120),
             len(associated_papers),
         )
+        translation_service.note_outputs_changed("autonomous_brainstorm_deleted")
         
         return {
             "success": True,
@@ -2321,13 +2326,15 @@ async def delete_paper(paper_id: str, confirm: bool = False):
                 detail="Must confirm deletion with confirm=true"
             )
 
-        return await _delete_autonomous_paper_from_scope(
+        result = await _delete_autonomous_paper_from_scope(
             session_id=_get_active_autonomous_session_id(),
             scoped_paper_library=paper_library,
             scoped_brainstorm_memory=brainstorm_memory,
             scoped_research_metadata=research_metadata,
             paper_id=paper_id,
         )
+        translation_service.note_outputs_changed("autonomous_paper_pruned")
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -2356,6 +2363,7 @@ async def delete_current_pruned_papers(confirm: bool = False):
         deleted_count = await paper_library.delete_all_pruned_papers()
         for paper in pruned_papers:
             await research_metadata.delete_paper(paper["paper_id"])
+        translation_service.note_outputs_changed("autonomous_pruned_papers_deleted")
         return {
             "success": True,
             "session_id": _get_active_autonomous_session_id(),
@@ -2389,13 +2397,15 @@ async def delete_history_paper(session_id: str, paper_id: str, confirm: bool = F
             paper_id=paper_id,
         )
 
-        return await _delete_autonomous_paper_from_scope(
+        result = await _delete_autonomous_paper_from_scope(
             session_id=session_id,
             scoped_paper_library=scoped_paper_library,
             scoped_brainstorm_memory=scoped_brainstorm_memory,
             scoped_research_metadata=scoped_research_metadata,
             paper_id=paper_id,
         )
+        translation_service.note_outputs_changed("autonomous_paper_pruned")
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -2683,6 +2693,7 @@ async def clear_tier3_data(confirm: bool = False):
             reason="tier3_cleared",
         )
         await assistant_proof_search_coordinator.clear_cooldown_state()
+        translation_service.note_outputs_changed("tier3_cleared")
         
         # Also clear any final answer critiques
         from backend.shared.critique_memory import clear_critiques

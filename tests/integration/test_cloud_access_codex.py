@@ -11,7 +11,7 @@ from keyring.errors import PasswordDeleteError
 from backend.api.routes import cloud_access as cloud_access_route
 from backend.api.routes import features as features_route
 from backend.shared import secret_store
-from backend.shared.api_client_manager import oauth_live_activity_error_message
+from backend.shared.api_client_manager import provider_live_activity_error_message
 from backend.shared.config import system_config
 from backend.shared.openai_codex_client import (
     OpenAICodexAuthError,
@@ -223,7 +223,7 @@ class OAuthLiveActivityErrorTests(IsolatedAsyncioTestCase):
         self.assertNotIn("private-user-text", message)
 
     async def test_codex_context_length_message_is_extracted_for_live_activity(self) -> None:
-        message = oauth_live_activity_error_message(
+        message = provider_live_activity_error_message(
             RuntimeError(
                 'OpenAI Codex completion failed: {"code": "context_length_exceeded", '
                 '"message": "Your input exceeds the context window of this model. Please adjust your input and try again."}'
@@ -237,7 +237,7 @@ class OAuthLiveActivityErrorTests(IsolatedAsyncioTestCase):
         self.assertLessEqual(len(message), 1800)
 
     async def test_grok_plain_error_is_capped_for_live_activity(self) -> None:
-        message = oauth_live_activity_error_message(
+        message = provider_live_activity_error_message(
             RuntimeError("xAI Grok completion failed: " + ("subscription quota exceeded " * 120))
         )
 

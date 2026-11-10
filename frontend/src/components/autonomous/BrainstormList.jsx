@@ -2,14 +2,23 @@
  * BrainstormList - Displays list of all brainstorm topics with rendered content.
  * Now uses LatexRenderer for proper mathematical notation display.
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import './AutonomousResearch.css';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
 import ProofCheckModeModal from './ProofCheckModeModal';
 import ProofRunStatusControls from './ProofRunStatusControls';
+import TranslationLanguageSwitch from '../translation/TranslationLanguageSwitch';
+import TranslationPendingNotice from '../translation/TranslationPendingNotice';
 import { isProofRunBusy, useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
+import useTranslatedDocuments from '../../hooks/useTranslatedDocuments';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
+import { downloadRawText } from '../../utils/downloadHelpers';
+import { viewedDownload } from '../../utils/translatedDownloads';
+
+const EMPTY_BRAINSTORM_TEXT = 'No content yet...';
+const BRAINSTORM_LOAD_ERROR_TEXT = 'Error loading brainstorm';
+const NO_TRANSLATION_DOCUMENTS = [];
 
 const BrainstormList = ({ brainstorms, onRefresh, api }) => {
   const [expandedId, setExpandedId] = useState(null);
@@ -55,11 +64,11 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
         const data = await getBrainstorm(expandedId);
         if (!isCurrent()) return;
         hasContent = true;
-        setFileContent(data.content || 'No content yet...');
+        setFileContent(data.content || EMPTY_BRAINSTORM_TEXT);
       } catch (error) {
         if (!isCurrent()) return;
         console.error('Failed to load brainstorm content:', error);
-        if (!hasContent) setFileContent('Error loading brainstorm');
+        if (!hasContent) setFileContent(BRAINSTORM_LOAD_ERROR_TEXT);
       } finally {
         if (isCurrent()) setLoading(false);
       }
@@ -80,6 +89,40 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
       unsubscribeNovelProof();
     };
   }, [expandedId, autoRefresh, getBrainstorm]);
+
+  const expandedTitle = expandedId
+    ? (brainstorms?.find((brainstorm) => brainstorm.topic_id === expandedId)?.topic_prompt || expandedId)
+    : '';
+  const translationKey = expandedId ? `brainstorm:current:${expandedId}` : '';
+  const translationDocuments = useMemo(() => {
+    if (
+      !translationKey
+      || loading
+      || !fileContent
+      || fileContent === EMPTY_BRAINSTORM_TEXT
+      || fileContent === BRAINSTORM_LOAD_ERROR_TEXT
+    ) {
+      return NO_TRANSLATION_DOCUMENTS;
+    }
+    return [{
+      docKey: translationKey,
+      kind: 'brainstorm',
+      title: expandedTitle,
+      profile: 'document',
+      parts: { content: fileContent },
+    }];
+  }, [expandedTitle, fileContent, loading, translationKey]);
+  const translation = useTranslatedDocuments(translationDocuments);
+  // This brainstorm's own language choice, kept even while its text is still loading.
+  const brainstormTranslation = translationKey ? translation.forKey(translationKey) : translation;
+  const translationEntry = translationKey ? translation.byKey[translationKey] : null;
+  const translatedContent = translationEntry?.status === 'complete' && typeof translationEntry.parts?.content === 'string'
+    ? translationEntry.parts.content
+    : null;
+  const displayedContent = translatedContent ?? fileContent;
+  const rendererDocumentId = translatedContent !== null
+    ? `brainstorm:${expandedId}:lang:${translation.language}`
+    : `brainstorm:${expandedId}`;
 
   const handleCardClick = (topicId) => {
     // Invalidate synchronously, before React runs the prior effect's cleanup.
@@ -113,19 +156,16 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
     setDeleteConfirm(null);
   };
 
+  // Saves the language shown: the translation once it is complete, otherwise the original.
   const handleDownload = (e, brainstorm) => {
     e.stopPropagation();
     if (!fileContent) return;
-    
-    const blob = new Blob([prependDisclaimer(fileContent, 'brainstorm')], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${brainstorm.topic_id}_brainstorm.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+
+    const shownTranslation = translatedContent !== null
+      ? { source: fileContent, language: translation.language, content: translatedContent }
+      : null;
+    const download = viewedDownload(shownTranslation, fileContent, `${brainstorm.topic_id}_brainstorm`);
+    downloadRawText(download.content, download.filename, null, 'brainstorm');
   };
 
   const handleProofCheck = (e, brainstorm) => {
@@ -309,6 +349,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
                         />
                         LaTeX Rendering
                       </label>
+                      <TranslationLanguageSwitch translation={brainstormTranslation} />
                       <button
                         className="btn-download-small"
                         onClick={(e) => handleDownload(e, brainstorm)}
@@ -318,10 +359,11 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
                       </button>
                     </div>
                   </div>
+                  <TranslationPendingNotice translation={brainstormTranslation} />
                   <div className="brainstorm-content-viewer" onClick={(e) => e.stopPropagation()}>
                     <LatexRenderer
-                      documentId={`brainstorm:${expandedId}`}
-                      content={prependDisclaimer(fileContent, 'brainstorm')}
+                      documentId={rendererDocumentId}
+                      content={prependDisclaimer(displayedContent, 'brainstorm')}
                       className="brainstorm-latex-renderer"
                       showToggle={false}
                       showLatex={showLatex}

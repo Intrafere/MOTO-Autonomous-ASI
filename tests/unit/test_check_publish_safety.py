@@ -50,6 +50,7 @@ PRIVATE_PATHS = (
     "backend/logs/backend.txt",
     "moto_data/auto_sessions/run_1/session_metadata.json",
     "moto_data/runtime_settings.json",
+    "moto_data/auto_translations/translation_store.sqlite3",
     "elsewhere/manual_compiler_prompt.txt",
     "tests/fixtures/user_uploads/client_notes.txt",
     "debug_copy/compiler_last_10_rejections.txt",
@@ -165,7 +166,8 @@ def test_gitignore_ignores_every_private_path_kind() -> None:
     # data-root files outside the default roots.
     guard_only = {
         "docs/plans/copied.md", "plans/notes.json", "moto_data/auto_sessions/run_1/session_metadata.json",
-        "moto_data/runtime_settings.json", "elsewhere/manual_compiler_prompt.txt",
+        "moto_data/runtime_settings.json", "moto_data/auto_translations/translation_store.sqlite3",
+        "elsewhere/manual_compiler_prompt.txt",
         "tests/fixtures/user_uploads/client_notes.txt", "debug_copy/compiler_last_10_rejections.txt",
         "debug_copy/Summary_Of_Last_5_Validator_Rejections_For_Submitter_1.txt",
     }

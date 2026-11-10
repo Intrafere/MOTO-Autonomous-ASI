@@ -47,6 +47,9 @@ import useDeveloperModeShortcut from './hooks/useDeveloperModeShortcut';
 import WolframAlphaAccessModal from './components/WolframAlphaAccessModal';
 import LMStudioConnectivityModal from './components/LMStudioConnectivityModal';
 import AgentConversationMemoryModal from './components/AgentConversationMemoryModal';
+import AutoTranslateProvider from './components/translation/AutoTranslateProvider';
+import AutoTranslateModal, { TranslationDeveloperModesGate } from './components/translation/AutoTranslateModal';
+import { useAutoTranslate } from './hooks/useAutoTranslate';
 import OpenRouterPrivacyWarningModal from './components/OpenRouterPrivacyWarningModal';
 import CritiqueNotificationStack from './components/CritiqueNotificationStack';
 import ProofNotificationStack from './components/autonomous/ProofNotificationStack';
@@ -69,6 +72,7 @@ import {
   connectivityAPI,
   leanojAPI,
   openRouterAPI,
+  translationAPI,
 } from './services/api';
 import {
   LM_STUDIO_STARTUP_CHOICE,
@@ -171,6 +175,21 @@ const DEFAULT_CAPABILITIES = Object.freeze({
   apiContractVersion: '',
 });
 const STARTUP_CLOUD_ACCESS_REASONS = new Set(['startup_setup', 'startup_codex_oauth', 'startup_oauth']);
+
+// Hands App the provider's stable status refresh without subscribing App itself
+// to translation status changes, which would re-render the whole shell.
+function AutoTranslateRefreshBridge({ refreshRef }) {
+  const { refreshStatus } = useAutoTranslate();
+  useEffect(() => {
+    refreshRef.current = refreshStatus;
+    return () => {
+      if (refreshRef.current === refreshStatus) {
+        refreshRef.current = null;
+      }
+    };
+  }, [refreshRef, refreshStatus]);
+  return null;
+}
 
 function hasConfiguredCloudAccessProvider(cloudStatus = {}) {
   return CLOUD_ACCESS_PROVIDERS.some((provider) => Boolean(cloudStatus.providers?.[provider.id]?.configured));
@@ -675,6 +694,8 @@ function App() {
   const [showWolframModal, setShowWolframModal] = useState(false);
   const [showLmStudioModal, setShowLmStudioModal] = useState(false);
   const [showAgentMemoryModal, setShowAgentMemoryModal] = useState(false);
+  const [showAutoTranslateModal, setShowAutoTranslateModal] = useState(false);
+  const autoTranslateRefreshRef = useRef(null);
   const [connectivityStatus, setConnectivityStatus] = useState(null);
   
   // LM Studio availability state (for determining default provider)
@@ -2086,8 +2107,8 @@ function App() {
         event: 'proof_framing_decided',
         timestamp: getTimestamp(data),
         message: data.is_proof_amenable
-          ? 'Proof framing enabled for this research run'
-          : 'Proof framing not applied for this research run',
+          ? 'Submitter 1 (Main Submitter) chose proof framing for this research run'
+          : 'Submitter 1 (Main Submitter) did not choose proof framing for this research run',
         data
       });
     }));
@@ -4202,6 +4223,18 @@ function App() {
     }
   };
 
+  // Auto Top-p Translate is a background service rather than a run-level toggle,
+  // so it may change while workflows run.
+  const handleToggleAutoTranslate = async (enabled) => {
+    try {
+      await translationAPI.control(enabled ? 'enable' : 'disable');
+    } catch (error) {
+      console.error('Failed to change Auto Top-p Translate:', error);
+    }
+    refreshConnectivityStatus();
+    autoTranslateRefreshRef.current?.();
+  };
+
   const mainTabs = [
     { id: 'auto-interface', label: 'Start Here: Autonomous Deep Research Controller', group: 'autonomous-main' },
     { id: 'auto-brainstorms', label: 'Autonomous Stage 1: Brainstorms', group: 'autonomous-main' },
@@ -4349,9 +4382,11 @@ function App() {
           onOpenSyntheticLib4={syntheticLibSurface.open}
           onOpenAgentMemory={() => setShowAgentMemoryModal(true)}
           onOpenWolfram={() => setShowWolframModal(true)}
+          onOpenAutoTranslate={() => setShowAutoTranslateModal(true)}
           onToggleSyntheticLib4={(enabled) => handleConnectivityToggle({ syntheticlib4_enabled: enabled })}
           onToggleAgentMemory={(enabled) => handleConnectivityToggle({ agent_conversation_memory_enabled: enabled })}
           onToggleWolfram={(enabled) => handleConnectivityToggle({ wolfram_alpha_enabled: enabled })}
+          onToggleAutoTranslate={handleToggleAutoTranslate}
         />
       </div>
       
@@ -4913,6 +4948,17 @@ function App() {
         capabilities={capabilities}
         anyWorkflowRunning={anyWorkflowRunning}
       />
+
+      <AutoTranslateRefreshBridge refreshRef={autoTranslateRefreshRef} />
+      <TranslationDeveloperModesGate developerModeEnabled={developerModeEnabled} />
+      <AutoTranslateModal
+        isOpen={showAutoTranslateModal}
+        onClose={() => setShowAutoTranslateModal(false)}
+        capabilities={capabilities}
+        credentialStatusRefreshToken={credentialStatusRefreshToken}
+        developerModeEnabled={developerModeEnabled}
+        onStatusChanged={refreshConnectivityStatus}
+      />
       
       {/* OpenRouter Privacy Warning Modal */}
       <OpenRouterPrivacyWarningModal
@@ -5058,5 +5104,15 @@ function App() {
   );
 }
 
-export default App;
+// The translation provider wraps the whole app shell so App's handlers, the
+// Auto Top-p Translate modal, and every viewer share one status.
+function AppWithAutoTranslate() {
+  return (
+    <AutoTranslateProvider>
+      <App />
+    </AutoTranslateProvider>
+  );
+}
+
+export default AppWithAutoTranslate;
 

@@ -14,6 +14,8 @@ import {
   sanitizeFilename,
 } from '../../utils/downloadHelpers';
 import { readBooleanStorage } from '../../utils/safeStorage';
+import { viewedPdfMetadata } from '../../utils/translatedDownloads';
+import useViewedTranslations from '../../hooks/useViewedTranslations';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
@@ -29,6 +31,7 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [showArchiveModal, setShowArchiveModal] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const { reportView, downloadFor } = useViewedTranslations();
   const containerRef = useRef(null);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   
@@ -83,8 +86,8 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
       return;
     }
     
-    const filename = sanitizeFilename(`Final_Answer_${title}`);
-    downloadRawText(content, filename, null);
+    const download = downloadFor(content, sanitizeFilename(`Final_Answer_${title}`));
+    downloadRawText(download.content, download.filename, null);
   };
 
   // Handle download PDF
@@ -134,10 +137,11 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
       return;
     }
 
+    const download = downloadFor(rawContent, filename);
     await downloadPDFViaBackend(
-      rawContent,
-      metadata,
-      filename,
+      download.content,
+      viewedPdfMetadata(metadata, download),
+      download.filename,
       null,
       () => setIsGeneratingPDF(true),
       () => setIsGeneratingPDF(false),
@@ -430,7 +434,14 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
                 {finalAnswerData.sample_label}
               </div>
             )}
-            <PaperProofViewer documentId={`final:${finalAnswerData?.metadata?.answer_id || status?.session_id || ''}:${shortFormPaper.paper_id || finalAnswerData?.short_form_paper_id || 'short'}`} content={shortFormPaper.content} metrics={shortFormPaper} />
+            <PaperProofViewer
+              documentId={`final:${finalAnswerData?.metadata?.answer_id || status?.session_id || ''}:${shortFormPaper.paper_id || finalAnswerData?.short_form_paper_id || 'short'}`}
+              translationKind="final_answer"
+              translationTitle={shortFormPaper.title || 'Final Answer'}
+              content={shortFormPaper.content}
+              metrics={shortFormPaper}
+              onTranslationView={reportView}
+            />
           </div>
         ) : (
           <div className="loading-content">
@@ -456,7 +467,14 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
             <div className="volume-meta">
               <PaperProofMetrics content={volumeContent.content || ''} metrics={volumeContent} />
             </div>
-            <PaperProofViewer documentId={`final:${finalAnswerData?.metadata?.answer_id || status?.session_id || ''}:volume`} content={volumeContent.content} metrics={volumeContent} />
+            <PaperProofViewer
+              documentId={`final:${finalAnswerData?.metadata?.answer_id || status?.session_id || ''}:volume`}
+              translationKind="final_answer"
+              translationTitle={volumeContent.title || finalAnswerData?.volume?.volume_title || 'Final Answer - Volume'}
+              content={volumeContent.content}
+              metrics={volumeContent}
+              onTranslationView={reportView}
+            />
           </div>
         ) : (
           <div className="loading-content">

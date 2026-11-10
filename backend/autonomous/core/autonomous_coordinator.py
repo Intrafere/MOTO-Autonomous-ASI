@@ -3256,7 +3256,7 @@ class AutonomousCoordinator:
                     notification_key = f"lean-workspace:{run_id}"
                     provider = "lean4"
                     role_id = "autonomous_proof_formalization"
-                    title = LEAN_WORKSPACE_REPAIR_TITLE
+                    title = self._terminal_event.title or LEAN_WORKSPACE_REPAIR_TITLE
                 else:
                     notification_key = f"proof-truncation:{run_id}"
                     provider = "proof_model"
@@ -6423,10 +6423,30 @@ class AutonomousCoordinator:
                 self._stop_event.clear()
                 logger.info("Force Tier 3: Flags reset for Tier 3 execution")
                 
-                # Run Tier 3 synchronously - main loop is stopped, we own the execution now
-                # This prevents the race condition where main loop and Tier 3 run in parallel
-                logger.info("Force Tier 3: Starting Tier 3 workflow synchronously")
-                result = await self._tier3_final_answer_workflow()
+                # Run Tier 3 as the tracked main task so Stop can cancel it,
+                # Start cannot overlap it, and Clear sees it as active. The
+                # request still waits for the outcome.
+                logger.info("Force Tier 3: Starting Tier 3 workflow as the tracked main task")
+                tier3_task = asyncio.create_task(
+                    self._tier3_final_answer_workflow(),
+                    name="autonomous-forced-tier3",
+                )
+                self._main_task = tier3_task
+                tier3_task.add_done_callback(self._on_main_task_done)
+                try:
+                    result = await asyncio.shield(tier3_task)
+                except asyncio.CancelledError:
+                    if not tier3_task.cancelled():
+                        # The HTTP request was cancelled; the tracked run continues.
+                        raise
+                    # Stop cancelled the forced run; stop() already reset the flags.
+                    self._ownership_handoff_active = False
+                    logger.info("Force Tier 3: Tier 3 workflow was stopped before completion")
+                    return {
+                        "success": False,
+                        "result": "stopped",
+                        "message": "Tier 3 was stopped before a final answer was produced",
+                    }
                 
                 # Handle Tier 3 result
                 if result:
@@ -9177,7 +9197,6 @@ class AutonomousCoordinator:
         
         import json
         import shutil
-        import time
         from backend.aggregator.core.queue_manager import queue_manager
         
         # Wait briefly for any pending async file operations to complete
@@ -9187,19 +9206,23 @@ class AutonomousCoordinator:
         critical_errors = []  # Track critical errors separately
         successes = []  # Track successful operations
         
-        def safe_rmtree(path: Path, max_retries: int = 5) -> bool:
-            """Safely remove directory tree with retries for Windows file locking."""
+        async def safe_rmtree(path: Path, max_retries: int = 5) -> bool:
+            """Safely remove directory tree with retries for Windows file locking.
+
+            The removal and its backoff run off the event loop so status,
+            health, and WebSocket traffic keep flowing during a large clear.
+            """
             for attempt in range(max_retries):
                 try:
-                    if path.exists():
-                        shutil.rmtree(path)
+                    if await asyncio.to_thread(path.exists):
+                        await asyncio.to_thread(shutil.rmtree, path)
                     return True
                 except PermissionError as e:
                     if attempt < max_retries - 1:
                         # Exponential backoff: 0.5s, 1s, 2s, 4s
                         delay = 0.5 * (2 ** attempt)
                         logger.warning(f"Retry {attempt + 1}/{max_retries} for {path}: {e}")
-                        time.sleep(delay)
+                        await asyncio.sleep(delay)
                     else:
                         raise
                 except Exception as e:
@@ -9275,7 +9298,7 @@ class AutonomousCoordinator:
                                 sessions_dir, safe_session_name, "proofs", "failed"
                             )
                             if failed_proof_hints_dir.exists():
-                                safe_rmtree(failed_proof_hints_dir)
+                                await safe_rmtree(failed_proof_hints_dir)
                                 logger.info(f"Cleared failed proof retry hints from session: {session_dir.name}")
                         except Exception as e:
                             logger.warning(f"Could not clear failed proof retry hints for {session_dir.name}: {e}")
@@ -9311,7 +9334,7 @@ class AutonomousCoordinator:
         # Step 1: Clear brainstorms directory
         try:
             brainstorms_dir = Path(system_config.auto_brainstorms_dir)
-            safe_rmtree(brainstorms_dir)
+            await safe_rmtree(brainstorms_dir)
             brainstorms_dir.mkdir(parents=True, exist_ok=True)
             successes.append("Cleared brainstorms directory")
             logger.info(f"Cleared brainstorms directory: {brainstorms_dir}")
@@ -9322,7 +9345,7 @@ class AutonomousCoordinator:
         # Step 2: Clear papers directory
         try:
             papers_dir = Path(system_config.auto_papers_dir)
-            safe_rmtree(papers_dir)
+            await safe_rmtree(papers_dir)
             papers_dir.mkdir(parents=True, exist_ok=True)
             (papers_dir / "archive").mkdir(exist_ok=True)
             successes.append("Cleared papers directory")

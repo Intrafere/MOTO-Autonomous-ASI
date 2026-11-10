@@ -101,6 +101,8 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 `get_embeddings()` in generic mode early-returns to `FastEmbedProvider` before the LM Studio → OpenRouter fallback chain.
 
+**One embedding space per index**: vectors from different embedding models are never mixed (dimensions differ and spaces are not comparable). `rag_manager` pins its index to the `<provider>:<model>` space of its first embedding, records it in Chroma collection metadata (a reopened index re-adopts it), and passes it to `get_embeddings_in_space()`. A pinned LM Studio index retries LM Studio with visible backoff and never falls back to OpenRouter; an OpenRouter-pinned index stays on OpenRouter. The pin resets only with the index (reset/clear/root change).
+
 **Batch query optimization**: `_vector_search()` batches all query embeddings into one `get_embeddings()` call (benefits both modes).
 
 **Key files:**
@@ -121,7 +123,7 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 - **Single data-root owner**: One backend process holds the authoritative OS-backed lease for each active data root for its full lifespan. Launcher metadata is advisory and cannot replace this lock.
 - **Read retry**: Vector search auto-retries with exponential backoff (0.5s → 1s waits, max 3 attempts) on HNSW index errors during concurrent writes; each wait is published through the shared emit-and-wait retry seam as a non-model storage retry
 - **Embedding rate limiting**: Semaphore limits concurrent embedding requests to 2 (default mode only; generic mode uses in-process FastEmbed)
-- **FastAPI event-loop safety**: `rag_manager` must not run synchronous ChromaDB calls or CPU-heavy scoring directly on the event loop. Use `asyncio.to_thread()` for ChromaDB `add/query/get/delete` and for large in-memory vector/BM25 scoring.
+- **FastAPI event-loop safety**: `rag_manager` must not run synchronous ChromaDB calls or CPU-heavy scoring directly on the event loop. Use `asyncio.to_thread()` for ChromaDB `add/query/get/delete`, for large in-memory vector/BM25 scoring, and for Stage C MMR reranking.
 - **Retrieval snapshots**: Take a stable chunk snapshot before threaded scoring so concurrent add/remove operations cannot mutate the iterable being scored. Worker-thread BM25/vector scoring should use local snapshot state and must not mutate shared caches such as `self.bm25_index`.
 - **GUI responsiveness invariant**: RAG work runs inside long-lived research/proof tasks; it must never starve `/api/health`, `/api/features`, status polling, OpenRouter key-status, or WebSocket handling.
 
@@ -133,7 +135,7 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Stage B — Hybrid Recall**: BM25 (exact terms) + ANN Cosine (semantic); top 120 from each, deduped by chunk_id. Optional `include_sources` / `include_source_prefixes` scopes recall to named source files or source-name prefixes before reranking. Recall operates on a chunk snapshot; scoped in-memory vector fallback and BM25 scoring must run off-loop.
 
-**Stage C — Reranking + MMR**: Blend vector (60%) + BM25 (40%); MMR λ=0.8 (80% relevance, 20% diversity); removes near-duplicates (similarity > 0.85); hard cap at context budget.
+**Stage C — Reranking + MMR**: Blend vector (60%) + BM25 (40%); MMR λ=0.8 (80% relevance, 20% diversity); removes near-duplicates (similarity > 0.85); hard cap at context budget. Runs off-loop and converts each embedding once, comparing each candidate with each selected chunk once (running minimum) rather than re-scoring every pair per step.
 
 **Stage D — Packing**: Assembles reranked/MMR chunks in order with evidence headers until the token budget is reached (no compression — disabled as unreliable). Skips chunks from `exclude_sources` (content already direct-injected in prompt). Returns `ContextPack` with evidence tracking.
 
@@ -237,7 +239,7 @@ When the content item is the SyntheticLib4 / MOTO unified proof-search result bl
 
 **LeanOJ Proof Solver**: LeanOJ useful proof memory uses the existing RAG pipeline through `backend/leanoj/core/leanoj_context.py`, not a separate/simple retriever. Mandatory prompt inputs (user problem, Lean template, role task, JSON schema) stay direct. Useful artifacts are persisted in full and indexed under session-scoped `leanoj_{session_id}_*` sources when they are eligible for that phase. Final proof editing receives verified subproofs plus accepted `active_plan` notes as proof evidence; ordinary partial scaffolds and failed attempts are excluded except as immediate compact execution feedback. Current final-cycle failure packets are direct context for the next brainstorm/proof-fragment phase; older final-cycle packets remain available through scoped RAG only. Recent rejection/error summaries remain capped direct feedback. During final proof-editing, allocation is narrower: no historical final-cycle packets, no failed-attempt counts, and no phase-transition/path vocabulary; the prompt may still include the most recent 5 final attempts as capped execution feedback so the solver does not repeat stale edits or ignored Lean errors. Validator feedback from rejected non-progressive master-proof shortening edits may be direct feedback because it tells the next final solver what proof progress to restore. The canonical LeanOJ master proof draft (`master_proof.lean`) is file-backed working state, not a RAG artifact: during the final proof-editing loop it is mandatory direct-inject context and must be shown fully or the program must halt with a mandatory direct-context overflow error. Edits always apply to the full persisted proof.
 
-**Embedding provider routing**: See dual-contract table above. Default mode uses LM Studio with OpenRouter fallback. Generic mode uses in-process FastEmbed. Both modes produce compatible vector dimensions for the same ChromaDB collections.
+**Embedding provider routing**: See dual-contract table above. Default mode uses LM Studio with OpenRouter fallback only before the index has an embedding space. Generic mode uses in-process FastEmbed.
 
 **Training DB files**: `rag_shared_training.txt` and `Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt` live under the active instance data root (default desktop paths: `backend/data/rag_shared_training.txt` and `backend/data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt`).
 
@@ -284,3 +286,4 @@ These agents use ONLY direct injection for their compact metadata decision steps
 17. LeanOJ `master_proof.lean` is mandatory full direct-inject context during the final proof-editing loop. Never RAG, summarize, compress, truncate, or window it. If it does not fit, halt with a mandatory direct-context overflow error.
 18. Synchronous ChromaDB operations and heavy RAG scoring must be offloaded from the FastAPI event loop.
 19. Threaded RAG scoring must use local snapshots and must not mutate shared retrieval indexes/caches.
+20. One RAG index holds vectors from exactly one embedding space; no cross-model embedding fallback after the index is pinned.

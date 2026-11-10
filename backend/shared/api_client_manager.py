@@ -14,7 +14,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Dict, Any, Awaitable, List, Optional, Callable
+from typing import Dict, Any, Awaitable, List, Optional, Callable, Tuple
 
 import httpx
 
@@ -51,6 +51,7 @@ from backend.shared.xai_grok_client import (
     XAIGrokUsageLimitError,
     xai_grok_client,
 )
+from backend.shared.background_call_scope import current_background_service
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
 from backend.shared.config import rag_config, system_config
@@ -95,6 +96,13 @@ logger = logging.getLogger(__name__)
 
 
 OAUTH_LIVE_ERROR_MAX_CHARS = 1800
+# Embedding spaces ("<provider>:<model>"): one RAG index holds vectors from one space only.
+EMBEDDING_SPACE_LM_STUDIO = "lm_studio"
+EMBEDDING_SPACE_OPENROUTER = "openrouter"
+EMBEDDING_SPACE_FASTEMBED = "fastembed"
+# An index already built from LM Studio vectors retries LM Studio (about 45 s of
+# backoff, enough for a just-in-time model reload) instead of switching models.
+PINNED_LM_STUDIO_EMBEDDING_ATTEMPTS = 8
 _TRUNCATION_SUFFIX = "..."
 _HARD_CODEX_REQUEST_ERROR_MARKERS = (
     "authentication failed",
@@ -207,6 +215,9 @@ def _retry_workflow_mode(role_id: str) -> str:
     manual_proof_mode = _manual_proof_role_workflow_mode(role)
     if manual_proof_mode:
         return manual_proof_mode
+    # Auto Top-p Translate runs beside any workflow and names its own mode.
+    if role.startswith("translation_"):
+        return "translation"
     active_mode = _active_notification_workflow_mode()
     if active_mode:
         return active_mode
@@ -313,7 +324,7 @@ def _route_log_host(fields: Dict[str, Any]) -> str:
     return routing or "n/a"
 
 
-def _cap_oauth_live_error_text(value: Any, max_chars: int = OAUTH_LIVE_ERROR_MAX_CHARS) -> str:
+def _redacted_live_error_text(value: Any, max_chars: int = OAUTH_LIVE_ERROR_MAX_CHARS) -> str:
     """Return a redacted one-line provider error that is at most max_chars long."""
     text = redact_log_text(value).strip()
     if len(text) <= max_chars:
@@ -350,8 +361,8 @@ _PROVIDER_ERROR_MESSAGE_PREFIXES = tuple(
 )
 
 
-def oauth_live_activity_error_message(error: Exception) -> str:
-    """Best-effort visible OAuth provider error summary for live activity."""
+def provider_live_activity_error_message(error: Exception) -> str:
+    """Best-effort visible provider error summary for live activity."""
     raw = str(error)
     start = raw.find("{")
     end = raw.rfind("}")
@@ -363,18 +374,18 @@ def oauth_live_activity_error_message(error: Exception) -> str:
         code, message = _extract_error_message_from_json(parsed)
         if message:
             detail = f"{code}: {message}" if code else message
-            return _cap_oauth_live_error_text(detail)
+            return _redacted_live_error_text(detail)
 
     for prefix in _PROVIDER_ERROR_MESSAGE_PREFIXES:
         if raw.startswith(prefix):
             raw = raw[len(prefix):].strip()
             break
-    return _cap_oauth_live_error_text(raw)
+    return _redacted_live_error_text(raw)
 
 
 def _is_provider_context_length_error(error: Exception) -> bool:
     """Return true when the provider rejected the request as too large."""
-    detail = oauth_live_activity_error_message(error).lower()
+    detail = provider_live_activity_error_message(error).lower()
     return is_provider_context_length_error(error) or is_provider_context_length_error(Exception(detail))
 
 
@@ -976,7 +987,7 @@ class APIClientManager:
                 "sign in again, and retry."
             ),
             "error_summary": redact_log_text(str(error), 700),
-            "oauth_error_message": oauth_live_activity_error_message(error),
+            "oauth_error_message": provider_live_activity_error_message(error),
         }
         payload = _merge_route_fields(payload, self.route_identity_for_role(
             role_id,
@@ -1033,7 +1044,7 @@ class APIClientManager:
                 )
             ),
             "error_summary": redact_log_text(str(error), 700),
-            "oauth_error_message": oauth_live_activity_error_message(error),
+            "oauth_error_message": provider_live_activity_error_message(error),
         }
         if terminal_guidance:
             payload["terminal_guidance"] = terminal_guidance
@@ -1096,7 +1107,7 @@ class APIClientManager:
                 )
             ),
             "error_summary": redact_log_text(str(error), 700),
-            "oauth_error_message": oauth_live_activity_error_message(error),
+            "oauth_error_message": provider_live_activity_error_message(error),
             "terminal_guidance": (
                 error.terminal_guidance
                 if isinstance(error, ProviderRepairRequiredError)
@@ -1321,7 +1332,7 @@ class APIClientManager:
         self._retryable_provider_backoff_state[key] = failure_count
         wait_seconds = int(error.retry_after_seconds or min(60 * (2 ** (failure_count - 1)), 900))
         safe_error_detail = sanitize_provider_error_text(
-            error.error_summary or oauth_live_activity_error_message(error),
+            error.error_summary or provider_live_activity_error_message(error),
             max_chars=OAUTH_LIVE_ERROR_MAX_CHARS,
         )
         # Identity is built before the activity callback so callback consumers
@@ -1554,7 +1565,7 @@ class APIClientManager:
                 f"Provider reports reset in {resets_in_seconds} seconds."
             ),
             "error_summary": redact_log_text(str(error), 700),
-            "oauth_error_message": oauth_live_activity_error_message(error),
+            "oauth_error_message": provider_live_activity_error_message(error),
         }, recovery_action="cooldown")
         payload = _merge_route_fields(payload, self.route_identity_for_role(
             role_id,
@@ -1847,6 +1858,9 @@ class APIClientManager:
         Args:
             model_id: The model ID that was used for the API call
         """
+        # Background-service calls are never credited as paper/Tier 3 authors.
+        if current_background_service():
+            return
         if self._model_tracking_callback:
             try:
                 await self._model_tracking_callback(model_id)
@@ -2082,6 +2096,7 @@ class APIClientManager:
             "novelty",
             "formalization",
             "proof_form",
+            "translat",
         )
         if any(marker in role_key for marker in excluded_markers):
             return True
@@ -2796,25 +2811,39 @@ class APIClientManager:
             f" using boost mode '{boost_mode}'" if boost_mode else "",
         )
 
-        attempt_responses = await asyncio.gather(*[
-            self._generate_completion_once(
-                task_id=f"{task_id}_supercharge_attempt_{attempt_index}",
-                role_id=role_id,
-                model=model,
-                messages=self._build_supercharge_attempt_messages(messages, attempt_index),
-                temperature=attempt_temperature,
-                max_tokens=max_tokens,
-                response_format=response_format,
-                _moto_force_boost_mode=forced_boost_mode,
-                _moto_consume_boost_count=False,
-                _moto_strict_boost=bool(boost_mode),
-                **kwargs
+        attempt_tasks = [
+            asyncio.create_task(
+                self._generate_completion_once(
+                    task_id=f"{task_id}_supercharge_attempt_{attempt_index}",
+                    role_id=role_id,
+                    model=model,
+                    messages=self._build_supercharge_attempt_messages(messages, attempt_index),
+                    temperature=attempt_temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                    _moto_force_boost_mode=forced_boost_mode,
+                    _moto_consume_boost_count=False,
+                    _moto_strict_boost=bool(boost_mode),
+                    **kwargs
+                ),
+                name=f"{task_id}_supercharge_attempt_{attempt_index}",
             )
             for attempt_index, attempt_temperature in enumerate(
                 self.SUPERCHARGE_ATTEMPT_TEMPERATURES,
                 start=1,
             )
-        ])
+        ]
+        try:
+            attempt_responses = await asyncio.gather(*attempt_tasks)
+        except BaseException:
+            # One lane failed (or this call was cancelled): the other lanes
+            # must not keep spending provider budget on an answer nobody will
+            # read, so cancel them and wait for them to finish before raising.
+            for attempt_task in attempt_tasks:
+                if not attempt_task.done():
+                    attempt_task.cancel()
+            await asyncio.gather(*attempt_tasks, return_exceptions=True)
+            raise
         attempts = [self._response_text(response) for response in attempt_responses]
 
         synthesis_response = await self._generate_completion_once(
@@ -4096,7 +4125,7 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=oauth_live_activity_error_message(e),
+                        error=provider_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
                 cooldown_payload = self._mark_provider_cooldown(
@@ -4180,7 +4209,7 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=oauth_live_activity_error_message(e),
+                        error=provider_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
                 if is_retryable_model_output_error(e):
@@ -4249,7 +4278,7 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=oauth_live_activity_error_message(e),
+                        error=provider_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
                 if is_retryable_model_output_error(e):
@@ -4518,7 +4547,7 @@ class APIClientManager:
                             tokens_used=None,
                             duration_ms=duration_ms,
                             success=False,
-                            error=oauth_live_activity_error_message(e),
+                            error=provider_live_activity_error_message(e),
                             phase=self._current_autonomous_phase,
                         )
                     if is_retryable_model_output_error(e):
@@ -4616,7 +4645,7 @@ class APIClientManager:
                             tokens_used=None,
                             duration_ms=duration_ms,
                             success=False,
-                            error=oauth_live_activity_error_message(e),
+                            error=provider_live_activity_error_message(e),
                             phase=self._current_autonomous_phase,
                         )
                     if is_retryable_model_output_error(e):
@@ -4826,7 +4855,7 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=oauth_live_activity_error_message(e),
+                        error=provider_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
                 cooldown_payload = self._mark_provider_cooldown(
@@ -4873,7 +4902,7 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=oauth_live_activity_error_message(e),
+                        error=provider_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
                 if is_retryable_model_output_error(e):
@@ -4961,7 +4990,7 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=oauth_live_activity_error_message(e),
+                        error=provider_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
                 if is_retryable_model_output_error(e):
@@ -5564,48 +5593,101 @@ class APIClientManager:
         return reset_roles
     
     async def get_embeddings(self, texts: List[str], model: str = None) -> List[List[float]]:
-        """
-        Get embeddings, routing to LM Studio first, then OpenRouter fallback.
-        
-        This enables the system to work without LM Studio if OpenRouter is configured.
-        LM Studio is tried first (local, free), then falls back to OpenRouter.
-        
-        Args:
-            texts: Texts to embed
-            model: Optional model override
-        
-        Returns:
-            List of embedding vectors
-            
-        Raises:
-            RuntimeError: If both LM Studio and OpenRouter are unavailable
-        """
-        if not texts:
-            return []
+        """Embed texts with LM Studio first, then OpenRouter (see ``get_embeddings_in_space``)."""
+        embeddings, _space = await self.get_embeddings_in_space(texts, model=model)
+        return embeddings
 
+    async def get_embeddings_in_space(
+        self,
+        texts: List[str],
+        *,
+        model: Optional[str] = None,
+        embedding_space: Optional[str] = None,
+    ) -> Tuple[List[List[float]], str]:
+        """
+        Embed texts and report the embedding space (provider and model) used.
+
+        Vectors from different embedding models cannot share one index: their
+        dimensions usually differ, and even equal-length vectors are not
+        comparable. With no ``embedding_space``, LM Studio is tried first (local,
+        free) and OpenRouter is the fallback. With an ``embedding_space``, only
+        that provider and model are used: LM Studio is retried with backoff
+        instead of falling back, so an index built from LM Studio vectors never
+        receives OpenRouter vectors.
+
+        Returns:
+            (vectors, embedding_space)
+
+        Raises:
+            RuntimeError: If the required or every available provider fails
+        """
         if system_config.generic_mode:
             provider_model = None if model in (None, rag_config.embedding_model) else model
+            space = f"{EMBEDDING_SPACE_FASTEMBED}:{provider_model or FASTEMBED_MODEL_NAME}"
+            self._require_embedding_space(embedding_space, space)
+            if not texts:
+                return [], space
             logger.debug("Generic mode enabled - using FastEmbed for embeddings")
-            return await self._get_fastembed_provider(provider_model).embed(texts)
-        
-        # Try LM Studio first (local, free)
+            return await self._get_fastembed_provider(provider_model).embed(texts), space
+
+        lm_studio_space = f"{EMBEDDING_SPACE_LM_STUDIO}:{model or rag_config.embedding_model}"
+        openrouter_space = (
+            f"{EMBEDDING_SPACE_OPENROUTER}:{model or OpenRouterClient.DEFAULT_EMBEDDING_MODEL}"
+        )
+        if embedding_space is not None and embedding_space not in (lm_studio_space, openrouter_space):
+            self._require_embedding_space(embedding_space, lm_studio_space)
+        if not texts:
+            return [], embedding_space or lm_studio_space
+
+        if embedding_space == openrouter_space:
+            if not self._openrouter_client:
+                raise RuntimeError(
+                    "Embeddings unavailable: this RAG index was built with OpenRouter embeddings, "
+                    "and OpenRouter is not configured. Add the OpenRouter API key again or clear "
+                    "the run to rebuild the index."
+                )
+            return await self._openrouter_client.get_embeddings(texts, model), openrouter_space
+
+        retry_callback = self._provider_retry_callback("embeddings", route_kind="embeddings")
+        if embedding_space == lm_studio_space:
+            try:
+                embeddings = await lm_studio_client.get_embeddings(
+                    texts,
+                    model,
+                    retry_callback=retry_callback,
+                    max_attempts=PINNED_LM_STUDIO_EMBEDDING_ATTEMPTS,
+                )
+            except Exception as lm_error:
+                raise RuntimeError(
+                    "Embeddings unavailable: LM Studio did not return embeddings "
+                    f"([{type(lm_error).__name__}] {lm_error}). This RAG index was built with "
+                    "LM Studio's embedding model, and vectors from another embedding model cannot "
+                    "be mixed into it, so MOTO is not falling back to OpenRouter. Check that "
+                    "LM Studio is running with the embedding model loaded."
+                ) from lm_error
+            return embeddings, lm_studio_space
+
+        # No index space yet: LM Studio first (local, free), then OpenRouter.
         try:
-            return await lm_studio_client.get_embeddings(
-                texts,
-                model,
-                retry_callback=self._provider_retry_callback(
-                    "embeddings",
-                    route_kind="embeddings",
-                ),
+            return (
+                await lm_studio_client.get_embeddings(texts, model, retry_callback=retry_callback),
+                lm_studio_space,
             )
         except Exception as lm_error:
-            logger.warning(f"LM Studio embeddings unavailable: {lm_error}")
-            
+            logger.warning(
+                "LM Studio embeddings unavailable: [%s] %s",
+                type(lm_error).__name__,
+                lm_error,
+            )
+
             # Fall back to OpenRouter if configured
             if self._openrouter_client:
                 logger.info("Falling back to OpenRouter for embeddings")
                 try:
-                    return await self._openrouter_client.get_embeddings(texts, model)
+                    return (
+                        await self._openrouter_client.get_embeddings(texts, model),
+                        openrouter_space,
+                    )
                 except Exception as or_error:
                     logger.error(f"OpenRouter embeddings also failed: {or_error}")
                     raise RuntimeError(
@@ -5617,6 +5699,14 @@ class APIClientManager:
                     "Embeddings unavailable: LM Studio is down and OpenRouter is not configured. "
                     "Please start LM Studio or configure OpenRouter API key."
                 )
+
+    @staticmethod
+    def _require_embedding_space(required: Optional[str], available: str) -> None:
+        if required is not None and required != available:
+            raise RuntimeError(
+                f"Embeddings unavailable: this RAG index was built with {required}, but only "
+                f"{available} is available now. Clear the run to rebuild the index."
+            )
     
     async def close(self):
         """Close all API clients."""

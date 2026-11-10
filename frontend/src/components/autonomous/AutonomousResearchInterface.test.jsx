@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import AutonomousResearchInterface from './AutonomousResearchInterface';
 
 const baseProps = {
@@ -55,6 +55,48 @@ test('hydrates autonomous prompt synchronously from session storage fallback', (
   render(<AutonomousResearchInterface {...baseProps} />);
 
   expect(screen.getByLabelText('Research Goal')).toHaveValue('cached autonomous prompt');
+});
+
+test('keeps a prompt typed while the backend prompt lookup is pending across a tab switch', async () => {
+  const api = { getPrompt: vi.fn(() => new Promise(() => {})) };
+
+  const firstMount = render(<AutonomousResearchInterface {...baseProps} api={api} />);
+  fireEvent.change(screen.getByLabelText('Research Goal'), { target: { value: 'typed before lookup finished' } });
+  firstMount.unmount();
+
+  render(<AutonomousResearchInterface {...baseProps} api={api} />);
+  await act(async () => {});
+
+  expect(screen.getByLabelText('Research Goal')).toHaveValue('typed before lookup finished');
+});
+
+test('a late backend prompt does not refill the composer after the user clears it', async () => {
+  let resolvePrompt;
+  const api = { getPrompt: vi.fn(() => new Promise((resolve) => { resolvePrompt = resolve; })) };
+  const onClear = vi.fn().mockResolvedValue(true);
+
+  render(<AutonomousResearchInterface {...baseProps} api={api} onClear={onClear} />);
+  await waitFor(() => expect(api.getPrompt).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole('button', { name: 'Clear Research Run' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm Reset' }));
+  await waitFor(() => expect(onClear).toHaveBeenCalledTimes(1));
+
+  await act(async () => {
+    resolvePrompt({ prompt: 'previous run prompt' });
+  });
+
+  expect(screen.getByLabelText('Research Goal')).toHaveValue('');
+});
+
+test('hydrates the resumable backend prompt into an empty composer', async () => {
+  const api = { getPrompt: vi.fn().mockResolvedValue({ prompt: 'resumable run prompt' }) };
+
+  render(<AutonomousResearchInterface {...baseProps} api={api} />);
+
+  await waitFor(() => {
+    expect(screen.getByLabelText('Research Goal')).toHaveValue('resumable run prompt');
+  });
+  expect(localStorage.getItem('autonomous_research_prompt')).toBe('resumable run prompt');
 });
 
 test('keeps autonomous start and output controls available in the prompt composer', () => {

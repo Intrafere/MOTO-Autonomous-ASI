@@ -224,6 +224,48 @@ describe('proof run lifecycle presentation', () => {
 });
 
 describe('proof check runtime recovery', () => {
+  const failedWorkspaceStatus = (overrides) => ({
+    lean4_enabled: true,
+    manual_check_ready: false,
+    workspace_ready: false,
+    workspace_state: 'failed',
+    workspace_error: 'LEAN 4 WORKSPACE ERROR: Lean 4 ran out of memory while loading Mathlib.',
+    lean4_version: '4.35',
+    ...overrides,
+  });
+
+  test('a retryable Lean setup failure keeps proof checks usable and says a check retries setup', async () => {
+    vi.spyOn(autonomousAPI, 'getProofStatus').mockResolvedValue(failedWorkspaceStatus({
+      manual_check_ready: true,
+      workspace_failure_kind: 'lean_out_of_memory',
+      workspace_retry_available: true,
+    }));
+    vi.spyOn(autonomousAPI, 'listProofRuns').mockResolvedValue({ runs: [] });
+
+    const { result } = renderHook(() => useProofCheckRuntime());
+
+    await waitFor(() => expect(result.current.manualCheckEnabled).toBe(true));
+    expect(result.current.manualCheckReason).toContain('ran out of memory');
+    expect(result.current.manualCheckReason).toContain('retries Lean 4 setup first');
+    expect(result.current.getManualCheckReason('brainstorm', 'topic-1')).toContain('retries Lean 4 setup first');
+  });
+
+  test('a Lean setup failure that needs a relaunch still blocks proof checks', async () => {
+    vi.spyOn(autonomousAPI, 'getProofStatus').mockResolvedValue(failedWorkspaceStatus({
+      workspace_error: 'LEAN 4 WORKSPACE ERROR: The MOTO folder path is too long.',
+      workspace_failure_kind: 'lean_workspace_path_too_long',
+      workspace_retry_available: false,
+      manual_check_message: 'LEAN 4 WORKSPACE ERROR: The MOTO folder path is too long.',
+    }));
+    vi.spyOn(autonomousAPI, 'listProofRuns').mockResolvedValue({ runs: [] });
+
+    const { result } = renderHook(() => useProofCheckRuntime());
+
+    await waitFor(() => expect(result.current.proofStatus).not.toBeNull());
+    expect(result.current.manualCheckEnabled).toBe(false);
+    expect(result.current.manualCheckReason).toContain('path is too long');
+  });
+
   test('a provider-repair run leaves the source free for a new check', async () => {
     const repairRun = {
       proof_run_id: 'repair-run',

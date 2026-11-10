@@ -57,6 +57,7 @@ PROVIDER_ERROR_ACTIVITY_EVENTS = frozenset({
     "proof_competition_unavailable",
     "proof_competitor_unavailable",
     "auto_research_stopped",
+    "translation_repair_required",
 })
 
 # Calls that publish provider_retry_cooldown activity through the shared seam.
@@ -237,6 +238,7 @@ _MANAGER = "backend/shared/api_client_manager.py"
 _ASSISTANT = "backend/shared/proof_search/assistant_coordinator.py"
 _RECOVERY_RUNTIME = "backend/shared/provider_recovery/runtime.py"
 _SOLUTION_PATH = "backend/shared/solution_path/engine.py"
+_TRANSLATION = "backend/shared/translation/service.py"
 
 _EMIT = "api_client_manager.emit_and_wait_for_retry"
 _RETRY = RETRY_SEAM_EVENT
@@ -260,6 +262,7 @@ ACTIVITY_POLICIES: tuple[ActivityPolicy, ...] = (
     _policy(_AGGREGATOR, "Coordinator._single_model_workflow", "_broadcast", "free_models_exhausted", ATTRIBUTED, _FREE_ROTATION_ROUTE),
     _policy(_AGGREGATOR, "Coordinator._single_model_workflow", _EMIT, _RETRY, ATTRIBUTED, _FREE_ROTATION_ROUTE),
     _policy(_AGGREGATOR, "Coordinator._single_model_workflow", _EMIT, _RETRY, ATTRIBUTED, _ERROR_SUPPLIES_ROUTE, occurrence=2),
+    _policy(_AGGREGATOR, "Coordinator._validate_restored_batch_individually", _EMIT, _RETRY, ATTRIBUTED, "Batch-contract retry names the validator's configured model and provider."),
     *(
         _policy(_AGGREGATOR, scope, call, event, ATTRIBUTED, "Repair payload names the error's model and provider and merges the role's route identity.")
         for scope, event in (
@@ -388,6 +391,10 @@ ACTIVITY_POLICIES: tuple[ActivityPolicy, ...] = (
     _policy(_RECOVERY_RUNTIME, "assured_retry_wait", _EMIT, _RETRY, EXEMPT, _PASS_THROUGH),
     _policy("backend/shared/subscription_providers/api_key_client.py", "SubscriptionApiKeyClient._wait_before_retry", "assured_retry_wait", _RETRY, ATTRIBUTED, _ADAPTER_ROUTE),
     *_policies(_SOLUTION_PATH, "SolutionPathEngine._review_loop", "_broadcast", "solution_path_proposal_user_repair_required", 3, ATTRIBUTED, "Reviewer repair payload merges _reviewer_route_identity for the Main Submitter 1 review route."),
+    _policy(_TRANSLATION, "TranslationService._validator_contract_retry", _EMIT, _RETRY, EXEMPT, "Translator Validator JSON-contract retry re-judges the same attempts; a parser failure with no typed provider error in scope, so it names mode and role only."),
+    _policy(_TRANSLATION, "TranslationService._wait_after_free_models_exhausted", _EMIT, _RETRY, ATTRIBUTED, _FREE_ROTATION_ROUTE),
+    _policy(_TRANSLATION, "TranslationService._wait_after_unexpected_error", _EMIT, _RETRY, ATTRIBUTED, _ERROR_SUPPLIES_ROUTE),
+    _policy(_TRANSLATION, "TranslationService._enter_repair", "_broadcast", "translation_repair_required", ATTRIBUTED, "Repair payload merges route_identity_for_role for the failing translator or validator role and its error."),
     *_policies("backend/shared/xai_grok_client.py", "XAIGrokClient._post_with_retry", "assured_retry_wait", _RETRY, 2, ATTRIBUTED, _ADAPTER_ROUTE),
 )
 

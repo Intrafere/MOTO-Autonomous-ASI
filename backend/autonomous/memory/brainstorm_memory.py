@@ -15,6 +15,7 @@ from backend.shared.config import system_config
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import BrainstormMetadata
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
+from backend.shared.atomic_json import atomic_write_text
 from backend.autonomous.memory.proof_database import (
     is_duplicate_novel_tier,
     is_live_context_active,
@@ -197,8 +198,7 @@ class BrainstormMemory:
             # by the fallback parsing in shared_training.py. The file starts empty and
             # submissions are added via shared_training_memory which handles formatting.
             db_path = self._get_database_path(topic_id)
-            async with aiofiles.open(db_path, 'w', encoding='utf-8') as f:
-                await f.write("")  # Empty file - shared_training_memory will manage content
+            await asyncio.to_thread(atomic_write_text, db_path, "")  # Empty file - shared_training_memory will manage content
             
             logger.info(f"Created new brainstorm: {topic_id}")
             return metadata
@@ -233,8 +233,7 @@ class BrainstormMemory:
             if isinstance(value, datetime):
                 data[key] = value.isoformat()
         
-        async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(data, indent=2))
+        await asyncio.to_thread(atomic_write_text, metadata_path, json.dumps(data, indent=2))
     
     async def update_metadata(self, topic_id: str, **kwargs) -> Optional[BrainstormMetadata]:
         """Update specific fields in brainstorm metadata."""
@@ -678,8 +677,7 @@ class BrainstormMemory:
             formatted_sections.append(section)
         
         full_content = '\n\n'.join(formatted_sections)
-        async with aiofiles.open(db_path, 'w', encoding='utf-8') as f:
-            await f.write(full_content)
+        await asyncio.to_thread(atomic_write_text, db_path, full_content)
     
     # ========================================================================
     # REJECTION LOG OPERATIONS
@@ -718,8 +716,7 @@ class BrainstormMemory:
             rejections = rejections[-5:]
             
             # Save
-            async with aiofiles.open(rejections_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(rejections, indent=2))
+            await asyncio.to_thread(atomic_write_text, rejections_path, json.dumps(rejections, indent=2))
     
     async def get_submitter_rejections(self, topic_id: str, submitter_id: int) -> List[Dict[str, Any]]:
         """Get rejection log for a submitter (last 5)."""
@@ -743,8 +740,7 @@ class BrainstormMemory:
         rejections_path = self._get_submitter_rejections_path(topic_id, submitter_id)
         
         if rejections_path.exists():
-            async with aiofiles.open(rejections_path, 'w', encoding='utf-8') as f:
-                await f.write("[]")
+            await asyncio.to_thread(atomic_write_text, rejections_path, "[]")
     
     # ========================================================================
     # COMPLETION FEEDBACK OPERATIONS

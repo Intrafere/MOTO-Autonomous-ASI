@@ -8,9 +8,13 @@ import {
   getCanonicalProofIdentity,
   getNoveltyGroupAnchorIds,
   sanitizeDomId,
+  getProofTranslationParts,
 } from '../../utils/proofPresentation';
 import { readBooleanStorage } from '../../utils/safeStorage';
+import useTranslatedDocuments from '../../hooks/useTranslatedDocuments';
 import SyntheticLibOfferPanel from './SyntheticLibOfferPanel';
+import TranslationLanguageSwitch from '../translation/TranslationLanguageSwitch';
+import TranslationPendingNotice from '../translation/TranslationPendingNotice';
 import './FinalAnswerLibrary.css';
 import './ProofLibrary.css';
 
@@ -43,6 +47,12 @@ function getProofCardId(proof) {
 
 function getProofRunKey(proof) {
   return proof.run_id || proof.session_id || `orphan:${proof.proof_id}`;
+}
+
+const NO_TRANSLATION_DOCUMENTS = [];
+
+function getProofTranslationKey(proof) {
+  return `proof:library:${proof.library_id || getProofCardId(proof)}`;
 }
 
 function matchesSelectedProof(proof, selectedProofId, selectedSessionId = '', selectedRunId = '') {
@@ -272,6 +282,36 @@ export default function ProofLibrary({
     }
     return map;
   }, [filteredProofs]);
+
+  // Library proofs are translated when opened: only the expanded, fully loaded entry.
+  const expandedListProof = useMemo(
+    () => (expandedId ? proofs.find((proof) => getProofCardId(proof) === expandedId) || null : null),
+    [expandedId, proofs]
+  );
+  const translationDocuments = useMemo(() => {
+    if (
+      !expandedListProof
+      || !expandedProof
+      || loadingContentId === expandedId
+      || String(expandedProof.proof_id || '') !== String(expandedListProof.proof_id || '')
+    ) {
+      return NO_TRANSLATION_DOCUMENTS;
+    }
+    return [{
+      docKey: getProofTranslationKey(expandedListProof),
+      kind: 'proof',
+      title: expandedProof.theorem_name || expandedProof.proof_id,
+      profile: 'fields',
+      parts: getProofTranslationParts(expandedProof),
+    }];
+  }, [expandedId, expandedListProof, expandedProof, loadingContentId]);
+  const translation = useTranslatedDocuments(translationDocuments);
+  const translateAllModes = proofScope === 'manual' ? ['aggregator', 'compiler'] : ['autonomous'];
+  // Translated prose for this card's opened entry when ready; otherwise `original`.
+  const getDisplayedProofText = (listProof, field, original) => {
+    const translated = translation.byKey[getProofTranslationKey(listProof)]?.parts?.[field];
+    return typeof translated === 'string' ? translated : original;
+  };
 
   const handleExpand = async (proof) => {
     const id = getProofCardId(proof);
@@ -826,6 +866,8 @@ export default function ProofLibrary({
                       const id = getProofCardId(proof);
                       const cardDomId = sanitizeDomId(id, 'proof-card');
                       const detailsDomId = sanitizeDomId(id, 'proof-library-details');
+                      // Each proof has its own language choice; the default comes from the translation window.
+                      const proofTranslation = translation.forKey(getProofTranslationKey(proof));
                       const isExpanded = expandedId === id;
                       const liveContext = classifyProofLiveContext(proof, { historical: true });
 
@@ -843,6 +885,7 @@ export default function ProofLibrary({
                                 {proof.theorem_name || proof.proof_id}
                               </h4>
                               <div className="proof-card-actions">
+                                <TranslationLanguageSwitch translation={proofTranslation} className="proof-language" />
                                 <button
                                   type="button"
                                   className="proof-header-download"
@@ -895,7 +938,7 @@ export default function ProofLibrary({
                             </div>
 
                             <p className="proof-statement">
-                              {truncate(proof.theorem_statement, 300)}
+                              {truncate(getDisplayedProofText(proof, 'theorem_statement', proof.theorem_statement), 300)}
                             </p>
 
                             {proof.source_title && (
@@ -930,6 +973,9 @@ export default function ProofLibrary({
                               hidden={!isExpanded}
                             >
                             {isExpanded && (
+                              <TranslationPendingNotice translation={proofTranslation} translateAllModes={translateAllModes} />
+                            )}
+                            {isExpanded && (
                               loadingContentId === id ? (
                                 <div className="library-loading" style={{ padding: '20px' }}>
                                   <span className="library-loading__icon">&#x21BB;</span>
@@ -940,14 +986,14 @@ export default function ProofLibrary({
                                   <div className="proof-detail-section">
                                     <h4>Theorem Statement</h4>
                                     <pre className="proof-code-block">
-                                      {expandedProof.theorem_statement}
+                                      {getDisplayedProofText(proof, 'theorem_statement', expandedProof.theorem_statement)}
                                     </pre>
                                   </div>
 
                                   {expandedProof.novelty_reasoning && (
                                     <div className="proof-detail-section">
                                       <h4>Novelty Assessment</h4>
-                                      <p>{expandedProof.novelty_reasoning}</p>
+                                      <p>{getDisplayedProofText(proof, 'novelty_reasoning', expandedProof.novelty_reasoning)}</p>
                                     </div>
                                   )}
                                   <div className="proof-detail-section">
@@ -957,7 +1003,9 @@ export default function ProofLibrary({
                                         ? 'Finite verified proof group'
                                         : 'Accepted Lean statement alone'}
                                     </p>
-                                    {expandedProof.novelty_group_claim && <p>{expandedProof.novelty_group_claim}</p>}
+                                    {expandedProof.novelty_group_claim && (
+                                      <p>{getDisplayedProofText(proof, 'novelty_group_claim', expandedProof.novelty_group_claim)}</p>
+                                    )}
                                     {expandedProof.novelty_scope === 'group' && expandedProof.novelty_group_proof_ids?.length > 0 && (
                                       <p>Ranked with: {expandedProof.novelty_group_proof_ids.join(', ')}</p>
                                     )}
@@ -974,7 +1022,7 @@ export default function ProofLibrary({
                                     <div className="proof-detail-section">
                                       <h4>Formal Sketch</h4>
                                       <pre className="proof-code-block">
-                                        {expandedProof.formal_sketch}
+                                        {getDisplayedProofText(proof, 'formal_sketch', expandedProof.formal_sketch)}
                                       </pre>
                                     </div>
                                   )}
@@ -1045,6 +1093,7 @@ export default function ProofLibrary({
             const cardDomId = sanitizeDomId(id, 'proof-card');
             const detailsDomId = sanitizeDomId(id, 'proof-library-details');
             const isExpanded = expandedId === id;
+            const proofTranslation = translation.forKey(getProofTranslationKey(proof));
             const liveContext = classifyProofLiveContext(proof, { historical: true });
             return (
               <div
@@ -1056,6 +1105,7 @@ export default function ProofLibrary({
                   <div className="answer-title-row">
                     <h4 className="answer-title proof-title">{proof.theorem_name || proof.proof_id}</h4>
                     <div className="proof-card-actions">
+                      <TranslationLanguageSwitch translation={proofTranslation} className="proof-language" />
                       <button
                         type="button"
                         className="proof-header-download"
@@ -1089,7 +1139,7 @@ export default function ProofLibrary({
                     </span>
                   </div>
                   <p className="proof-statement">
-                    {truncate(proof.theorem_statement, 300)}
+                    {truncate(getDisplayedProofText(proof, 'theorem_statement', proof.theorem_statement), 300)}
                   </p>
                   {liveContext.isPruned && (
                     <div className="proof-library-live-context-note">
@@ -1110,6 +1160,9 @@ export default function ProofLibrary({
                     hidden={!isExpanded}
                   >
                   {isExpanded && (
+                    <TranslationPendingNotice translation={proofTranslation} translateAllModes={translateAllModes} />
+                  )}
+                  {isExpanded && (
                     loadingContentId === id ? (
                       <div className="library-loading" style={{ padding: '20px' }}>
                         <span className="library-loading__icon">&#x21BB;</span>
@@ -1120,13 +1173,13 @@ export default function ProofLibrary({
                         <div className="proof-detail-section">
                           <h4>Theorem Statement</h4>
                           <pre className="proof-code-block">
-                            {expandedProof.theorem_statement}
+                            {getDisplayedProofText(proof, 'theorem_statement', expandedProof.theorem_statement)}
                           </pre>
                         </div>
                         {expandedProof.novelty_reasoning && (
                           <div className="proof-detail-section">
                             <h4>Novelty Assessment</h4>
-                            <p>{expandedProof.novelty_reasoning}</p>
+                            <p>{getDisplayedProofText(proof, 'novelty_reasoning', expandedProof.novelty_reasoning)}</p>
                           </div>
                         )}
                         <div className="proof-detail-section">
@@ -1136,7 +1189,9 @@ export default function ProofLibrary({
                               ? 'Finite verified proof group'
                               : 'Accepted Lean statement alone'}
                           </p>
-                          {expandedProof.novelty_group_claim && <p>{expandedProof.novelty_group_claim}</p>}
+                          {expandedProof.novelty_group_claim && (
+                            <p>{getDisplayedProofText(proof, 'novelty_group_claim', expandedProof.novelty_group_claim)}</p>
+                          )}
                           {expandedProof.novelty_scope === 'group' && expandedProof.novelty_group_proof_ids?.length > 0 && (
                             <p>Ranked with: {expandedProof.novelty_group_proof_ids.join(', ')}</p>
                           )}

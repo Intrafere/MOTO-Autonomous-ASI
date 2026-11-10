@@ -32,6 +32,7 @@ from backend.aggregator.core.chroma_cache import (
 
 logger = logging.getLogger(__name__)
 CHROMA_DELETE_BATCH_SIZE = 1000
+EMBEDDING_SPACE_METADATA_KEY = "embedding_space"
 
 
 class RAGManager:
@@ -69,6 +70,12 @@ class RAGManager:
         self.document_count = 0
         self.permanent_documents = set()  # User files never evicted
         self.document_access_order: OrderedDict = OrderedDict()  # LRU tracking: source_name -> last_access_time
+
+        # The single embedding space ("<provider>:<model>") of this index. Every
+        # stored and query vector must come from it; it is chosen by the first
+        # embedding and recorded on the collections so a reopened index keeps it.
+        self._embedding_space: Optional[str] = None
+        self._embedding_space_lock = asyncio.Lock()
 
     @property
     def is_initialized(self) -> bool:
@@ -123,6 +130,8 @@ class RAGManager:
                 )
                 for size in rag_config.submitter_chunk_intervals
             }
+            if self._embedding_space is None:
+                self._embedding_space = self._recorded_embedding_space_locked()
             self._root_identity = identity
         except BaseException:
             self._close_locked()
@@ -250,6 +259,46 @@ class RAGManager:
         self.document_count = 0
         self.permanent_documents.clear()
         self.document_access_order.clear()
+        self._embedding_space = None
+
+    def _recorded_embedding_space_locked(self) -> Optional[str]:
+        """Worker-only: the embedding space recorded on the open collections, if any."""
+        for collection in self.collections.values():
+            space = (collection.metadata or {}).get(EMBEDDING_SPACE_METADATA_KEY)
+            if isinstance(space, str) and space:
+                return space
+        return None
+
+    @staticmethod
+    def _record_embedding_space_locked(collection, embedding_space: str) -> None:
+        """Worker-only: record the embedding space of the vectors stored in a collection."""
+        metadata = dict(collection.metadata or {})
+        if metadata.get(EMBEDDING_SPACE_METADATA_KEY) == embedding_space:
+            return
+        metadata[EMBEDDING_SPACE_METADATA_KEY] = embedding_space
+        collection.modify(metadata=metadata)
+
+    async def _embed(self, texts: List[str]) -> Tuple[List[List[float]], str]:
+        """Embed texts in this index's embedding space, choosing it on first use.
+
+        Choosing waits only on the embedding call, never on the RAG operation
+        lock, because callers may already hold that lock while embedding.
+        """
+        space = self._embedding_space
+        if space is None:
+            async with self._embedding_space_lock:
+                space = self._embedding_space
+                if space is None:
+                    embeddings, space = await api_client_manager.get_embeddings_in_space(texts)
+                    if self._embedding_space is None:
+                        self._embedding_space = space
+                        logger.info("RAG index embedding space set to %s", space)
+                    return embeddings, space
+        embeddings, _ = await api_client_manager.get_embeddings_in_space(
+            texts,
+            embedding_space=space,
+        )
+        return embeddings, space
 
     async def close(self) -> None:
         """Drain native work, then close the Chroma client exactly once."""
@@ -451,9 +500,9 @@ class RAGManager:
         )
         logger.debug(f"RAG Stage 2/4 complete: Retrieved {len(candidates)} candidate chunks")
         
-        # Stage C: Reranking + MMR
+        # Stage C: Reranking + MMR (off the event loop, like Stage B scoring)
         logger.debug(f"RAG Stage 3/4: Reranking and MMR diversification")
-        ranked_chunks = self._rerank_and_diversify(candidates, query, chunk_size)
+        ranked_chunks = await asyncio.to_thread(self._rerank_and_diversify, candidates)
         logger.debug(f"RAG Stage 3/4 complete: Ranked to {len(ranked_chunks)} chunks")
         
         # Stage D: Packing + Compression
@@ -472,7 +521,7 @@ class RAGManager:
         
         texts = [chunk.text for chunk in chunks]
         await self.ensure_initialized()
-        embeddings = await api_client_manager.get_embeddings(texts)
+        embeddings, embedding_space = await self._embed(texts)
 
         # Update chunks with embeddings and tokens
         for chunk, embedding in zip(chunks, embeddings):
@@ -486,7 +535,20 @@ class RAGManager:
                 f"{operation_name} initialization",
                 self._ensure_initialized_locked,
             )
+            if self._embedding_space is None:
+                self._embedding_space = embedding_space
+            if embedding_space != self._embedding_space:
+                raise RuntimeError(
+                    f"RAG index embedding space changed from {embedding_space} to "
+                    f"{self._embedding_space} while these chunks were embedded; not storing them."
+                )
             collection = self.collections[chunk_size]
+            await self._await_native_worker(
+                f"{operation_name} embedding space",
+                self._record_embedding_space_locked,
+                collection,
+                embedding_space,
+            )
             try:
                 await self._await_native_worker(
                     operation_name,
@@ -601,7 +663,7 @@ class RAGManager:
         if not chunks:
             return []
         
-        query_embeddings = await api_client_manager.get_embeddings(queries)
+        query_embeddings, _ = await self._embed(queries)
         if candidate_chunks is not None and len(candidate_chunks) != len(self.chunks_by_size[chunk_size]):
             return await asyncio.to_thread(
                 self._score_vector_candidates,
@@ -756,83 +818,96 @@ class RAGManager:
     def _rerank_and_diversify(
         self,
         candidates: List[Tuple[DocumentChunk, float]],
-        query: str,
-        chunk_size: int
     ) -> List[DocumentChunk]:
-        """Stage C: Reranking with MMR diversification."""
+        """Stage C: Reranking with MMR diversification.
+
+        Runs in a worker thread. Each embedding is converted once, and each
+        remaining candidate is compared with a chunk only when that chunk is
+        selected, keeping a running minimum similarity. The selection order,
+        tie-breaking, and similarity values are identical to recomputing every
+        candidate-to-selected pair at every step, at a small fraction of the cost.
+        """
         if not candidates:
             return []
-        
-        # Apply MMR (Maximal Marginal Relevance)
-        selected = []
-        remaining = candidates.copy()
-        
-        while remaining and len(selected) < rag_config.hybrid_recall_top_k:
-            if not selected:
-                # Select most relevant
-                best_idx = 0
-                selected.append(remaining[best_idx][0])
-                remaining.pop(best_idx)
-            else:
-                # Balance relevance and diversity
+
+        top_k = rag_config.hybrid_recall_top_k
+        mmr_lambda = rag_config.mmr_lambda
+        operands = [self._similarity_operand(chunk.embedding) for chunk, _ in candidates]
+
+        # Apply MMR (Maximal Marginal Relevance). Diversity is one minus the
+        # minimum similarity to the already-selected chunks.
+        selected: List[int] = []
+        remaining = list(range(len(candidates)))
+        min_similarity: Dict[int, float] = {}
+
+        while remaining and len(selected) < top_k:
+            best_position = 0
+            if selected:
+                # Balance relevance and diversity; the first strictly best score wins
                 best_score = -float('inf')
-                best_idx = 0
-                
-                for idx, (chunk, relevance) in enumerate(remaining):
-                    # Calculate diversity (min similarity to selected)
-                    diversities = []
-                    for sel_chunk in selected:
-                        similarity = self._cosine_similarity(
-                            chunk.embedding,
-                            sel_chunk.embedding
-                        )
-                        diversities.append(similarity)
-                    
-                    diversity = 1.0 - min(diversities) if diversities else 1.0
-                    
-                    # MMR score
+                for position, index in enumerate(remaining):
+                    diversity = 1.0 - min_similarity[index]
                     mmr_score = (
-                        rag_config.mmr_lambda * relevance +
-                        (1 - rag_config.mmr_lambda) * diversity
+                        mmr_lambda * candidates[index][1] +
+                        (1 - mmr_lambda) * diversity
                     )
-                    
                     if mmr_score > best_score:
                         best_score = mmr_score
-                        best_idx = idx
-                
-                selected.append(remaining[best_idx][0])
-                remaining.pop(best_idx)
-        
+                        best_position = position
+
+            chosen = remaining.pop(best_position)
+            selected.append(chosen)
+            if len(selected) >= top_k:
+                break
+            for index in remaining:
+                similarity = self._operand_similarity(operands[index], operands[chosen])
+                previous = min_similarity.get(index)
+                if previous is None or similarity < previous:
+                    min_similarity[index] = similarity
+
         # Remove near-duplicates
-        final = []
-        for chunk in selected:
-            is_duplicate = False
-            for existing in final:
-                similarity = self._cosine_similarity(chunk.embedding, existing.embedding)
-                if similarity > rag_config.similarity_threshold:
-                    is_duplicate = True
-                    break
-            if not is_duplicate:
-                final.append(chunk)
-        
-        return final
-    
+        threshold = rag_config.similarity_threshold
+        final: List[int] = []
+        for index in selected:
+            if not any(
+                self._operand_similarity(operands[index], operands[kept]) > threshold
+                for kept in final
+            ):
+                final.append(index)
+
+        return [candidates[index][0] for index in final]
+
+    @staticmethod
+    def _similarity_operand(
+        vector: Optional[List[float]],
+    ) -> Optional[Tuple[np.ndarray, float]]:
+        """Convert an embedding once for repeated cosine comparisons."""
+        if vector is None or len(vector) == 0:
+            return None
+        array = np.array(vector)
+        return array, np.linalg.norm(array)
+
+    @staticmethod
+    def _operand_similarity(
+        first: Optional[Tuple[np.ndarray, float]],
+        second: Optional[Tuple[np.ndarray, float]],
+    ) -> float:
+        """Cosine similarity of two converted embeddings; 0.0 when either is empty or zero."""
+        if first is None or second is None:
+            return 0.0
+        first_array, first_norm = first
+        second_array, second_norm = second
+        dot = np.dot(first_array, second_array)
+        if first_norm == 0 or second_norm == 0:
+            return 0.0
+        return float(dot / (first_norm * second_norm))
+
     def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """Calculate cosine similarity between two vectors."""
-        if not vec1 or not vec2:
-            return 0.0
-        
-        v1 = np.array(vec1)
-        v2 = np.array(vec2)
-        
-        dot = np.dot(v1, v2)
-        norm1 = np.linalg.norm(v1)
-        norm2 = np.linalg.norm(v2)
-        
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-        
-        return float(dot / (norm1 * norm2))
+        return self._operand_similarity(
+            self._similarity_operand(vec1),
+            self._similarity_operand(vec2),
+        )
     
     async def _pack_and_compress(
         self,

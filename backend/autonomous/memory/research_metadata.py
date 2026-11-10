@@ -14,6 +14,7 @@ from backend.shared.config import system_config
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import BrainstormMetadata, PaperMetadata
 from backend.shared.path_safety import resolve_path_within_root
+from backend.shared.atomic_json import atomic_write_text
 from backend.autonomous.memory.session_write_authority import autonomous_session_write
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,7 @@ class ResearchMetadata:
                     
         except Exception as e:
             logger.error(f"Failed to load research metadata: {e}")
+            await self._preserve_unreadable_file(self._metadata_path, "research metadata")
             self._data = {
                 "user_research_prompt": "",
                 "base_user_research_prompt": "",
@@ -228,10 +230,36 @@ class ResearchMetadata:
         if needs_save:
             await self._save_metadata()
     
+    async def _preserve_unreadable_file(self, path: Path, label: str) -> None:
+        """Move an existing but unreadable state file aside before defaults replace it.
+
+        The registry would otherwise be overwritten with empty defaults and the
+        prior brainstorm/paper/ID-counter state lost; a `.corrupt-<timestamp>`
+        sibling keeps it recoverable.
+        """
+        try:
+            exists = await asyncio.to_thread(path.is_file)
+        except OSError:
+            exists = False
+        if not exists:
+            return
+        backup_path = path.with_name(
+            f"{path.name}.corrupt-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        )
+        try:
+            await asyncio.to_thread(path.replace, backup_path)
+        except OSError as exc:
+            logger.error("Could not preserve unreadable %s file: %s", label, exc)
+            return
+        logger.error(
+            "Unreadable %s file preserved as %s; a fresh default file replaces it",
+            label,
+            redact_log_text(backup_path.name, 160),
+        )
+
     async def _save_metadata(self) -> None:
         """Save metadata to file."""
-        async with aiofiles.open(self._metadata_path, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(self._data, indent=2))
+        await asyncio.to_thread(atomic_write_text, self._metadata_path, json.dumps(self._data, indent=2))
     
     async def _load_stats(self) -> None:
         """Load statistics from file."""
@@ -241,13 +269,13 @@ class ResearchMetadata:
                 self._stats = json.loads(content)
         except Exception as e:
             logger.error(f"Failed to load research stats: {e}")
+            await self._preserve_unreadable_file(self._stats_path, "research stats")
             self._stats = self._get_default_stats()
     
     async def _save_stats(self) -> None:
         """Save statistics to file."""
         self._stats["last_updated"] = datetime.now().isoformat()
-        async with aiofiles.open(self._stats_path, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(self._stats, indent=2))
+        await asyncio.to_thread(atomic_write_text, self._stats_path, json.dumps(self._stats, indent=2))
     
     # ========================================================================
     # WORKFLOW STATE (For crash recovery / resume)
@@ -316,13 +344,8 @@ class ResearchMetadata:
     async def _write_workflow_state_locked(self) -> None:
         """Atomically publish the in-memory workflow state while holding `_lock`."""
         self._workflow_state_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self._workflow_state_path.with_name(
-            f".{self._workflow_state_path.name}.tmp"
-        )
         payload = json.dumps(self._workflow_state, indent=2)
-        async with aiofiles.open(temp_path, "w", encoding="utf-8") as f:
-            await f.write(payload)
-        await asyncio.to_thread(temp_path.replace, self._workflow_state_path)
+        await asyncio.to_thread(atomic_write_text, self._workflow_state_path, payload)
     
     async def save_workflow_state(self, state: Dict[str, Any]) -> None:
         """Save workflow state for crash recovery / resume."""

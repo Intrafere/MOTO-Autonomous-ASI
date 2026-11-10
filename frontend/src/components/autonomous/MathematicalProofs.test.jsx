@@ -46,6 +46,20 @@ test('shows active proofs directly without a prompt-level collapse', async () =>
   expect(screen.getByText(proof.lean_code)).toBeInTheDocument();
 });
 
+test('explains a proofs request that got no response and recovers on Refresh', async () => {
+  const api = buildApi();
+  api.getProofs
+    .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    .mockResolvedValue({ proofs: [proof], proof_set_revision: 4 });
+  const user = userEvent.setup();
+  render(<MathematicalProofs api={api} />);
+
+  expect(await screen.findByText(/the backend did not respond/i)).toBeInTheDocument();
+  expect(screen.queryByText(/Failed to fetch/)).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Refresh' }));
+  expect(await screen.findByText(proof.theorem_statement)).toBeInTheDocument();
+});
+
 test('opens a selected active proof directly', async () => {
   render(<MathematicalProofs api={buildApi()} selectedProofId="proof-1" />);
 

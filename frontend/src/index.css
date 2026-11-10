@@ -1303,6 +1303,12 @@ button.danger:hover {
   margin-bottom: 1.5rem;
 }
 
+/* The accepted-submissions toolbar also holds the translation language switch. */
+.button-group.results-controls {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

@@ -44,6 +44,15 @@
 .whats-new-section li a:hover { color: #c3d2ff; }
 .whats-new-section--warning { background: rgba(255, 184, 0, 0.08); border-color: rgba(255, 184, 0, 0.45); }
 .whats-new-section--warning h3 { color: #ffd166; }
+.whats-new-section--feature {
+  background: linear-gradient(180deg, rgba(30, 255, 28, 0.07), rgba(111, 140, 255, 0.05) 60%, rgba(255, 255, 255, 0.03));
+  border-color: rgba(30, 255, 28, 0.38);
+  box-shadow: 0 0 32px rgba(30, 255, 28, 0.08);
+}
+.whats-new-section--feature h3 { color: #1eff1c; font-size: 1.32rem; text-shadow: 0 0 16px rgba(30, 255, 28, 0.3); }
+.whats-new-section__intro { margin: 0 auto 1rem; max-width: 980px; color: #e6e7fb; font-size: 1.04rem; line-height: 1.72; text-align: center; }
+.whats-new-section__intro strong { color: #fff; font-weight: 800; }
+.whats-new-section__intro a { color: #9bb5ff; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
 .whats-new-footer { padding-top: 0.5rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
 .whats-new-footer a { color: #f4f5ff; background: rgba(255, 255, 255, 0.075); border: 1px solid rgba(255, 255, 255, 0.18); padding: 0.58rem 1.05rem; border-radius: 999px; font-weight: 800; text-decoration: none; box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22); }
 .whats-new-done { background: rgba(30, 255, 28, 0.08); color: #1eff1c; font: inherit; font-weight: 800; border: 1px solid rgba(30, 255, 28, 0.38); border-radius: 999px; padding: 0.58rem 1.5rem; cursor: pointer; }
@@ -52,4 +61,5 @@
   .whats-new-overlay { padding: 10px; }
   .inline-modal-content.whats-new-modal { padding: 1.25rem; }
   .whats-new-header { padding: 2.5rem 0 1rem; }
+  .whats-new-section { padding: 1rem 0.8rem; }
 }

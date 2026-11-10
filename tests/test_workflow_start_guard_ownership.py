@@ -263,7 +263,9 @@ async def test_failed_chroma_upsert_does_not_commit_memory(monkeypatch):
     )
     manager.chunks_by_size[256] = [existing]
     manager.collections[256] = SimpleNamespace(
-        upsert=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("write failed"))
+        metadata={},
+        modify=lambda **_kwargs: None,
+        upsert=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("write failed")),
     )
     monkeypatch.setattr(manager, "_ensure_initialized_locked", lambda: None)
 
@@ -272,8 +274,8 @@ async def test_failed_chroma_upsert_does_not_commit_memory(monkeypatch):
 
     monkeypatch.setattr(manager, "_await_native_worker", direct_native)
     monkeypatch.setattr(
-        "backend.aggregator.core.rag_manager.api_client_manager.get_embeddings",
-        lambda _texts: asyncio.sleep(0, result=[[0.0, 1.0]]),
+        "backend.aggregator.core.rag_manager.api_client_manager.get_embeddings_in_space",
+        lambda _texts, **_kwargs: asyncio.sleep(0, result=([[0.0, 1.0]], "lm_studio:test")),
     )
 
     with pytest.raises(RuntimeError, match="write failed"):

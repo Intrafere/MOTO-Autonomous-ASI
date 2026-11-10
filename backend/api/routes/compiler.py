@@ -24,6 +24,7 @@ from backend.shared.log_redaction import redact_log_text
 from backend.shared.manual_proof_context import get_manual_proof_context_lock
 from backend.shared.workflow_start_guard import WorkflowLease, workflow_start_guard
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
+from backend.shared.translation.service import translation_service
 from backend.compiler.core.compiler_coordinator import CRITIQUE_ATTEMPT_TARGET, compiler_coordinator
 from backend.compiler.memory.manual_prompt import (
     clear_manual_compiler_prompt,
@@ -31,7 +32,7 @@ from backend.compiler.memory.manual_prompt import (
     save_manual_compiler_prompt,
 )
 from backend.compiler.memory.outline_memory import outline_memory
-from backend.compiler.memory.paper_memory import paper_memory
+from backend.compiler.memory.paper_memory import format_live_paper_display, paper_memory
 from backend.aggregator.core.coordinator import coordinator
 from backend.aggregator.memory.shared_training import (
     append_proof_to_manual_shared_training,
@@ -964,11 +965,7 @@ async def get_paper():
         word_count = await paper_memory.get_word_count()
         
         # Prepend outline to paper for display
-        full_content = ""
-        if outline:
-            full_content = f"OUTLINE:\n{'='*80}\n\n{outline}\n\n{'='*80}\n\nPAPER:\n{'='*80}\n\n{paper}"
-        else:
-            full_content = paper
+        full_content = format_live_paper_display(outline, paper)
         from backend.shared.paper_proofs import analyze_paper_content
         analysis = analyze_paper_content(paper)
         metrics = {
@@ -1253,6 +1250,7 @@ async def clear_paper(confirm: bool = False):
             )
             await assistant_proof_search_coordinator.clear_cooldown_state()
             await clear_manual_compiler_prompt()
+        translation_service.note_outputs_changed("compiler_cleared")
         
         # Also clear any paper critiques
         from backend.shared.critique_memory import clear_critiques

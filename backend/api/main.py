@@ -30,6 +30,7 @@ from backend.api.routes import (
     update,
     leanoj,
     cloud_access,
+    translation,
 )
 from backend.shared.build_info import get_build_info
 from backend.shared.lm_studio_client import lm_studio_client
@@ -192,6 +193,37 @@ def _restore_desktop_provider_credentials(api_client_manager) -> None:
         logger.warning("Failed to restore Wolfram Alpha credentials on startup: %s", exc)
 
 
+async def _restore_leanoj_session() -> None:
+    """Restore saved LeanOJ state for the UI; launch model work only when explicitly requested.
+
+    Lean 4 being enabled is not enough to imply that LM Studio/OpenRouter
+    models are loaded and ready at backend startup. Auto Top-p Translate scans
+    again once the restore finishes, so the restored run translates as the
+    Proof Solver's current run rather than as older output.
+    """
+    from backend.shared.translation.service import translation_service
+
+    try:
+        auto_resume_leanoj = (
+            system_config.lean4_enabled and system_config.leanoj_auto_resume_enabled
+        )
+        await leanoj_coordinator.restore_latest_session(auto_resume=False)
+        translation_service.note_outputs_changed("leanoj_restored")
+        if auto_resume_leanoj and leanoj_coordinator._request is not None:
+            async with workflow_start_guard.reserve():
+                if workflow_start_guard.active_owner is None:
+                    from backend.api.routes.leanoj import (
+                        commit_leanoj_workflow_lease,
+                        release_leanoj_workflow_lease,
+                    )
+                    if leanoj_coordinator.start_in_background():
+                        commit_leanoj_workflow_lease()
+                        if not leanoj_coordinator.is_active:
+                            release_leanoj_workflow_lease()
+    except Exception as exc:
+        logger.warning("Failed to restore LeanOJ session state on startup: %s", exc)
+
+
 @asynccontextmanager
 async def _application_lifespan(app: FastAPI):
     """Lifespan events for the FastAPI app."""
@@ -289,27 +321,15 @@ async def _application_lifespan(app: FastAPI):
     # Set API client manager broadcaster (token tracking, rate limits, fallbacks)
     api_client_manager.set_broadcast_callback(websocket.broadcast_event)
 
+    # Auto Top-p Translate is a background service beside every workflow; it
+    # never takes a workflow lease, and a startup failure leaves the app running.
+    from backend.shared.translation.service import translation_service
     try:
-        # Restore saved LeanOJ state for the UI, but only launch model work when
-        # explicitly requested. Lean 4 being enabled is not enough to imply that
-        # LM Studio/OpenRouter models are loaded and ready at backend startup.
-        auto_resume_leanoj = (
-            system_config.lean4_enabled and system_config.leanoj_auto_resume_enabled
-        )
-        await leanoj_coordinator.restore_latest_session(auto_resume=False)
-        if auto_resume_leanoj and leanoj_coordinator._request is not None:
-            async with workflow_start_guard.reserve():
-                if workflow_start_guard.active_owner is None:
-                    from backend.api.routes.leanoj import (
-                        commit_leanoj_workflow_lease,
-                        release_leanoj_workflow_lease,
-                    )
-                    if leanoj_coordinator.start_in_background():
-                        commit_leanoj_workflow_lease()
-                        if not leanoj_coordinator.is_active:
-                            release_leanoj_workflow_lease()
+        await translation_service.start()
     except Exception as exc:
-        logger.warning("Failed to restore LeanOJ session state on startup: %s", exc)
+        logger.warning("Auto Top-p Translate failed to start: %s", type(exc).__name__)
+
+    await _restore_leanoj_session()
 
     logger.info("ASI Aggregator System ready")
 
@@ -317,6 +337,10 @@ async def _application_lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("Shutting down ASI Aggregator System...")
+    try:
+        await translation_service.shutdown()
+    except Exception:
+        logger.exception("Auto Top-p Translate shutdown cleanup failed")
     try:
         for label, stop in (
             ("Aggregator", coordinator.stop),
@@ -394,6 +418,7 @@ app.include_router(cloud_access.router)
 app.include_router(download.router)
 app.include_router(update.router)
 app.include_router(leanoj.router)
+app.include_router(translation.router)
 app.include_router(websocket.router)
 
 

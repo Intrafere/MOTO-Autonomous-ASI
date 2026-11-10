@@ -22,6 +22,7 @@ from backend.shared.runtime_settings import (
     save_connectivity_runtime_settings,
 )
 from backend.shared.syntheticlib4_client import syntheticlib4_client
+from backend.shared.translation.service import DISPLAY_NAME as TRANSLATION_DISPLAY_NAME, translation_service
 from backend.shared.syntheticlib_product import (
     get_syntheticlib_product_state,
     syntheticlib_runtime_allowed,
@@ -260,6 +261,22 @@ def _wolfram_status() -> dict[str, Any]:
     }
 
 
+def _auto_translate_status() -> dict[str, Any]:
+    """Return the in-memory Auto Top-p Translate summary; never touches disk or models."""
+    try:
+        return translation_service.connectivity_summary()
+    except Exception as exc:
+        logger.warning("Connectivity Auto Top-p Translate status failed: %s", type(exc).__name__)
+        return {
+            "status": "error",
+            "enabled": False,
+            "active": False,
+            "message": f"{TRANSLATION_DISPLAY_NAME} status is unavailable.",
+            "languages": [],
+            "pending_units": 0,
+        }
+
+
 def _workflow_is_active() -> bool:
     """Return True when a top-level workflow is active."""
     try:
@@ -299,6 +316,7 @@ async def get_connectivity_status() -> dict[str, Any]:
             "syntheticlib4": syntheticlib4,
             "agent_conversation_memory": agent_memory,
             "wolfram_alpha": _wolfram_status(),
+            "auto_translate": _auto_translate_status(),
         },
         "boost": boost_manager.get_boost_status(),
     }
@@ -330,7 +348,11 @@ async def update_connectivity_toggles(request: ConnectivityToggleRequest) -> dic
     try:
         save_connectivity_runtime_settings()
     except RuntimeSettingsError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Failed to persist connectivity toggles")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save connectivity settings; see the backend log.",
+        ) from exc
 
     return await get_connectivity_status()
 

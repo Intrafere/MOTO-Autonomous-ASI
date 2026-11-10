@@ -63,7 +63,6 @@ from backend.shared.context_overflow import (
     context_overflow_model_payload,
 )
 from backend.shared.lean4_client import (
-    LEAN_WORKSPACE_REPAIR_TITLE,
     LeanWorkspaceRepairRequiredError,
     clear_lean4_client,
     close_lean4_client,
@@ -133,6 +132,7 @@ ProofLibraryCategory = Literal["novel", "duplicate_novel", "not_novel", "all"]
 _manual_proof_run_lock = asyncio.Lock()
 _LEAN_STATUS_STARTING_LOG_INTERVAL_SECONDS = 60.0
 _last_lean_status_starting_log_at = 0.0
+_LEAN_SETUP_RETRY_NOTICE = "Starting a proof check retries Lean 4 setup first, so no restart is needed."
 _ASSISTANT_MANUAL_SOURCE_SUMMARY_CHARS = 8000
 ProofAppendCallback = Callable[[object], Awaitable[bool]]
 
@@ -1813,10 +1813,7 @@ async def _run_manual_proof_check(
                 if isinstance(exc, LeanWorkspaceRepairRequiredError):
                     await proof_run_manager.repair_required(
                         run_control,
-                        reason=(
-                            f"{LEAN_WORKSPACE_REPAIR_TITLE}: {exc.message} "
-                            f"{exc.terminal_guidance}"
-                        ),
+                        reason=f"{exc.title}: {exc.message} {exc.terminal_guidance}",
                     )
                     return "stopped", None
                 if is_provider_credit_pause_error(exc):
@@ -2356,6 +2353,8 @@ async def get_proofs_status():
     smt_available = False
     workspace_state = "disabled" if not system_config.lean4_enabled else "not_started"
     workspace_error = ""
+    workspace_failure_kind = ""
+    workspace_retry_available = False
     manual_check_ready, manual_check_message = await _get_manual_check_status()
     if system_config.lean4_enabled:
         try:
@@ -2364,6 +2363,8 @@ async def get_proofs_status():
             workspace_state = str(workspace_status.get("state") or "not_started")
             workspace_ready = bool(workspace_status.get("ready"))
             workspace_error = str(workspace_status.get("error") or "")
+            workspace_failure_kind = str(workspace_status.get("failure_kind") or "")
+            workspace_retry_available = bool(workspace_status.get("retry_available"))
             version = client.get_cached_version()
             if workspace_ready:
                 mathlib_commit = client.get_mathlib_commit()
@@ -2382,6 +2383,12 @@ async def get_proofs_status():
             if version_unavailable:
                 manual_check_ready = False
                 manual_check_message = "Lean 4 executable is not available."
+            elif workspace_state == "failed" and workspace_retry_available:
+                # Queuing a check restarts setup, so the controls stay usable.
+                manual_check_message = (
+                    f"{workspace_error or 'Lean 4 workspace preparation failed.'} "
+                    f"{_LEAN_SETUP_RETRY_NOTICE}"
+                )
             elif workspace_state == "failed":
                 manual_check_ready = False
                 manual_check_message = workspace_error or "Lean 4 workspace preparation failed."
@@ -2417,6 +2424,8 @@ async def get_proofs_status():
         "workspace_ready": workspace_ready,
         "workspace_state": workspace_state,
         "workspace_error": workspace_error,
+        "workspace_failure_kind": workspace_failure_kind,
+        "workspace_retry_available": workspace_retry_available,
         "mathlib_commit": mathlib_commit,
         "smt_enabled": system_config.smt_enabled,
         "smt_available": smt_available,

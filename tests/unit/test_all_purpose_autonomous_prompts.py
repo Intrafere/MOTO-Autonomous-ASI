@@ -5,6 +5,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from backend.aggregator.prompts.submitter_prompts import get_submitter_system_prompt
+from backend.aggregator.prompts.validator_prompts import (
+    get_validator_dual_system_prompt,
+    get_validator_system_prompt,
+    get_validator_triple_system_prompt,
+)
 from backend.autonomous.core.autonomous_coordinator import AutonomousCoordinator
 from backend.autonomous.prompts.completion_prompts import (
     build_completion_review_prompt,
@@ -215,6 +221,38 @@ def test_topic_routes_allow_novel_incremental_and_indirect_progress() -> None:
     assert "at least as direct a route" not in validator
     assert "unjustifiably ignored" not in validator
     assert "no plausible path, direct or indirect" in validator
+
+
+def test_topic_prompts_keep_brainstorm_open_instead_of_locking_a_solution_path() -> None:
+    exploration = build_exploration_user_prompt(ENGINEERING_GOAL, [], [])
+    selection = get_topic_selection_system_prompt()
+    validator = get_topic_validator_system_prompt()
+    exploration_submitter = get_submitter_system_prompt()
+    exploration_validators = (
+        get_validator_system_prompt(),
+        get_validator_dual_system_prompt(),
+        get_validator_triple_system_prompt(),
+    )
+
+    for prompt in (exploration, selection, validator):
+        lower = prompt.lower()
+        assert "smartest phase" in lower
+        assert "what to attack" in lower
+        assert "predetermined" in lower
+        assert "presumed" in lower or "presupposes" in lower
+    for prompt in (exploration, selection):
+        assert "determine whether" in prompt
+        assert "exact statement is the user's own question" in prompt
+    assert "Specific enough to guide focused solution seeking" not in exploration
+    assert "broader than a narrower alternative" in validator
+    assert "Locks Solution Path" in validator
+
+    assert "open about method and answer" in exploration_submitter
+    for prompt in exploration_validators:
+        assert "open about method and answer" in prompt
+        assert "predetermined construction, method, or solution path" in prompt
+        assert "broader than a narrower alternative" in prompt
+        assert "accept a candidate brainstorm question if it is specific" not in prompt
 
 
 def test_completion_and_continuation_keep_novel_indirect_progress() -> None:

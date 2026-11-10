@@ -8,6 +8,8 @@ import pytest
 from backend.api.routes.cloud_access import ProviderNotificationRecord, ProviderNotificationsResponse
 from backend.shared.config import system_config
 from backend.shared.provider_notification_store import (
+    MAX_BACKGROUND_PROVIDER_NOTIFICATIONS,
+    MAX_PROVIDER_NOTIFICATIONS,
     PROVIDER_NOTIFICATIONS_FILENAME,
     list_provider_notifications,
     record_provider_notification,
@@ -165,6 +167,77 @@ def test_invalid_workflow_mode_is_still_dropped(temp_data_dir):
 
     assert stored["workflow_mode"] == ""
     assert stored["route_identity"].startswith("[Autonomous")
+
+
+def test_translation_workflow_mode_is_kept(temp_data_dir):
+    stored = record_provider_notification(
+        "provider_retry_cooldown",
+        _retry_payload(workflow_mode="translation", role_id="translation_validator"),
+    )
+
+    assert stored["workflow_mode"] == "translation"
+    assert list_provider_notifications()[-1]["workflow_mode"] == "translation"
+
+
+def _translation_retry(index: int) -> dict:
+    return _retry_payload(
+        workflow_mode="translation",
+        role_id="translation_validator",
+        event_id=f"provider_retry:translation-{index}:1",
+    )
+
+
+def test_translation_notifications_are_capped_and_never_evict_workflow_notifications(temp_data_dir):
+    workflow_keys = []
+    for index in range(MAX_PROVIDER_NOTIFICATIONS - 2):
+        stored = record_provider_notification(
+            "provider_retry_cooldown",
+            _retry_payload(event_id=f"provider_retry:workflow-{index}:1"),
+        )
+        workflow_keys.append(stored["notification_key"])
+    translation_keys = [
+        record_provider_notification("provider_retry_cooldown", _translation_retry(index))["notification_key"]
+        for index in range(12)
+    ]
+
+    notifications = list_provider_notifications()
+    keys = [item["notification_key"] for item in notifications]
+    assert len(notifications) == MAX_PROVIDER_NOTIFICATIONS
+    # Every workflow notification survives; only the newest translation entries remain.
+    assert keys[: len(workflow_keys)] == workflow_keys
+    assert keys[len(workflow_keys):] == translation_keys[-2:]
+
+    # A new workflow notification evicts the oldest translation entry, not a workflow one.
+    newest = record_provider_notification(
+        "provider_retry_cooldown",
+        _retry_payload(event_id="provider_retry:workflow-new:1"),
+    )
+    keys = [item["notification_key"] for item in list_provider_notifications()]
+    assert keys == [*workflow_keys, translation_keys[-1], newest["notification_key"]]
+
+
+def test_translation_notification_trimmed_on_arrival_reports_degraded_persistence(temp_data_dir):
+    for index in range(MAX_PROVIDER_NOTIFICATIONS):
+        record_provider_notification(
+            "provider_retry_cooldown",
+            _retry_payload(event_id=f"provider_retry:workflow-{index}:1"),
+        )
+
+    translation = record_provider_notification("provider_retry_cooldown", _translation_retry(0))
+
+    assert translation["persistence_status"] == "degraded"
+    assert translation["persistence_degraded"] is True
+    assert "not stored" in translation["persistence_detail"]
+    assert all(item.get("workflow_mode") != "translation" for item in list_provider_notifications())
+
+
+def test_translation_notifications_keep_at_most_their_own_cap(temp_data_dir):
+    translation_keys = [
+        record_provider_notification("provider_retry_cooldown", _translation_retry(index))["notification_key"]
+        for index in range(MAX_BACKGROUND_PROVIDER_NOTIFICATIONS + 4)
+    ]
+    keys = [item["notification_key"] for item in list_provider_notifications()]
+    assert keys == translation_keys[-MAX_BACKGROUND_PROVIDER_NOTIFICATIONS:]
 
 
 def test_legacy_records_without_route_identity_still_load(temp_data_dir):

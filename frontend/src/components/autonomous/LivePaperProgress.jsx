@@ -12,12 +12,15 @@ import {
   sanitizeFilename,
 } from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
+import { viewedPdfMetadata } from '../../utils/translatedDownloads';
+import useViewedTranslations from '../../hooks/useViewedTranslations';
 
 const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
   const [paperData, setPaperData] = useState(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [isExpanded, setIsExpanded] = useState(true);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const { reportView, downloadFor } = useViewedTranslations();
   const [isResetting, setIsResetting] = useState(false);
   const containerRef = useRef(null);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
@@ -73,8 +76,8 @@ const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
 
   const handleDownloadRaw = () => {
     if (!paperData?.content) return;
-    const filename = sanitizeFilename(paperData.title || paperData.paper_id || 'paper');
-    downloadRawText(paperData.content, filename, paperData.outline, 'paper');
+    const download = downloadFor(paperData.content, sanitizeFilename(paperData.title || paperData.paper_id || 'paper'));
+    downloadRawText(download.content, download.filename, paperData.outline, 'paper');
   };
 
   const handleDownloadPdf = async () => {
@@ -85,18 +88,18 @@ const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
 
     if (!paperData?.content) return;
 
-    const filename = sanitizeFilename(paperData.title || paperData.paper_id || 'paper');
-    const metadata = {
+    const download = downloadFor(paperData.content, sanitizeFilename(paperData.title || paperData.paper_id || 'paper'));
+    const metadata = viewedPdfMetadata({
       title: paperData.title || 'Untitled Paper',
       wordCount: paperData.word_count,
       date: new Date().toLocaleDateString(),
       models: null,
-    };
+    }, download);
 
     await downloadPDFViaBackend(
-      paperData.content,
+      download.content,
       metadata,
-      filename,
+      download.filename,
       paperData.outline || null,
       () => setIsDownloadingPdf(true),
       () => setIsDownloadingPdf(false),
@@ -199,10 +202,14 @@ const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
                 <h4>Paper Content</h4>
                 <PaperProofViewer
                   documentId={`paper:${paperData.session_id || ''}:${paperData.paper_id || ''}`}
+                  translationKind="live_paper"
+                  translationTitle={paperData.title || ''}
+                  translationEnabled={Boolean(paperData.paper_id)}
                   prefixContent={paperData.outline ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n` : ''}
                   content={prependDisclaimer(paperData.content, 'paper')}
                   metrics={paperData}
                   className="live-paper-latex-renderer"
+                  onTranslationView={reportView}
                 />
               </div>
             ) : (

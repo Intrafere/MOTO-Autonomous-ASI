@@ -51,6 +51,7 @@ PROVIDER_ERROR_ACTIVITY_EVENTS = frozenset({
     "proof_competition_unavailable",
     "proof_competitor_unavailable",
     "auto_research_stopped",
+    "translation_repair_required",
 })
 
 VALID_WORKFLOW_MODES = frozenset({
@@ -59,6 +60,7 @@ VALID_WORKFLOW_MODES = frozenset({
     "compiler",
     "leanoj",
     "manual_proof_check",
+    "translation",
 })
 WORKFLOW_LABELS = {
     "autonomous": "Autonomous",
@@ -66,6 +68,7 @@ WORKFLOW_LABELS = {
     "compiler": "Compiler",
     "leanoj": "LeanOJ",
     "manual_proof_check": "Manual proof check",
+    "translation": "Foreign Language Translation w/ Top-p",
 }
 PROVIDER_LABELS = {
     "openrouter": "OpenRouter",
@@ -144,6 +147,8 @@ _EXACT_ROLE_LABELS = {
     "autonomous_assistant": "Assistant (autonomous)",
     "compiler_assistant": "Assistant (compiler)",
     "leanoj_assistant": "Assistant (LeanOJ)",
+    "translation_submitter": "Translator Submitter",
+    "translation_validator": "Translator Validator",
 }
 _PROOF_ROLE_KINDS = (
     "candidate_list_validator",

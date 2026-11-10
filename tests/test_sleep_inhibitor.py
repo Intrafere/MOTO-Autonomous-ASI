@@ -7,6 +7,7 @@ import sys
 import pytest
 
 from backend.shared.sleep_inhibitor import (
+    POWER_REQUEST_DISPLAY_REQUIRED,
     POWER_REQUEST_EXECUTION_REQUIRED,
     POWER_REQUEST_REASON,
     POWER_REQUEST_SYSTEM_REQUIRED,
@@ -99,16 +100,20 @@ def test_windows_inhibitor_is_owner_idempotent_and_releases_after_last_owner(
         ("create", POWER_REQUEST_REASON),
         ("set", 100, POWER_REQUEST_SYSTEM_REQUIRED),
         ("set", 100, POWER_REQUEST_EXECUTION_REQUIRED),
+        ("set", 100, POWER_REQUEST_DISPLAY_REQUIRED),
     ]
+    assert inhibitor.display_required_active is True
     assert inhibitor.owners == frozenset({"compiler"})
 
     inhibitor.release("compiler")
     _wait_until(lambda: not inhibitor.native_active)
-    assert api.calls[-3:] == [
+    assert api.calls[-4:] == [
+        ("clear", 100, POWER_REQUEST_DISPLAY_REQUIRED),
         ("clear", 100, POWER_REQUEST_EXECUTION_REQUIRED),
         ("clear", 100, POWER_REQUEST_SYSTEM_REQUIRED),
         ("close", 100),
     ]
+    assert inhibitor.display_required_active is False
     assert inhibitor.owners == frozenset()
 
 
@@ -192,6 +197,29 @@ def test_partial_setup_failure_rolls_back_then_retries(monkeypatch):
     _wait_until(lambda: not inhibitor.native_active)
 
 
+def test_display_request_failure_rolls_back_earlier_requests_then_retries(monkeypatch):
+    api = FakePowerApi()
+    api.set_results[POWER_REQUEST_DISPLAY_REQUIRED] = [False, True]
+    monkeypatch.setattr("backend.shared.sleep_inhibitor.time.sleep", lambda _delay: None)
+    inhibitor = _enabled_inhibitor(monkeypatch, api)
+    inhibitor.acquire("autonomous")
+
+    _wait_until(lambda: inhibitor.native_active)
+    assert api.calls[:7] == [
+        ("create", POWER_REQUEST_REASON),
+        ("set", 100, POWER_REQUEST_SYSTEM_REQUIRED),
+        ("set", 100, POWER_REQUEST_EXECUTION_REQUIRED),
+        ("set", 100, POWER_REQUEST_DISPLAY_REQUIRED),
+        ("clear", 100, POWER_REQUEST_EXECUTION_REQUIRED),
+        ("clear", 100, POWER_REQUEST_SYSTEM_REQUIRED),
+        ("close", 100),
+    ]
+    assert ("set", 101, POWER_REQUEST_DISPLAY_REQUIRED) in api.calls
+    assert inhibitor.display_required_active is True
+    inhibitor.release_all()
+    _wait_until(lambda: not inhibitor.native_active)
+
+
 def test_first_set_failure_closes_without_clearing(monkeypatch):
     api = FakePowerApi()
     api.set_results[POWER_REQUEST_SYSTEM_REQUIRED] = [False]
@@ -271,6 +299,7 @@ def test_real_windows_power_request_activates_and_releases(monkeypatch):
     _wait_until(lambda: inhibitor.native_active)
     assert inhibitor.system_required_active is True
     assert inhibitor.execution_required_active is True
+    assert inhibitor.display_required_active is True
     assert inhibitor.last_error == 0
 
     inhibitor.release("real-windows-power-request")

@@ -11,6 +11,8 @@ import {
 } from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 import { buildResearchRunGroups, formatRunPromptPreview } from '../../utils/researchRunHistory';
+import { viewedPdfMetadata } from '../../utils/translatedDownloads';
+import useViewedTranslations from '../../hooks/useViewedTranslations';
 import './FinalAnswerLibrary.css';
 
 /**
@@ -44,6 +46,8 @@ function FinalAnswerLibrary({ capabilities }) {
   const [expandedPrunedContent, setExpandedPrunedContent] = useState(null);
   const [downloadingPrunedPDF, setDownloadingPrunedPDF] = useState(null);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
+  // Downloads of an expanded answer or paper save the language its viewer shows.
+  const { reportView, downloadFor } = useViewedTranslations();
   
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
@@ -138,15 +142,8 @@ function FinalAnswerLibrary({ capabilities }) {
       return;
     }
 
-    const blob = new Blob([prependDisclaimer(expandedContent.content, 'paper')], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `final_answer_${answer.answer_id}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const download = downloadFor(expandedContent.content, `final_answer_${answer.answer_id}`);
+    downloadRawText(download.content, download.filename, null, 'paper');
   };
   
   // Download raw text without expanding card first
@@ -158,8 +155,8 @@ function FinalAnswerLibrary({ capabilities }) {
       const data = await response.json();
       
       if (data.success && data.content) {
-        const filename = sanitizeFilename(`Final_Answer_${answer.title}`);
-        downloadRawText(data.content, filename, null, 'paper');
+        const download = downloadFor(data.content, sanitizeFilename(`Final_Answer_${answer.title}`));
+        downloadRawText(download.content, download.filename, null, 'paper');
       } else {
         alert('Failed to load content for download');
       }
@@ -191,18 +188,18 @@ function FinalAnswerLibrary({ capabilities }) {
         throw new Error('Failed to load content');
       }
 
-      const filename = sanitizeFilename(`Final_Answer_${answer.title}`);
-      const metadata = {
+      const download = downloadFor(data.content, sanitizeFilename(`Final_Answer_${answer.title}`));
+      const metadata = viewedPdfMetadata({
         title: answer.title,
         wordCount: answer.word_count,
         date: formatDate(answer.completion_date),
         models: null,
-      };
+      }, download);
 
       await downloadPDFViaBackend(
-        data.content,
+        download.content,
         metadata,
-        filename,
+        download.filename,
         null,
         () => setDownloadingPDF(answer.answer_id),
         () => setDownloadingPDF(null),
@@ -237,8 +234,11 @@ function FinalAnswerLibrary({ capabilities }) {
     e.stopPropagation();
     try {
       const data = await autonomousAPI.getPrunedHistoryPaper(paper.session_id, paper.paper_id);
-      const filename = sanitizeFilename(`pruned_${paper.session_id}_${paper.paper_id}_${paper.title}`);
-      downloadRawText(data.content || '', filename, data.outline || '');
+      const download = downloadFor(
+        data.content || '',
+        sanitizeFilename(`pruned_${paper.session_id}_${paper.paper_id}_${paper.title}`),
+      );
+      downloadRawText(download.content, download.filename, data.outline || '');
     } catch (err) {
       console.error('Pruned paper download failed:', err);
       alert(`Download failed: ${err.message}`);
@@ -259,16 +259,19 @@ function FinalAnswerLibrary({ capabilities }) {
 
     try {
       const data = await autonomousAPI.getPrunedHistoryPaper(paper.session_id, paper.paper_id);
-      const filename = sanitizeFilename(`pruned_${paper.session_id}_${paper.paper_id}_${paper.title}`);
-      await downloadPDFViaBackend(
+      const download = downloadFor(
         data.content || '',
-        {
+        sanitizeFilename(`pruned_${paper.session_id}_${paper.paper_id}_${paper.title}`),
+      );
+      await downloadPDFViaBackend(
+        download.content,
+        viewedPdfMetadata({
           title: data.title || paper.title,
           wordCount: paper.word_count,
           date: paper.created_at ? new Date(paper.created_at).toLocaleDateString() : new Date().toLocaleDateString(),
           models: paper.model_usage ? Object.keys(paper.model_usage).join(', ') : null,
-        },
-        filename,
+        }, download),
+        download.filename,
         data.outline || null,
         () => setDownloadingPrunedPDF(paper.history_id),
         () => setDownloadingPrunedPDF(null),
@@ -606,8 +609,14 @@ function FinalAnswerLibrary({ capabilities }) {
                           {/* Full content */}
                           <div className="full-content">
                             <PaperProofViewer
+                              documentId={`final:${answer.answer_id}`}
+                              translationKind="final_answer"
+                              translationTitle={answer.title || ''}
+                              translationEnabled={Boolean(expandedContent.content)}
+                              translateAllModes={['autonomous']}
                               content={prependDisclaimer(expandedContent.content, 'paper')}
                               metrics={{ ...answer, ...expandedContent }}
+                              onTranslationView={reportView}
                             />
                           </div>
                         </div>
@@ -660,9 +669,14 @@ function FinalAnswerLibrary({ capabilities }) {
                             {expandedPrunedPaperId === paper.history_id && expandedPrunedContent && (
                               <div className="full-content pruned-paper-content">
                                 <PaperProofViewer
+                                  documentId={`paper:${paper.session_id}:${paper.paper_id}`}
+                                  translationTitle={expandedPrunedContent.title || paper.title || ''}
+                                  translationEnabled={Boolean(expandedPrunedContent.content)}
+                                  translateAllModes={['autonomous']}
                                   prefixContent={expandedPrunedContent.outline ? `${expandedPrunedContent.outline}\n\n${'='.repeat(80)}\n\n` : ''}
                                   content={expandedPrunedContent.content || ''}
                                   metrics={{ ...paper, ...expandedPrunedContent }}
+                                  onTranslationView={reportView}
                                 />
                               </div>
                             )}

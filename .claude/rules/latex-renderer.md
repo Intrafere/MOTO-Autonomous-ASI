@@ -9,6 +9,7 @@ paths:
 ## 🔒 CRITICAL SECURITY REQUIREMENTS
 
 **DOMPurify sanitization MUST be active in LatexRenderer.jsx.** Processes untrusted LLM output — XSS risk without it.
+Auto Top-p Translate output is equally untrusted: translated documents render through this path with language-suffixed `documentId`s, and short translated proof fields render only as React-escaped plain text, never as raw HTML.
 
 **Required implementation:**
 - `import DOMPurify from 'dompurify';` in LatexRenderer.jsx

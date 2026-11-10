@@ -926,8 +926,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     setFallback(null);
                   }}
                   title="Select cloud provider"
-                  className="input-dark"
-                  style={{ width: 'auto', minWidth: '150px' }}
+                  className="input-dark provider-toggle-select"
                 >
                   {configuredOAuthProviders.map((oauthProvider) => (
                     <option key={oauthProvider.id} value={oauthProvider.id}>

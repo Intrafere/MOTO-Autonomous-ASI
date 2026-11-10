@@ -12,6 +12,9 @@ import {
   isSolutionPathSnapshotAtLeast,
   solutionPathEventMatches,
 } from '../utils/solutionPathPresentation';
+import TranslationLanguageSwitch from './translation/TranslationLanguageSwitch';
+import TranslationPendingNotice from './translation/TranslationPendingNotice';
+import useTranslatedDocuments from '../hooks/useTranslatedDocuments';
 import './WorkflowPanel.css';
 
 const AUTO_OPEN_DELAY_SECONDS = 600;
@@ -620,6 +623,29 @@ export default function WorkflowPanel({
 
   const assistantResults = assistantMemoryPack?.results || [];
   const selectedProofView = assistantProofDetail || selectedAssistantProof;
+  // The opened proof's prose, translated like every other proof view; Lean code stays as is.
+  const assistantProofTranslationDocuments = useMemo(() => {
+    if (!selectedProofView || assistantProofLoading) return [];
+    return [{
+      docKey: `proof:history:${getCanonicalProofIdentity(selectedProofView)}`,
+      kind: 'proof',
+      title: selectedProofView.theorem_name || selectedProofView.display_title || selectedProofView.proof_id || '',
+      profile: 'fields',
+      parts: {
+        theorem_statement: selectedProofView.theorem_statement || '',
+        formal_sketch: selectedProofView.proof_description || selectedProofView.formal_sketch || '',
+      },
+    }];
+  }, [selectedProofView, assistantProofLoading]);
+  const assistantProofTranslation = useTranslatedDocuments(assistantProofTranslationDocuments);
+  const assistantProofDocKey = assistantProofTranslationDocuments[0]?.docKey;
+  const assistantProofParts = assistantProofDocKey
+    ? assistantProofTranslation.byKey[assistantProofDocKey]?.parts
+    : null;
+  const assistantProofStatement = assistantProofParts?.theorem_statement || selectedProofView?.theorem_statement;
+  const assistantProofDescription = assistantProofParts?.formal_sketch
+    || selectedProofView?.proof_description
+    || selectedProofView?.formal_sketch;
 
   // REMOVED: Conditional rendering that hid panel when no workflow running
   // WorkflowPanel is now ETERNAL - always visible for boost controls
@@ -936,12 +962,14 @@ export default function WorkflowPanel({
                         {(selectedProofView?.retrieval_lanes || []).map((lane) => <span key={lane}>Lane: {lane}</span>)}
                         {formatProofProvenance(selectedProofView).omitted > 0 && <span>+{formatProofProvenance(selectedProofView).omitted} omitted lineage records</span>}
                       </div>
+                      <TranslationLanguageSwitch translation={assistantProofTranslation} />
+                      <TranslationPendingNotice translation={assistantProofTranslation} />
                       <p className="assistant-proof-preview__statement">
-                        {selectedProofView?.theorem_statement || 'No theorem statement available.'}
+                        {assistantProofStatement || 'No theorem statement available.'}
                       </p>
-                      {(selectedProofView?.proof_description || selectedProofView?.formal_sketch) && (
+                      {assistantProofDescription && (
                         <p className="assistant-proof-preview__description">
-                          {selectedProofView.proof_description || selectedProofView.formal_sketch}
+                          {assistantProofDescription}
                         </p>
                       )}
                       {selectedProofView?.hydration_error && (

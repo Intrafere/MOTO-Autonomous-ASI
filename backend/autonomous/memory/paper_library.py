@@ -22,6 +22,7 @@ from backend.shared.path_safety import (
 )
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.paper_proofs import analyze_paper_content, paper_metric_fields, strip_paper_proofs
+from backend.shared.atomic_json import atomic_write_text
 from backend.autonomous.memory.session_write_authority import autonomous_session_write
 
 logger = logging.getLogger(__name__)
@@ -1023,31 +1024,30 @@ class PaperLibrary:
             
             # Save paper content
             paper_path = self._get_paper_path(paper_id)
-            async with aiofiles.open(paper_path, 'w', encoding='utf-8') as f:
-                await f.write(content)
+            await asyncio.to_thread(atomic_write_text, paper_path, content)
             logger.info("Paper saved: %s", redact_log_text(paper_path, 240))
             
             # Save outline
             outline_path = self._get_outline_path(paper_id)
-            async with aiofiles.open(outline_path, 'w', encoding='utf-8') as f:
-                await f.write(outline)
+            await asyncio.to_thread(atomic_write_text, outline_path, outline)
             logger.info("Outline saved: %s", redact_log_text(outline_path, 240))
             
             # Save abstract
             abstract_path = self._get_abstract_path(paper_id)
-            async with aiofiles.open(abstract_path, 'w', encoding='utf-8') as f:
-                await f.write(abstract)
+            await asyncio.to_thread(atomic_write_text, abstract_path, abstract)
             logger.info("Abstract saved: %s", redact_log_text(abstract_path, 240))
             
             # Save source brainstorm cache
             source_path = self._get_source_brainstorm_path(paper_id)
-            async with aiofiles.open(source_path, 'w', encoding='utf-8') as f:
-                await f.write(f"# Source Brainstorm(s) for Paper: {paper_id}\n")
-                await f.write(f"# Title: {title}\n")
-                await f.write(f"# Source Topic IDs: {', '.join(source_brainstorm_ids)}\n")
-                await f.write(f"# Cached: {datetime.now().isoformat()}\n")
-                await f.write("=" * 80 + "\n\n")
-                await f.write(source_brainstorm_content)
+            source_cache = (
+                f"# Source Brainstorm(s) for Paper: {paper_id}\n"
+                f"# Title: {title}\n"
+                f"# Source Topic IDs: {', '.join(source_brainstorm_ids)}\n"
+                f"# Cached: {datetime.now().isoformat()}\n"
+                + "=" * 80 + "\n\n"
+                + source_brainstorm_content
+            )
+            await asyncio.to_thread(atomic_write_text, source_path, source_cache)
             
             # Save metadata
             await self._save_metadata(metadata)
@@ -1126,8 +1126,7 @@ class PaperLibrary:
                     logger.info("No new proof entries to append to paper %s", redact_log_text(paper_id, 120))
                     return True
 
-                async with aiofiles.open(paper_path, "w", encoding="utf-8") as handle:
-                    await handle.write(updated_content)
+                await asyncio.to_thread(atomic_write_text, paper_path, updated_content)
 
                 metadata = await self.get_metadata(paper_id, derive_metrics=False)
                 if metadata is not None:
@@ -1353,8 +1352,7 @@ class PaperLibrary:
                         self._get_pruned_paper_path(paper_id),
                         "pruned paper path",
                     )
-                    async with aiofiles.open(pruned_paper_path, 'w', encoding='utf-8') as f:
-                        await f.write(pruned_content)
+                    await asyncio.to_thread(atomic_write_text, pruned_paper_path, pruned_content)
                     paper_path.unlink(missing_ok=True)
 
                 files_to_move = [

@@ -593,6 +593,9 @@ class AutonomousTerminalEvent(BaseModel):
     event_type: str = "auto_research_stopped"
     reason: str
     message: str
+    # Heading for the repair popup when the cause has its own name
+    # (for example a memory shortage rather than a broken Lean setup).
+    title: Optional[str] = None
     occurred_at: datetime = Field(default_factory=datetime.now)
     recoverable: bool = True
     fatal: bool = False
@@ -2015,6 +2018,15 @@ class ProofStatusResponse(BaseModel):
     workspace_ready: bool
     workspace_state: str
     workspace_error: str
+    # Set while workspace_state is "failed"; every kind except a too-long
+    # folder path can be retried in place by the next proof check or Start.
+    workspace_failure_kind: Literal[
+        "",
+        "lean_workspace_setup_failed",
+        "lean_workspace_path_too_long",
+        "lean_out_of_memory",
+    ] = ""
+    workspace_retry_available: bool = False
     mathlib_commit: str
     smt_enabled: bool
     smt_available: bool

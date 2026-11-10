@@ -70,7 +70,7 @@ DIRECT-SOLUTION PREFERENCE:
 
 META-PHASE EXCEPTION:
 If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate the submission as the requested candidate artifact, not as a direct solution:
-- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is specific, distinct, relevant, grounded, and aimed at answering the user's whole prompt if answered, or at a novel piece, incremental step, or indirect route toward it when a whole-answer route is not possible in one shot
+- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is clearly scoped, distinct, relevant, grounded, open about method and answer, and aimed at answering the user's whole prompt if answered, or at a novel piece, incremental step, or indirect route toward it when a whole-answer route is not possible in one shot. The later brainstorm is the main solving phase, so reject a candidate that presupposes its own answer or locks the brainstorm into one predetermined construction, method, or solution path that would leave it stuck if that path fails (unless that exact statement is the user's own question). Do not reject a candidate merely for being broader than a narrower alternative while it stays focused on the user's goal
 - PAPER TITLE EXPLORATION PHASE: accept a candidate title if it is accurate, specific, distinct, professional, and foregrounds direct answer-bearing content when justified
 - Do NOT reject these meta-phase submissions merely because they are questions or titles rather than direct solutions
 
@@ -244,7 +244,7 @@ DIRECT-SOLUTION PREFERENCE:
 
 META-PHASE EXCEPTION:
 If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate each submission as the requested candidate artifact, not as a direct solution:
-- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is specific, distinct, relevant, grounded, and aimed at answering the user's whole prompt if answered, or at a novel piece, incremental step, or indirect route toward it when a whole-answer route is not possible in one shot
+- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is clearly scoped, distinct, relevant, grounded, open about method and answer, and aimed at answering the user's whole prompt if answered, or at a novel piece, incremental step, or indirect route toward it when a whole-answer route is not possible in one shot. The later brainstorm is the main solving phase, so reject a candidate that presupposes its own answer or locks the brainstorm into one predetermined construction, method, or solution path that would leave it stuck if that path fails (unless that exact statement is the user's own question). Do not reject a candidate merely for being broader than a narrower alternative while it stays focused on the user's goal
 - PAPER TITLE EXPLORATION PHASE: accept a candidate title if it is accurate, specific, distinct, professional, and foregrounds direct answer-bearing content when justified
 - Do NOT reject these meta-phase submissions merely because they are questions or titles rather than direct solutions
 
@@ -471,7 +471,7 @@ DIRECT-SOLUTION PREFERENCE:
 
 META-PHASE EXCEPTION:
 If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate each submission as the requested candidate artifact, not as a direct solution:
-- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is specific, distinct, relevant, grounded, and aimed at answering the user's whole prompt if answered, or at a novel piece, incremental step, or indirect route toward it when a whole-answer route is not possible in one shot
+- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is clearly scoped, distinct, relevant, grounded, open about method and answer, and aimed at answering the user's whole prompt if answered, or at a novel piece, incremental step, or indirect route toward it when a whole-answer route is not possible in one shot. The later brainstorm is the main solving phase, so reject a candidate that presupposes its own answer or locks the brainstorm into one predetermined construction, method, or solution path that would leave it stuck if that path fails (unless that exact statement is the user's own question). Do not reject a candidate merely for being broader than a narrower alternative while it stays focused on the user's goal
 - PAPER TITLE EXPLORATION PHASE: accept a candidate title if it is accurate, specific, distinct, professional, and foregrounds direct answer-bearing content when justified
 - Do NOT reject these meta-phase submissions merely because they are questions or titles rather than direct solutions
 

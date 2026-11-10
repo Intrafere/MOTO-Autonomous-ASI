@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 
 from backend.shared.config import system_config
+from backend.shared.atomic_json import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +72,7 @@ class OutlineMemory:
             # Create file if doesn't exist
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
             if not self.file_path.exists():
-                async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                    await f.write("")
+                await asyncio.to_thread(atomic_write_text, self.file_path, "")
             
             self._initialized = True
             logger.info("Outline memory initialized")
@@ -135,8 +135,7 @@ class OutlineMemory:
             final_content = self._ensure_anchor(cleaned)
             
             # Write to file
-            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                await f.write(final_content)
+            await asyncio.to_thread(atomic_write_text, self.file_path, final_content)
             
             # Increment version
             self.version += 1
@@ -178,8 +177,7 @@ class OutlineMemory:
             final_content = self._ensure_anchor(outline)
             
             # Write repaired outline
-            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
-                await f.write(final_content)
+            await asyncio.to_thread(atomic_write_text, self.file_path, final_content)
             
             # Increment version
             self.version += 1
@@ -224,8 +222,7 @@ class OutlineMemory:
             feedbacks = feedbacks[-5:]
             
             # Write back
-            async with aiofiles.open(feedback_path, 'w', encoding='utf-8') as f:
-                await f.write("\n\n---FEEDBACK SEPARATOR---\n\n".join(feedbacks))
+            await asyncio.to_thread(atomic_write_text, feedback_path, "\n\n---FEEDBACK SEPARATOR---\n\n".join(feedbacks))
             
             logger.debug(f"Added outline creation feedback: {status}")
     
