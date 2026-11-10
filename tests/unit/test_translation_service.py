@@ -4235,11 +4235,17 @@ async def test_after_a_restart_nothing_older_is_targeted_before_a_fresh_enumerat
 
     monkeypatch.setattr(service_module, "SCAN_DEBOUNCE_SECONDS", 0.0)
     gate = asyncio.Event()
+    release = asyncio.Event()
 
     async def gated(_modes) -> DiscoveryResult:
         await gate.wait()
         return DiscoveryResult(documents=(_spec(_doc("paper:old:p1", OLDER_TEXT), "history_papers"),))
 
+    async def translator(record):
+        await release.wait()
+        return _translate_ok(record)
+
+    harness.fake.translator = translator
     service._enumerate_backlog = gated
     await service.start()
     try:
@@ -4249,11 +4255,18 @@ async def test_after_a_restart_nothing_older_is_targeted_before_a_fresh_enumerat
         doc = service._docs[older_hash]
         assert not service._doc_targets(doc, "es")
         assert service._waiting_jobs() == []
+        assert service._jobs == {}
         assert service.status_snapshot()["translate_all"]["state"] == "preparing"
         gate.set()
-        await wait_until(lambda: service._doc_targets(service._docs[older_hash], "es"))
-        assert service._waiting_jobs() == [(older_hash, "es")]
+        # The resumed worker starts the older output's job at once; the held translator keeps it running.
+        await wait_until(lambda: service._backlog_enumerated and bool(harness.fake.translator_calls()))
+        assert service._doc_tier(service._docs[older_hash], "es") == service_module.TIER_BACKGROUND
+        assert list(service._jobs) == [(older_hash, "es")]
+        assert service._waiting_jobs() == []
+        [call] = harness.fake.translator_calls()
+        assert "Alpha older paragraph text." in _source_units(call).values()
     finally:
+        release.set()
         gate.set()
         await service.shutdown()
 
