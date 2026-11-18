@@ -1,7 +1,10 @@
 import {
   OPENAI_CODEX_STARTUP_CHOICE,
+  VLLM_STARTUP_CHOICE,
   XAI_GROK_STARTUP_CHOICE,
   applyCloudAccessStartupDefaults,
+  applyVllmStartupDefaults,
+  getStoredAutonomousSettings,
   persistAutonomousSettings,
   RECOMMENDED_PROFILE_KEYS,
   RECOMMENDED_PROFILES,
@@ -382,6 +385,46 @@ test('partial autonomous settings saves preserve existing output and creativity 
   expect(rawStoredSettings.allowMathematicalProofs).toBe(false);
   expect(rawStoredSettings.allowResearchPapers).toBe(true);
   expect(rawStoredSettings.creativityEmphasisBoostEnabled).toBe(true);
+});
+
+test('Mathematical Proofs output defaults off only for new users', () => {
+  expect(getStoredAutonomousSettings().allowMathematicalProofs).toBe(false);
+  expect(settingsToAutonomousConfig(getStoredAutonomousSettings()).allow_mathematical_proofs).toBe(false);
+
+  // Settings saved before the field existed came from builds where proofs were on.
+  localStorage.setItem('autonomous_research_settings', JSON.stringify({ allowResearchPapers: true }));
+  expect(getStoredAutonomousSettings().allowMathematicalProofs).toBe(true);
+
+  localStorage.setItem('autonomous_research_settings', JSON.stringify({ allowMathematicalProofs: true }));
+  expect(getStoredAutonomousSettings().allowMathematicalProofs).toBe(true);
+
+  localStorage.setItem('autonomous_research_settings', JSON.stringify({ allowMathematicalProofs: false }));
+  expect(getStoredAutonomousSettings().allowMathematicalProofs).toBe(false);
+});
+
+test('vLLM startup defaults put every role on the detected model and context window', () => {
+  localStorage.clear();
+  const first = applyVllmStartupDefaults({ id: 'Qwen/Qwen2.5-32B', context_length: 32768, server: 'http://x/v1' });
+  for (const role of ['validator', 'assistant', 'writer', 'high_param']) {
+    expect(first.config[`${role}_provider`]).toBe(VLLM_STARTUP_CHOICE);
+    expect(first.config[`${role}_model`]).toBe('Qwen/Qwen2.5-32B');
+    expect(first.config[`${role}_context_window`]).toBe(32768);
+    expect(first.config[`${role}_max_tokens`]).toBe(6553);
+    expect(first.config[`${role}_lm_studio_fallback`]).toBeNull();
+  }
+  expect(first.config.submitter_configs).toHaveLength(3);
+  expect(first.config.submitter_configs.every((role) => (
+    role.provider === VLLM_STARTUP_CHOICE && role.modelId === 'Qwen/Qwen2.5-32B' && role.contextWindow === 32768
+  ))).toBe(true);
+  // Only the model id and limits are stored, never the server address.
+  expect(localStorage.getItem('autonomous_research_settings')).not.toContain('http://x/v1');
+
+  // Roles the user already chose are never replaced, and a missing model changes nothing.
+  const again = applyVllmStartupDefaults({ id: 'other/model', context_length: 4096 });
+  expect(again.config.validator_model).toBe('Qwen/Qwen2.5-32B');
+  localStorage.clear();
+  const none = applyVllmStartupDefaults({});
+  expect(none.config.validator_provider).not.toBe(VLLM_STARTUP_CHOICE);
 });
 
 test('OAuth startup defaults use known public model metadata from availability only', () => {

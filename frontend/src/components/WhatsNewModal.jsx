@@ -1,14 +1,14 @@
 import React, { useRef } from 'react';
 import useModalDialogFocus from '../hooks/useModalDialogFocus';
 import { MOTO_GITHUB_URL, releaseNotes } from '../utils/releaseNotes';
-import TopPTranslationGraphic from './TopPTranslationGraphic';
+import MasterProofGraphic from './MasterProofGraphic';
 import './settings-common.css';
 import './WhatsNewModal.css';
 
 const RELEASE_NOTE_LINK = /^\[([^\]]+)\]\((https:\/\/[^\s)]+)\)$/;
 // Illustrations a release-notes section can name in its `graphic` field.
 const SECTION_GRAPHICS = {
-  'top-p-translation': TopPTranslationGraphic,
+  'master-proof': MasterProofGraphic,
 };
 const SECTION_TONE_CLASSES = {
   warning: ' whats-new-section--warning',

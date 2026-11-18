@@ -156,9 +156,13 @@ class ProviderContextLengthError(ValueError):
         *,
         route: ProviderRouteIdentity,
         cause: Optional[BaseException] = None,
+        required_tokens: Optional[int] = None,
+        context_window: Optional[int] = None,
     ) -> None:
         self.route = route
         self.cause = cause
+        self.required_tokens = required_tokens
+        self.context_window = context_window
         self.safe_message = redact_log_text(message, 1000)
         super().__init__(f"{self.safe_message} ({route.safe_summary()})")
 
@@ -181,5 +185,7 @@ class ProviderContextLengthError(ValueError):
                 configured_model=configured_model,
             ),
             cause=self.cause,
+            required_tokens=self.required_tokens,
+            context_window=self.context_window,
         )
 

@@ -103,6 +103,6 @@ test('keeps single paper writer start and output controls available in the promp
   await waitFor(() => {
     expect(screen.getByRole('button', { name: 'Start Writer' })).toBeEnabled();
   });
-  expect(screen.getByLabelText('Mathematical Proofs')).toBeInTheDocument();
-  expect(screen.getByLabelText('Research Papers')).toBeInTheDocument();
+  expect(screen.getByLabelText('Mathematical Proofs')).toHaveAccessibleDescription(/^Very high usage\./);
+  expect(screen.getByLabelText('Research Papers')).toHaveAccessibleDescription(/^Medium usage\./);
 });

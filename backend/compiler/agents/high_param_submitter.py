@@ -49,10 +49,15 @@ from backend.compiler.prompts.rigor_prompts import (
 )
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config, system_config
+from backend.shared.json_key_recovery import KeySpec, ObjectSchema, recover_key_labels
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
+)
+from backend.shared.model_output_contract import (
+    ModelOutputContractError,
+    report_model_output_normalizations,
 )
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.prompt_feedback_budget import (
@@ -79,12 +84,98 @@ from backend.shared.utils import count_tokens
 
 logger = logging.getLogger(__name__)
 
+# Rigor discovery reply (rigor_prompts discovery contract, in prompt order).
+# Only the three free-text rationale fields may be relabeled by key recovery.
+RIGOR_DISCOVERY_SCHEMA = ObjectSchema(
+    name="rigor_theorem_discovery",
+    keys=(
+        KeySpec("needs_theorem_work", value_type="bool"),
+        KeySpec("theorem_statement"),
+        KeySpec("formal_sketch"),
+        KeySpec("source_excerpt"),
+        KeySpec("theorem_origin"),
+        KeySpec("placement_preference"),
+        KeySpec("expected_novelty_tier"),
+        KeySpec("prompt_relevance_rationale", repairable=True),
+        KeySpec("novelty_rationale", repairable=True),
+        KeySpec("why_not_standard_known_result", repairable=True),
+        KeySpec("retry_existing_failure_id", required=False),
+        KeySpec("reasoning"),
+    ),
+    allow_extra=frozenset({"solution_path_update"}),
+)
+
 _NOVEL_PROOF_TIERS = {
     "major_mathematical_discovery",
     "mathematical_discovery",
     "novel_variant",
     "novel_formulation",
 }
+
+
+@dataclass(frozen=True)
+class _RigorReply:
+    """One parsed Rigor & Proofs reply plus its not-yet-published normalizations.
+
+    The caller publishes ``repairs`` (``model_output_normalized``) only after
+    its own contract checks accept the reply, so a refused reply never shows
+    an "Accepted ..." normalization.
+    """
+
+    data: Any
+    repairs: tuple = ()
+    task_id: str = ""
+
+
+def _validate_discovery_reply(data: Any, *, role: str) -> dict:
+    """Return the discovery reply object or raise ``ModelOutputContractError``.
+
+    The reply must be one JSON object whose ``needs_theorem_work`` is a JSON
+    bool: a string such as ``"false"`` or a missing key is never read as a
+    decision.
+    """
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        data = data[0]
+    if not isinstance(data, dict):
+        raise ModelOutputContractError(
+            "The theorem-discovery reply must be one JSON object", role=role, stage="shape"
+        )
+    if "needs_theorem_work" not in data:
+        raise ModelOutputContractError(
+            "The theorem-discovery reply omitted its decision",
+            role=role,
+            stage="missing_key",
+            missing_keys=("needs_theorem_work",),
+        )
+    if not isinstance(data["needs_theorem_work"], bool):
+        raise ModelOutputContractError(
+            "The theorem-discovery decision must be a JSON boolean (true or false)",
+            role=role,
+            stage="invalid_value",
+            invalid_fields=("needs_theorem_work",),
+        )
+    return data
+
+
+def _discovery_decline_reason(data: dict) -> str:
+    """Return why a theorem proposal is declined before Lean cost, or ''."""
+    if not str(data.get("theorem_statement") or "").strip():
+        return "discovery returned empty theorem_statement"
+    tier = str(data.get("expected_novelty_tier") or "").strip().lower()
+    if tier == "not_novel":
+        return "discovery marked theorem not_novel"
+    if tier not in _NOVEL_PROOF_TIERS:
+        return "discovery omitted a valid expected_novelty_tier"
+    if not all(
+        str(data.get(key) or "").strip()
+        for key in (
+            "prompt_relevance_rationale",
+            "novelty_rationale",
+            "why_not_standard_known_result",
+        )
+    ):
+        return "discovery omitted required novelty/relevance rationales"
+    return ""
 
 
 def _is_rigor_model_call_failure(exc: Exception) -> bool:
@@ -101,6 +192,14 @@ def _is_rigor_model_call_failure(exc: Exception) -> bool:
         or "upstream provider timeout" in message
         or "response missing 'choices'" in message
     )
+
+
+def _response_text(response: Any) -> str:
+    """Return a completion's reply text, or "" when it carried no message."""
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if not choices or not choices[0].get("message"):
+        return ""
+    return extract_message_text(choices[0]["message"])
 
 
 def _normalize_string_field(value) -> str:
@@ -361,49 +460,51 @@ class HighParamSubmitter:
         reference_papers: Optional[str] = None,
         existing_critiques: Optional[str] = None,
         accumulated_history: Optional[str] = None,
-    ) -> Optional[Submission]:
-        """Generate post-body critique or a validated decline assessment."""
+    ) -> Submission:
+        """Generate post-body critique or a validated decline assessment.
+
+        A reply that breaks the critique JSON contract gets one bounded retry;
+        if it still does not match, ``ModelOutputContractError`` is raised. A
+        prompt that cannot fit the configured window raises a context-overflow
+        ``ValueError``. Provider failures propagate to shared recovery.
+        """
+        rejection_entries = await self.critique_rejection_memory.get_rejection_entries()
+
+        def assemble(selected):
+            return build_critique_prompt(
+                user_prompt=user_prompt,
+                current_body=current_body,
+                current_outline=current_outline,
+                aggregator_db=aggregator_db,
+                reference_papers=reference_papers,
+                critique_feedback=existing_critiques,
+                rejection_feedback=self.critique_rejection_memory.render_rejections(selected),
+                accumulated_history=accumulated_history,
+            )
+
+        fit = fit_prompt_with_feedback(
+            rejection_entries,
+            build_prompt=assemble,
+            available_tokens=self.available_input_tokens,
+        )
+        prompt = fit.prompt
+        visible_rejections = fit.retained_entries
+
+        prompt_tokens = count_tokens(prompt)
+        max_allowed = rag_config.get_available_input_tokens(
+            self.context_window,
+            self.max_output_tokens,
+        )
+        if prompt_tokens > max_allowed:
+            raise ValueError(
+                "Critique prompt too large for the Rigor & Proofs context window "
+                f"({prompt_tokens} tokens > {max_allowed} tokens available)"
+            )
+
+        task_id = self.next_critique_task_id(f"critique_sub{self.critique_submitter_id}")
+        if self.task_tracking_callback:
+            self.task_tracking_callback("started", task_id)
         try:
-            rejection_entries = await self.critique_rejection_memory.get_rejection_entries()
-
-            def assemble(selected):
-                return build_critique_prompt(
-                    user_prompt=user_prompt,
-                    current_body=current_body,
-                    current_outline=current_outline,
-                    aggregator_db=aggregator_db,
-                    reference_papers=reference_papers,
-                    critique_feedback=existing_critiques,
-                    rejection_feedback=self.critique_rejection_memory.render_rejections(selected),
-                    accumulated_history=accumulated_history,
-                )
-
-            fit = fit_prompt_with_feedback(
-                rejection_entries,
-                build_prompt=assemble,
-                available_tokens=self.available_input_tokens,
-            )
-            prompt = fit.prompt
-            visible_rejections = fit.retained_entries
-
-            prompt_tokens = count_tokens(prompt)
-            max_allowed = rag_config.get_available_input_tokens(
-                self.context_window,
-                self.max_output_tokens,
-            )
-            if prompt_tokens > max_allowed:
-                logger.error(
-                    "Critique prompt (%s tokens) exceeds Rigor & Proofs context window "
-                    "(%s tokens available)",
-                    prompt_tokens,
-                    max_allowed,
-                )
-                return None
-
-            task_id = self.next_critique_task_id(f"critique_sub{self.critique_submitter_id}")
-            if self.task_tracking_callback:
-                self.task_tracking_callback("started", task_id)
-
             while True:
                 try:
                     response = await api_client_manager.generate_completion(
@@ -421,75 +522,143 @@ class HighParamSubmitter:
                     visible_rejections = visible_rejections[1:]
                     prompt = assemble(visible_rejections)
 
+            llm_output = _response_text(response)
+            try:
+                data = await self._parse_critique_reply(llm_output, task_id=task_id)
+            except ModelOutputContractError as contract_error:
+                logger.warning(
+                    "Rigor & Proofs critique reply broke its JSON contract; one retry: %s",
+                    contract_error,
+                )
+                data = await self._retry_critique_reply(
+                    prompt=prompt,
+                    failed_output=llm_output,
+                    contract_error=contract_error,
+                    task_id=task_id,
+                    max_input_tokens=max_allowed,
+                )
+        finally:
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
 
-            if not response.get("choices") or not response["choices"][0].get("message"):
-                logger.error("Critique: Rigor & Proofs LLM returned empty response structure")
-                return None
+        is_decline = not data["critique_needed"]
+        submission = Submission(
+            submission_id=str(uuid.uuid4()),
+            submitter_id=self.critique_submitter_id,
+            content=str(data.get("submission") or ""),
+            reasoning=data["reasoning"],
+            chunk_size_used=512,
+            timestamp=datetime.now(),
+            is_decline=is_decline,
+        )
 
-            message = response["choices"][0]["message"]
-            llm_output = extract_message_text(message)
-            data = parse_json(llm_output)
-            if data is None:
-                logger.error("Failed to parse critique JSON response")
-                return None
-
-            if isinstance(data, list):
-                logger.warning("Rigor & Proofs critique returned array instead of object - using first element")
-                if not data:
-                    logger.error("Empty array response from Rigor & Proofs critique generation")
-                    return None
-                data = data[0]
-
-            if "critique_needed" not in data:
-                logger.error("Critique response missing 'critique_needed' field")
-                return None
-            if "reasoning" not in data:
-                logger.error("Critique response missing 'reasoning' field")
-                return None
-
-            critique_needed = data.get("critique_needed", True)
-            is_decline = not critique_needed
-            if critique_needed and "submission" not in data:
-                logger.error("Critique response missing 'submission' field when critique_needed=true")
-                return None
-
-            submission = Submission(
-                submission_id=str(uuid.uuid4()),
-                submitter_id=self.critique_submitter_id,
-                content=data.get("submission", ""),
-                reasoning=data.get("reasoning", ""),
-                chunk_size_used=512,
-                timestamp=datetime.now(),
-                is_decline=is_decline,
+        self.critique_submission_count += 1
+        if is_decline:
+            logger.info(
+                "Rigor & Proofs declined critique (assessment #%s)",
+                self.critique_submission_count,
             )
+        else:
+            logger.info(
+                "Rigor & Proofs generated critique #%s",
+                self.critique_submission_count,
+            )
+        return submission
 
-            self.critique_submission_count += 1
-            if is_decline:
-                logger.info(
-                    "Rigor & Proofs declined critique (assessment #%s)",
-                    self.critique_submission_count,
-                )
-            else:
-                logger.info(
-                    "Rigor & Proofs generated critique #%s",
-                    self.critique_submission_count,
-                )
-            return submission
-
-        except FreeModelExhaustedError:
-            raise
-        except RuntimeError as exc:
-            if "credits exhausted" in str(exc).lower() or _is_rigor_model_call_failure(exc):
-                raise
-            logger.error("Error generating critique through Rigor & Proofs: %s", exc, exc_info=True)
-            return None
+    async def _parse_critique_reply(self, llm_output: str, *, task_id: str) -> Dict[str, Any]:
+        """Parse one critique reply strictly; raise ``ModelOutputContractError``."""
+        role = self.role_id
+        if not llm_output.strip():
+            raise ModelOutputContractError("The critique response was empty", role=role, stage="syntax")
+        repairs: list = []
+        try:
+            data = parse_json(llm_output, repairs=repairs)
         except Exception as exc:
-            if _is_rigor_model_call_failure(exc):
-                raise
-            logger.error("Error generating critique through Rigor & Proofs: %s", exc, exc_info=True)
-            return None
+            raise ModelOutputContractError.syntax(exc, role=role) from exc
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            logger.warning("Rigor & Proofs critique returned array instead of object - using first element")
+            data = data[0]
+        if not isinstance(data, dict):
+            raise ModelOutputContractError(
+                "The critique response must be one JSON object", role=role, stage="shape"
+            )
+        if "critique_needed" not in data or "reasoning" not in data:
+            raise ModelOutputContractError(
+                "The critique response is missing required fields",
+                role=role,
+                stage="missing_key",
+                missing_keys=[key for key in ("critique_needed", "reasoning") if key not in data],
+            )
+        if type(data["critique_needed"]) is not bool:
+            raise ModelOutputContractError(
+                "critique_needed must be true or false",
+                role=role,
+                stage="invalid_value",
+                invalid_fields=("critique_needed",),
+            )
+        reasoning = data["reasoning"]
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            raise ModelOutputContractError(
+                "reasoning must be a non-empty string",
+                role=role,
+                stage="invalid_value",
+                invalid_fields=("reasoning",),
+            )
+        if data["critique_needed"]:
+            if "submission" not in data:
+                raise ModelOutputContractError(
+                    "submission is required when critique_needed is true",
+                    role=role,
+                    stage="missing_key",
+                    missing_keys=("submission",),
+                )
+            if not isinstance(data["submission"], str) or not data["submission"].strip():
+                raise ModelOutputContractError(
+                    "submission must be non-empty text when critique_needed is true",
+                    role=role,
+                    stage="invalid_value",
+                    invalid_fields=("submission",),
+                )
+        # Published only once the reply is accepted.
+        await report_model_output_normalizations(role, repairs, task_id=task_id)
+        return data
+
+    async def _retry_critique_reply(
+        self,
+        *,
+        prompt: str,
+        failed_output: str,
+        contract_error: ModelOutputContractError,
+        task_id: str,
+        max_input_tokens: int,
+    ) -> Dict[str, Any]:
+        """Run the one bounded contract retry for a critique reply."""
+        retry_prompt = (
+            "Your previous response did not match the required JSON format.\n\n"
+            f"ERROR: {contract_error}\n\n"
+            "Please respond again with ONLY the JSON object, no markdown."
+        )
+        messages = [
+            {"role": "user", "content": prompt},
+            {
+                "role": "assistant",
+                "content": sanitize_model_output_for_retry_context(failed_output, max_chars=2000),
+            },
+            {"role": "user", "content": retry_prompt},
+        ]
+        if sum(count_tokens(str(message["content"])) for message in messages) > max_input_tokens:
+            # The conversation does not fit; resend the original prompt alone.
+            messages = [{"role": "user", "content": prompt}]
+        retry_task_id = f"{task_id}_retry"
+        response = await api_client_manager.generate_completion(
+            task_id=retry_task_id,
+            role_id=self.role_id,
+            model=self.model_name,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=self.max_output_tokens,
+        )
+        return await self._parse_critique_reply(_response_text(response), task_id=retry_task_id)
 
     async def handle_critique_rejection(self, summary: str, content: str) -> None:
         """Store critique rejection feedback for later critique attempts."""
@@ -616,27 +785,6 @@ class HighParamSubmitter:
         why_not_standard_known_result = str(
             discovery.get("why_not_standard_known_result") or ""
         ).strip()
-
-        if not theorem_statement:
-            logger.info("Rigor cycle: discovery returned empty theorem_statement; declining")
-            return None
-        if expected_novelty_tier == "not_novel":
-            logger.info("Rigor cycle: discovery marked theorem not_novel; declining before Lean cost")
-            return None
-        if expected_novelty_tier not in _NOVEL_PROOF_TIERS:
-            logger.info(
-                "Rigor cycle: discovery omitted a valid expected_novelty_tier; declining before Lean cost"
-            )
-            return None
-        if not (
-            prompt_relevance_rationale
-            and novelty_rationale
-            and why_not_standard_known_result
-        ):
-            logger.info(
-                "Rigor cycle: discovery omitted required novelty/relevance rationales; declining before Lean cost"
-            )
-            return None
 
         if theorem_origin not in {
             "existing_paper_claim",
@@ -919,7 +1067,7 @@ class HighParamSubmitter:
                 f"({prompt_tokens} tokens > {max_allowed} tokens) even without RAG evidence."
             )
 
-        data = await self._call_llm_and_parse(
+        reply = await self._call_llm_and_parse(
             prompt=prompt,
             task_label="rigor_discovery",
             provider_overflow_rebuild=(
@@ -927,16 +1075,19 @@ class HighParamSubmitter:
                 if len(visible_rejections) > 1
                 else None
             ),
+            schema=RIGOR_DISCOVERY_SCHEMA,
+            validate=lambda parsed: _validate_discovery_reply(parsed, role=self.role_id),
         )
-        if data is None:
+        if reply is None:
             return None
-        if isinstance(data, list):
-            data = data[0] if data else {}
-        if not isinstance(data, dict):
-            return None
-        if not data.get("needs_theorem_work", False):
-            return None
-        return data
+        data = reply.data
+        if data["needs_theorem_work"]:
+            decline_reason = _discovery_decline_reason(data)
+            if decline_reason:
+                logger.info("Rigor cycle: %s; declining before Lean cost", decline_reason)
+                return None
+        await self._publish_rigor_repairs(reply)
+        return data if data["needs_theorem_work"] else None
 
     # --------------------------------------------------------- stage 2
 
@@ -1231,6 +1382,7 @@ class HighParamSubmitter:
                     "source_type": "compiler_rigor",
                     "source_id": self._compiler_source_id(),
                     "verified_count": 0,
+                    "had_error": True,
                     "message": f"formalization error: {exc}",
                 },
             )
@@ -1468,6 +1620,7 @@ class HighParamSubmitter:
                     "source_type": "compiler_rigor",
                     "source_id": self._compiler_source_id(),
                     "verified_count": 0,
+                    "had_error": True,
                     "message": f"novelty validation failed: {exc}",
                 },
             )
@@ -1575,17 +1728,28 @@ class HighParamSubmitter:
             logger.warning("Rigor placement prompt too large; retrying without RAG evidence")
             prompt = base_prompt
 
-        data = await self._call_llm_and_parse(
-            prompt=prompt,
-            task_label=f"rigor_placement_{placement_attempt}",
-            provider_overflow_rebuild=(
-                (lambda: assemble_placement(visible_rejections[1:], ""))
-                if len(visible_rejections) > 1
-                else None
-            ),
-        )
-        if data is None:
+        try:
+            reply = await self._call_llm_and_parse(
+                prompt=prompt,
+                task_label=f"rigor_placement_{placement_attempt}",
+                provider_overflow_rebuild=(
+                    (lambda: assemble_placement(visible_rejections[1:], ""))
+                    if len(visible_rejections) > 1
+                    else None
+                ),
+            )
+        except ModelOutputContractError as exc:
+            # No legal placement this attempt; the coordinator's defined
+            # appendix fallback preserves the verified theorem.
+            logger.warning(
+                "Rigor placement attempt %s: reply broke its JSON contract after one retry: %s",
+                placement_attempt,
+                exc,
+            )
             return None
+        if reply is None:
+            return None
+        data = reply.data
         if isinstance(data, list):
             data = data[0] if data else {}
         if not isinstance(data, dict):
@@ -1610,6 +1774,7 @@ class HighParamSubmitter:
         if operation not in ("replace", "insert_after"):
             operation = "insert_after"
 
+        await self._publish_rigor_repairs(reply)
         submission = CompilerSubmission(
             submission_id=str(uuid.uuid4()),
             mode="rigor",
@@ -1639,11 +1804,19 @@ class HighParamSubmitter:
         prompt: str,
         task_label: str,
         provider_overflow_rebuild: Optional[Callable[[], Awaitable[str]]] = None,
-    ) -> Optional[Any]:
-        """Send `prompt` to the Rigor & Proofs model and return parsed JSON.
+        schema: Optional[ObjectSchema] = None,
+        validate: Optional[Callable[[Any], Any]] = None,
+    ) -> Optional[_RigorReply]:
+        """Send `prompt` to the Rigor & Proofs model and return the parsed reply.
 
-        On a JSON parse failure, issues a single conversational retry that
-        feeds the failed output back with a JSON-escape-rules reminder.
+        On an empty, unparseable, or ``validate``-refused reply, issues a single
+        conversational retry that feeds the failed output back with a
+        JSON-escape-rules reminder; if that also fails, raises
+        ``ModelOutputContractError``. ``schema`` enables guarded key-label
+        recovery; ``validate`` may raise ``ModelOutputContractError`` and
+        returns the accepted data. Applied normalizations are returned
+        unpublished: the caller publishes them with ``_publish_rigor_repairs``
+        once its own checks accept the reply.
         """
         task_id = self.get_current_task_id()
         self.task_sequence += 1
@@ -1697,18 +1870,16 @@ class HighParamSubmitter:
 
         message = response["choices"][0]["message"]
         llm_output = extract_message_text(message)
-        if not llm_output.strip():
-            logger.error("Rigor & Proofs LLM returned empty content (%s)", task_label)
-            if self.task_tracking_callback:
-                self.task_tracking_callback("completed", task_id)
-            return None
 
         try:
-            parsed = parse_json(llm_output)
+            parsed = self._parse_rigor_reply(
+                llm_output, schema=schema, validate=validate, task_id=task_id
+            )
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
             return parsed
-        except Exception as parse_error:
+        except ModelOutputContractError as parse_error_value:
+            parse_error = parse_error_value
             logger.info(
                 "Rigor & Proofs Submitter (%s): initial JSON parse failed, attempting one retry: %s",
                 task_label,
@@ -1754,26 +1925,56 @@ class HighParamSubmitter:
                 temperature=0.0,
                 max_tokens=self.max_output_tokens,
             )
-            if retry_response and retry_response.get("choices"):
-                retry_msg = retry_response["choices"][0]["message"]
-                retry_output = extract_message_text(retry_msg)
-                parsed = parse_json(retry_output)
-                logger.info("Rigor & Proofs Submitter (%s): retry succeeded", task_label)
-                if self.task_tracking_callback:
-                    self.task_tracking_callback("completed", task_id)
-                return parsed
-        except Exception as retry_error:
-            if _is_rigor_model_call_failure(retry_error):
-                raise
-            if "retry prompt exceeds context limit" in str(retry_error).lower():
-                raise
+            parsed = self._parse_rigor_reply(
+                _response_text(retry_response),
+                schema=schema,
+                validate=validate,
+                task_id=f"{task_id}_retry",
+            )
+            logger.info("Rigor & Proofs Submitter (%s): retry succeeded", task_label)
+            return parsed
+        except ModelOutputContractError as retry_error:
             logger.warning(
                 "Rigor & Proofs Submitter (%s): retry failed: %s", task_label, retry_error
             )
+            raise
+        finally:
+            if self.task_tracking_callback:
+                self.task_tracking_callback("completed", task_id)
 
-        if self.task_tracking_callback:
-            self.task_tracking_callback("completed", task_id)
-        return None
+    def _parse_rigor_reply(
+        self,
+        llm_output: str,
+        *,
+        schema: Optional[ObjectSchema],
+        validate: Optional[Callable[[Any], Any]],
+        task_id: str,
+    ) -> _RigorReply:
+        """Parse one reply, recover keys against ``schema``, then ``validate``.
+
+        The applied repairs are returned, not published.
+        """
+        if not llm_output.strip():
+            raise ModelOutputContractError(
+                "The response was empty", role=self.role_id, stage="syntax"
+            )
+        repairs: list = []
+        try:
+            parsed = parse_json(llm_output, repairs=repairs)
+        except Exception as exc:
+            raise ModelOutputContractError.syntax(exc, role=self.role_id) from exc
+        if schema is not None:
+            parsed, key_repairs = recover_key_labels(parsed, schema)
+            repairs.extend(key_repairs)
+        if validate is not None:
+            parsed = validate(parsed)
+        return _RigorReply(data=parsed, repairs=tuple(repairs), task_id=task_id)
+
+    async def _publish_rigor_repairs(self, reply: _RigorReply) -> None:
+        """Publish an accepted reply's normalizations as ``model_output_normalized``."""
+        await report_model_output_normalizations(
+            self.role_id, reply.repairs, task_id=reply.task_id
+        )
 
 
 

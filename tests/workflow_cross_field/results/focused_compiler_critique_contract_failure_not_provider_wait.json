@@ -1,0 +1,43 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "no_emit_and_wait",
+    "not_counted_as_attempt",
+    "no_rejection_feedback"
+  ],
+  "faked_dependencies": [
+    "critique model replies",
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "model_output_contract",
+    "provider_pause_resume",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "observed_transition": "critique and critique-validator contract failures surface as operational warnings, not provider waits",
+  "real_components": [
+    "backend/compiler/core/compiler_coordinator.py",
+    "backend/compiler/agents/high_param_submitter.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_compiler_critique_contract_failure_not_provider_wait",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:2b9042996568ecbdf61bf40bd3659748f4bb64552c33c4a51d80ea80a737df0a",
+  "test_file": "tests/unit/test_compiler_model_output_contract.py",
+  "test_selectors": [
+    "tests/unit/test_compiler_model_output_contract.py::test_critique_loop_contract_failures_are_not_provider_waits"
+  ]
+}

@@ -14,6 +14,7 @@ import {
   formatEmptyProofDiscoveryMessage,
   formatHungConnectionMessage,
   formatProofRunEventMessage,
+  formatMasterProofMessage,
   formatSolutionPathEventMessage,
   buildRejectionFeedbackNoticeActivity,
   getActivityClass,
@@ -21,6 +22,10 @@ import {
   hasRecentAssistantProofPackDuplicate,
   hasRecentProofActivityDuplicate,
   shouldAddRejectionFeedbackNotice,
+  masterProofCountNote,
+  MASTER_PROOF_EXPANSION_EVENT,
+  formatMasterProofExpansionMessage,
+  formatProofCheckCompleteText,
 } from '../../utils/activityStyles';
 import {
   formatValidatorDecisionActivity,
@@ -45,6 +50,7 @@ const MANUAL_PROOF_EVENTS = [
   'proof_lean_accepted',
   'proof_attempt_failed',
   'proof_attempts_exhausted',
+  'master_proof_progress',
   'proof_integrity_rejected',
   'proof_novelty_assessment_started',
   'proof_verified',
@@ -254,6 +260,7 @@ export default function AggregatorLogs({ providerActivity = [] }) {
       websocket.on('context_overflow_error', handleContextOverflow),
       websocket.on('proof_context_overflow', handleProofContextOverflow),
       websocket.on('hung_connection_alert', handleHungConnectionAlert),
+      websocket.on(MASTER_PROOF_EXPANSION_EVENT, handleMasterProofExpansion),
       websocket.on('assistant_proof_pack_updated', (data) => handleAssistantProofPackEvent('assistant_proof_pack_updated', data)),
       websocket.on('assistant_proof_pack_failed', (data) => handleAssistantProofPackEvent('assistant_proof_pack_failed', data)),
       ...SOLUTION_PATH_EVENTS.map((eventName) => (
@@ -498,6 +505,16 @@ export default function AggregatorLogs({ providerActivity = [] }) {
     addEvent('warning', formatHungConnectionMessage(data));
   };
 
+  const handleMasterProofExpansion = (data = {}) => {
+    const roleId = String(data.role_id || '').toLowerCase();
+    const isManualAggregatorProof = String(data.workflow_mode || '') === 'manual_proof_check'
+      && String(data.source_id || '') === MANUAL_AGGREGATOR_PROOF_SOURCE_ID;
+    if (!roleId.startsWith('aggregator_') && !isManualAggregatorProof) {
+      return;
+    }
+    addEvent(MASTER_PROOF_EXPANSION_EVENT, formatMasterProofExpansionMessage(data), data);
+  };
+
   const handleContextOverflow = (data = {}) => {
     const roleId = String(data.role_id || '').toLowerCase();
     if (!roleId.startsWith('aggregator_')) {
@@ -557,7 +574,7 @@ export default function AggregatorLogs({ providerActivity = [] }) {
       case 'proof_check_no_candidates':
         return formatEmptyProofDiscoveryMessage(proofRoundPrefix(data));
       case 'proof_candidate_list_review_started':
-        return `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed)`;
+        return `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed${masterProofCountNote(data, 'proposed')})`;
       case 'proof_candidate_list_review_accepted':
         return `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`;
       case 'proof_candidate_list_review_rejected':
@@ -569,7 +586,7 @@ export default function AggregatorLogs({ providerActivity = [] }) {
       case 'proof_check_candidates_found': {
         const count = Number(data.count || 0);
         const subject = count === 1 ? 'proof candidate' : 'proof candidates';
-        return `${proofRoundPrefix(data)} found ${count} ${subject}; ${count} will be attempted`;
+        return `${proofRoundPrefix(data)} found ${count} ${subject}; ${count} will be attempted${masterProofCountNote(data)}`;
       }
       case 'proof_attempt_started':
         return `Lean proof attempt started: ${proofTargetLabel(data)}`;
@@ -579,6 +596,8 @@ export default function AggregatorLogs({ providerActivity = [] }) {
         return formatLeanProofAttempt('Proof attempt feedback', data);
       case 'proof_attempts_exhausted':
         return formatLeanProofAttempt('Proof attempts exhausted', data);
+      case 'master_proof_progress':
+        return formatMasterProofMessage(data);
       case 'proof_integrity_rejected':
         return `Proof integrity rejected: ${data.reason || data.message || proofTargetLabel(data)}`;
       case 'proof_novelty_assessment_started':
@@ -594,8 +613,9 @@ export default function AggregatorLogs({ providerActivity = [] }) {
       case 'proof_dependency_added':
         return `Proof dependency added: ${proofTargetLabel(data, 'verified proof')}`;
       case 'proof_check_complete': {
-        const detail = data.message ? ` - ${compactProofText(data.message)}` : '';
-        return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel${detail}`;
+        return formatProofCheckCompleteText(data, {
+          detail: data.message ? compactProofText(data.message) : '',
+        });
       }
       case 'proof_retry_scheduled':
       case 'proof_retry_started':

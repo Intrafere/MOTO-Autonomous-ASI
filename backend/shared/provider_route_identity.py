@@ -86,6 +86,12 @@ ROUTE_KIND_LABELS = {
     "boost": "boost",
     "fallback": "LM Studio fallback",
     "lm_studio_fallback": "LM Studio fallback",
+    # A role's fallback model on a local server: "vllm_fallback" -> "vLLM fallback".
+    **{
+        f"{provider.provider_id}_fallback": f"{provider.label} fallback"
+        for provider in CLOUD_PROVIDERS
+        if provider.auth_kind == "local_server"
+    },
     "free_rotation": "free rotation",
     "auto_selector": "auto-selector",
     "embeddings": "embeddings",

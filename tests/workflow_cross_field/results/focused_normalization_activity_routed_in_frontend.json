@@ -1,0 +1,40 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "workflow_mode_routing"
+  ],
+  "faked_dependencies": [
+    "WebSocket events supplied by Vitest"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "model_output_normalized rows reach the owning mode's Live Activity feed",
+  "real_components": [
+    "frontend/src/App.jsx",
+    "frontend/src/utils/activityStyles.js"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "vitest",
+  "scenario_id": "focused_normalization_activity_routed_in_frontend",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:ee5397505cd45e45ab2cdcfbc1436cb411c9decfd2194c4af57401e6341e1b3c",
+  "test_file": "frontend/src/components/modelOutputNormalizedActivity.test.jsx",
+  "test_selectors": [
+    "frontend/src/components/modelOutputNormalizedActivity.test.jsx::model_output_normalized Live Activity routing::routes by workflow mode exactly like provider retry rows"
+  ]
+}

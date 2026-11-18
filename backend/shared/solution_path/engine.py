@@ -10,6 +10,7 @@ import random
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
+from backend.shared.atomic_json import replace_file
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.activity import fill_missing_activity_metadata
 from backend.shared.model_error_utils import is_non_retryable_model_error
@@ -789,7 +790,7 @@ class SolutionPathEngine:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, self._state_path)
+        replace_file(temporary, self._state_path)
 
     def _write_generation_tombstone(self, generation: int) -> None:
         self._generation_path.parent.mkdir(parents=True, exist_ok=True)
@@ -806,7 +807,7 @@ class SolutionPathEngine:
             )
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, self._generation_path)
+        replace_file(temporary, self._generation_path)
 
     def _delete_state_files(self) -> None:
         try:

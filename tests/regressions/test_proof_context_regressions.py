@@ -2727,7 +2727,7 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         async def raise_codex_incomplete(*_args, **_kwargs):
             raise RuntimeError(
                 "OpenAI Codex failed for role 'autonomous_proof_formalization_paper' "
-                "and no LM Studio fallback is configured: OpenAI Codex completion failed: "
+                "and no local fallback is configured: OpenAI Codex completion failed: "
                 '{"type":"response.incomplete","response":{"status":"incomplete",'
                 '"incomplete_details":{"reason":"max_output_tokens"}}}'
             )
@@ -2869,7 +2869,7 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         async def raise_codex_gateway_timeout(*_args, **_kwargs):
             raise RuntimeError(
                 "OpenAI Codex failed for role 'autonomous_proof_formalization_brainstorm' "
-                "and no LM Studio fallback is configured: OpenAI Codex completion failed: "
+                "and no local fallback is configured: OpenAI Codex completion failed: "
                 "upstream connect error or disconnect/reset before headers. "
                 "retried and the latest reset reason: connection timeout"
             )
@@ -2926,7 +2926,7 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         async def raise_codex_gateway_timeout(*_args, **_kwargs):
             raise RuntimeError(
                 "OpenAI Codex failed for role 'autonomous_proof_identification_brainstorm' "
-                "and no LM Studio fallback is configured: OpenAI Codex completion failed: "
+                "and no local fallback is configured: OpenAI Codex completion failed: "
                 "upstream connect error or disconnect/reset before headers. "
                 "retried and the latest reset reason: connection timeout"
             )

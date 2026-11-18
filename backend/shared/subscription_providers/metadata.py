@@ -1,18 +1,22 @@
-"""Single source of truth for MOTO's desktop cloud subscription providers.
+"""Single source of truth for MOTO's desktop role providers beyond LM Studio and OpenRouter.
 
 Every list of provider ids, labels, capability flags, and provider error markers
 is derived from ``CLOUD_PROVIDERS``. This module has no MOTO imports so models,
 route identity, and error helpers can depend on it without import cycles.
 
+Most entries are cloud subscriptions. A ``local_server`` entry (vLLM) is a
+user-run OpenAI-compatible server that shares the same registry plumbing.
+
 Adding a provider: append one ``CloudProviderMetadata`` entry here, then (for an
-API-key subscription) add its profile module and register it in ``registry``.
+API-key subscription or a local server) add its profile module and register it
+in ``registry``.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal, Optional, Tuple
 
-AuthKind = Literal["oauth_pkce", "api_key"]
+AuthKind = Literal["oauth_pkce", "api_key", "local_server"]
 
 
 @dataclass(frozen=True)
@@ -81,12 +85,45 @@ CLOUD_PROVIDERS: Tuple[CloudProviderMetadata, ...] = (
         api_slug="kimi-code",
         allows_max_effort=True,
     ),
+    CloudProviderMetadata(
+        provider_id="claude_api",
+        label="Anthropic Claude",
+        short_label="Claude",
+        auth_kind="api_key",
+        capability_flag="claude_api_available",
+        api_slug="claude-api",
+        allows_max_effort=True,
+        error_markers=("anthropic",),
+    ),
+    CloudProviderMetadata(
+        provider_id="amazon_bedrock",
+        label="Amazon Bedrock",
+        short_label="Bedrock",
+        auth_kind="api_key",
+        capability_flag="amazon_bedrock_available",
+        api_slug="amazon-bedrock",
+        allows_max_effort=True,
+        error_markers=("bedrock",),
+    ),
+    CloudProviderMetadata(
+        provider_id="vllm",
+        label="vLLM",
+        short_label="vLLM",
+        auth_kind="local_server",
+        capability_flag="vllm_available",
+        api_slug="vllm",
+    ),
 )
 
 CLOUD_PROVIDER_IDS: Tuple[str, ...] = tuple(provider.provider_id for provider in CLOUD_PROVIDERS)
 API_KEY_SUBSCRIPTION_PROVIDER_IDS: Tuple[str, ...] = tuple(
     provider.provider_id for provider in CLOUD_PROVIDERS if provider.auth_kind == "api_key"
 )
+LOCAL_SERVER_PROVIDER_IDS: Tuple[str, ...] = tuple(
+    provider.provider_id for provider in CLOUD_PROVIDERS if provider.auth_kind == "local_server"
+)
+# Providers served by one registered client (see ``registry``).
+REGISTRY_CLIENT_PROVIDER_IDS: Tuple[str, ...] = (*API_KEY_SUBSCRIPTION_PROVIDER_IDS, *LOCAL_SERVER_PROVIDER_IDS)
 MODEL_PROVIDER_IDS: Tuple[str, ...] = ("lm_studio", "openrouter", *CLOUD_PROVIDER_IDS)
 MAX_EFFORT_PROVIDER_IDS = frozenset(
     provider.provider_id for provider in CLOUD_PROVIDERS if provider.allows_max_effort
@@ -106,6 +143,35 @@ def is_cloud_provider(provider_id: str) -> bool:
 def is_api_key_subscription_provider(provider_id: str) -> bool:
     provider = get_cloud_provider(provider_id)
     return provider is not None and provider.auth_kind == "api_key"
+
+
+def is_local_server_provider(provider_id: str) -> bool:
+    provider = get_cloud_provider(provider_id)
+    return provider is not None and provider.auth_kind == "local_server"
+
+
+LOCAL_FALLBACK_SEPARATOR = "::"
+
+
+def local_fallback_id(provider_id: str, model_id: str) -> str:
+    """Return the fallback value that names ``model_id`` on a local provider."""
+    if provider_id == "lm_studio":
+        return model_id
+    return f"{provider_id}{LOCAL_FALLBACK_SEPARATOR}{model_id}"
+
+
+def split_local_fallback(fallback_id: object) -> Tuple[str, str]:
+    """Return ``(provider_id, model_id)`` for a role's local fallback value.
+
+    A plain value is an LM Studio model. ``<local server id>::<model>`` (for
+    example ``vllm::Qwen/Qwen2.5``) names a model on that local server.
+    """
+    text = str(fallback_id or "").strip()
+    for provider_id in LOCAL_SERVER_PROVIDER_IDS:
+        prefix = f"{provider_id}{LOCAL_FALLBACK_SEPARATOR}"
+        if text.startswith(prefix) and len(text) > len(prefix):
+            return provider_id, text[len(prefix):]
+    return "lm_studio", text
 
 
 def cloud_provider_label(provider_id: str) -> str:

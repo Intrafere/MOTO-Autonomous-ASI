@@ -358,3 +358,59 @@ test('ignores an older overlapping solution-path request', async () => {
   expect(screen.getByText(/1 steps · revision 2/i)).toBeInTheDocument();
 });
 
+
+test('token count checks list measured models with an on/off control and a way to measure again', async () => {
+  const { resetTokenCalibrationStoreForTests } = await import('../hooks/useTokenCalibration');
+  resetTokenCalibrationStoreForTests();
+  const user = userEvent.setup();
+  const measured = {
+    provider: 'claude_api',
+    model: 'claude-opus-5-5',
+    state: 'counts_more',
+    samples: 12,
+    samples_required: 10,
+    ratio: 1.25,
+    applied: true,
+    context_windows: [{ configured: 1000000, effective: 800000 }],
+  };
+  const calibration = (overrides = {}) => ({
+    success: true,
+    adjust_enabled: true,
+    samples_required: 10,
+    minimum_sample_tokens: 8000,
+    models: [measured],
+    ...overrides,
+  });
+  workflowAPI.getTokenCalibration = vi.fn().mockResolvedValue(calibration());
+  workflowAPI.setTokenCalibrationAdjustEnabled = vi.fn().mockResolvedValue(calibration({ adjust_enabled: false }));
+  workflowAPI.resetTokenCalibration = vi.fn().mockResolvedValue(calibration({ models: [] }));
+
+  try {
+    render(
+      <WorkflowPanel
+        isRunning={false}
+        onOpenBoostSettings={vi.fn()}
+        onOpenAssistantProof={vi.fn()}
+        collapsed={false}
+      />
+    );
+
+    await user.click(await screen.findByRole('button', { name: /Token count checks \(1\)/ }));
+    expect(screen.getByText(/counts about 25% more tokens.*MOTO fits prompts to 800,000 tokens/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('checkbox', { name: /smaller context window/i }));
+    expect(workflowAPI.setTokenCalibrationAdjustEnabled).toHaveBeenCalledWith(false);
+    expect(await screen.findByText(/The adjustment is turned off/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Discard token count measurements for claude-opus-5-5/ }));
+    expect(workflowAPI.resetTokenCalibration).toHaveBeenCalledWith('claude_api', 'claude-opus-5-5');
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Token count checks/ })).not.toBeInTheDocument();
+    });
+  } finally {
+    delete workflowAPI.getTokenCalibration;
+    delete workflowAPI.setTokenCalibrationAdjustEnabled;
+    delete workflowAPI.resetTokenCalibration;
+    resetTokenCalibrationStoreForTests();
+  }
+});

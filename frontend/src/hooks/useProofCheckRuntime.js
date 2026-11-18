@@ -17,16 +17,11 @@ import {
 import { isCloudAccessProvider } from '../utils/oauthProviders';
 import { isReplayedProofRunActivity } from '../utils/proofRunActivityRecovery';
 
-const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
 export {
   MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
   MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
 };
 const PROOF_STATUS_STARTUP_POLL_MS = 30000;
-
-function isDeveloperModeEnabled() {
-  return localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === 'true';
-}
 
 function inferProofScope(sourceType, sourceId, requestedScope = null) {
   if (requestedScope) return requestedScope;
@@ -156,7 +151,6 @@ function readStoredJson(key) {
 }
 
 function roleFromSubmitterConfig(config = {}) {
-  const superchargeAllowed = isDeveloperModeEnabled();
   return {
     provider: normalizeProvider(config.provider),
     model_id: config.modelId || config.model_id || '',
@@ -165,12 +159,11 @@ function roleFromSubmitterConfig(config = {}) {
     lm_studio_fallback_id: config.lmStudioFallbackId ?? config.lm_studio_fallback_id ?? null,
     context_window: toPositiveInteger(config.contextWindow ?? config.context_window),
     max_output_tokens: toPositiveInteger(config.maxOutputTokens ?? config.max_output_tokens),
-    supercharge_enabled: superchargeAllowed && Boolean(config.superchargeEnabled ?? config.supercharge_enabled),
+    supercharge_enabled: Boolean(config.superchargeEnabled ?? config.supercharge_enabled),
   };
 }
 
 function roleFromAggregatorValidatorSettings(settings = {}) {
-  const superchargeAllowed = isDeveloperModeEnabled();
   return {
     provider: normalizeProvider(settings.validatorProvider),
     model_id: settings.validatorModel || settings.validator_model || '',
@@ -179,12 +172,11 @@ function roleFromAggregatorValidatorSettings(settings = {}) {
     lm_studio_fallback_id: settings.validatorLmStudioFallback ?? settings.validator_lm_studio_fallback ?? null,
     context_window: toPositiveInteger(settings.validatorContextSize ?? settings.validator_context_size),
     max_output_tokens: toPositiveInteger(settings.validatorMaxOutput ?? settings.validator_max_output_tokens),
-    supercharge_enabled: superchargeAllowed && Boolean(settings.validatorSuperchargeEnabled ?? settings.validator_supercharge_enabled),
+    supercharge_enabled: Boolean(settings.validatorSuperchargeEnabled ?? settings.validator_supercharge_enabled),
   };
 }
 
 function roleFromCompilerSettings(settings = {}, prefix) {
-  const superchargeAllowed = isDeveloperModeEnabled();
   return {
     provider: normalizeProvider(settings[`${prefix}Provider`]),
     model_id: settings[`${prefix}Model`] || '',
@@ -193,12 +185,11 @@ function roleFromCompilerSettings(settings = {}, prefix) {
     lm_studio_fallback_id: settings[`${prefix}LmStudioFallback`] ?? null,
     context_window: toPositiveInteger(settings[`${prefix}ContextSize`]),
     max_output_tokens: toPositiveInteger(settings[`${prefix}MaxOutput`]),
-    supercharge_enabled: superchargeAllowed && Boolean(settings[`${prefix}SuperchargeEnabled`]),
+    supercharge_enabled: Boolean(settings[`${prefix}SuperchargeEnabled`]),
   };
 }
 
 function roleFromAutonomousConfig(config, rolePrefix, fallbackModelId = '') {
-  const superchargeAllowed = isDeveloperModeEnabled();
   return {
     provider: normalizeProvider(config[`${rolePrefix}_provider`]),
     model_id: config[`${rolePrefix}_model`] || fallbackModelId || '',
@@ -207,7 +198,7 @@ function roleFromAutonomousConfig(config, rolePrefix, fallbackModelId = '') {
     lm_studio_fallback_id: config[`${rolePrefix}_lm_studio_fallback`] ?? null,
     context_window: toPositiveInteger(config[`${rolePrefix}_context_window`]),
     max_output_tokens: toPositiveInteger(config[`${rolePrefix}_max_tokens`]),
-    supercharge_enabled: superchargeAllowed && Boolean(config[`${rolePrefix}_supercharge_enabled`]),
+    supercharge_enabled: Boolean(config[`${rolePrefix}_supercharge_enabled`]),
   };
 }
 
@@ -232,7 +223,6 @@ function roleWithDefaults(role = {}, defaults = {}) {
 }
 
 function roleFromAggregatorAssistantSettings(settings = {}, defaults = {}) {
-  const superchargeAllowed = isDeveloperModeEnabled();
   return roleWithDefaults({
     provider: normalizeProvider(settings.assistantProvider),
     model_id: settings.assistantModel || '',
@@ -241,7 +231,7 @@ function roleFromAggregatorAssistantSettings(settings = {}, defaults = {}) {
     lm_studio_fallback_id: settings.assistantLmStudioFallback ?? null,
     context_window: toPositiveInteger(settings.assistantContextSize),
     max_output_tokens: toPositiveInteger(settings.assistantMaxOutput),
-    supercharge_enabled: superchargeAllowed && Boolean(settings.assistantSuperchargeEnabled),
+    supercharge_enabled: Boolean(settings.assistantSuperchargeEnabled),
   }, defaults);
 }
 

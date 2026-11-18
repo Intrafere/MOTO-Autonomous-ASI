@@ -363,6 +363,8 @@ test('does not let delayed model auto-fill restore an older submitter count', as
     expect(latestConfig.num_submitters).toBe(4);
     expect(latestConfig.submitter_configs).toHaveLength(4);
   });
+  expect(screen.getByRole('combobox', { name: 'Number of Submitters' }))
+    .toHaveAccessibleDescription(/^High usage\. 4 brainstorm submitters/);
 });
 
 test('discards delayed submitter auto-fill after the selected model changes', async () => {
@@ -421,6 +423,8 @@ test('does not let delayed Validator auto-fill restore an older submitter count'
     expect(latestConfig.num_submitters).toBe(4);
     expect(latestConfig.submitter_configs).toHaveLength(4);
   });
+  expect(screen.getByRole('combobox', { name: 'Number of Submitters' }))
+    .toHaveAccessibleDescription(/^High usage\. 4 brainstorm submitters/);
 });
 
 test('applies a recommended profile even when OpenRouter model list is empty', async () => {

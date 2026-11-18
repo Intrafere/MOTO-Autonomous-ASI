@@ -44,6 +44,9 @@ from tests.workflow_harness.actions import (
     stale_child_output_arrives_after_parent_action,
     try_hosted_desktop_only_route,
     verify_rag_source_exclusion,
+    cli_start_manual_aggregator,
+    cli_replay_saved_template,
+    exercise_cli_control_surface,
 )
 from tests.workflow_harness.invariant_catalog import (
     FIRST_BUILD_FIELDS,
@@ -131,6 +134,8 @@ PLAN2_INVARIANT_IDS = {
     "supercharge_creativity.routing_separation",
     "proof_novelty.group_atomic_same_run",
     "leanoj.parent_control_generation_fences_children",
+    "model_output.contract_failure_not_semantic",
+    "model_output.normalizations_visible_and_guarded",
     "live_activity.provider_retry_each_wait_visible",
     "live_activity.provider_retry_identity_stable",
     "live_activity.provider_retry_secret_safe",
@@ -138,6 +143,11 @@ PLAN2_INVARIANT_IDS = {
     "live_activity.all_retry_wait_sources_accounted",
     "live_activity.provider_error_route_identity",
     "live_activity.provider_error_sources_route_attributed",
+    "cli_control.start_template_only_after_committed_start",
+    "cli_control.start_template_credentials_stripped",
+    "cli_control.hosted_writes_no_artifacts",
+    "cli_control.control_file_owner_lifecycle",
+    "cli_control.template_replays_into_valid_start",
 }
 
 
@@ -265,6 +275,20 @@ SCENARIOS_BY_INVARIANT = {
         emit_registered_proof_verified,
     ],
     "api.hosted_desktop_only_routes_unavailable": [try_hosted_desktop_only_route],
+    "cli_control.start_template_only_after_committed_start": [
+        cli_start_manual_aggregator,
+        cli_start_manual_aggregator,
+    ],
+    "cli_control.start_template_credentials_stripped": [
+        cli_start_manual_aggregator,
+        cli_replay_saved_template,
+    ],
+    "cli_control.hosted_writes_no_artifacts": [exercise_cli_control_surface],
+    "cli_control.control_file_owner_lifecycle": [exercise_cli_control_surface],
+    "cli_control.template_replays_into_valid_start": [
+        cli_start_manual_aggregator,
+        cli_replay_saved_template,
+    ],
     "prompt.user_prompt_direct_injected": [prepare_prompt_context],
     "prompt.validator_excludes_assistant_memory": [prepare_prompt_context],
     "prompt.proof_source_context_required": [prepare_prompt_context],
@@ -327,6 +351,8 @@ SCENARIOS_BY_INVARIANT = {
             "supercharge_creativity.routing_separation",
             "proof_novelty.group_atomic_same_run",
             "leanoj.parent_control_generation_fences_children",
+            "model_output.contract_failure_not_semantic",
+            "model_output.normalizations_visible_and_guarded",
         )
     },
 }
@@ -425,6 +451,16 @@ def _make_invariant_violation(model: WorkflowModel, invariant_id: str) -> None:
         model.events.append(WorkflowEvent("proof_verified", {"proof_id": "missing-proof"}))
     elif invariant_id == "api.hosted_desktop_only_routes_unavailable":
         model.hosted_route_attempts = {"pdf"}
+    elif invariant_id == "cli_control.start_template_only_after_committed_start":
+        model.cli_templates_after_rejected_start = 1
+    elif invariant_id == "cli_control.start_template_credentials_stripped":
+        model.cli_template_credential_leaks = 1
+    elif invariant_id == "cli_control.hosted_writes_no_artifacts":
+        model.cli_hosted_artifacts_written = 1
+    elif invariant_id == "cli_control.control_file_owner_lifecycle":
+        model.cli_control_file_foreign_removals = 1
+    elif invariant_id == "cli_control.template_replays_into_valid_start":
+        model.cli_template_replays_rejected = 1
     elif invariant_id == "prompt.user_prompt_direct_injected":
         model.prompt_user_direct_injected = False
     elif invariant_id == "prompt.proof_source_context_required":
@@ -507,6 +543,8 @@ def _make_invariant_violation(model: WorkflowModel, invariant_id: str) -> None:
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
         "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded",
     }:
         model.law_observations.add(invariant_id)
         model.law_violations.add(invariant_id)

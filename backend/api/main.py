@@ -70,6 +70,7 @@ _set_windows_console_title()
 
 # Suppress noisy HTTP client logs (keep only WARNING/ERROR level)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 build_info = get_build_info()
@@ -333,9 +334,14 @@ async def _application_lifespan(app: FastAPI):
 
     logger.info("ASI Aggregator System ready")
 
+    # Let the local `moto` command find this backend (desktop mode only).
+    from backend.shared.cli_control import remove_control_file, write_control_file
+    write_control_file(version=build_info.version)
+
     yield
-    
+
     # Shutdown
+    remove_control_file()
     logger.info("Shutting down ASI Aggregator System...")
     try:
         await translation_service.shutdown()

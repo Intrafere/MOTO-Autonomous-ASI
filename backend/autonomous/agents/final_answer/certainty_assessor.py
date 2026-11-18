@@ -12,7 +12,7 @@ NO RAG FOR ABSTRACTS (by design): Step 1 browses abstracts/outlines which are sm
 EXPANDED PAPERS OVERFLOW: Step 2 uses RAG fallback for expanded papers when full direct injection does not fit.
 """
 import logging
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Tuple
 
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
@@ -20,8 +20,10 @@ from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
 )
-from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text
+from backend.shared.model_output_contract import (
+    ModelOutputContractError,
+    is_model_output_contract_error,
+)
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
 from backend.shared.models import CertaintyAssessment
@@ -34,11 +36,72 @@ from backend.autonomous.prompts.final_answer_prompts import (
 from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.memory.final_answer_memory import final_answer_memory
 from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
+from backend.autonomous.agents.output_contract import (
+    ContractFailurePacer,
+    json_object,
+    parse_with_contract_retry,
+    never_stop,
+    report_model_output_contract_failure,
+    require_bool,
+    require_choice,
+    require_string_list,
+    require_text,
+    response_text,
+)
 
 logger = logging.getLogger(__name__)
 
+_CERTAINTY_LEVELS = (
+    "total_answer",
+    "partial_answer",
+    "no_answer_known",
+    "appears_impossible",
+    "other",
+)
+
+_ASSESSMENT_SHAPE = """{
+  "certainty_level": "total_answer | partial_answer | no_answer_known | appears_impossible | other",
+  "known_certainties_summary": "string",
+  "reasoning": "string"
+}"""
+
+_EXPANSION_SHAPE = """{
+  "expand_papers": ["paper_id", ...],
+  "proceed_without_expansion": false,
+  "reasoning": "string"
+}"""
+
+_VALIDATION_SHAPE = """{
+  "decision": "accept | reject",
+  "reasoning": "string"
+}"""
+
+
+def _parse_validation(data: Any, *, role: str) -> Tuple[str, str, Dict[str, Any]]:
+    data = json_object(data, role=role)
+    decision = require_choice(data, "decision", ("accept", "reject"), role=role)
+    return decision, require_text(data, "reasoning", role=role), data
+
+
+def _parse_assessment(data: Any, *, role: str) -> CertaintyAssessment:
+    data = json_object(data, role=role)
+    return CertaintyAssessment(
+        certainty_level=require_choice(data, "certainty_level", _CERTAINTY_LEVELS, role=role),
+        known_certainties_summary=require_text(data, "known_certainties_summary", role=role),
+        reasoning=require_text(data, "reasoning", role=role),
+    )
+
+
+def _parse_expansion(data: Any, *, role: str) -> List[str]:
+    data = json_object(data, role=role)
+    proceed_without_expansion = require_bool(data, "proceed_without_expansion", role=role)
+    expand_papers = require_string_list(data, "expand_papers", role=role)
+    return [] if proceed_without_expansion else expand_papers
+
 
 def _is_tier3_model_call_failure(exc: Exception) -> bool:
+    if is_model_output_contract_error(exc):
+        return False
     message = str(exc or "").lower()
     return (
         isinstance(exc, RetryableProviderError)
@@ -84,6 +147,8 @@ class CertaintyAssessor:
         self.task_sequence: int = 0
         self.role_id = "autonomous_certainty_assessor"
         self.task_tracking_callback: Optional[Callable] = None
+        # Bound to the owning workflow's stop state so contract backoff ends on Stop.
+        self.should_stop: Callable[[], bool] = never_stop
     
     def set_task_tracking_callback(self, callback: Callable) -> None:
         """Set callback for task tracking (workflow panel integration)."""
@@ -143,31 +208,74 @@ class CertaintyAssessor:
         # Step 3: Assess certainties with validation loop
         attempt = 0
         rejection_entries = tuple((await final_answer_memory.get_rejections("assessment"))[-5:])
-        
+        # An assessment whose validator reply was unusable is validated again rather
+        # than regenerated or recorded as a rejection.
+        pending_assessment: Optional[CertaintyAssessment] = None
+        contract_pacer = ContractFailurePacer(self.should_stop)
+
         while attempt < self.MAX_RETRIES:
             attempt += 1
             logger.info(f"CertaintyAssessor: Assessment attempt {attempt}/{self.MAX_RETRIES}")
-            
+
             # Generate assessment
-            assessment = await self._generate_assessment(
-                user_research_prompt,
-                all_papers,
-                expanded_papers,
-                rejection_entries
-            )
-            
+            assessment = pending_assessment
+            pending_assessment = None
+            if assessment is None:
+                try:
+                    assessment = await self._generate_assessment(
+                        user_research_prompt,
+                        all_papers,
+                        expanded_papers,
+                        rejection_entries
+                    )
+                except ModelOutputContractError as exc:
+                    await report_model_output_contract_failure(
+                        self.role_id,
+                        exc,
+                        model=self.submitter_model,
+                        outcome="No certainty assessment was proposed; the assessment runs again.",
+                    )
+                    await contract_pacer.after_failure(self.role_id)
+                    if self.should_stop():
+                        return None
+                    # A contract failure is operational: it never uses up one of the
+                    # fixed tries, so re-asks continue until a usable reply or Stop.
+                    attempt -= 1
+                    continue
+                contract_pacer.reset()
+
             if assessment is None:
                 logger.error(f"CertaintyAssessor: Failed to generate assessment (attempt {attempt})")
                 continue
-            
+
             # Validate assessment
-            is_valid, feedback = await self._validate_assessment(
-                user_research_prompt,
-                all_papers,
-                assessment,
-                expanded_papers,
-            )
-            
+            try:
+                is_valid, feedback = await self._validate_assessment(
+                    user_research_prompt,
+                    all_papers,
+                    assessment,
+                    expanded_papers,
+                )
+            except ModelOutputContractError as exc:
+                await report_model_output_contract_failure(
+                    f"{self.role_id}_validator",
+                    exc,
+                    model=self.validator_model,
+                    outcome=(
+                        "The certainty assessment was not judged and will be validated again; "
+                        "no rejection was recorded."
+                    ),
+                )
+                pending_assessment = assessment
+                await contract_pacer.after_failure(f"{self.role_id}_validator")
+                if self.should_stop():
+                    return None
+                # A contract failure is operational: it never uses up one of the
+                # fixed tries, so re-asks continue until a usable reply or Stop.
+                attempt -= 1
+                continue
+            contract_pacer.reset()
+
             if is_valid:
                 logger.info(f"CertaintyAssessor: Assessment validated: {assessment.certainty_level}")
                 await final_answer_memory.save_certainty_assessment(assessment)
@@ -235,27 +343,35 @@ class CertaintyAssessor:
             
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
-            
-            if not response:
+
+            try:
+                expand_papers = await parse_with_contract_retry(
+                    response_text(response),
+                    lambda parsed: _parse_expansion(parsed, role=self.role_id),
+                    prompt=prompt,
+                    task_id=task_id,
+                    role_id=self.role_id,
+                    model=self.submitter_model,
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens,
+                    response_noun="paper expansion request",
+                    response_shape=_EXPANSION_SHAPE,
+                )
+            except ModelOutputContractError as exc:
+                await report_model_output_contract_failure(
+                    self.role_id,
+                    exc,
+                    task_id=task_id,
+                    model=self.submitter_model,
+                    outcome=(
+                        "No papers were chosen for full review; the certainty assessment "
+                        "continues from paper abstracts and outlines."
+                    ),
+                )
                 return []
-            
-            # Extract content
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return []
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
-            
-            if data.get("proceed_without_expansion", False):
-                logger.info("CertaintyAssessor: Proceeding with abstract-only assessment")
-                return []
-            
-            expand_papers = data.get("expand_papers", [])
             logger.info(f"CertaintyAssessor: Requested expansion of {len(expand_papers)} papers")
             return expand_papers
-            
+
         except FreeModelExhaustedError:
             raise
         except Exception as e:
@@ -479,43 +595,23 @@ USER'S RESEARCH QUESTION:
             
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
-            
-            if not response:
-                return None
-            
-            # Extract content
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return None
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
-            if not isinstance(data, dict):
-                raise ValueError("Certainty assessment must be a JSON object")
-            certainty_level = data.get("certainty_level")
-            summary = data.get("known_certainties_summary")
-            reasoning = data.get("reasoning")
-            if certainty_level not in {
-                "total_answer",
-                "partial_answer",
-                "no_answer_known",
-                "appears_impossible",
-                "other",
-            }:
-                raise ValueError("Certainty assessment has an invalid or missing certainty_level")
-            if not isinstance(summary, str) or not summary.strip():
-                raise ValueError("Certainty assessment requires a non-empty known_certainties_summary")
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                raise ValueError("Certainty assessment requires non-empty reasoning")
 
-            return CertaintyAssessment(
-                certainty_level=certainty_level,
-                known_certainties_summary=summary.strip(),
-                reasoning=reasoning.strip(),
+            return await parse_with_contract_retry(
+                response_text(response),
+                lambda parsed: _parse_assessment(parsed, role=self.role_id),
+                prompt=prompt,
+                task_id=task_id,
+                role_id=self.role_id,
+                model=self.submitter_model,
+                context_window=self.context_window,
+                max_output_tokens=self.max_output_tokens,
+                response_noun="certainty assessment",
+                response_shape=_ASSESSMENT_SHAPE,
             )
-            
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_tier3_model_call_failure(e):
@@ -535,6 +631,10 @@ USER'S RESEARCH QUESTION:
         
         Returns:
             Tuple of (is_valid, feedback_if_rejected)
+
+        Raises:
+            ModelOutputContractError: the validator reply did not match its JSON
+                contract after one bounded retry (not a semantic rejection).
         """
         try:
             # Build validation prompt
@@ -577,33 +677,35 @@ USER'S RESEARCH QUESTION:
             
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
-            
-            if not response:
-                return False, "Empty response from validator"
-            
-            # Extract content
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return False, "No content in validator response"
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
+
+            validator_role = f"{self.role_id}_validator"
+            decision, reasoning, data = await parse_with_contract_retry(
+                response_text(response),
+                lambda parsed: _parse_validation(parsed, role=validator_role),
+                prompt=prompt,
+                task_id=task_id,
+                role_id=validator_role,
+                model=self.validator_model,
+                context_window=self.validator_context_window,
+                max_output_tokens=self.validator_max_output_tokens,
+                response_noun="validation decision",
+                response_shape=_VALIDATION_SHAPE,
+            )
             from backend.shared.solution_path.integration import enqueue_optional_update
-            decision = data.get("decision", "reject")
             await enqueue_optional_update(
                 data,
                 getattr(self, "solution_path_manager", None),
-                proposer_role=f"{self.role_id}_validator",
+                proposer_role=validator_role,
                 source_task_id=task_id,
                 source_phase="certainty_validation",
-                source_decision=decision if decision in {"accept", "reject"} else None,
+                source_decision=decision,
             )
-            reasoning = data.get("reasoning", "No reasoning provided")
-            
+
             return decision == "accept", reasoning
-            
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_tier3_model_call_failure(e):

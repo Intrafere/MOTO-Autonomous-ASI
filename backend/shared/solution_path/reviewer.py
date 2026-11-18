@@ -102,7 +102,11 @@ async def review_with_json_retry(
 ) -> ReviewDecision:
     """Run one bounded sanitized JSON repair without replaying raw model output."""
 
-    max_input = max(1, context_window - max_output_tokens)
+    from backend.shared.token_calibration import token_calibration
+
+    max_input = token_calibration.adjusted_context_window(context_window) - max_output_tokens
+    if max_input <= 0:
+        max_input = max(1, context_window - max_output_tokens)
     prompt_tokens = count_tokens(prompt)
     if prompt_tokens > max_input:
         if compact_prompt is not None and count_tokens(compact_prompt) <= max_input:

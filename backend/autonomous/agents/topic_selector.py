@@ -11,14 +11,12 @@ It only needs metadata summaries (topic prompts, statuses, paper titles/abstract
 not full brainstorm databases or full paper content. Metadata is small enough to
 direct-inject; abstract truncation is the overflow fallback.
 """
-import json
 import logging
 from typing import Optional, Dict, Any, List, Callable
 
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
-from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text
+from backend.shared.model_output_contract import ModelOutputContractError
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
 from backend.shared.models import TopicSelectionSubmission
@@ -28,6 +26,39 @@ from backend.autonomous.prompts.topic_prompts import (
     build_topic_selection_prompt
 )
 from backend.autonomous.memory.autonomous_rejection_logs import autonomous_rejection_logs
+from backend.autonomous.agents.output_contract import (
+    json_object,
+    optional_text,
+    parse_with_contract_retry,
+    require_choice,
+    require_text,
+    response_text,
+)
+
+_SELECTION_SHAPE = """{
+  "action": "new_topic | continue_existing",
+  "topic_id": "string (required for continue_existing)",
+  "topic_prompt": "string (required for new_topic)",
+  "reasoning": "string"
+}"""
+
+
+def _parse_selection(data: Any, *, role: str) -> TopicSelectionSubmission:
+    data = json_object(data, role=role)
+    action = require_choice(data, "action", ("new_topic", "continue_existing"), role=role)
+    reasoning = require_text(data, "reasoning", role=role)
+    if action == "continue_existing":
+        topic_id = require_text(data, "topic_id", role=role)
+        topic_prompt = optional_text(data, "topic_prompt", role=role)
+    else:
+        topic_id = optional_text(data, "topic_id", role=role) or None
+        topic_prompt = require_text(data, "topic_prompt", role=role)
+    return TopicSelectionSubmission(
+        action=action,
+        topic_id=topic_id,
+        topic_prompt=topic_prompt,
+        reasoning=reasoning,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +119,10 @@ class TopicSelectorAgent:
         
         Returns:
             TopicSelectionSubmission or None if generation failed
+
+        Raises:
+            ModelOutputContractError: the reply did not match its JSON contract
+                after one bounded retry.
         """
         try:
             max_input_tokens = self._calculate_max_input_tokens()
@@ -179,71 +214,31 @@ class TopicSelectorAgent:
                     retained_rejections = retained_rejections[1:]
                     prompt = build_prompt(retained_rejections)
             
-            if not response:
-                logger.error("TopicSelector: Empty response from LLM")
-                return None
-            
-            # Extract content from response (check both content and reasoning fields)
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                logger.error("TopicSelector: No content in response")
-                return None
-            
-            # Parse JSON using central utility (handles sanitization + parsing + array handling)
             try:
-                data = parse_json(content)
-                
-                # parse_json already handles array response, but keep check for safety
-                if isinstance(data, list) and len(data) > 0:
-                    logger.warning("TopicSelector: Model returned array, using first element")
-                    data = data[0]
-                
-                # Validate required fields
-                action = data.get("action", "")
-                if action not in ["new_topic", "continue_existing"]:
-                    logger.error(f"TopicSelector: Invalid action: {action}")
-                    return None
-                reasoning = data.get("reasoning")
-                if not isinstance(reasoning, str) or not reasoning.strip():
-                    logger.error("TopicSelector: Missing non-empty reasoning")
-                    return None
-                
-                # Create submission
-                submission = TopicSelectionSubmission(
-                    action=action,
-                    topic_id=data.get("topic_id"),
-                    topic_prompt=data.get("topic_prompt", ""),
-                    reasoning=reasoning.strip(),
+                submission = await parse_with_contract_retry(
+                    response_text(response),
+                    lambda parsed: _parse_selection(parsed, role=self.role_id),
+                    prompt=prompt,
+                    task_id=task_id,
+                    role_id=self.role_id,
+                    model=self.model_id,
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens,
+                    response_noun="topic selection",
+                    response_shape=_SELECTION_SHAPE,
                 )
-                
-                # Validate based on action
-                if action == "continue_existing" and not submission.topic_id:
-                    logger.error("TopicSelector: continue_existing requires topic_id")
-                    return None
-                
-                if action == "new_topic" and not submission.topic_prompt:
-                    logger.error(f"TopicSelector: {action} requires topic_prompt")
-                    return None
-                
-                # Notify task completed successfully
+            finally:
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
-                
-                logger.info(f"TopicSelector: Generated submission - action={action}")
-                return submission
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"TopicSelector: JSON parse error: {e}")
-                logger.debug(f"TopicSelector: Raw response: {content[:500]}...")
-                # Notify task completed (failed but still completed)
-                if self.task_tracking_callback:
-                    self.task_tracking_callback("completed", task_id)
-                return None
-                
+
+            logger.info(f"TopicSelector: Generated submission - action={submission.action}")
+            return submission
+
         except FreeModelExhaustedError:
             raise
         except RetryableProviderError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if api_client_manager.is_provider_failure(e):

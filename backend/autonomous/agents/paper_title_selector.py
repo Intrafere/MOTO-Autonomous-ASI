@@ -16,8 +16,10 @@ from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
 )
-from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text
+from backend.shared.model_output_contract import (
+    ModelOutputContractError,
+    is_model_output_contract_error,
+)
 from backend.shared.models import PaperTitleSelection
 from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
 from backend.shared.provider_errors import ProviderContextLengthError
@@ -27,11 +29,50 @@ from backend.autonomous.prompts.paper_title_prompts import (
     build_paper_title_prompt,
     build_paper_title_validation_prompt
 )
+from backend.autonomous.agents.output_contract import (
+    ContractFailurePacer,
+    json_object,
+    parse_with_contract_retry,
+    report_model_output_contract_failure,
+    require_choice,
+    require_text,
+    response_text,
+)
 
 logger = logging.getLogger(__name__)
 
+_TITLE_SHAPE = """{
+  "paper_title": "string",
+  "reasoning": "string"
+}"""
+
+_TITLE_VALIDATION_SHAPE = """{
+  "decision": "accept | reject",
+  "reasoning": "string"
+}"""
+
+TITLE_VALIDATOR_ROLE_ID = "autonomous_paper_title_validator"
+
+
+def _parse_title(data: Any, *, role: str) -> PaperTitleSelection:
+    data = json_object(data, role=role)
+    return PaperTitleSelection(
+        paper_title=require_text(data, "paper_title", role=role),
+        reasoning=require_text(data, "reasoning", role=role),
+    )
+
+
+def _parse_title_validation(data: Any, *, role: str) -> Tuple[str, str, Dict[str, Any]]:
+    data = json_object(data, role=role)
+    decision = require_choice(
+        data, "decision", ("accept", "reject"), role=role, case_insensitive=True
+    )
+    return decision, require_text(data, "reasoning", role=role), data
+
 
 def _is_title_model_call_failure(exc: Exception) -> bool:
+    if is_model_output_contract_error(exc):
+        return False
     message = str(exc or "").lower()
     return (
         isinstance(exc, RetryableProviderError)
@@ -112,6 +153,12 @@ class PaperTitleSelectorAgent:
         """
         rejection_history: List[str] = []
         attempt = 0
+        # A title whose validator reply was unusable is re-validated, not regenerated
+        # or recorded as a rejection.
+        pending_selection: Optional[PaperTitleSelection] = None
+        contract_pacer = ContractFailurePacer(
+            stop_event.is_set if stop_event is not None else None
+        )
 
         while True:
             # Honour user stop before each attempt
@@ -123,16 +170,30 @@ class PaperTitleSelectorAgent:
             logger.info(f"PaperTitleSelector: Attempt {attempt}")
 
             # Generate title selection (pass feedback so model learns from failures)
-            selection = await self._generate_title(
-                user_research_prompt,
-                topic_prompt,
-                brainstorm_summary,
-                existing_papers_from_brainstorm,
-                reference_papers,
-                rejection_feedback_entries=tuple(rejection_history[-5:]),
-                rejection_attempt=attempt,
-                candidate_titles=candidate_titles
-            )
+            selection = pending_selection
+            pending_selection = None
+            if selection is None:
+                try:
+                    selection = await self._generate_title(
+                        user_research_prompt,
+                        topic_prompt,
+                        brainstorm_summary,
+                        existing_papers_from_brainstorm,
+                        reference_papers,
+                        rejection_feedback_entries=tuple(rejection_history[-5:]),
+                        rejection_attempt=attempt,
+                        candidate_titles=candidate_titles
+                    )
+                except ModelOutputContractError as exc:
+                    await report_model_output_contract_failure(
+                        self.role_id,
+                        exc,
+                        model=self.model_id,
+                        outcome="No title was proposed; title selection runs again.",
+                    )
+                    await contract_pacer.after_failure(self.role_id)
+                    continue
+                contract_pacer.reset()
 
             if selection is None:
                 logger.error("PaperTitleSelector: Failed to generate title - will retry")
@@ -154,15 +215,30 @@ class PaperTitleSelectorAgent:
                 continue
 
             # Validate title
-            is_valid, rejection_reason = await self._validate_title(
-                user_research_prompt,
-                topic_prompt,
-                brainstorm_summary,
-                existing_papers_from_brainstorm,
-                reference_papers,
-                selection.paper_title,
-                selection.reasoning
-            )
+            try:
+                is_valid, rejection_reason = await self._validate_title(
+                    user_research_prompt,
+                    topic_prompt,
+                    brainstorm_summary,
+                    existing_papers_from_brainstorm,
+                    reference_papers,
+                    selection.paper_title,
+                    selection.reasoning
+                )
+            except ModelOutputContractError as exc:
+                await report_model_output_contract_failure(
+                    TITLE_VALIDATOR_ROLE_ID,
+                    exc,
+                    model=self.validator_model_id,
+                    outcome=(
+                        "The proposed title was not judged and will be validated again; "
+                        "no rejection was recorded."
+                    ),
+                )
+                pending_selection = selection
+                await contract_pacer.after_failure(TITLE_VALIDATOR_ROLE_ID)
+                continue
+            contract_pacer.reset()
 
             if is_valid:
                 logger.info(f"PaperTitleSelector: Title accepted: '{selection.paper_title}'")
@@ -309,37 +385,26 @@ class PaperTitleSelectorAgent:
                     retained_feedback = retained_feedback[1:]
                     prompt = build_prompt(retained_feedback)
             
-            if not response:
-                return None
-            
-            # Extract content (check both content and reasoning fields)
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return None
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
-            
-            title = data.get("paper_title")
-            reasoning = data.get("reasoning")
-            if not isinstance(title, str) or not title.strip():
-                logger.error("PaperTitleSelector: No title in response")
-                return None
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                logger.error("PaperTitleSelector: Missing non-empty reasoning")
-                return None
-            
-            # Notify task completed successfully
-            if self.task_tracking_callback:
-                self.task_tracking_callback("completed", task_id)
-            
-            return PaperTitleSelection(
-                paper_title=title.strip(),
-                reasoning=reasoning.strip(),
-            )
-            
+            try:
+                return await parse_with_contract_retry(
+                    response_text(response),
+                    lambda parsed: _parse_title(parsed, role=self.role_id),
+                    prompt=prompt,
+                    task_id=task_id,
+                    role_id=self.role_id,
+                    model=self.model_id,
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens,
+                    response_noun="paper title selection",
+                    response_shape=_TITLE_SHAPE,
+                )
+            finally:
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_title_model_call_failure(e):
@@ -365,6 +430,10 @@ class PaperTitleSelectorAgent:
         
         Returns:
             Tuple of (is_valid: bool, rejection_reason: str)
+
+        Raises:
+            ModelOutputContractError: the validator reply did not match its JSON
+                contract after one bounded retry (not a semantic rejection).
         """
         try:
             # Build validation prompt
@@ -406,31 +475,31 @@ class PaperTitleSelectorAgent:
             
             response = await api_client_manager.generate_completion(
                 task_id=task_id,
-                role_id="autonomous_paper_title_validator",
+                role_id=TITLE_VALIDATOR_ROLE_ID,
                 model=self.validator_model_id,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=self.validator_max_output_tokens,
                 temperature=0.0  # Deterministic validation - evolving context provides diversity
             )
-            
-            if not response:
-                return False, "Empty validation response"
-            
-            # Extract content (check both content and reasoning fields)
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return False, "No content in validation response"
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
+
+            try:
+                decision, reasoning, data = await parse_with_contract_retry(
+                    response_text(response),
+                    lambda parsed: _parse_title_validation(parsed, role=TITLE_VALIDATOR_ROLE_ID),
+                    prompt=prompt,
+                    task_id=task_id,
+                    role_id=TITLE_VALIDATOR_ROLE_ID,
+                    model=self.validator_model_id,
+                    context_window=self.validator_context_window,
+                    max_output_tokens=self.validator_max_output_tokens,
+                    response_noun="title validation decision",
+                    response_shape=_TITLE_VALIDATION_SHAPE,
+                )
+            except ModelOutputContractError:
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+                raise
             from backend.shared.solution_path.integration import enqueue_optional_update
-            decision = data.get("decision", "").lower()
-            reasoning = data.get("reasoning")
-            if decision not in {"accept", "reject"}:
-                return False, "Title validator requires decision to be exactly accept or reject"
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                return False, "Title validator requires non-empty reasoning"
             await enqueue_optional_update(
                 data,
                 getattr(self, "solution_path_manager", None),
@@ -447,9 +516,11 @@ class PaperTitleSelectorAgent:
             if decision == "accept":
                 return True, ""
             else:
-                return False, reasoning.strip()
-                
+                return False, reasoning
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_title_model_call_failure(e):

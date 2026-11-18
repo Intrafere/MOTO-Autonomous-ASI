@@ -691,3 +691,35 @@
   line-height: 1.35;
   white-space: pre-wrap;
 }
+
+/* Token count checks */
+.token-check-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.4rem;
+}
+
+.token-check-detail {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.token-check-reset {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-top: 0.15rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.token-check-reset:hover,
+.token-check-reset:focus-visible {
+  color: var(--text-primary);
+}

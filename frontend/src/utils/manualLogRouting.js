@@ -81,3 +81,28 @@ export const compactCompilerActivityEvents = (events = []) => (
     };
   })
 );
+
+const activitySortTime = (event = {}) => {
+  const parsed = new Date(event.fullTimestamp || event.timestamp || '').getTime();
+  return Number.isNaN(parsed) ? -Infinity : parsed;
+};
+
+// Merges Single Paper Writer activity lists newest-first, keeping the first copy
+// of each activity identity so App-owned provider and model-output rows never
+// repeat when they are handed down again or restored after a reload.
+export const mergeCompilerActivityEvents = (...eventLists) => {
+  const seen = new Set();
+  const merged = [];
+  eventLists.flat().forEach((event) => {
+    if (!event || typeof event !== 'object') return;
+    const normalized = normalizeActivityEvent(event);
+    if (seen.has(normalized.activityIdentity)) return;
+    seen.add(normalized.activityIdentity);
+    merged.push(normalized);
+  });
+  return merged
+    .map((event, index) => ({ event, index, time: activitySortTime(event) }))
+    .sort((left, right) => (right.time - left.time) || (left.index - right.index))
+    .map(({ event }) => event)
+    .slice(0, MAX_COMPILER_ACTIVITY_EVENTS);
+};

@@ -28,8 +28,10 @@ from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
 )
-from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text
+from backend.shared.model_output_contract import (
+    ModelOutputContractError,
+    is_model_output_contract_error,
+)
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config, system_config
 from backend.shared.models import ReferenceExpansionRequest
@@ -40,11 +42,58 @@ from backend.autonomous.prompts.paper_reference_prompts import (
 )
 from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
+from backend.autonomous.agents.output_contract import (
+    json_object,
+    parse_with_contract_retry,
+    require_bool,
+    require_string_list,
+    require_text,
+    response_text,
+)
 
 logger = logging.getLogger(__name__)
 
+_EXPANSION_SHAPE = """{
+  "expand_papers": ["paper_id", ...],
+  "proceed_without_references": false,
+  "reasoning": "string"
+}"""
+
+_SELECTION_SHAPE = """{
+  "selected_papers": ["paper_id", ...],
+  "reasoning": "string"
+}"""
+
+
+def _parse_expansion(data: Any, *, role: str) -> ReferenceExpansionRequest:
+    data = json_object(data, role=role)
+    expand_papers = require_string_list(data, "expand_papers", role=role)
+    proceed_without_references = require_bool(data, "proceed_without_references", role=role)
+    reasoning = require_text(data, "reasoning", role=role)
+    if proceed_without_references and expand_papers:
+        raise ModelOutputContractError(
+            "A reply cannot request papers while proceeding without references",
+            role=role,
+            stage="variant",
+            invalid_fields=("expand_papers", "proceed_without_references"),
+        )
+    return ReferenceExpansionRequest(
+        expand_papers=expand_papers,
+        proceed_without_references=proceed_without_references,
+        reasoning=reasoning,
+    )
+
+
+def _parse_selection(data: Any, *, role: str) -> List[str]:
+    data = json_object(data, role=role)
+    selected = require_string_list(data, "selected_papers", role=role)
+    require_text(data, "reasoning", role=role)
+    return selected
+
 
 def _is_reference_model_call_failure(exc: Exception) -> bool:
+    if is_model_output_contract_error(exc):
+        return False
     message = str(exc or "").lower()
     return (
         isinstance(exc, RetryableProviderError)
@@ -126,6 +175,11 @@ class ReferenceSelectorAgent:
         
         Returns:
             List of selected paper_ids, capped by the caller's policy
+
+        Raises:
+            ModelOutputContractError: an expansion or final-selection reply did not
+                match its JSON contract after one bounded retry. No selection was
+                made; callers decide visibly how to continue.
         """
         if already_selected is None:
             already_selected = []
@@ -285,48 +339,26 @@ class ReferenceSelectorAgent:
                 temperature=0.0  # Deterministic generation - evolving context provides diversity
             )
             
-            if not response:
-                logger.error("ReferenceSelector: Empty response from LLM")
-                return None
-            
-            # Extract content (check both content and reasoning fields)
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return None
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
-            expand_papers = data.get("expand_papers")
-            proceed_without_references = data.get("proceed_without_references")
-            reasoning = data.get("reasoning")
-            if not isinstance(expand_papers, list) or not all(
-                isinstance(paper_id, str) and paper_id.strip()
-                for paper_id in expand_papers
-            ):
-                raise ValueError("Reference expansion requires expand_papers to be a string list")
-            if type(proceed_without_references) is not bool:
-                raise ValueError(
-                    "Reference expansion requires proceed_without_references to be a boolean"
+            try:
+                return await parse_with_contract_retry(
+                    response_text(response),
+                    lambda parsed: _parse_expansion(parsed, role=self.role_id),
+                    prompt=prompt,
+                    task_id=task_id,
+                    role_id=self.role_id,
+                    model=self.model_id,
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens,
+                    response_noun="reference expansion request",
+                    response_shape=_EXPANSION_SHAPE,
                 )
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                raise ValueError("Reference expansion requires non-empty reasoning")
-            if proceed_without_references and expand_papers:
-                raise ValueError(
-                    "Reference expansion cannot request papers while proceeding without references"
-                )
-            
-            # Notify task completed successfully
-            if self.task_tracking_callback:
-                self.task_tracking_callback("completed", task_id)
-            
-            return ReferenceExpansionRequest(
-                expand_papers=[paper_id.strip() for paper_id in expand_papers],
-                proceed_without_references=proceed_without_references,
-                reasoning=reasoning.strip(),
-            )
-            
+            finally:
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_reference_model_call_failure(e):
@@ -519,32 +551,24 @@ class ReferenceSelectorAgent:
                 temperature=0.0  # Deterministic validation - evolving context provides diversity
             )
             
-            if not response:
-                logger.error(f"ReferenceSelector [{mode}]: Empty response for final selection")
-                return []
-            
-            # Extract content (check both content and reasoning fields)
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return []
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
-            
-            selected = data.get("selected_papers")
-            reasoning = data.get("reasoning")
-            if not isinstance(selected, list) or not all(
-                isinstance(paper_id, str) and paper_id.strip()
-                for paper_id in selected
-            ):
-                raise ValueError(
-                    "Final reference selection requires selected_papers to be a string list"
+            try:
+                selected = await parse_with_contract_retry(
+                    response_text(response),
+                    lambda parsed: _parse_selection(parsed, role=self.role_id),
+                    prompt=prompt,
+                    task_id=task_id,
+                    role_id=self.role_id,
+                    model=self.model_id,
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens,
+                    response_noun="reference selection",
+                    response_shape=_SELECTION_SHAPE,
                 )
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                raise ValueError("Final reference selection requires non-empty reasoning")
-            selected = [paper_id.strip() for paper_id in selected]
-            
+            except ModelOutputContractError:
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+                raise
+
             # Enforce max papers limit
             if len(selected) > max_papers:
                 logger.warning(f"ReferenceSelector [{mode}]: Limiting selection from {len(selected)} to {max_papers} papers")
@@ -556,8 +580,10 @@ class ReferenceSelectorAgent:
             
             logger.info(f"ReferenceSelector [{mode}]: Selected {len(selected)} reference papers")
             return selected
-            
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_reference_model_call_failure(e):

@@ -55,6 +55,7 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_STOP_MESSAGE,
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
+    context_overflow_token_payload,
 )
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
@@ -93,6 +94,7 @@ from backend.shared.provider_route_identity import (
 from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback_async
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
+from backend.shared.token_calibration import token_calibration
 from backend.shared.token_tracker import token_tracker
 from backend.shared.utils import count_tokens
 from backend.shared.atomic_json import atomic_write_text
@@ -462,6 +464,7 @@ class LeanOJCoordinator:
             "reason": CONTEXT_OVERFLOW_STOP_REASON,
             "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
             "error_detail": str(exc),
+            **context_overflow_token_payload(exc, config=role_config),
             "resolution": CONTEXT_OVERFLOW_RESOLUTION,
         }
         self._fatal_stop_payload = overflow_payload
@@ -5424,7 +5427,10 @@ class LeanOJCoordinator:
             current_prompt = with_budgeted_solver_plan(
                 prompt,
                 self.solution_path_manager,
-                max(0, config.context_window - config.max_output_tokens),
+                max(
+                    0,
+                    token_calibration.adjusted_context_window(config.context_window) - config.max_output_tokens,
+                ),
             )
         else:
             current_prompt = prompt

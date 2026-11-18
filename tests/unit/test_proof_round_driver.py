@@ -6,6 +6,8 @@ from backend.autonomous.core.proof_round_driver import (
     ContinuousPruningPolicy,
     OneRoundPolicy,
     ProofRoundDriver,
+    normalize_round_memory,
+    round_memory_entry,
     summarize_round_result,
 )
 
@@ -31,27 +33,57 @@ class ProofRoundPolicyTests(unittest.TestCase):
         self.assertIsNone(continuous.max_rounds)
         self.assertTrue(continuous.holds_source_reservation)
 
-    def test_round_summary_is_bounded(self):
+    def test_round_summary_lists_every_attempt_with_result_and_novelty(self):
         results = [
             SimpleNamespace(
-                success=index % 2 == 0,
-                theorem_statement=("theorem-" + str(index)) * 100,
-            )
-            for index in range(7)
+                success=True,
+                novelty_tier="not_novel",
+                novel=False,
+                theorem_statement="C(M-D,k)/C(M,k) <=\n (1-D/M)^k",
+            ),
+            SimpleNamespace(
+                success=True,
+                novelty_tier="novel_formulation",
+                novel=True,
+                theorem_statement="Theorem B",
+            ),
+            SimpleNamespace(success=False, theorem_statement="Theorem C"),
+        ] + [
+            SimpleNamespace(success=False, theorem_statement=f"Extra {index}")
+            for index in range(5)
         ]
         summary = summarize_round_result(
             2,
             SimpleNamespace(
-                verified_count=3,
-                total_candidates=7,
-                novel_count=2,
+                verified_count=2,
+                total_candidates=8,
+                novel_count=1,
                 results=results,
             ),
         )
 
-        self.assertIn("Round 2: 3/7 candidates verified, 2 novel.", summary)
-        self.assertEqual(summary.count("\n- "), 5)
-        self.assertNotIn("theorem-6", summary)
+        self.assertIn("Round 2: 2/8 candidates verified, 1 novel.", summary)
+        self.assertIn(
+            "- Verified in Lean 4, novelty rating not_novel: C(M-D,k)/C(M,k) <= (1-D/M)^k",
+            summary,
+        )
+        self.assertIn(
+            "- Verified in Lean 4, novelty rating novel_formulation: Theorem B",
+            summary,
+        )
+        self.assertIn("- Failed to get a Lean 4 proof verified: Theorem C", summary)
+        self.assertIn("Extra 4", summary)
+        self.assertEqual(summary.count("\n- "), 8)
+
+    def test_round_memory_skips_rounds_without_attempts_and_reads_legacy_text(self):
+        empty = SimpleNamespace(
+            verified_count=0, total_candidates=0, novel_count=0, results=[]
+        )
+        self.assertEqual(round_memory_entry(3, empty), "")
+        self.assertEqual(round_memory_entry(3, None), "")
+        self.assertEqual(normalize_round_memory("Round 1: legacy"), ("Round 1: legacy",))
+        self.assertEqual(normalize_round_memory(["", " a ", None]), ("a",))
+        self.assertEqual(normalize_round_memory(None), ())
 
 
 class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
@@ -74,8 +106,16 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
             return "completed", SimpleNamespace(
                 verified_count=total,
                 total_candidates=total,
-                novel_count=total,
-                results=[],
+                novel_count=0,
+                results=[
+                    SimpleNamespace(
+                        success=True,
+                        novelty_tier="not_novel",
+                        theorem_statement=f"Theorem {index}",
+                    )
+                ]
+                if total
+                else [],
                 had_error=False,
             )
 
@@ -96,9 +136,14 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(releases, [("paper", "paper-1", "owner-token")])
         self.assertTrue(all(call[3] == "owner-token" for call in calls))
         self.assertEqual(calls[3][1], "automatic_round_4")
-        self.assertIn("Round 1:", calls[1][2])
-        self.assertIn("Round 2:", calls[2][2])
-        self.assertIn("Round 3: 0/0 candidates verified", calls[3][2])
+        self.assertEqual(calls[0][2], ())
+        self.assertEqual(len(calls[1][2]), 1)
+        self.assertIn("novelty rating not_novel: Theorem 1", calls[1][2][0])
+        # The empty third round adds no memory entry.
+        self.assertEqual(
+            [entry.splitlines()[0][:8] for entry in calls[3][2]],
+            ["Round 1:", "Round 2:"],
+        )
 
     async def test_one_round_does_not_reserve(self):
         calls = []
@@ -128,7 +173,7 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(await driver.run(), "complete")
-        self.assertEqual(calls, [(1, "retry", "", "")])
+        self.assertEqual(calls, [(1, "retry", (), "")])
 
     async def test_automatic_policy_continues_past_completed_empty_checkpoints(self):
         calls = []
@@ -213,9 +258,8 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await driver.run(), "fatal_stop")
 
-    async def test_continuous_policy_can_idle_then_resume_exactly_once(self):
+    async def test_continuous_empty_round_continues_with_memory_kept(self):
         calls = []
-        wake_requested = False
 
         async def reserve(*_args):
             return "manager-owned-token"
@@ -224,11 +268,23 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         async def execute(index, trigger, prior_results, token):
-            nonlocal wake_requested
             calls.append((index, trigger, prior_results, token))
             if index == 1:
-                wake_requested = True
-                return "continue_reset", None
+                return "completed", SimpleNamespace(
+                    verified_count=1,
+                    total_candidates=1,
+                    novel_count=0,
+                    results=[
+                        SimpleNamespace(
+                            success=True,
+                            novelty_tier="not_novel",
+                            theorem_statement="Hypergeometric bound",
+                        )
+                    ],
+                    had_error=False,
+                )
+            if index == 2:
+                return "continue_empty", None
             return "stopped", None
 
         driver = ProofRoundDriver(
@@ -243,11 +299,11 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(await driver.run(), "stopped")
-        self.assertTrue(wake_requested)
-        self.assertEqual([call[0] for call in calls], [1, 2])
-        self.assertEqual(calls[1][2], "")
+        self.assertEqual([call[0] for call in calls], [1, 2, 3])
+        self.assertEqual(calls[1][2], calls[2][2])
+        self.assertIn("not_novel: Hypergeometric bound", calls[2][2][0])
 
-    async def test_source_reset_clears_prior_summaries_without_stopping(self):
+    async def test_memory_keeps_newest_five_rounds_and_honours_seed(self):
         calls = []
 
         async def reserve(*_args):
@@ -258,19 +314,17 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
 
         async def execute(index, _trigger, prior_results, _token):
             calls.append((index, prior_results))
-            result = SimpleNamespace(
-                verified_count=1,
+            if index == 8:
+                return "stopped", None
+            return "completed", SimpleNamespace(
+                verified_count=0,
                 total_candidates=1,
-                novel_count=1,
-                results=[],
+                novel_count=0,
+                results=[
+                    SimpleNamespace(success=False, theorem_statement=f"Target {index}")
+                ],
                 had_error=False,
             )
-            if index == 1:
-                return "completed", result
-            if index == 2:
-                return "completed_reset", result
-            self.assertEqual(prior_results.count("Round"), 1)
-            return "stopped", None
 
         driver = ProofRoundDriver(
             policy=ContinuousPruningPolicy(),
@@ -281,13 +335,16 @@ class ProofRoundDriverTests(unittest.IsolatedAsyncioTestCase):
             should_stop=lambda: False,
             reserve_source=reserve,
             release_source=release,
+            initial_round_memory=["Round 0: restored"],
         )
 
         self.assertEqual(await driver.run(), "stopped")
-        self.assertIn("Round 1:", calls[1][1])
-        self.assertIn("Round 2:", calls[2][1])
-        self.assertNotIn("Round 1:", calls[2][1])
-
+        self.assertEqual(calls[0][1], ("Round 0: restored",))
+        self.assertEqual(len(calls[-1][1]), 5)
+        self.assertEqual(
+            [entry.splitlines()[0][:8] for entry in calls[-1][1]],
+            ["Round 3:", "Round 4:", "Round 5:", "Round 6:", "Round 7:"],
+        )
 
 if __name__ == "__main__":
     unittest.main()

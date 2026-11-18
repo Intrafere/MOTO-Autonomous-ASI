@@ -130,7 +130,7 @@ describe('proof check runtime Assistant snapshots', () => {
     expect(snapshot.assistant.max_output_tokens).toBe(999);
   });
 
-  test('strips persisted Supercharge outside developer mode', () => {
+  test('keeps persisted Supercharge without developer mode', () => {
     localStorage.setItem('aggregator_settings', JSON.stringify({
       validatorProvider: 'openrouter',
       validatorModel: 'validator',
@@ -147,8 +147,8 @@ describe('proof check runtime Assistant snapshots', () => {
     }));
 
     const snapshot = buildManualAggregatorProofRuntimeConfig();
-    expect(snapshot.brainstorm.supercharge_enabled).toBe(false);
-    expect(snapshot.validator.supercharge_enabled).toBe(false);
+    expect(snapshot.brainstorm.supercharge_enabled).toBe(true);
+    expect(snapshot.validator.supercharge_enabled).toBe(true);
   });
 });
 

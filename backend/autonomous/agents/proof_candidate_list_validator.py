@@ -15,16 +15,55 @@ from backend.shared.json_parser import (
     parse_json,
     sanitize_model_output_for_retry_context,
 )
+from backend.shared.model_output_contract import ModelOutputContractError
 from backend.shared.models import (
     ProofCandidate,
     ProofCandidateListValidation,
 )
+from backend.shared.proof_kind_policy import ProofKindPolicy
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
 
 
-class ProofCandidateListContractError(ValueError):
-    """The original and bounded repair outputs violated the list contract."""
+class ProofCandidateListContractError(ModelOutputContractError):
+    """The candidate-list Validator reply violated the list contract.
+
+    A model-output contract failure, never a provider failure or a semantic
+    rejection. Its message is system-authored: field names only, no raw output.
+    """
+
+
+_LIST_CONTRACT_SUMMARY = "The candidate-list review did not match the required JSON format"
+
+
+def _list_contract_error(error: BaseException, *, role: str) -> ProofCandidateListContractError:
+    """Type one list-review parse/shape failure without echoing model output."""
+    if isinstance(error, ProofCandidateListContractError):
+        if not error.role:
+            error.role = role
+        return error
+    if isinstance(error, ValidationError):
+        fields = sorted(
+            {
+                ".".join(str(part) for part in issue.get("loc", ()) if str(part))
+                for issue in error.errors()
+            }
+            - {""}
+        )
+        return ProofCandidateListContractError(
+            _LIST_CONTRACT_SUMMARY,
+            role=role,
+            stage="invalid_value",
+            invalid_fields=fields,
+        )
+    if isinstance(error, ValueError):
+        # The shared parser's failures (invalid, truncated, or missing JSON).
+        return ProofCandidateListContractError.syntax(error, role=role)
+    return ProofCandidateListContractError(
+        f"{_LIST_CONTRACT_SUMMARY} ({type(error).__name__})",
+        role=role,
+        stage="shape",
+    )
 
 
 class ProofCandidateListContextError(ValueError):
@@ -69,16 +108,21 @@ class ProofCandidateListValidator:
     ) -> ProofCandidateListValidation:
         data = parse_json(content)
         if not isinstance(data, dict):
-            raise ValueError("Candidate-list Validator output must be one JSON object.")
+            raise ProofCandidateListContractError(
+                "Candidate-list Validator output must be one JSON object.", stage="shape"
+            )
         validation = ProofCandidateListValidation.model_validate(data)
         actual_ids = [result.theorem_id for result in validation.results]
         if actual_ids != expected_candidate_ids:
-            raise ValueError(
+            raise ProofCandidateListContractError(
                 "Candidate-list Validator results must contain exactly one result for "
-                "every proposed theorem_id in the original order."
+                "every proposed theorem_id in the original order.",
+                stage="shape",
             )
         if len(set(actual_ids)) != len(actual_ids):
-            raise ValueError("Candidate-list Validator returned duplicate theorem IDs.")
+            raise ProofCandidateListContractError(
+                "Candidate-list Validator returned duplicate theorem IDs.", stage="shape"
+            )
         return validation
 
     async def validate(
@@ -104,6 +148,11 @@ class ProofCandidateListValidator:
             source_id=source_id,
             source_title=source_title,
             candidates_json=candidates_json,
+            # Checkpointed master proofs keep their review guidance even if
+            # master proofs were turned off after they were proposed.
+            allow_master_proofs=ProofKindPolicy.from_config().master or any(
+                candidate.proposal_kind == "master_proof" for candidate in candidates
+            ),
         )
         max_input_tokens = rag_config.get_available_input_tokens(
             self.context_window,
@@ -126,7 +175,8 @@ class ProofCandidateListValidator:
         content = self._extract_content(response)
         try:
             return self.parse_response(content, expected_candidate_ids=expected_ids)
-        except (ValueError, TypeError, ValidationError) as first_error:
+        except (ValueError, TypeError, ValidationError) as first_parse_error:
+            first_error = _list_contract_error(first_parse_error, role=self.role_id)
             visible_output = sanitize_model_output_for_retry_context(
                 content,
                 max_chars=2000,
@@ -167,9 +217,7 @@ class ProofCandidateListValidator:
                     expected_candidate_ids=expected_ids,
                 )
             except (ValueError, TypeError, ValidationError) as repair_error:
-                raise ProofCandidateListContractError(
-                    f"Candidate-list Validator repair failed: {repair_error}"
-                ) from repair_error
+                raise _list_contract_error(repair_error, role=self.role_id) from first_error
 
     @staticmethod
     def approved_candidates(

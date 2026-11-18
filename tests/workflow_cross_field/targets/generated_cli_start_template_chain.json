@@ -1,0 +1,31 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "cli_control_surface",
+    "runtime_exclusivity",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "cli_control.start_template_only_after_committed_start",
+    "cli_control.start_template_credentials_stripped",
+    "cli_control.hosted_writes_no_artifacts",
+    "cli_control.control_file_owner_lifecycle",
+    "cli_control.template_replays_into_valid_start",
+    "runtime.single_active_workflow"
+  ],
+  "max_steps": 8,
+  "must_exercise": [
+    "cli_template_saved_after_commit",
+    "cli_rejected_start_no_template",
+    "cli_template_replayed",
+    "cli_hosted_no_artifacts",
+    "start_blocked"
+  ],
+  "result_ids": [
+    "generated_cli_start_template_chain_seed_7",
+    "generated_cli_start_template_chain_seed_29"
+  ],
+  "schema_version": 2,
+  "target_id": "generated_cli_start_template_chain"
+}

@@ -10,20 +10,38 @@ NO RAG BY DESIGN: Same rationale as topic selector — validates a strategic dec
 using only metadata summaries (topic prompts, statuses, paper titles/abstracts).
 Full content not needed for validating topic selection quality.
 """
-import json
 import logging
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
-from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text
+from backend.shared.model_output_contract import ModelOutputContractError
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
 from backend.shared.models import TopicSelectionSubmission, TopicValidationResult
 from backend.autonomous.prompts.topic_prompts import build_topic_validation_prompt
+from backend.autonomous.agents.output_contract import (
+    json_object,
+    parse_with_contract_retry,
+    require_choice,
+    require_text,
+    response_text,
+)
 
 logger = logging.getLogger(__name__)
+
+_VALIDATION_SHAPE = """{
+  "decision": "accept | reject",
+  "reasoning": "string"
+}"""
+
+
+def _parse_validation(data: Any, *, role: str) -> Tuple[str, str, Dict[str, Any]]:
+    data = json_object(data, role=role)
+    decision = require_choice(
+        data, "decision", ("accept", "reject"), role=role, case_insensitive=True
+    )
+    return decision, require_text(data, "reasoning", role=role), data
 
 
 class TopicValidatorAgent:
@@ -84,6 +102,11 @@ class TopicValidatorAgent:
         
         Returns:
             TopicValidationResult with accept/reject decision
+
+        Raises:
+            ModelOutputContractError: the validator's reply did not match its JSON
+                contract after one bounded retry. That is not a semantic decision,
+                so callers must not record it as a rejection.
         """
         try:
             if override_prompt:
@@ -170,67 +193,40 @@ class TopicValidatorAgent:
                 temperature=0.0  # Deterministic validation - evolving context provides diversity
             )
             
-            if not response:
-                logger.error("TopicValidator: Empty response from LLM")
-                return self._create_rejection("Empty response from validator")
-            
-            # Extract content from response (check both content and reasoning fields)
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                logger.error("TopicValidator: No content in response")
-                return self._create_rejection("No content in validator response")
-            
-            # Parse JSON using central utility (handles sanitization + parsing + array handling)
             try:
-                data = parse_json(content)
-                from backend.shared.solution_path.integration import enqueue_optional_update
-                # parse_json already handles array response, but keep check for safety
-                if isinstance(data, list) and len(data) > 0:
-                    logger.warning("TopicValidator: Model returned array, using first element")
-                    data = data[0]
-                
-                # Validate required fields
-                decision = data.get("decision", "").lower()
-                reasoning = data.get("reasoning")
-                if not isinstance(reasoning, str) or not reasoning.strip():
-                    logger.error("TopicValidator: Missing non-empty reasoning")
-                    return self._create_rejection("Missing non-empty reasoning")
-                if decision not in ["accept", "reject"]:
-                    logger.error(f"TopicValidator: Invalid decision: {decision}")
-                    return self._create_rejection(f"Invalid decision format: {decision}")
-                await enqueue_optional_update(
-                    data,
-                    getattr(self, "solution_path_manager", None),
-                    proposer_role="topic_validator",
-                    source_task_id=task_id,
-                    source_phase="topic_validation",
-                    source_decision=decision,
+                decision, reasoning, data = await parse_with_contract_retry(
+                    response_text(response),
+                    lambda parsed: _parse_validation(parsed, role=self.role_id),
+                    prompt=prompt,
+                    task_id=task_id,
+                    role_id=self.role_id,
+                    model=self.model_id,
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens,
+                    response_noun="validation decision",
+                    response_shape=_VALIDATION_SHAPE,
                 )
-                
-                result = TopicValidationResult(
-                    decision=decision,
-                    reasoning=reasoning.strip(),
-                )
-                
-                # Notify task completed successfully
+            finally:
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
-                
-                logger.info(f"TopicValidator: Decision={decision}")
-                return result
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"TopicValidator: JSON parse error: {e}")
-                logger.debug(f"TopicValidator: Raw response: {content[:500]}...")
-                # Notify task completed (failed but still completed)
-                if self.task_tracking_callback:
-                    self.task_tracking_callback("completed", task_id)
-                return self._create_rejection(f"JSON parse error: {str(e)}")
-                
+
+            from backend.shared.solution_path.integration import enqueue_optional_update
+            await enqueue_optional_update(
+                data,
+                getattr(self, "solution_path_manager", None),
+                proposer_role="topic_validator",
+                source_task_id=task_id,
+                source_phase="topic_validation",
+                source_decision=decision,
+            )
+            logger.info(f"TopicValidator: Decision={decision}")
+            return TopicValidationResult(decision=decision, reasoning=reasoning)
+
         except FreeModelExhaustedError:
             raise
         except RetryableProviderError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if api_client_manager.is_provider_failure(e):

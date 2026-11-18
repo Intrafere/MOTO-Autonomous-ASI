@@ -22,7 +22,10 @@ Model-visible rolling rejection/execution feedback uses whole chronological entr
 start with at most the newest five, remove the oldest one at a time while rebuilding
 and counting the complete prompt, and retain the newest entry as the minimum. Retained
 feedback stays direct and never enters RAG; if newest-only still overflows, use the
-mode's existing hard context-overflow path without mutating durable history. Proof-attempt
+mode's existing hard context-overflow path without mutating durable history. Master proof
+scaffold/obligation prompts start from the newest 15 entries instead of five, and their
+full scaffold is mandatory direct context; the verified proof library block is optional
+there and is left out whole before any feedback entry is dropped. Proof-attempt
 entries show a bounded, priority-ordered prefix of their Lean output with an omission
 note and do not repeat goal lines already shown; durable feedback stays complete.
 Provider-context retries preserve already-omitted optional context and re-count the
@@ -30,6 +33,8 @@ complete rebuilt prompt; normal and compact full-script/tactic proof calls share
 policy without consuming additional proof attempts. LeanOJ deduplicates overlapping
 attempt/event feedback only in prompt projections, preferring richer attempt records;
 durable packets, artifact history, and the full master proof remain unchanged.
+
+A verified master proof enters the verified proofs list as its statement plus a solved template, never its full Lean file. When a model asks to view it, the isolated review step must show the expanded proof; if that does not fit, the proofs list, then papers, then brainstorms are each moved to retrieval in that order (5000-token evidence each), and their excerpts are cut in the same order only if the step still does not fit. That retrieval indexes the text under a one-off `master_proof_expansion_*` source that only a retrieval naming it can read and that is removed afterwards; it is indexed only when the shared index has clear spare room, so it can never trim real chunks, and otherwise that context is cut. Declarations carried back into the task that do not fit are dropped whole, last first.
 
 The active Progressive Solution Path is never RAG-indexed. Before five accepted brainstorm ideas it is absent; afterward, only the bounded Main Submitter 1-approved canonical revision is optional advisory direct context for relevant solving and semantic-validator calls. It may be shed before mandatory user/source/candidate/tool context when budget requires, and pending, rejected, stale, and historical revisions never enter model context. The path is not evidence and may always be ignored for a better route.
 
@@ -48,6 +53,7 @@ These priorities apply to Aggregator, Compiler, and Autonomous paper-writing wor
 | Autonomous topic/title/metadata agents | User research prompt, compact metadata/candidate lists | Usually none; metadata is capped direct context | No RAG unless the specific browsing/expansion step calls for full-content fallback |
 | Autonomous brainstorm/paper context | User research prompt, topic/title/outline as applicable | Brainstorm DB when the compiler caller injects it, current paper | Reference and prior-brainstorm papers are indexed as high-priority RAG evidence; oversized direct source blocks fail or use the mode's explicit fallback |
 | Autonomous proof verification | User prompt, complete source content, proof candidate/formalization context | Verified proof summaries and failed-proof hints | Proof agents operate outside Chroma RAG; Lean source files are not indexed |
+| Autonomous direct answer | User prompt, answer instructions | Paper abstracts (papers allowed), verified proof block (proofs allowed), brainstorm DBs with the current topic first | A block that does not fit is left out whole; each brainstorm DB is direct when it fits, else retrieved through the normal brainstorm fallback; topics with too little room left are skipped and recorded |
 
 Autonomous reference papers selected for paper compilation are currently loaded into the compiler RAG context rather than always being direct-injected. Standalone browsing/selection helpers may direct-inject expanded papers when they fit and use RAG when they do not.
 
@@ -99,7 +105,7 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 | Default (`generic_mode=False`) | `text-embedding-nomic-embed-text-v1.5` via LM Studio | `openai/text-embedding-3-small` via OpenRouter | Global RAG lock acquired |
 | Generic (`generic_mode=True`) | `FastEmbedProvider` (in-process ONNX, `nomic-ai/nomic-embed-text-v1.5`) | None (fail fast if fastembed missing) | Embedding lock SKIPPED (thread-safe); ChromaDB write lock still acquired |
 
-`get_embeddings()` in generic mode early-returns to `FastEmbedProvider` before the LM Studio → OpenRouter fallback chain.
+`get_embeddings()` in generic mode early-returns to `FastEmbedProvider` before the LM Studio → vLLM → OpenRouter fallback chain. A vLLM embedding model the user set up (desktop only) is tried after LM Studio and before OpenRouter, and pins its own `vllm:<model>` space.
 
 **One embedding space per index**: vectors from different embedding models are never mixed (dimensions differ and spaces are not comparable). `rag_manager` pins its index to the `<provider>:<model>` space of its first embedding, records it in Chroma collection metadata (a reopened index re-adopts it), and passes it to `get_embeddings_in_space()`. A pinned LM Studio index retries LM Studio with visible backoff and never falls back to OpenRouter; an OpenRouter-pinned index stays on OpenRouter. The pin resets only with the index (reset/clear/root change).
 
@@ -118,7 +124,7 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 - **Global RAG Lock**: ChromaDB write operations acquire lock to prevent race conditions. Embedding API calls also acquire lock in default mode.
 - **Generic mode lock skip**: FastEmbed is in-process and thread-safe — embedding calls skip the global RAG lock. ChromaDB write locking remains in both modes.
-- **Chroma derived-state lifecycle**: `chroma_db` is derived state. Windows desktop atomically replaces prior-process Chroma state once per runtime root before the first native open and lazily re-indexes durable sources; hosted Linux retains persistent-cache behavior. Interrupted quarantines are recovered without inspecting suspect collections in the application process.
+- **Chroma derived-state lifecycle**: `chroma_db` is derived state. Windows desktop atomically replaces prior-process Chroma state once per runtime root before the first native open and lazily re-indexes durable sources; hosted Linux retains persistent-cache behavior. Interrupted quarantines are recovered without inspecting suspect collections in the application process. A quarantine rename Windows refuses because cache files are still open is retried for about 2 seconds before failing. A new Autonomous run resets the cache before it creates its session folder, so a failed reset leaves no empty session.
 - **Transactional native boundary**: Resolve collection handles only after lifecycle initialization while holding the global RAG lock. Native lookup/write/delete sequences and corresponding in-memory chunk/LRU/BM25 commits share one owner-safe transaction; cancellation drains the worker before releasing ownership.
 - **Single data-root owner**: One backend process holds the authoritative OS-backed lease for each active data root for its full lifespan. Launcher metadata is advisory and cannot replace this lock.
 - **Read retry**: Vector search auto-retries with exponential backoff (0.5s → 1s waits, max 3 attempts) on HNSW index errors during concurrent writes; each wait is published through the shared emit-and-wait retry seam as a non-model storage retry
@@ -172,6 +178,8 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 **Mandatory direct-inject overflow**: Mandatory direct-inject inputs are not eligible for RAG fallback or compression. If they exceed available prompt context, halt with an explicit overflow error. Examples include the LeanOJ final-loop `master_proof.lean`, validator submissions under review, active Lean source/proof attempts, and proof-verification candidate theorem/formalization inputs.
 
 **Token budget formula**: `available_input = context_window - output_reserve - buffer(500)`
+
+When a model is verified to count more tokens than MOTO's estimate (`token_calibration`, see `api-key-controls.md`), `context_window` in this formula is first divided by the measured ratio. The budget is never raised.
 
 **Context allocation algorithm**:
 1. Calculate mandatory tokens: user_prompt + json_schema + system_prompt + submission (validator) + assembly overhead
@@ -239,7 +247,7 @@ When the content item is the SyntheticLib4 / MOTO unified proof-search result bl
 
 **LeanOJ Proof Solver**: LeanOJ useful proof memory uses the existing RAG pipeline through `backend/leanoj/core/leanoj_context.py`, not a separate/simple retriever. Mandatory prompt inputs (user problem, Lean template, role task, JSON schema) stay direct. Useful artifacts are persisted in full and indexed under session-scoped `leanoj_{session_id}_*` sources when they are eligible for that phase. Final proof editing receives verified subproofs plus accepted `active_plan` notes as proof evidence; ordinary partial scaffolds and failed attempts are excluded except as immediate compact execution feedback. Current final-cycle failure packets are direct context for the next brainstorm/proof-fragment phase; older final-cycle packets remain available through scoped RAG only. Recent rejection/error summaries remain capped direct feedback. During final proof-editing, allocation is narrower: no historical final-cycle packets, no failed-attempt counts, and no phase-transition/path vocabulary; the prompt may still include the most recent 5 final attempts as capped execution feedback so the solver does not repeat stale edits or ignored Lean errors. Validator feedback from rejected non-progressive master-proof shortening edits may be direct feedback because it tells the next final solver what proof progress to restore. The canonical LeanOJ master proof draft (`master_proof.lean`) is file-backed working state, not a RAG artifact: during the final proof-editing loop it is mandatory direct-inject context and must be shown fully or the program must halt with a mandatory direct-context overflow error. Edits always apply to the full persisted proof.
 
-**Embedding provider routing**: See dual-contract table above. Default mode uses LM Studio with OpenRouter fallback only before the index has an embedding space. Generic mode uses in-process FastEmbed.
+**Embedding provider routing**: See dual-contract table above. Default mode uses LM Studio, then a configured vLLM embedding model, with OpenRouter fallback only before the index has an embedding space. Generic mode uses in-process FastEmbed.
 
 **Training DB files**: `rag_shared_training.txt` and `Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt` live under the active instance data root (default desktop paths: `backend/data/rag_shared_training.txt` and `backend/data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt`).
 

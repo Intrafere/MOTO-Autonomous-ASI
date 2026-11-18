@@ -1139,6 +1139,7 @@ class OpenRouterClient:
                         "OpenRouter rejected the request because its input exceeded the provider context limit.",
                         route=route,
                         cause=e,
+                        required_tokens=approx_tokens,
                     ) from e
                 
                 logger.error(

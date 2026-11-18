@@ -1,0 +1,43 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "continue_brainstorm_fallback",
+    "no_durable_feedback",
+    "operational_activity"
+  ],
+  "faked_dependencies": [
+    "self-validation model replies",
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "model_output_contract",
+    "provider_pause_resume",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "observed_transition": "an unusable self-validation keeps the continue fallback without writing completion feedback",
+  "real_components": [
+    "backend/autonomous/agents/completion_reviewer.py",
+    "backend/autonomous/agents/output_contract.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_completion_self_validation_fallback_labeled",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:b4a19f3c822b3a2326fc57f6130a64ccec739e4468f926712c56b86851b70151",
+  "test_file": "tests/unit/test_autonomous_output_contracts.py",
+  "test_selectors": [
+    "tests/unit/test_autonomous_output_contracts.py::CompletionReviewerTests::test_unusable_self_validation_continues_without_feedback"
+  ]
+}

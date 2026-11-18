@@ -1,5 +1,6 @@
 import React from 'react';
 import { openRouterAPI } from '../services/api';
+import { getCloudAccessProvider } from '../utils/oauthProviders';
 
 const IconX = ({ className }) => (
   <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -239,9 +240,9 @@ function CreditExhaustionNotification({ notification, onDismiss }) {
         {isProviderPaused
           ? 'This proof workflow is paused until OpenRouter credits are reset. Add credits, then press Retry OpenRouter to resume.'
           : isNoFallback
-          ? 'No LM Studio fallback configured. This role has stopped. Configure a fallback model or add credits.'
+          ? 'No local fallback configured. This role has stopped. Configure a local fallback (an LM Studio or vLLM model) or add credits.'
           : notification.fallback_model
-            ? `Fell back to LM Studio model: ${notification.fallback_model}`
+            ? `Fell back to ${getCloudAccessProvider(notification.fallback_provider)?.label || 'LM Studio'} model: ${notification.fallback_model}`
             : (notification.message || 'OpenRouter credits have been exhausted for this role.')}
       </div>
 

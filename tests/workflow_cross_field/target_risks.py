@@ -227,6 +227,22 @@ _EXPLICIT_TARGET_RISKS: tuple[TargetRisk, ...] = (
     TargetRisk("risk.group_novelty_partial_context", "Group novelty becomes partial or cross-run", "critical", ("group_novelty", "proof_scope_isolation"), ("proof_novelty.group_atomic_same_run",), ("model",), "A group rank is applied to an incomplete or cross-run member set."),
     TargetRisk("risk.leanoj_parent_control_stale_commit", "LeanOJ child overrides parent control", "critical", ("leanoj_parent_control", "runtime_exclusivity"), ("leanoj.parent_control_generation_fences_children",), ("model",), "Stale child work commits after Skip or Force advances parent control generation."),
     TargetRisk(
+        "risk.model_output_contract_mislabeled",
+        "Malformed model output is mislabeled as a decision or silently rewritten",
+        "critical",
+        ("model_output_contract", "provider_pause_resume", "websocket_api_contracts", "prompt_context"),
+        (
+            "model_output.contract_failure_not_semantic",
+            "model_output.normalizations_visible_and_guarded",
+        ),
+        ("model", "focused_production"),
+        (
+            "A broken model reply becomes a semantic rejection, provider wait, default decision, "
+            "or vague error that hides the bad item and field, or a repair touches protected, "
+            "truncated, or value content, invents content, or happens without visible activity."
+        ),
+    ),
+    TargetRisk(
         "risk.provider_retry_activity_incomplete",
         "Provider retry activity is missing, ambiguous, unsafe, or ephemeral",
         "critical",
@@ -262,6 +278,25 @@ _EXPLICIT_TARGET_RISKS: tuple[TargetRisk, ...] = (
             "A new or changed production provider/API-error activity source publishes "
             "a line that cannot name its mode, role, model, provider, or host, or "
             "escapes the attributed/exempt inventory."
+        ),
+    ),
+    TargetRisk(
+        "risk.cli_control_surface_drift",
+        "Terminal/agent control drifts from the app's start, hosted, and credential rules",
+        "critical",
+        ("cli_control_surface", "runtime_exclusivity", "workflow_filesystem_state", "websocket_api_contracts"),
+        (
+            "cli_control.start_template_only_after_committed_start",
+            "cli_control.start_template_credentials_stripped",
+            "cli_control.hosted_writes_no_artifacts",
+            "cli_control.control_file_owner_lifecycle",
+            "cli_control.template_replays_into_valid_start",
+        ),
+        ("model", "real_route", "focused_production"),
+        (
+            "A rejected start leaves a reusable template, a template keeps a credential, hosted "
+            "mode writes CLI artifacts, a control file is published early or removed by another "
+            "process, or a template saved by one start no longer replays into the next."
         ),
     ),
 )

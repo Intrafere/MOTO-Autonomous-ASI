@@ -10,6 +10,7 @@ from backend.autonomous.agents.final_answer.volume_organizer import VolumeOrgani
 from backend.autonomous.agents.paper_title_selector import PaperTitleSelectorAgent
 from backend.autonomous.agents.topic_selector import TopicSelectorAgent
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.model_output_contract import ModelOutputContractError
 from backend.shared.models import CertaintyAssessment
 from backend.shared.provider_errors import (
     ProviderContextLengthError,
@@ -55,17 +56,18 @@ async def test_answer_format_rejects_missing_invalid_or_blank_required_fields(
     await completion_stub(payload)
     selector = AnswerFormatSelector("submitter", "validator", 8192, 1024)
 
-    result = await selector._generate_selection(
-        "Exact objective",
-        CertaintyAssessment(
-            certainty_level="partial_answer",
-            known_certainties_summary="Some support",
-            reasoning="Evidence is incomplete",
-        ),
-        [{"paper_id": "p1", "title": "Paper"}],
-    )
-
-    assert result is None
+    # Still invalid after the bounded contract retry: a typed contract error,
+    # never a fabricated selection.
+    with pytest.raises(ModelOutputContractError):
+        await selector._generate_selection(
+            "Exact objective",
+            CertaintyAssessment(
+                certainty_level="partial_answer",
+                known_certainties_summary="Some support",
+                reasoning="Evidence is incomplete",
+            ),
+            [{"paper_id": "p1", "title": "Paper"}],
+        )
 
 
 @pytest.mark.asyncio
@@ -167,17 +169,16 @@ async def test_volume_organizer_rejects_incomplete_or_repaired_contracts(
     await completion_stub(payload)
     organizer = VolumeOrganizer("submitter", "validator", 8192, 1024)
 
-    result = await organizer._generate_organization(
-        "Exact objective",
-        CertaintyAssessment(
-            certainty_level="partial_answer",
-            known_certainties_summary="Some support",
-            reasoning="Evidence is incomplete",
-        ),
-        [{"paper_id": "p1", "title": "Paper"}],
-    )
-
-    assert result is None
+    with pytest.raises(ModelOutputContractError):
+        await organizer._generate_organization(
+            "Exact objective",
+            CertaintyAssessment(
+                certainty_level="partial_answer",
+                known_certainties_summary="Some support",
+                reasoning="Evidence is incomplete",
+            ),
+            [{"paper_id": "p1", "title": "Paper"}],
+        )
 
 
 @pytest.mark.asyncio
@@ -230,9 +231,8 @@ async def test_topic_selector_requires_non_empty_reasoning(completion_stub) -> N
     )
     selector = TopicSelectorAgent("model", 8192, 1024)
 
-    result = await selector.select_topic("Exact objective", [], [], "Candidate")
-
-    assert result is None
+    with pytest.raises(ModelOutputContractError):
+        await selector.select_topic("Exact objective", [], [], "Candidate")
 
 
 @pytest.mark.asyncio
@@ -240,8 +240,7 @@ async def test_paper_title_requires_non_empty_reasoning(completion_stub) -> None
     await completion_stub({"paper_title": "Strong title", "reasoning": ""})
     selector = PaperTitleSelectorAgent("model", "validator", 8192, 1024)
 
-    result = await selector._generate_title(
-        "Exact objective", "Topic", "Summary", [], [], "", ""
-    )
-
-    assert result is None
+    with pytest.raises(ModelOutputContractError):
+        await selector._generate_title(
+            "Exact objective", "Topic", "Summary", [], [], "", ""
+        )

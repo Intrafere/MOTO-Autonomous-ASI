@@ -2,10 +2,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping
+
+logger = logging.getLogger(__name__)
+
+# Windows refuses to replace a file that another handle holds open without
+# delete sharing (a MOTO reader, antivirus, or the search indexer). Those holds
+# last milliseconds, so the rename is retried briefly before the error stands.
+_REPLACE_RETRIES_ON_PERMISSION_ERROR = os.name == "nt"
+_REPLACE_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4)
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -22,6 +32,27 @@ def _fsync_directory(directory: Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def replace_file(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+    """``os.replace`` that waits out a brief Windows sharing lock on either path.
+
+    Only ``PermissionError`` on Windows is retried, for under a second in total;
+    any other error, or a lock that outlasts the retries, is raised unchanged.
+    """
+    if _REPLACE_RETRIES_ON_PERMISSION_ERROR:
+        for delay in _REPLACE_RETRY_DELAYS_SECONDS:
+            try:
+                os.replace(source, destination)
+                return
+            except PermissionError:
+                logger.debug(
+                    "%s is briefly locked by another handle; retrying the replace in %.2f s",
+                    Path(destination).name,
+                    delay,
+                )
+                time.sleep(delay)
+    os.replace(source, destination)
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -44,7 +75,7 @@ def atomic_write_text(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_name, path)
+        replace_file(temporary_name, path)
     except BaseException:
         try:
             os.unlink(temporary_name)
@@ -73,7 +104,7 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_name, path)
+        replace_file(temporary_name, path)
     except BaseException:
         try:
             os.unlink(temporary_name)

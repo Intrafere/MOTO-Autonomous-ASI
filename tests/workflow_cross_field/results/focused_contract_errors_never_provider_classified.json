@@ -1,0 +1,42 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "not_transient",
+    "not_context_length",
+    "not_non_retryable"
+  ],
+  "faked_dependencies": [
+    "marker-laden model tokens supplied by the test"
+  ],
+  "fields": [
+    "model_output_contract",
+    "provider_pause_resume",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "observed_transition": "a contract error carrying provider-like words is never classified as a provider, transient, or context failure",
+  "real_components": [
+    "backend/shared/model_error_utils.py",
+    "backend/shared/model_output_contract.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_contract_errors_never_provider_classified",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:98a1c9997146fa26f57f7ba7fd678e0611069112ddf682a7d3961dd8b6a98fdf",
+  "test_file": "tests/unit/test_model_output_contract.py",
+  "test_selectors": [
+    "tests/unit/test_model_output_contract.py::test_error_helpers_check_the_contract_type_first"
+  ]
+}

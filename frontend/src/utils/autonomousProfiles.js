@@ -3,6 +3,7 @@ import { CLOUD_ACCESS_PROVIDERS } from './oauthProviders';
 import {
   computeCodexAutoSettings,
   computeCloudAccessAutoSettings,
+  computeCloudProviderAutoSettings,
   computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -37,6 +38,7 @@ export const AUTONOMOUS_PROFILES_STORAGE_KEY = 'autonomous_research_profiles';
 export const STARTUP_PROVIDER_CHOICE_STORAGE_KEY = 'startup_provider_choice';
 export const LM_STUDIO_STARTUP_CHOICE = 'lm_studio';
 export const OPENAI_CODEX_STARTUP_CHOICE = 'openai_codex_oauth';
+export const VLLM_STARTUP_CHOICE = 'vllm';
 export const XAI_GROK_STARTUP_CHOICE = 'xai_grok_oauth';
 export const RECOMMENDED_PROFILE_KEY = 'recommended_slower_affordable_higher_knowledge';
 export const RECOMMENDED_LAB_FAST_PROFILE_KEY = 'recommended_lab_fast_costly_extra_high';
@@ -452,13 +454,16 @@ const DEFAULT_AUTONOMOUS_SETTINGS = {
   freeOnly: false,
   freeModelLooping: false,
   freeModelAutoSelector: false,
-  allowMathematicalProofs: true,
+  // New installs start with Mathematical Proofs off; saved settings keep their choice.
+  allowMathematicalProofs: false,
   allowResearchPapers: true,
   tier3Enabled: false,
   creativityEmphasisBoostEnabled: false,
   modelProviders: {},
   selectedProfile: RECOMMENDED_PROFILE_KEY,
 };
+
+const LEGACY_ALLOW_MATHEMATICAL_PROOFS = true;
 
 const PUBLIC_ROLE_STORAGE_KEYS = [
   'provider',
@@ -756,8 +761,12 @@ export function getStoredAutonomousSettings() {
       return normalizeStoredSettings(DEFAULT_AUTONOMOUS_SETTINGS);
     }
 
-    const saved = JSON.parse(raw);
-    return normalizeStoredSettings(saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {});
+    const parsed = JSON.parse(raw);
+    const saved = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    // Saved settings without the field predate the off default, when proofs were on.
+    return normalizeStoredSettings(hasOwnSetting(saved, 'allowMathematicalProofs')
+      ? saved
+      : { ...saved, allowMathematicalProofs: LEGACY_ALLOW_MATHEMATICAL_PROOFS });
   } catch (error) {
     console.error('Failed to load autonomous research settings:', error);
     return normalizeStoredSettings();
@@ -1024,6 +1033,44 @@ export function applyLmStudioStartupDefaults(modelId = '') {
     localConfig: {
       ...currentSettings.localConfig,
       ...buildLocalConfigFromLmStudio(modelId),
+    },
+    selectedProfile: '',
+  });
+
+  return {
+    settings: nextSettings,
+    config: settingsToAutonomousConfig(nextSettings),
+  };
+}
+
+// First-launch defaults for a vLLM startup: every role uses one detected vLLM chat
+// model with its detected context window. `model` is { id, context_length }.
+export function applyVllmStartupDefaults(model = {}) {
+  const currentSettings = getStoredAutonomousSettings();
+  if (!model?.id || !shouldApplyStartupRoleDefaults(currentSettings)) {
+    return {
+      settings: currentSettings,
+      config: settingsToAutonomousConfig(currentSettings),
+    };
+  }
+  const autoSettings = computeCloudProviderAutoSettings(VLLM_STARTUP_CHOICE, model);
+  const roleDefaults = {
+    provider: VLLM_STARTUP_CHOICE,
+    modelId: model.id,
+    openrouterProvider: null,
+    openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    lmStudioFallbackId: null,
+    contextWindow: autoSettings.contextWindowKnown ? autoSettings.contextWindow : DEFAULT_CONTEXT_WINDOW,
+    maxOutputTokens: autoSettings.outputCapKnown ? autoSettings.maxOutputTokens : DEFAULT_MAX_OUTPUT_TOKENS,
+    superchargeEnabled: false,
+  };
+  const nextSettings = persistAutonomousSettings({
+    ...currentSettings,
+    numSubmitters: 3,
+    submitterConfigs: [1, 2, 3].map((submitterId) => ({ ...roleDefaults, submitterId })),
+    localConfig: {
+      ...currentSettings.localConfig,
+      ...buildStartupLocalConfig(roleDefaults),
     },
     selectedProfile: '',
   });

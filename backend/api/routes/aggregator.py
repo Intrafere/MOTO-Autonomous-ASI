@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 import aiofiles
 
+from backend.shared.cli_control import remember_start_request
 from backend.shared.models import AggregatorStartRequest, SystemStatus, ModelInfo, ModelConfig
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import OpenRouterClient
@@ -553,6 +554,7 @@ async def start_aggregator(request: AggregatorStartRequest):
                 AGGREGATOR_WORKFLOW_OWNER
             )
             parent_start_committed = True
+            remember_start_request("aggregator", request)
 
             return {
                 "status": "started",

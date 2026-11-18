@@ -3,7 +3,7 @@ import asyncio
 from functools import wraps
 from typing import Any, Awaitable, Callable, Dict, TypeVar
 
-from backend.shared.subscription_providers.metadata import API_KEY_SUBSCRIPTION_PROVIDER_IDS
+from backend.shared.subscription_providers.metadata import REGISTRY_CLIENT_PROVIDER_IDS
 
 
 _OPENROUTER_LOCK = asyncio.Lock()
@@ -11,7 +11,7 @@ _WOLFRAM_LOCK = asyncio.Lock()
 _CODEX_LOCK = asyncio.Lock()
 _XAI_GROK_LOCK = asyncio.Lock()
 _SUBSCRIPTION_API_KEY_LOCKS: Dict[str, asyncio.Lock] = {
-    provider_id: asyncio.Lock() for provider_id in API_KEY_SUBSCRIPTION_PROVIDER_IDS
+    provider_id: asyncio.Lock() for provider_id in REGISTRY_CLIENT_PROVIDER_IDS
 }
 
 _T = TypeVar("_T")
@@ -33,7 +33,7 @@ def serialize_credential_mutation(
 
 
 def subscription_api_key_lock(provider_id: str) -> asyncio.Lock:
-    """Return the credential-mutation lock owned by one API-key subscription provider."""
+    """Return the credential-mutation lock owned by one registered API-key or local-server provider."""
     try:
         return _SUBSCRIPTION_API_KEY_LOCKS[provider_id]
     except KeyError as exc:

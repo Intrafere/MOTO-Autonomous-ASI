@@ -191,6 +191,67 @@ async def test_real_continuous_route_completes_after_ten_empty_rounds_and_cleans
 
 
 @pytest.mark.asyncio
+async def test_real_continuous_route_errored_round_reports_error_not_empty_discovery(
+    monkeypatch,
+    tmp_path,
+):
+    manager, events, sleep_acquires, sleep_releases = await _proof_loop_environment(
+        monkeypatch, tmp_path
+    )
+    calls: list[int] = []
+    parse_error = "Expecting property name enclosed in double quotes: line 31 column 1"
+
+    async def errored_stage(**kwargs):
+        calls.append(kwargs["proof_round_index"])
+        return ProofStageResult(
+            source_type="paper",
+            source_id="paper-loop",
+            total_candidates=0,
+            results=[],
+            had_error=True,
+            error_message=parse_error,
+        )
+
+    monkeypatch.setattr(
+        routes,
+        "autonomous_coordinator",
+        SimpleNamespace(
+            _proof_verification_stage=SimpleNamespace(run_manual=errored_stage)
+        ),
+    )
+    queued = await routes.run_manual_proof_check(
+        ProofCheckRequest(
+            source_type="paper",
+            source_id="paper-loop",
+            run_mode="loop_with_pruning",
+        )
+    )
+    control = manager._runs[queued.proof_run_id]
+    await asyncio.wait_for(control.task, timeout=10)
+
+    assert calls == [1]
+    assert control.snapshot.status == "error"
+    assert control.snapshot.consecutive_no_discovery_rounds == 0
+    assert len(sleep_acquires) == len(sleep_releases) == 1
+    complete_events = [
+        payload for event, payload in events if event == "proof_run_round_complete"
+    ]
+    assert len(complete_events) == 1
+    assert complete_events[0]["round_outcome"] == "error"
+    assert complete_events[0]["candidate_count"] is None
+    assert complete_events[0]["next_round_automatic"] is False
+    terminal_events = [
+        payload for event, payload in events if event == "proof_run_terminal"
+    ]
+    assert len(terminal_events) == 1
+    # The run's end reason names the real error, not a generic placeholder.
+    assert parse_error in terminal_events[0]["last_error_summary"]
+    assert terminal_events[0]["last_error_summary"].startswith(
+        "Round 1 stopped on an error:"
+    )
+
+
+@pytest.mark.asyncio
 async def test_rejected_list_empty_regeneration_counts_ten_completed_rounds(
     monkeypatch,
     tmp_path,

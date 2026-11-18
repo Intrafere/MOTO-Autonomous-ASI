@@ -35,8 +35,54 @@ describe('ConnectivityPanel', () => {
       />
     );
 
-    // OpenRouter, LM Studio, Wolfram Alpha, Session History Memory, and Foreign Language Translation w/ Top-p.
-    expect(screen.getAllByText('starting')).toHaveLength(5);
+    // OpenRouter, LM Studio, vLLM, Wolfram Alpha, Session History Memory, and Foreign Language Translation w/ Top-p.
+    expect(screen.getAllByText('starting')).toHaveLength(6);
+  });
+
+  test('lists vLLM under inference connectivity and opens its setup window', async () => {
+    const onOpenVllm = vi.fn();
+    render(
+      <ConnectivityPanel
+        appMode="autonomous"
+        developerModeEnabled={false}
+        connectivityStatus={{
+          ...connectivityStatus,
+          inference: { ...connectivityStatus.inference, vllm: { status: 'ACTIVE' } },
+        }}
+        capabilities={{ lmStudioEnabled: true, vllmAvailable: true }}
+        onModeChange={vi.fn()}
+        onOpenVllm={onOpenVllm}
+      />
+    );
+
+    const row = screen.getByRole('button', { name: /vLLM/ });
+    expect(row).toHaveTextContent('ACTIVE');
+    await userEvent.click(row);
+    expect(onOpenVllm).toHaveBeenCalledTimes(1);
+  });
+
+  test('hides vLLM in hosted mode or when the backend reports it unavailable', () => {
+    const { rerender } = render(
+      <ConnectivityPanel
+        appMode="autonomous"
+        developerModeEnabled={false}
+        connectivityStatus={connectivityStatus}
+        capabilities={{ lmStudioEnabled: false, genericMode: true, vllmAvailable: false }}
+        onModeChange={vi.fn()}
+      />
+    );
+    expect(screen.queryByRole('button', { name: /vLLM/ })).not.toBeInTheDocument();
+
+    rerender(
+      <ConnectivityPanel
+        appMode="autonomous"
+        developerModeEnabled={false}
+        connectivityStatus={connectivityStatus}
+        capabilities={{ lmStudioEnabled: true, vllmAvailable: false }}
+        onModeChange={vi.fn()}
+      />
+    );
+    expect(screen.queryByRole('button', { name: /vLLM/ })).not.toBeInTheDocument();
   });
 
   test('titles the skills section without the old Connectivity suffix', () => {
@@ -220,6 +266,18 @@ describe('ConnectivityPanel', () => {
       'title',
       'Translate papers, proofs, and other outputs into your chosen languages with Top-p Exploration',
     );
+    const usageBadge = toggle.closest('.connectivity-row').querySelector('.usage-level-badge');
+    expect(usageBadge).toHaveAttribute('data-usage-level', 'high');
+    expect(usageBadge).toHaveClass('usage-level-badge--compact');
+    // The badge sits left of the status pill, inside the row's indicator group.
+    const indicators = open.querySelector('.connectivity-row__indicators');
+    expect(indicators.lastElementChild).toHaveClass('connectivity-status');
+    expect(indicators.firstElementChild).toContainElement(usageBadge);
+    expect(open).toHaveAccessibleDescription(/^High usage\./);
+    const usageLevelFor = (name) => screen.getByRole('button', { name })
+      .querySelector('.usage-level-badge')?.getAttribute('data-usage-level');
+    expect(usageLevelFor(/^Wolfram Alpha/)).toBe('low');
+    expect(usageLevelFor(/^Session History Memory/)).toBe('medium');
     expect(open).not.toContainElement(toggle);
     expect(document.querySelector('[role="button"] input, button input')).toBeNull();
 

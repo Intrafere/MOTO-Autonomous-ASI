@@ -34,6 +34,23 @@ class ProxyAuthError(RuntimeError):
         self.status_code = status_code
 
 
+def routed_path(scope: Mapping[str, object]) -> str:
+    """Return the path the router dispatches on for an ASGI connection.
+
+    Every auth decision must use this value. A URL rebuilt from the request
+    (``request.url``) includes the client-controlled ``Host`` header, so its
+    path can differ from the path that is actually routed.
+    """
+    path = scope.get("path")
+    return path if isinstance(path, str) else ""
+
+
+def routed_query(scope: Mapping[str, object]) -> bytes:
+    """Return the raw query string the router received for an ASGI connection."""
+    query_string = scope.get("query_string")
+    return query_string if isinstance(query_string, bytes) else b""
+
+
 def normalize_proxy_path(path: str) -> str:
     """Normalize request paths before signing or validating them."""
     normalized = (path or "").strip()

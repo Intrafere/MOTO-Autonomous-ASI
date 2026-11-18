@@ -1,0 +1,55 @@
+{
+  "actions": [
+    "cli_start_manual_aggregator",
+    "cli_start_manual_aggregator",
+    "cli_replay_saved_template",
+    "exercise_cli_control_surface"
+  ],
+  "adapter": "model",
+  "artifact_type": "scenario",
+  "asserted_invariants": [
+    "cli_control.start_template_only_after_committed_start",
+    "cli_control.start_template_credentials_stripped",
+    "cli_control.hosted_writes_no_artifacts",
+    "cli_control.control_file_owner_lifecycle",
+    "cli_control.template_replays_into_valid_start",
+    "runtime.single_active_workflow"
+  ],
+  "blocked_dependencies": [],
+  "coverage_classification": "deterministic_model_evidence",
+  "expected_result": "passed",
+  "faked_dependencies": [
+    "workflow executable state model"
+  ],
+  "fields": [
+    "cli_control_surface",
+    "runtime_exclusivity",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "cli_control.start_template_only_after_committed_start",
+    "cli_control.start_template_credentials_stripped",
+    "cli_control.hosted_writes_no_artifacts",
+    "cli_control.control_file_owner_lifecycle",
+    "cli_control.template_replays_into_valid_start",
+    "runtime.single_active_workflow"
+  ],
+  "must_exercise": [
+    "cli_template_saved_after_commit",
+    "cli_rejected_start_no_template",
+    "start_blocked",
+    "cli_template_replayed",
+    "cli_hosted_no_artifacts",
+    "cli_control_file_owner_removed"
+  ],
+  "observed_transition": "direct model actions preserve declared product laws",
+  "real_components": [],
+  "runner": "pytest",
+  "scenario_id": "cli_template_chain_exclusive_start_and_hosted_boundary",
+  "schema_version": 2,
+  "source_identity": "workflow-source-v1:1e997f4f4ff4613a54617958777f77d9056490037e625219bd69b0a26cbf4a56",
+  "test_selectors": [
+    "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+  ]
+}

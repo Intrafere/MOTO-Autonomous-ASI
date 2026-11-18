@@ -2,11 +2,11 @@
   "action_ids": [
     "start_leanoj",
     "skip_leanoj_brainstorm",
-    "attempt_conflicting_start",
+    "cli_start_while_workflow_active",
     "edit_leanoj_master_proof",
-    "force_leanoj_brainstorm",
     "stop",
     "resume",
+    "force_leanoj_brainstorm",
     "clear_leanoj_state"
   ],
   "adapter": "model",
@@ -21,6 +21,7 @@
     "final_phase": "idle"
   },
   "evidence": [
+    "cli_rejected_start_no_template",
     "leanoj_clear",
     "leanoj_draft",
     "leanoj_force",
@@ -44,10 +45,10 @@
     "provider.stop_resume_preserves_pause"
   ],
   "observed_fields": [
+    "cli_control_surface",
     "prompt_context",
     "provider_pause_resume",
     "runtime_exclusivity",
-    "websocket_api_contracts",
     "workflow_filesystem_state"
   ],
   "observed_transition": "seeded model planner reached the declared target",
@@ -55,11 +56,12 @@
   "replay": [
     "start_leanoj()",
     "skip_leanoj_brainstorm()",
-    "start_manual_compiler()",
+    "cli_start_manual_aggregator()",
+    "start_manual_aggregator()",
     "edit_leanoj_master_proof()",
-    "force_leanoj_brainstorm()",
     "stop()",
     "resume()",
+    "force_leanoj_brainstorm()",
     "clear()"
   ],
   "result": "passed",

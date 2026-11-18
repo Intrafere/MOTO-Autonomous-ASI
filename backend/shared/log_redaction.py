@@ -17,6 +17,8 @@ _SECRET_PATTERNS = (
     re.compile(r'("(?:api[_-]?key|appid|authorization|password|token|secret)"\s*:\s*)"[^"]*"', re.IGNORECASE),
     re.compile(r"((?:api[_-]?key|appid|authorization|password|token|secret)\s*[=:]\s*)(?!\[redacted\])[^\s,&}\]]+", re.IGNORECASE),
     re.compile(r"\bsk-or-v1-[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
+    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"(?:\bABSK|\bbedrock-api-key-)[A-Za-z0-9+/=]{16,}"),
 )
 
 # Installation-linking and trade-only opaque identifiers never belong in logs

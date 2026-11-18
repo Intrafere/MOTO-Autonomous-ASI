@@ -182,11 +182,14 @@ def test_content_check_flags_credentials() -> None:
         "JSON web token": "eyJ" + "a" * 12 + ".eyJ" + "b" * 12 + "." + "c" * 12,
         "npm token": "npm_" + "x" * 36,
         "AWS access key": "AKIA" + "ABCD1234EFGH5678",
+        "Anthropic API key": "sk-" + "ant-" + "Ab3" * 8,
         "private key block": "-----BEGIN PGP PRIVATE KEY" + " BLOCK-----",
     }
     for label, token in fake.items():
         assert content_reasons(f"value = {token}") == [label]
-    secret = "7f3c9a1e" + "Kq2Lm8Np4Rs6Tu0Vw"
+    for token in ("AB" + "SK" + "QmVk" * 11, "bedrock-" + "api-key-" + "YmVk" * 11):
+        assert content_reasons(f"value = {token}") == ["Amazon Bedrock API key"]
+    secret ="7f3c9a1e" + "Kq2Lm8Np4Rs6Tu0Vw"
     assert content_reasons("PuTTY-User-Key-" + "File-3: ssh-ed25519") == ["private key block"]
     assert content_reasons("WOLFRAM_ALPHA_APP_ID=" + "6PJ2RY-" + "T7V8QQ9KLL") == ["Wolfram Alpha App ID"]
     for line in (

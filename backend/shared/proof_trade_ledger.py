@@ -38,7 +38,7 @@ from typing import Any, Callable, Literal, Optional, Sequence, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from backend.shared.atomic_json import atomic_write_json
+from backend.shared.atomic_json import atomic_write_json, replace_file
 from backend.shared.config import system_config
 from backend.shared.installation_identity import (
     InstallationBinding,
@@ -656,7 +656,7 @@ def archive_and_reset_local_ledger(
             archive_dir = path.parent / LEDGER_ARCHIVE_DIRNAME
             archive_dir.mkdir(parents=True, exist_ok=True)
             stamp = _now().strftime("%Y%m%dT%H%M%S%fZ")
-            os.replace(path, archive_dir / f"{_ARCHIVED_LEDGER_PREFIX}{stamp}.json")
+            replace_file(path, archive_dir / f"{_ARCHIVED_LEDGER_PREFIX}{stamp}.json")
             archived = True
         return {"archived": archived, "server_side_deletion_claimed": False}
 

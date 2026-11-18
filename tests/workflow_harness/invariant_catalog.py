@@ -111,6 +111,17 @@ class InvariantState(Protocol):
     retry_wait_inventory_assured: bool
     provider_error_inventory_complete: bool
     provider_error_inventory_route_attributed: bool
+    cli_start_attempts: int
+    cli_committed_starts: int
+    cli_templates_saved: int
+    cli_templates_after_rejected_start: int
+    cli_template_credential_leaks: int
+    cli_template_replays: int
+    cli_template_replays_rejected: int
+    cli_hosted_attempts: int
+    cli_hosted_artifacts_written: int
+    cli_control_file_written_before_ready: int
+    cli_control_file_foreign_removals: int
     law_observations: set[str]
     law_violations: set[str]
     adverse_order_attempts: int
@@ -555,6 +566,35 @@ def _assert_hosted_desktop_only_routes_unavailable(model: InvariantState) -> Non
     unavailable = required & model.hosted_route_unavailable
     if attempted != unavailable:
         _fail(model, f"Hosted desktop-only routes were not uniformly unavailable: {sorted(attempted - unavailable)!r}")
+
+
+def _assert_cli_template_only_after_committed_start(model: InvariantState) -> None:
+    if model.cli_templates_after_rejected_start:
+        _fail(model, "A rejected or conflicting workflow start saved a CLI start template.")
+    if model.cli_templates_saved > model.cli_committed_starts:
+        _fail(model, "More CLI start templates were saved than workflow starts committed.")
+
+
+def _assert_cli_template_credentials_stripped(model: InvariantState) -> None:
+    if model.cli_template_credential_leaks:
+        _fail(model, "A saved CLI start template kept a credential-shaped field.")
+
+
+def _assert_cli_hosted_writes_no_artifacts(model: InvariantState) -> None:
+    if model.cli_hosted_artifacts_written:
+        _fail(model, "Hosted mode wrote a CLI control file or start template.")
+
+
+def _assert_cli_control_file_owner_lifecycle(model: InvariantState) -> None:
+    if model.cli_control_file_written_before_ready:
+        _fail(model, "The CLI control file was published before the backend was ready.")
+    if model.cli_control_file_foreign_removals:
+        _fail(model, "A backend removed a CLI control file owned by another process.")
+
+
+def _assert_cli_template_replays_into_valid_start(model: InvariantState) -> None:
+    if model.cli_template_replays_rejected:
+        _fail(model, "A start template saved by a committed start did not replay into a valid start request.")
 
 
 def _assert_user_prompt_direct_injected(model: WorkflowModel) -> None:
@@ -1162,6 +1202,8 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
     InvariantSpec("supercharge_creativity.routing_separation", "answer_wrappers", ("prompt_context", "provider_pause_resume"), ("model",), _product_law_checker("supercharge_creativity.routing_separation"), "Supercharge wraps answers while creativity only steers eligible brainstorm prompts."),
     InvariantSpec("proof_novelty.group_atomic_same_run", "group_novelty", ("proof_scope_isolation", "prompt_context"), ("model",), _product_law_checker("proof_novelty.group_atomic_same_run"), "Group novelty uses a complete finite same-run member set and injects it atomically."),
     InvariantSpec("leanoj.parent_control_generation_fences_children", "leanoj_parent_control", ("runtime_exclusivity", "workflow_filesystem_state"), ("model",), _product_law_checker("leanoj.parent_control_generation_fences_children"), "LeanOJ Skip and Force advance control generation before stale child commits."),
+    InvariantSpec("model_output.contract_failure_not_semantic", "model_output_contract", ("provider_pause_resume", "websocket_api_contracts"), ("model", "focused_production"), _product_law_checker("model_output.contract_failure_not_semantic"), "Model-output contract failures are typed, name the failing item and field, and never become semantic rejections, provider waits, or silent decisions; submitter output still returns to its own feedback."),
+    InvariantSpec("model_output.normalizations_visible_and_guarded", "model_output_contract", ("websocket_api_contracts", "prompt_context"), ("model", "focused_production"), _product_law_checker("model_output.normalizations_visible_and_guarded"), "Only guarded stray-character, trailing-comma, and repairable free-text key-label repairs are applied, never to protected or truncated content, and each applied repair is published as route-identified model_output_normalized activity."),
     # Append-only Live Activity Assurance laws.
     InvariantSpec("live_activity.provider_retry_each_wait_visible", "websocket_api_contracts", ("provider_pause_resume", "provider_routing"), ("model", "focused_production", "browser_smoke"), _assert_provider_retry_waits_visible, "Every actual provider retry wait emits additive Live Activity with provider, role/model, attempt, and wait duration."),
     InvariantSpec("live_activity.provider_retry_identity_stable", "websocket_api_contracts", ("provider_pause_resume", "workflow_filesystem_state"), ("model", "focused_production"), _assert_provider_retry_identity_stable, "Retry attempts have distinct event identities while retaining one stable correlation identity."),
@@ -1170,6 +1212,12 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
     InvariantSpec("live_activity.all_retry_wait_sources_accounted", "websocket_api_contracts", ("provider_routing", "provider_pause_resume"), ("model", "focused_production", "real_coordinator"), _assert_all_retry_wait_sources_accounted, "Provider-adapter, manager, workflow, timed-cooldown, and free-model retry waits all use the assured Live Activity path."),
     InvariantSpec("live_activity.provider_error_route_identity", "websocket_api_contracts", ("provider_routing", "provider_pause_resume"), ("model", "focused_production", "browser_smoke"), _assert_provider_error_route_identity, "Every provider/API-error activity line names workflow mode, role, model, provider, and OpenRouter host routing in fields and its rendered message."),
     InvariantSpec("live_activity.provider_error_sources_route_attributed", "websocket_api_contracts", ("provider_routing", "provider_pause_resume"), ("model", "real_coordinator"), _assert_provider_error_sources_route_attributed, "Every production provider-error activity source is syntactically route-attributed or explicitly exempt."),
+    # Append-only desktop `moto` CLI control-surface laws.
+    InvariantSpec("cli_control.start_template_only_after_committed_start", "cli_control_surface", ("runtime_exclusivity", "workflow_filesystem_state"), ("model", "real_route"), _assert_cli_template_only_after_committed_start, "A workflow start saves its CLI start template only after the start commits; rejected or conflicting starts save nothing."),
+    InvariantSpec("cli_control.start_template_credentials_stripped", "cli_control_surface", ("workflow_filesystem_state", "websocket_api_contracts"), ("model", "real_route"), _assert_cli_template_credentials_stripped, "Saved CLI start templates never keep credential-shaped fields."),
+    InvariantSpec("cli_control.hosted_writes_no_artifacts", "cli_control_surface", ("websocket_api_contracts", "workflow_filesystem_state"), ("model", "real_route"), _assert_cli_hosted_writes_no_artifacts, "Hosted generic mode never writes the CLI control file or start templates."),
+    InvariantSpec("cli_control.control_file_owner_lifecycle", "cli_control_surface", ("runtime_exclusivity", "workflow_filesystem_state"), ("model", "focused_production"), _assert_cli_control_file_owner_lifecycle, "The CLI control file is published once the backend is ready and removed only by the process that owns it."),
+    InvariantSpec("cli_control.template_replays_into_valid_start", "cli_control_surface", ("websocket_api_contracts", "runtime_exclusivity"), ("model", "real_route"), _assert_cli_template_replays_into_valid_start, "A template saved by a committed start replays through the CLI into a request the same start route accepts."),
 )
 
 

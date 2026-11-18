@@ -170,7 +170,7 @@ def normalize_settings(settings: AutoTranslateSettings, *, generic_mode: bool) -
 
 
 def _without_fallback(role: Optional[TranslationRoleConfig]) -> Optional[TranslationRoleConfig]:
-    """Drop the LM Studio fallback, which hosted mode does not offer."""
+    """Drop the local fallback, which hosted mode does not offer."""
     if role is None:
         return None
     return role.model_copy(update={"lm_studio_fallback_id": None})

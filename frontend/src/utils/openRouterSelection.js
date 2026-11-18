@@ -326,9 +326,30 @@ export function computeXAIGrokAutoSettings(model) {
   };
 }
 
-// Auto-fill for any cloud subscription provider, chosen by its registry entry.
+// A local server (vLLM) reports each model's context window but no separate
+// output cap, so the output cap follows the same 20%-of-context rule as
+// OpenRouter auto-fill.
+export function computeLocalServerAutoSettings(model, providerLabel = 'Local server') {
+  const base = computeCloudAccessAutoSettings(model, providerLabel);
+  if (base.outputCapKnown || !base.contextWindowKnown) {
+    return base;
+  }
+  return {
+    ...base,
+    maxOutputTokens: Math.max(1, Math.floor(base.contextWindow * 0.2)),
+    outputCapKnown: true,
+    outputCapSource: 'context-window-share',
+    source: 'local-server-model-metadata',
+    warnings: base.warnings.filter((warning) => !warning.includes('max output cap')),
+  };
+}
+
+// Auto-fill for any registry provider, chosen by its registry entry.
 export function computeCloudProviderAutoSettings(providerId, model) {
   const provider = getCloudAccessProvider(providerId);
+  if (provider?.autoSettings === 'local_server') {
+    return computeLocalServerAutoSettings(model, provider.label);
+  }
   if (provider?.autoSettings === 'codex') {
     return computeCodexAutoSettings(model);
   }

@@ -1,0 +1,40 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "misspelled_free_text_key_relabeled",
+    "order_preserved"
+  ],
+  "faked_dependencies": [
+    "parsed objects supplied by the test"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "each observed misspelled free-text key is relabeled to its schema key in place",
+  "real_components": [
+    "backend/shared/json_key_recovery.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_key_recovery_relabels_observed_misspellings",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:061a2d691a09b0ac77508ac89ac52f9da7467991393860c6abdc8731d4266e81",
+  "test_file": "tests/unit/test_json_key_recovery.py",
+  "test_selectors": [
+    "tests/unit/test_json_key_recovery.py::test_observed_gemma_misspellings_recover"
+  ]
+}

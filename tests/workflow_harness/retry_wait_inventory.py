@@ -135,6 +135,14 @@ def _scope_policies(
 
 
 WAIT_POLICIES: tuple[WaitPolicy, ...] = (
+    _policy(
+        "backend/aggregator/core/chroma_cache.py",
+        "_rename_released_cache",
+        1,
+        WaitClassification.NON_RETRY,
+        "Bounded Windows wait for released Chroma cache files before a rename, not a model/provider retry.",
+        call="time.sleep",
+    ),
     *_scope_policies(
         "backend/aggregator/agents/submitter.py",
         "SubmitterAgent._run_loop",
@@ -170,6 +178,14 @@ WAIT_POLICIES: tuple[WaitPolicy, ...] = (
         WaitClassification.ASSURED_RETRY,
         "Shared retry runtime sleeps only after its observer has been called; APIClientManager.emit_and_wait_for_retry supplies the assured activity observer.",
         assurance="APIClientManager.emit_and_wait_for_retry/provider_retry_cooldown",
+    ),
+    _policy(
+        "backend/shared/atomic_json.py",
+        "replace_file",
+        1,
+        WaitClassification.NON_RETRY,
+        "Bounded Windows wait for a briefly locked file before an atomic rename, not a model/provider retry.",
+        call="time.sleep",
     ),
     _policy(
         "backend/shared/lean4_client.py",
@@ -243,6 +259,13 @@ WAIT_POLICIES: tuple[WaitPolicy, ...] = (
         2,
         WaitClassification.NON_RETRY,
         "Periodic Aggregator monitoring cadence, including recovery to the next poll.",
+    ),
+    _policy(
+        "backend/autonomous/core/autonomous_coordinator.py",
+        "AutonomousCoordinator._enforce_runtime_limit",
+        1,
+        WaitClassification.NON_RETRY,
+        "User-set maximum runtime countdown for one Start; cancelled by Stop or a later Start.",
     ),
     _policy(
         "backend/autonomous/core/autonomous_coordinator.py",

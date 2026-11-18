@@ -15,6 +15,13 @@ import {
 import TranslationLanguageSwitch from './translation/TranslationLanguageSwitch';
 import TranslationPendingNotice from './translation/TranslationPendingNotice';
 import useTranslatedDocuments from '../hooks/useTranslatedDocuments';
+import {
+  refreshTokenCalibration,
+  resetTokenCalibration,
+  setTokenCalibrationAdjustEnabled,
+  useTokenCalibration,
+} from '../hooks/useTokenCalibration';
+import { describeTokenCalibration } from './TokenCountNote';
 import './WorkflowPanel.css';
 
 const AUTO_OPEN_DELAY_SECONDS = 600;
@@ -215,6 +222,8 @@ export default function WorkflowPanel({
   // Token tracking & timer state
   const [tokenStats, setTokenStats] = useState({ total_input: 0, total_output: 0, by_model: {}, elapsed_seconds: 0 });
   const [showPerModel, setShowPerModel] = useState(false);
+  const [showTokenChecks, setShowTokenChecks] = useState(false);
+  const tokenCalibration = useTokenCalibration();
   const [localElapsed, setLocalElapsed] = useState(0);
   const lastSyncRef = useRef(Date.now());
   const hasElapsedSyncRef = useRef(false);
@@ -437,6 +446,7 @@ export default function WorkflowPanel({
       } catch { /* ignore */ }
     };
     fetchTokenStats();
+    refreshTokenCalibration();
   }, [isRunning]);
 
   // Token stats: listen for real-time WebSocket updates
@@ -811,6 +821,55 @@ export default function WorkflowPanel({
                           </div>
                         </div>
                       ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {tokenCalibration.models.length > 0 && (
+              <div className="per-model-section">
+                <button
+                  className="per-model-toggle"
+                  onClick={() => {
+                    if (!showTokenChecks) refreshTokenCalibration();
+                    setShowTokenChecks(prev => !prev);
+                  }}
+                >
+                  {showTokenChecks ? '▾' : '▸'} Token count checks ({tokenCalibration.models.length})
+                </button>
+                {showTokenChecks && (
+                  <div className="per-model-list">
+                    <label className="token-check-toggle">
+                      <input
+                        type="checkbox"
+                        checked={tokenCalibration.adjust_enabled !== false}
+                        onChange={(event) => {
+                          setTokenCalibrationAdjustEnabled(event.target.checked).catch(() => {});
+                        }}
+                      />
+                      <span>Use a smaller context window for models found to count more tokens</span>
+                    </label>
+                    {tokenCalibration.models.map((entry) => (
+                      <div key={`${entry.provider}:${entry.model}`} className="model-row">
+                        <div className="model-name" title={entry.model}>{entry.model}</div>
+                        <div className="token-check-detail">
+                          {describeTokenCalibration(entry, {
+                            adjustEnabled: tokenCalibration.adjust_enabled !== false,
+                            contextWindow: entry.context_windows?.[0]?.configured,
+                          })}
+                        </div>
+                        <button
+                          type="button"
+                          className="token-check-reset"
+                          aria-label={`Discard token count measurements for ${entry.model}`}
+                          onClick={() => {
+                            resetTokenCalibration(entry.provider, entry.model).catch(() => {});
+                          }}
+                        >
+                          Measure again
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

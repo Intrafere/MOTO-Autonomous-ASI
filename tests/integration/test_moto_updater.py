@@ -694,6 +694,97 @@ class SnapshotSyncTests(TestCase):
         self.assertEqual(installed_manifest["version"], "1.0.9")
         self.assertEqual(installed_manifest["build_commit"], "resolved-remote-head")
 
+    def test_apply_zip_update_restores_install_when_overlay_fails_midway(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir) / "install"
+            repo_root.mkdir()
+            manifest_path = repo_root / "moto-update-manifest.json"
+            original_manifest = json.dumps({"manifest_version": 1, "version": "1.0.9", "build_commit": "old-local"})
+            manifest_path.write_text(original_manifest, encoding="utf-8")
+            (repo_root / "moto_launcher.py").write_text("old launcher\n", encoding="utf-8")
+
+            def fake_download_archive(remote_manifest: moto_updater.BuildManifest, archive_path: Path) -> None:
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.writestr("MOTO/moto-update-manifest.json", "{}")
+                    archive.writestr("MOTO/moto_launcher.py", "new launcher\n")
+                    archive.writestr("MOTO/docs/guide.txt", "new docs\n")
+
+            real_copy2 = moto_updater.shutil.copy2
+            install_copies = 0
+
+            def copy2_failing_on_third_install_copy(source, destination, *args, **kwargs):
+                nonlocal install_copies
+                if repo_root in Path(destination).parents:
+                    install_copies += 1
+                    if install_copies == 3:
+                        raise OSError("simulated locked file")
+                return real_copy2(source, destination, *args, **kwargs)
+
+            remote_manifest = moto_updater.BuildManifest(
+                version="1.1.0",
+                build_commit="resolved-remote-head",
+                update_channel="main",
+                api_contract_version="build5-v29",
+            )
+
+            with mock.patch.object(moto_updater, "REPO_ROOT", repo_root):
+                with mock.patch.object(moto_updater, "LOCAL_MANIFEST_PATH", manifest_path):
+                    with mock.patch.object(moto_updater, "cleanup_launcher_state", return_value=[]):
+                        with mock.patch.object(moto_updater, "_download_archive", side_effect=fake_download_archive):
+                            with mock.patch.object(moto_updater, "_relaunch_launcher", return_value=None):
+                                with mock.patch.object(
+                                    moto_updater.shutil,
+                                    "copy2",
+                                    side_effect=copy2_failing_on_third_install_copy,
+                                ):
+                                    applied, message = moto_updater.apply_zip_update(
+                                        remote_manifest=remote_manifest,
+                                        launcher_args=[],
+                                        env={},
+                                    )
+
+            # Two files had already been overlaid when the third copy failed.
+            self.assertFalse(applied)
+            self.assertIn("previous install was restored", message)
+            self.assertEqual(manifest_path.read_text(encoding="utf-8"), original_manifest)
+            self.assertEqual((repo_root / "moto_launcher.py").read_text(encoding="utf-8"), "old launcher\n")
+            self.assertFalse((repo_root / "docs" / "guide.txt").exists())
+
+    def test_sync_snapshot_records_changes_in_the_callers_journal_before_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            source_root = temp_root / "source"
+            destination_root = temp_root / "destination"
+            source_root.mkdir()
+            destination_root.mkdir()
+            (source_root / "a.txt").write_text("new a\n", encoding="utf-8")
+            (source_root / "b.txt").write_text("new b\n", encoding="utf-8")
+            (destination_root / "a.txt").write_text("old a\n", encoding="utf-8")
+            (destination_root / "b.txt").write_text("old b\n", encoding="utf-8")
+
+            real_copy2 = moto_updater.shutil.copy2
+            install_copies = 0
+
+            def copy2_failing_on_second_install_copy(source, destination, *args, **kwargs):
+                nonlocal install_copies
+                if destination_root in Path(destination).parents:
+                    install_copies += 1
+                    if install_copies == 2:
+                        raise OSError("simulated locked file")
+                return real_copy2(source, destination, *args, **kwargs)
+
+            journal = moto_updater._CopyJournal()
+            with mock.patch.object(moto_updater.shutil, "copy2", side_effect=copy2_failing_on_second_install_copy):
+                with self.assertRaises(OSError):
+                    moto_updater.sync_snapshot_into_install(
+                        source_root, destination_root, set(), temp_root / "backup", journal
+                    )
+
+            self.assertEqual(sorted(journal.overwritten_files), ["a.txt", "b.txt"])
+            moto_updater.restore_snapshot_from_backup(destination_root, temp_root / "backup", journal)
+            self.assertEqual((destination_root / "a.txt").read_text(encoding="utf-8"), "old a\n")
+            self.assertEqual((destination_root / "b.txt").read_text(encoding="utf-8"), "old b\n")
+
 
 class RelaunchCommandTests(TestCase):
     def test_build_relaunch_command_prefers_linux_entrypoint_when_provided(self) -> None:

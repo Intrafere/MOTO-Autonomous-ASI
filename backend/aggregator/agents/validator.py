@@ -13,6 +13,13 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
+from backend.shared.json_key_recovery import KeySpec, ObjectSchema, recover_key_labels
+from backend.shared.model_output_contract import (
+    ItemContractProblem,
+    ModelOutputContractError,
+    report_model_output_normalizations,
+)
+from backend.shared.utils import count_tokens
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.solution_path.integration import (
     enqueue_optional_update,
@@ -46,17 +53,142 @@ from backend.aggregator.validation.contradiction_checker import contradiction_ch
 logger = logging.getLogger(__name__)
 
 
-class BatchValidationContractError(RuntimeError):
-    """A dual/triple validator reply that cannot be used as one decision per submission.
+VALIDATOR_ROLE_ID = "aggregator_validator"
 
+# One decision object of a dual/triple validator reply, in prompt order. Only the
+# free-text fields may be relabeled; identity and decision fields never are.
+_BATCH_DECISION_SCHEMA = ObjectSchema(
+    name="aggregator_batch_decision",
+    keys=(
+        KeySpec("submission_number", value_type="int"),
+        KeySpec("decision"),
+        KeySpec("reasoning", repairable=True),
+        KeySpec("summary", repairable=True),
+    ),
+    item_id_key="submission_number",
+)
+_BATCH_REPLY_SCHEMA = ObjectSchema(
+    name="aggregator_batch_validation",
+    keys=(KeySpec("decisions", value_type="list_object", item_schema=_BATCH_DECISION_SCHEMA),),
+    allow_extra=frozenset({"solution_path_update"}),
+)
+
+
+class ValidatorOutputContractError(ModelOutputContractError):
+    """A validator reply that cannot be used as one decision per submission.
+
+    Raised only after the validator's one bounded repair attempt also failed.
     This is operational, never a decision: no submission is accepted or rejected
-    because of it. The coordinator restores the batch to the queue and validates
-    those submissions one at a time.
+    because of it and no submitter receives rejection feedback. The coordinator
+    restores the submissions to the front of the queue and validates them one at
+    a time. ``stage`` (syntax, shape, missing_key, invalid_value) says which part
+    of the contract failed.
     """
 
-    def __init__(self, message: str, *, batch_size: int) -> None:
-        super().__init__(message)
+    def __init__(self, summary: str, *, batch_size: int = 1, role: str = "", **kwargs: Any) -> None:
+        super().__init__(summary, role=role or VALIDATOR_ROLE_ID, **kwargs)
         self.batch_size = batch_size
+
+
+class BatchValidationInterruptedError(RuntimeError):
+    """An internal error stopped a dual/triple validation before any decision.
+
+    Operational but not a model-output contract failure: the model reply was
+    never judged. The coordinator restores the batch and validates those
+    submissions one at a time. Only the internal exception's type is carried;
+    its text (which may name local paths or data) stays in the backend log.
+    """
+
+    def __init__(self, *, error_type: str, batch_size: int) -> None:
+        super().__init__(f"Batch validation could not complete ({error_type}).")
+        self.error_type = error_type
+        self.batch_size = batch_size
+
+
+def _with_batch_size(error: ModelOutputContractError, batch_size: int) -> ValidatorOutputContractError:
+    if not isinstance(error, ValidatorOutputContractError):
+        raise TypeError("expected a ValidatorOutputContractError")
+    error.batch_size = batch_size
+    return error
+
+
+def _decision_problem(
+    item: Any,
+    *,
+    item_path: str,
+    expected_number: Optional[int] = None,
+) -> Optional[ItemContractProblem]:
+    """Return the contract problems of one decision object, or None when valid."""
+    if not isinstance(item, dict):
+        return ItemContractProblem(item_path=item_path, detail="not a JSON object")
+    missing: list[str] = []
+    invalid: list[str] = []
+    details: list[str] = []
+    if expected_number is not None and item.get("submission_number") != expected_number:
+        if "submission_number" in item:
+            invalid.append("submission_number")
+        else:
+            missing.append("submission_number")
+        details.append(f"expected submission_number {expected_number}")
+    if "decision" not in item:
+        missing.append("decision")
+    elif item.get("decision") not in ("accept", "reject"):
+        invalid.append("decision")
+        details.append("decision must be accept or reject")
+    if "reasoning" not in item:
+        missing.append("reasoning")
+    elif not isinstance(item.get("reasoning"), str):
+        invalid.append("reasoning")
+    if "summary" in item and not isinstance(item.get("summary"), str):
+        invalid.append("summary")
+    if not (missing or invalid or details):
+        return None
+    number = item.get("submission_number")
+    return ItemContractProblem(
+        item_path=item_path,
+        item_id=str(number) if isinstance(number, int) and expected_number is not None else "",
+        missing_keys=tuple(missing),
+        invalid_fields=tuple(invalid),
+        detail="; ".join(details),
+    )
+
+
+def _problem_stage(problems: List[ItemContractProblem]) -> str:
+    if any(problem.invalid_fields for problem in problems):
+        return "invalid_value"
+    if any(problem.missing_keys for problem in problems):
+        return "missing_key"
+    return "shape"
+
+
+def _parse_validator_json(text: str, repairs: list) -> dict:
+    """Parse one validator reply into a JSON object or raise a contract error."""
+    if not str(text or "").strip():
+        raise ValidatorOutputContractError("The validator returned an empty reply", stage="shape")
+    try:
+        parsed = parse_json(text, repairs=repairs)
+    except Exception as exc:
+        raise ValidatorOutputContractError.syntax(exc) from exc
+    if not isinstance(parsed, dict):
+        raise ValidatorOutputContractError("The validator reply was not a JSON object", stage="shape")
+    return parsed
+
+
+def _parse_single_decision(text: str, repairs: list) -> dict:
+    """Parse a single-submission validator reply and check its decision contract."""
+    parsed = _parse_validator_json(text, repairs)
+    problem = _decision_problem(parsed, item_path="")
+    if problem is not None:
+        summary = "The validator decision did not match the required JSON format"
+        if problem.detail:
+            summary = f"{summary} ({problem.detail})"
+        raise ValidatorOutputContractError(
+            summary,
+            stage=_problem_stage([problem]),
+            missing_keys=problem.missing_keys,
+            invalid_fields=problem.invalid_fields,
+        )
+    return parsed
 
 
 class ValidatorAgent:
@@ -148,6 +280,7 @@ class ValidatorAgent:
             ContextAllocationError,
             RetryableProviderError,
             ProviderRepairRequiredError,
+            ValidatorOutputContractError,
         ):
             raise
         except Exception as e:
@@ -197,7 +330,6 @@ class ValidatorAgent:
             prompt = with_validator_hook(prompt, self.solution_path_manager)
             
             # CRITICAL: Verify actual prompt size fits in context window
-            from backend.shared.utils import count_tokens
             actual_prompt_tokens = count_tokens(prompt)
             max_allowed_tokens = rag_config.get_available_input_tokens(context_allocator.validator_context_window, rag_config.validator_max_output_tokens)
             configured_context = context_allocator.validator_context_window
@@ -374,145 +506,53 @@ class ValidatorAgent:
                         json_valid=False
                     )
             
-            # Extract content
-            if not response or not response.get("choices"):
-                logger.error("Validator: No choices in response")
-                return ValidationResult(
-                    submission_id=submission.submission_id,
-                    decision="reject",
-                    reasoning="Validation LLM error: no response",
-                    summary="Internal error",
-                    json_valid=False
-                )
-            
-            # Extract content from either 'content' or 'reasoning' field
-            # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
-            message = response["choices"][0]["message"]
-            llm_output = extract_message_text(message)
-            
-            # Cache model config on first successful API call (only relevant for LM Studio)
-            try:
-                await lm_studio_client.cache_model_load_config(self.model_name, {
-                    "context_length": context_allocator.validator_context_window,
-                    "model_path": self.model_name
-                })
-            except Exception as exc:
-                # Only applies to LM Studio models; cache misses should not fail validation.
-                logger.debug("Validator skipped LM Studio cache warmup: %s", exc)
-            
-            # Parse JSON
-            try:
-                parsed = parse_json(llm_output)
-                valid = True
-            except Exception as parse_error:
-                # Not corrupted, just invalid JSON - continue with conversational retry
-                valid = False
-                parsed = None
-                error = str(parse_error)
-            if not valid:
-                # Attempt conversational retry before final rejection
-                logger.info("Validator: Initial JSON parse failed, attempting conversational retry")
-                logger.debug(f"Parse error: {error}")
-                
-                retry_prompt = (
-                    "Your previous response could not be parsed as valid JSON.\n\n"
-                    f"PARSE ERROR: {error}\n\n"
-                    "Please provide the same validation decision in valid JSON format:\n"
-                    "{\n"
-                    '  "decision": "accept" or "reject",\n'
-                    '  "reasoning": "your reasoning here",\n'
-                    '  "summary": "brief summary here"\n'
-                    "}\n\n"
-                    "Retain the one valid optional top-level `solution_path_update` "
-                    "from your previous response if present; omission remains valid.\n"
-                    "CRITICAL: Properly escape all backslashes (use \\\\) and quotes (use \\\").\n"
-                    "Respond with ONLY the JSON object, no markdown, no explanation."
-                )
-                
+            # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output
+            # JSON in the 'reasoning' field, which extract_message_text covers.
+            llm_output = ""
+            if response and response.get("choices"):
+                llm_output = extract_message_text(response["choices"][0].get("message") or {})
+
+                # Cache model config on first successful API call (only relevant for LM Studio)
                 try:
-                    # Keep conversational retry context, but never replay private
-                    # model thought/channel/control tokens as an assistant turn.
-                    max_failed_output_chars = 2000  # ~500 tokens - enough for error context
-                    failed_output_preview = sanitize_model_output_for_retry_context(
-                        llm_output,
-                        max_chars=max_failed_output_chars,
-                    )
-                    
-                    # Calculate if conversation fits in context window
-                    prompt_tokens = count_tokens(prompt)
-                    preview_tokens = count_tokens(failed_output_preview)
-                    retry_prompt_tokens = count_tokens(retry_prompt)
-                    conversation_tokens = prompt_tokens + preview_tokens + retry_prompt_tokens
-                    max_input = rag_config.get_available_input_tokens(context_allocator.validator_context_window, rag_config.validator_max_output_tokens)
-                    
-                    if conversation_tokens > max_input:
-                        # Too large - just retry with original prompt
-                        logger.warning(
-                            f"Validator: Retry conversation too large ({conversation_tokens} > {max_input}), "
-                            f"using simple retry without conversation context"
-                        )
-                        retry_response = await api_client_manager.generate_completion(
-                            task_id=f"{task_id}_retry",
-                            role_id=self.role_id,
-                            model=self.model_name,
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.0,
-                            max_tokens=rag_config.validator_max_output_tokens
-                        )
-                    else:
-                        # Build conversation with truncated failed output
-                        retry_response = await api_client_manager.generate_completion(
-                            task_id=f"{task_id}_retry",  # Track retry attempt
-                            role_id=self.role_id,
-                            model=self.model_name,
-                            messages=[
-                                {"role": "user", "content": prompt},
-                                {"role": "assistant", "content": failed_output_preview},
-                                {"role": "user", "content": retry_prompt}
-                            ],
-                            temperature=0.0,  # Deterministic JSON formatting
-                            max_tokens=rag_config.validator_max_output_tokens  # Respect max_tokens on retry
-                        )
-                    
-                    if retry_response.get("choices"):
-                        call_metadata = api_client_manager.extract_call_metadata(retry_response)
-                        retry_output = retry_response["choices"][0]["message"]["content"]
-                        
-                        try:
-                            parsed = parse_json(retry_output)
-                            valid = True
-                            logger.info("Validator: Conversational retry succeeded!")
-                        except Exception as parse_error:
-                            valid = False
-                            error = str(parse_error)
-                            logger.warning(f"Validator: Retry failed - {error}")
-                    else:
-                        logger.warning("Validator: Retry request returned no choices")
-                except RetryableProviderError:
+                    await lm_studio_client.cache_model_load_config(self.model_name, {
+                        "context_length": context_allocator.validator_context_window,
+                        "model_path": self.model_name
+                    })
+                except Exception as exc:
+                    # Only applies to LM Studio models; cache misses should not fail validation.
+                    logger.debug("Validator skipped LM Studio cache warmup: %s", exc)
+
+            # A reply that breaks the decision contract is operational, never a
+            # decision: one bounded repair, then the coordinator requeues it.
+            repairs: list = []
+            try:
+                parsed = _parse_single_decision(llm_output, repairs)
+            except ValidatorOutputContractError as first_error:
+                logger.info(
+                    "Validator: reply broke the decision contract (%s); attempting one repair",
+                    first_error.stage,
+                )
+                retry_output, retry_call_metadata = await self._request_contract_retry(
+                    prompt,
+                    llm_output,
+                    self._single_retry_prompt(first_error),
+                    f"{task_id}_retry",
+                )
+                if retry_call_metadata:
+                    call_metadata = retry_call_metadata
+                repairs = []
+                try:
+                    parsed = _parse_single_decision(retry_output, repairs)
+                except ValidatorOutputContractError:
+                    if self.task_tracking_callback:
+                        self.task_tracking_callback("completed", task_id)
                     raise
-                except ProviderRepairRequiredError:
-                    raise
-                except Exception as e:
-                    if api_client_manager.is_provider_failure(e):
-                        raise
-                    logger.error(f"Validator: Retry request failed - {e}")
-                
-                # If STILL invalid after retry, return error ValidationResult
-                if not valid:
-                    logger.warning(f"Validator: Invalid JSON - {error}")
-                    return ValidationResult(
-                        submission_id=submission.submission_id,
-                        decision="reject",
-                        reasoning=f"Validator JSON error: {error}",
-                        summary="Validator output error",
-                        json_valid=False
-                    )
-            
+                logger.info("Validator: Contract repair succeeded")
+            await report_model_output_normalizations(self.role_id, repairs, task_id=task_id)
+
             # Notify task completed successfully
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
-            # Extract summary with fallback for rejections
-            # Schema requires summary for rejections, but some models may not provide it
             decision = parsed["decision"]
             await enqueue_optional_update(
                 parsed,
@@ -522,26 +562,24 @@ class ValidatorAgent:
                 source_phase="submission_validation",
                 source_decision=decision,
             )
+            reasoning = parsed["reasoning"]
             summary = parsed.get("summary", "").strip()
-            
+
             # For rejections, if summary is missing/empty, use reasoning as fallback
             if decision == "reject" and not summary:
-                summary = parsed["reasoning"][:750]
+                summary = reasoning[:750]
                 logger.debug(f"Validator: No summary provided for rejection, using reasoning as fallback")
-            
-            # Create validation result
-            result = ValidationResult(
+
+            return ValidationResult(
                 submission_id=submission.submission_id,
                 decision=decision,
-                reasoning=parsed["reasoning"],
+                reasoning=reasoning,
                 summary=summary,
                 contradiction_check_passed=True,
                 json_valid=True,
                 metadata={"llm_call": call_metadata}
             )
-            
-            return result
-            
+
         except ProviderContextLengthError as e:
             raise ContextAllocationError.from_provider_error(
                 e,
@@ -550,7 +588,7 @@ class ValidatorAgent:
                 context_window=context_allocator.validator_context_window,
                 output_reserve=rag_config.validator_max_output_tokens,
             ) from e
-        except ContextAllocationError:
+        except (ContextAllocationError, ValidatorOutputContractError):
             raise
         except Exception as e:
             if api_client_manager.is_provider_failure(e):
@@ -730,7 +768,6 @@ class ValidatorAgent:
             # batch as a whole, never one competing update per decision.
             
             # Verify prompt size
-            from backend.shared.utils import count_tokens
             actual_prompt_tokens = count_tokens(prompt)
             max_allowed_tokens = rag_config.get_available_input_tokens(context_allocator.validator_context_window, rag_config.validator_max_output_tokens)
             
@@ -770,60 +807,86 @@ class ValidatorAgent:
             )
             call_metadata = api_client_manager.extract_call_metadata(response)
             
-            def contract_error(message: str) -> BatchValidationContractError:
-                logger.error("Batch validator: %s", message)
-                if self.task_tracking_callback:
-                    self.task_tracking_callback("completed", task_id)
-                return BatchValidationContractError(message, batch_size=batch_size)
+            def parse_batch(text: str, repairs: list) -> dict:
+                """Parse a dual/triple reply; raise unless it holds exactly one
+                well-formed, correctly numbered decision per submission."""
+                try:
+                    parsed = _parse_validator_json(text, repairs)
+                except ValidatorOutputContractError as error:
+                    raise _with_batch_size(error, batch_size)
+                parsed, key_repairs = recover_key_labels(parsed, _BATCH_REPLY_SCHEMA)
+                repairs.extend(key_repairs)
+                decisions = parsed.get("decisions")
+                if not isinstance(decisions, list):
+                    raise _with_batch_size(
+                        ValidatorOutputContractError(
+                            f"Expected a 'decisions' list with {batch_size} decisions for this batch",
+                            stage="missing_key" if "decisions" not in parsed else "shape",
+                        ),
+                        batch_size,
+                    )
+                if len(decisions) != batch_size:
+                    raise _with_batch_size(
+                        ValidatorOutputContractError(
+                            f"Expected {batch_size} decisions for this batch, got {len(decisions)}",
+                        ),
+                        batch_size,
+                    )
+                problems = [
+                    problem
+                    for problem in (
+                        _decision_problem(
+                            item,
+                            item_path=f"decisions[{index}]",
+                            expected_number=index + 1,  # submission_number is 1-indexed
+                        )
+                        for index, item in enumerate(decisions)
+                    )
+                    if problem is not None
+                ]
+                if problems:
+                    raise _with_batch_size(
+                        ValidatorOutputContractError.from_item_problems(
+                            item_noun_plural="batch decisions",
+                            total=batch_size,
+                            problems=problems,
+                            stage=_problem_stage(problems),
+                        ),
+                        batch_size,
+                    )
+                return parsed
 
-            if not response or not response.get("choices"):
-                raise contract_error(
-                    f"The validator returned no reply for a batch of {batch_size} submissions."
-                )
+            llm_output = ""
+            if response and response.get("choices"):
+                llm_output = extract_message_text(response["choices"][0].get("message") or {})
 
-            # Extract content
-            message = response["choices"][0]["message"]
-            llm_output = extract_message_text(message)
-            
-            # Parse JSON
+            repairs: list = []
             try:
-                parsed = parse_json(llm_output)
-            except Exception as e:
-                logger.warning(f"Batch validator: JSON parse failed: {e}")
-                # Attempt conversational retry
-                parsed, retry_call_metadata = await self._retry_batch_json_parse(prompt, llm_output, batch_size, task_id)
+                parsed = parse_batch(llm_output, repairs)
+            except ValidatorOutputContractError as first_error:
+                logger.warning(
+                    "Batch validator: reply broke the batch contract (%s); attempting one repair",
+                    first_error.stage,
+                )
+                retry_output, retry_call_metadata = await self._request_contract_retry(
+                    prompt,
+                    llm_output,
+                    self._batch_retry_prompt(batch_size, first_error),
+                    f"{task_id}_batch_retry",
+                )
                 if retry_call_metadata:
                     call_metadata = retry_call_metadata
-                if parsed is None:
-                    raise contract_error(
-                        f"The validator's batch reply was not valid JSON after a repair attempt ({e})."
-                    )
-            if not isinstance(parsed, dict):
-                raise contract_error("The validator's batch reply was not a JSON object.")
-
-            # Deterministic contract checks before any decision is used:
-            # exactly one well-formed, correctly numbered decision per submission.
-            decisions_list = parsed.get("decisions", [])
-            if not isinstance(decisions_list, list) or len(decisions_list) != batch_size:
-                count = len(decisions_list) if isinstance(decisions_list, list) else "no"
-                raise contract_error(
-                    f"Expected {batch_size} decisions for this batch, got {count}."
-                )
-            for i, decision_data in enumerate(decisions_list):
-                expected_number = i + 1  # 1-indexed
-                if not isinstance(decision_data, dict):
-                    raise contract_error(f"Decision {expected_number} was not a JSON object.")
-                actual_number = decision_data.get("submission_number")
-                if actual_number != expected_number:
-                    raise contract_error(
-                        f"Decision order mismatch at position {i}: submission_number="
-                        f"{actual_number!r}, expected {expected_number}."
-                    )
-                if decision_data.get("decision") not in ("accept", "reject"):
-                    raise contract_error(
-                        f"Decision {expected_number} has decision="
-                        f"{decision_data.get('decision')!r}, expected accept or reject."
-                    )
+                repairs = []
+                try:
+                    parsed = parse_batch(retry_output, repairs)
+                except ValidatorOutputContractError as final_error:
+                    logger.error("Batch validator: %s", final_error)
+                    if self.task_tracking_callback:
+                        self.task_tracking_callback("completed", task_id)
+                    raise
+                logger.info("Batch validator: Contract repair succeeded")
+            await report_model_output_normalizations(self.role_id, repairs, task_id=task_id)
+            decisions_list = parsed["decisions"]
 
             # Create validation results using verified order
             results = []
@@ -890,7 +953,7 @@ class ValidatorAgent:
             ContextAllocationError,
             RetryableProviderError,
             ProviderRepairRequiredError,
-            BatchValidationContractError,
+            ValidatorOutputContractError,
         ):
             raise
         except Exception as e:
@@ -910,33 +973,40 @@ class ValidatorAgent:
                     output_reserve=rag_config.validator_max_output_tokens,
                 ) from e
             logger.error(f"Batch quality assessment failed: {e}", exc_info=True)
-            raise BatchValidationContractError(
-                f"Batch validation could not complete ([{type(e).__name__}] {e}).",
+            raise BatchValidationInterruptedError(
+                error_type=type(e).__name__,
                 batch_size=len(submissions),
             ) from e
     
-    async def _retry_batch_json_parse(
-        self, 
-        original_prompt: str, 
-        failed_output: str, 
-        batch_size: int,
-        task_id: str
-    ) -> tuple[Optional[Dict], Dict[str, Any]]:
-        """
-        Attempt conversational retry for batch JSON parsing.
-        
-        Args:
-            original_prompt: The original validation prompt
-            failed_output: The failed LLM output
-            batch_size: Number of submissions in batch
-            task_id: Task ID for tracking retry attempt
-        
-        Returns:
-            Tuple of (parsed JSON dict if successful, call metadata dict)
-        """
-        logger.info("Batch validator: Attempting conversational retry for JSON parse")
-        
-        # Build example format based on batch size
+    @staticmethod
+    def _single_retry_prompt(error: ValidatorOutputContractError) -> str:
+        """Repair instruction for a single-submission reply that broke its contract."""
+        if error.stage == "syntax":
+            header = (
+                "Your previous response could not be parsed as valid JSON.\n\n"
+                f"PARSE ERROR: {error}\n\n"
+            )
+        else:
+            header = (
+                "Your previous response did not match the required JSON format.\n\n"
+                f"CONTRACT ERROR: {error}\n\n"
+            )
+        return header + (
+            "Please provide the same validation decision in valid JSON format:\n"
+            "{\n"
+            '  "decision": "accept" or "reject",\n'
+            '  "reasoning": "your reasoning here",\n'
+            '  "summary": "brief summary here"\n'
+            "}\n\n"
+            "Retain the one valid optional top-level `solution_path_update` "
+            "from your previous response if present; omission remains valid.\n"
+            "CRITICAL: Properly escape all backslashes (use \\\\) and quotes (use \\\").\n"
+            "Respond with ONLY the JSON object, no markdown, no explanation."
+        )
+
+    @staticmethod
+    def _batch_retry_prompt(batch_size: int, error: ValidatorOutputContractError) -> str:
+        """Repair instruction for a dual/triple reply that broke its contract."""
         if batch_size == 2:
             example_format = '''
 {
@@ -954,9 +1024,15 @@ class ValidatorAgent:
     {"submission_number": 3, "decision": "accept", "reasoning": "...", "summary": ""}
   ]
 }'''
-        
-        retry_prompt = (
-            "Your previous response could not be parsed as valid JSON.\n\n"
+
+        if error.stage == "syntax":
+            header = "Your previous response could not be parsed as valid JSON.\n\n"
+        else:
+            header = (
+                "Your previous response did not match the required JSON format.\n\n"
+                f"CONTRACT ERROR: {error}\n\n"
+            )
+        return header + (
             f"Please provide the same validation decisions in valid JSON format:{example_format}\n\n"
             "The object may also retain the one valid optional top-level "
             "`solution_path_update` from your previous response beside `decisions`; "
@@ -964,78 +1040,80 @@ class ValidatorAgent:
             "CRITICAL: Properly escape all backslashes (use \\\\) and quotes (use \\\").\n"
             "Respond with ONLY the JSON object, no markdown, no explanation."
         )
-        
+
+    async def _request_contract_retry(
+        self,
+        original_prompt: str,
+        failed_output: str,
+        retry_prompt: str,
+        retry_task_id: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        """Ask the validator once to repair a reply that broke its JSON contract.
+
+        Returns the repaired reply text ("" when the request produced none) and
+        its call metadata. Provider failures propagate to the shared provider
+        recovery path; they are never treated as a contract failure.
+        """
         try:
-            call_metadata = {}
             # Keep conversational retry context, but never replay private
             # model thought/channel/control tokens as an assistant turn.
-            max_failed_output_chars = 2000  # ~500 tokens - enough for error context
             failed_output_preview = sanitize_model_output_for_retry_context(
                 failed_output,
-                max_chars=max_failed_output_chars,
+                max_chars=2000,  # ~500 tokens - enough for error context
             )
-            
-            # Calculate if conversation fits in context window
-            from backend.shared.utils import count_tokens
-            prompt_tokens = count_tokens(original_prompt)
-            preview_tokens = count_tokens(failed_output_preview)
-            retry_prompt_tokens = count_tokens(retry_prompt)
-            conversation_tokens = prompt_tokens + preview_tokens + retry_prompt_tokens
-            max_input = rag_config.get_available_input_tokens(context_allocator.validator_context_window, rag_config.validator_max_output_tokens)
-            
-            if conversation_tokens > max_input:
-                # Too large - just retry with original prompt
-                logger.warning(
-                    f"Batch validator: Retry conversation too large ({conversation_tokens} > {max_input}), "
-                    f"using simple retry without conversation context"
-                )
-                retry_response = await api_client_manager.generate_completion(
-                    task_id=f"{task_id}_batch_retry",
-                    role_id=self.role_id,
-                    model=self.model_name,
-                    messages=[{"role": "user", "content": original_prompt}],
-                    temperature=0.0,
-                    max_tokens=rag_config.validator_max_output_tokens
-                )
+            conversation_tokens = (
+                count_tokens(original_prompt)
+                + count_tokens(failed_output_preview)
+                + count_tokens(retry_prompt)
+            )
+            max_input = rag_config.get_available_input_tokens(
+                context_allocator.validator_context_window,
+                rag_config.validator_max_output_tokens,
+            )
+            if failed_output_preview and conversation_tokens <= max_input:
+                messages = [
+                    {"role": "user", "content": original_prompt},
+                    {"role": "assistant", "content": failed_output_preview},
+                    {"role": "user", "content": retry_prompt},
+                ]
             else:
-                # Build conversation with truncated failed output
-                retry_response = await api_client_manager.generate_completion(
-                    task_id=f"{task_id}_batch_retry",  # Track batch retry attempt
-                    role_id=self.role_id,
-                    model=self.model_name,
-                    messages=[
-                        {"role": "user", "content": original_prompt},
-                        {"role": "assistant", "content": failed_output_preview},
-                        {"role": "user", "content": retry_prompt}
-                    ],
-                    temperature=0.0,
-                    max_tokens=rag_config.validator_max_output_tokens  # Respect max_tokens on retry
+                # Too large (or no prior reply to replay): retry with the original prompt
+                logger.warning(
+                    "Validator: repair conversation does not fit (%s > %s) or has no prior "
+                    "reply; retrying with the original prompt only",
+                    conversation_tokens,
+                    max_input,
                 )
-            call_metadata = api_client_manager.extract_call_metadata(retry_response)
-            
-            if retry_response.get("choices"):
-                retry_output = retry_response["choices"][0]["message"]["content"]
-                parsed = parse_json(retry_output)
-                logger.info("Batch validator: Conversational retry succeeded!")
-                return parsed, call_metadata
+                messages = [{"role": "user", "content": original_prompt}]
+            retry_response = await api_client_manager.generate_completion(
+                task_id=retry_task_id,
+                role_id=self.role_id,
+                model=self.model_name,
+                messages=messages,
+                temperature=0.0,  # Deterministic JSON formatting
+                max_tokens=rag_config.validator_max_output_tokens,
+            )
         except ProviderContextLengthError as e:
             raise ContextAllocationError.from_provider_error(
                 e,
-                "Validator context overflow or provider context mismatch during batch JSON retry: "
+                "Validator context overflow or provider context mismatch during JSON retry: "
                 "the provider rejected the mandatory validation prompt as too large.",
                 context_window=context_allocator.validator_context_window,
                 output_reserve=rag_config.validator_max_output_tokens,
             ) from e
-        except RetryableProviderError:
-            raise
-        except ProviderRepairRequiredError:
+        except (RetryableProviderError, ProviderRepairRequiredError, FreeModelExhaustedError):
             raise
         except Exception as e:
             if api_client_manager.is_provider_failure(e):
                 raise
-            logger.warning(f"Batch validator: Retry failed - {e}")
-        
-        return None, {}
+            logger.warning("Validator: repair request failed - %s", e)
+            return "", {}
+        if not retry_response or not retry_response.get("choices"):
+            logger.warning("Validator: repair request returned no choices")
+            return "", {}
+        call_metadata = api_client_manager.extract_call_metadata(retry_response)
+        message = retry_response["choices"][0].get("message") or {}
+        return extract_message_text(message), call_metadata
 
     async def _retry_validator_json_parse(
         self,

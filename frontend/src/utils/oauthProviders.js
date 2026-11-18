@@ -1,12 +1,16 @@
-// Registry of desktop cloud subscription providers (OAuth logins and subscription
-// API keys). Every settings panel, the OpenRouter/OAuth modal, and the API helpers
-// read provider details from here, so adding a provider is one entry plus its
-// backend profile. It mirrors backend/shared/subscription_providers/metadata.py.
+// Registry of desktop role providers beyond LM Studio and OpenRouter: cloud
+// subscriptions (OAuth logins and subscription API keys) and local inference
+// servers (vLLM). Every settings panel, the OpenRouter/OAuth modal, and the API
+// helpers read provider details from here, so adding a provider is one entry plus
+// its backend profile. It mirrors backend/shared/subscription_providers/metadata.py.
 
 export const OPENAI_CODEX_PROVIDER = 'openai_codex_oauth';
 export const XAI_GROK_PROVIDER = 'xai_grok_oauth';
 export const SAKANA_FUGU_PROVIDER = 'sakana_fugu';
 export const KIMI_CODE_PROVIDER = 'kimi_code';
+export const CLAUDE_API_PROVIDER = 'claude_api';
+export const AMAZON_BEDROCK_PROVIDER = 'amazon_bedrock';
+export const VLLM_PROVIDER = 'vllm';
 
 export const SAKANA_FUGU_REASONING_EFFORT_OPTIONS = [
   { value: 'auto', label: 'Auto (xhigh)' },
@@ -27,6 +31,19 @@ export const KIMI_CODE_REASONING_EFFORT_OPTIONS = [
   { value: 'low', label: 'low' },
   { value: 'none', label: 'none / thinking off' },
 ];
+export const CLAUDE_REASONING_EFFORT_OPTIONS = [
+  { value: 'auto', label: 'Auto (model default)' },
+  { value: 'max', label: 'max' },
+  { value: 'xhigh', label: 'xhigh' },
+  { value: 'high', label: 'high' },
+  { value: 'medium', label: 'medium' },
+  { value: 'low', label: 'low' },
+];
+const CLAUDE_REASONING = {
+  control: 'options',
+  options: CLAUDE_REASONING_EFFORT_OPTIONS,
+  aliases: { maximum: 'max', highest: 'max', minimal: 'low', none: 'low' },
+};
 
 export const CLOUD_ACCESS_PROVIDERS = [
   {
@@ -128,7 +145,91 @@ export const CLOUD_ACCESS_PROVIDERS = [
       supportsUsage: true,
     },
   },
+  {
+    id: CLAUDE_API_PROVIDER,
+    label: 'Anthropic Claude',
+    shortLabel: 'Claude',
+    authKind: 'api_key',
+    apiSlug: 'claude-api',
+    capabilityKey: 'claudeApiAvailable',
+    featureFlag: 'claude_api_available',
+    loginLabel: 'Anthropic Claude API Key',
+    unavailableTitle: 'Set Anthropic Claude API key in OpenRouter/OAuth first',
+    modelErrorLabel: 'Anthropic Claude API',
+    noModelsMessage: 'Anthropic Claude API key is saved, but no Claude models were returned. Check the key in the Claude Console.',
+    reasoning: {
+      ...CLAUDE_REASONING,
+      ariaLabel: 'Claude Reasoning Effort',
+      hint: 'Auto uses the model\'s own default effort. A level a model does not offer falls to the next lower one.',
+    },
+    autoSettings: 'generic',
+    apiKey: {
+      inputId: 'claude-api-key',
+      inputName: 'moto-claude-api-key',
+      consoleUrl: 'https://platform.claude.com/settings/keys',
+      consoleLabel: 'platform.claude.com',
+      description: (
+        'Use a Claude API key from the Claude Console to run Claude models directly as a MOTO role '
+        + 'provider. This is pay-as-you-go API billing, not a Claude.ai or Claude Code subscription login.'
+      ),
+      supportsUsage: false,
+    },
+  },
+  {
+    id: AMAZON_BEDROCK_PROVIDER,
+    label: 'Amazon Bedrock',
+    shortLabel: 'Bedrock',
+    authKind: 'api_key',
+    apiSlug: 'amazon-bedrock',
+    capabilityKey: 'amazonBedrockAvailable',
+    featureFlag: 'amazon_bedrock_available',
+    loginLabel: 'Amazon Bedrock API Key',
+    unavailableTitle: 'Set Amazon Bedrock API key in OpenRouter/OAuth first',
+    modelErrorLabel: 'Amazon Bedrock API',
+    noModelsMessage: 'Amazon Bedrock API key is saved, but no models were returned. Check the key, its region, and model access in the Bedrock console.',
+    reasoning: {
+      ...CLAUDE_REASONING,
+      ariaLabel: 'Amazon Bedrock Reasoning Effort',
+      hint: 'Applies to Claude models; Auto uses the model\'s own default effort. Other Bedrock models ignore this setting.',
+    },
+    autoSettings: 'generic',
+    apiKey: {
+      inputId: 'amazon-bedrock-api-key',
+      inputName: 'moto-amazon-bedrock-api-key',
+      consoleUrl: 'https://console.aws.amazon.com/bedrock/home#/api-keys',
+      consoleLabel: 'the Amazon Bedrock console (API keys)',
+      description: (
+        'Use an Amazon Bedrock API key and choose the AWS region it belongs to. Short-term keys expire '
+        + 'within 12 hours and only work in the region that created them; a long-term key lasts until its '
+        + 'expiry date. Usage is billed to your AWS account.'
+      ),
+      supportsUsage: false,
+    },
+  },
+  {
+    id: VLLM_PROVIDER,
+    label: 'vLLM',
+    shortLabel: 'vLLM',
+    authKind: 'local_server',
+    apiSlug: 'vllm',
+    capabilityKey: 'vllmAvailable',
+    featureFlag: 'vllm_available',
+    loginLabel: 'vLLM server',
+    unavailableTitle: 'Add your vLLM server in Inference Connectivity first',
+    modelErrorLabel: 'vLLM',
+    noModelsMessage: 'vLLM is set up, but its servers list no chat models. Start a vLLM server with a chat model, then refresh.',
+    autoSettings: 'local_server',
+  },
 ];
+
+// Cloud subscriptions only: the providers behind the "Cloud" role button and the
+// OpenRouter/OAuth modal. Local servers have their own button and setup window.
+export const CLOUD_SUBSCRIPTION_PROVIDERS = CLOUD_ACCESS_PROVIDERS.filter(
+  (provider) => provider.authKind !== 'local_server',
+);
+export const LOCAL_SERVER_PROVIDERS = CLOUD_ACCESS_PROVIDERS.filter(
+  (provider) => provider.authKind === 'local_server',
+);
 
 const CLOUD_ACCESS_PROVIDER_BY_ID = new Map(CLOUD_ACCESS_PROVIDERS.map((provider) => [provider.id, provider]));
 
@@ -152,6 +253,34 @@ export function isApiKeyCloudProvider(providerId) {
   return getCloudAccessProvider(providerId)?.authKind === 'api_key';
 }
 
+export function isLocalServerProvider(providerId) {
+  return getCloudAccessProvider(providerId)?.authKind === 'local_server';
+}
+
+export function isCloudSubscriptionProvider(providerId) {
+  return isCloudAccessProvider(providerId) && !isLocalServerProvider(providerId);
+}
+
+// A role's local fallback is an LM Studio model id, or "<local server id>::<model>"
+// for a model on a local server (vLLM). Mirrors split_local_fallback in the backend.
+export const LOCAL_FALLBACK_SEPARATOR = '::';
+
+export function localFallbackValue(providerId, modelId) {
+  return providerId === 'lm_studio' ? modelId : `${providerId}${LOCAL_FALLBACK_SEPARATOR}${modelId}`;
+}
+
+export function describeLocalFallback(value) {
+  const text = String(value || '').trim();
+  for (const provider of LOCAL_SERVER_PROVIDERS) {
+    const prefix = `${provider.id}${LOCAL_FALLBACK_SEPARATOR}`;
+    if (text.startsWith(prefix) && text.length > prefix.length) {
+      const modelId = text.slice(prefix.length);
+      return { providerId: provider.id, providerLabel: provider.label, modelId, text: `${provider.label}: ${modelId}` };
+    }
+  }
+  return { providerId: 'lm_studio', providerLabel: 'LM Studio', modelId: text, text };
+}
+
 // Desktop-only providers are available unless hosted mode is active or the backend
 // reports the capability off; a missing flag (older backend) counts as available.
 export function isCloudProviderAvailable(capabilities, providerId) {
@@ -163,11 +292,11 @@ export function isCloudProviderAvailable(capabilities, providerId) {
 }
 
 export function getAvailableCloudAccessProviders(capabilities) {
-  return CLOUD_ACCESS_PROVIDERS.filter((provider) => isCloudProviderAvailable(capabilities, provider.id));
+  return CLOUD_SUBSCRIPTION_PROVIDERS.filter((provider) => isCloudProviderAvailable(capabilities, provider.id));
 }
 
 export function getConfiguredCloudAccessProviders(statusByProvider = {}) {
-  return CLOUD_ACCESS_PROVIDERS.filter((provider) => Boolean(statusByProvider?.[provider.id]?.configured));
+  return CLOUD_SUBSCRIPTION_PROVIDERS.filter((provider) => Boolean(statusByProvider?.[provider.id]?.configured));
 }
 
 export function chooseDefaultCloudAccessProvider(statusByProvider = {}) {

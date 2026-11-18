@@ -228,7 +228,7 @@ async def test_free_model_wait_after_rotation_names_auto_host(monkeypatch, tmp_p
 @pytest.mark.asyncio
 async def test_account_credit_free_model_wait_names_primary_route_with_rotation_on(monkeypatch, tmp_path):
     # The account-credit short-circuit raises before any rotation leg runs.
-    message = "Account free credits exhausted and no LM Studio fallback for role 'aggregator_submitter_3'."
+    message = "Account free credits exhausted and no local fallback for role 'aggregator_submitter_3'."
     error = FreeModelExhaustedError(message)
     exhausted, retry_payload = await _run_single_model_free_model_wait(
         monkeypatch, tmp_path, error, looping=True, auto_selector=True,

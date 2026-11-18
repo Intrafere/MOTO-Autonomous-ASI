@@ -1,0 +1,83 @@
+{
+  "action_ids": [
+    "cli_start_manual_aggregator",
+    "cli_start_while_workflow_active",
+    "exercise_cli_control_surface",
+    "cli_replay_saved_template"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "cli_control.start_template_only_after_committed_start",
+    "cli_control.start_template_credentials_stripped",
+    "cli_control.hosted_writes_no_artifacts",
+    "cli_control.control_file_owner_lifecycle",
+    "cli_control.template_replays_into_valid_start",
+    "runtime.single_active_workflow"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {
+    "final_mode": "manual_aggregator",
+    "final_phase": "manual_aggregation"
+  },
+  "evidence": [
+    "cli_control_file_owner_removed",
+    "cli_hosted_no_artifacts",
+    "cli_rejected_start_no_template",
+    "cli_template_replayed",
+    "cli_template_saved_after_commit",
+    "start_blocked"
+  ],
+  "exercised_invariants": [
+    "cli_control.control_file_owner_lifecycle",
+    "cli_control.hosted_writes_no_artifacts",
+    "cli_control.start_template_credentials_stripped",
+    "cli_control.start_template_only_after_committed_start",
+    "cli_control.template_replays_into_valid_start",
+    "runtime.single_active_workflow"
+  ],
+  "faked_dependencies": [
+    "workflow executable state model"
+  ],
+  "fields": [
+    "cli_control_surface",
+    "runtime_exclusivity",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "cli_control.start_template_only_after_committed_start",
+    "cli_control.start_template_credentials_stripped",
+    "cli_control.hosted_writes_no_artifacts",
+    "cli_control.control_file_owner_lifecycle",
+    "cli_control.template_replays_into_valid_start",
+    "runtime.single_active_workflow"
+  ],
+  "observed_fields": [
+    "cli_control_surface",
+    "runtime_exclusivity",
+    "websocket_api_contracts",
+    "workflow_filesystem_state"
+  ],
+  "observed_transition": "seeded model planner reached the declared target",
+  "real_components": [],
+  "replay": [
+    "cli_start_manual_aggregator()",
+    "start_manual_aggregator()",
+    "cli_start_manual_aggregator()",
+    "start_manual_aggregator()",
+    "exercise_cli_control_surface()",
+    "cli_replay_saved_template()"
+  ],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "generated_cli_start_template_chain_seed_7",
+  "schema_version": 2,
+  "seed": 7,
+  "source_identity": "workflow-source-v1:d719eb0e0070b528002d05bc0f0b82e17f447ab0a98ab80be73edbf40fbfaebf",
+  "target_artifact": "targets/generated_cli_start_template_chain.json",
+  "target_id": "generated_cli_start_template_chain",
+  "test_selectors": [
+    "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+  ]
+}

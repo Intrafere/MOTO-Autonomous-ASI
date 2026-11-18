@@ -1,10 +1,12 @@
-"""Shared client for OpenAI-compatible subscription APIs that use an API key.
+"""Shared client for cloud provider APIs that authenticate with an API key.
 
-One instance serves one provider profile (for example Sakana Fugu or Kimi Code).
-The client owns the key lifecycle (environment override, then the desktop
-keyring), endpoint-region detection, bounded transient retries through the
-shared stop-aware wait seam, and normalization of every response to the Chat
-Completions shape the rest of MOTO consumes.
+One instance serves one provider profile (for example Sakana Fugu, Kimi Code,
+the Claude API, or Amazon Bedrock). The client owns the key lifecycle
+(environment override, then the desktop keyring), the endpoint region (detected
+or chosen by the user), bounded transient retries through the shared stop-aware
+wait seam, and normalization of every response to the Chat Completions shape the
+rest of MOTO consumes. OpenAI-compatible wires live here; Claude models use the
+Messages API wire in ``claude_messages``.
 """
 from __future__ import annotations
 
@@ -63,7 +65,7 @@ class _ChatStreamResult:
 
 
 class SubscriptionApiKeyClient:
-    """Client for one OpenAI-compatible API-key subscription provider."""
+    """Client for one API-key cloud provider."""
 
     def __init__(self, profile: ApiKeyProviderProfile) -> None:
         self.profile = profile
@@ -74,6 +76,11 @@ class SubscriptionApiKeyClient:
         self._region_detection_attempted = False
         # Keys this client has sent; scrubbed from every provider-supplied error text.
         self._secrets_seen: Dict[str, None] = {}
+        # Optional HTTP client handed to the Messages API wire (tests inject one).
+        self.messages_http_client: Any = None
+        self._messages_wire_instance: Any = None
+        # model -> Chat Completions base URL that accepted it after the default refused.
+        self._chat_base_urls: Dict[str, str] = {}
         self.client = httpx.AsyncClient(
             timeout=None,
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=30.0),
@@ -113,6 +120,8 @@ class SubscriptionApiKeyClient:
             if load_subscription_api_key(self.settings.secret_name) != key:
                 raise SecretStoreError(f"Stored {self.provider_label} credential could not be verified")
         self._api_key = key
+        # Routes learned for the previous key or region no longer apply.
+        self._chat_base_urls.clear()
         if self._is_multi_region():
             self._region_id = region_id or None
             self._persisted_region_checked = True
@@ -123,6 +132,7 @@ class SubscriptionApiKeyClient:
     async def clear_api_key(self) -> None:
         clear_subscription_api_key(self.settings.secret_name)
         self._api_key = None
+        self._chat_base_urls.clear()
         self._region_id = None
         self._persisted_region_checked = True
         self._region_detection_attempted = False
@@ -140,6 +150,12 @@ class SubscriptionApiKeyClient:
             region = self._known_region()
             status["region"] = region.region_id if region else None
             status["region_label"] = region.label if region else None
+            if self.settings.region_selection == "user":
+                status["region_selection"] = "user"
+                status["region_options"] = [
+                    {"id": option.region_id, "label": option.label} for option in self.settings.regions
+                ]
+                status["default_region"] = (region or self._fallback_region()).region_id
         if self.settings.supports_usage:
             status["supports_usage"] = True
         return status
@@ -179,10 +195,26 @@ class SubscriptionApiKeyClient:
             self._region_id = persisted.region_id
         return persisted
 
-    def _candidate_regions(self) -> Tuple[EndpointRegion, ...]:
+    def _fallback_region(self) -> EndpointRegion:
+        """Return the region used when none is recorded: the environment's, else the first."""
+        for name in self.settings.region_env_var_names:
+            region = self._region_by_id((os.getenv(name) or "").strip().lower())
+            if region is not None:
+                return region
+        return self.settings.regions[0]
+
+    def _candidate_regions(self, region_id: str = "") -> Tuple[EndpointRegion, ...]:
         override = self._base_url_override()
         if override:
             return (EndpointRegion("override", "Custom endpoint", override),)
+        if self.settings.region_selection == "user":
+            requested = (region_id or "").strip().lower()
+            if requested:
+                chosen = self._region_by_id(requested)
+                if chosen is None:
+                    raise ValueError(f"{self.provider_label} is not available in region '{requested}'.")
+                return (chosen,)
+            return (self._known_region() or self._fallback_region(),)
         return self.settings.regions
 
     @property
@@ -190,11 +222,14 @@ class SubscriptionApiKeyClient:
         override = self._base_url_override()
         if override:
             return override
-        region = self._known_region() or self.settings.regions[0]
+        region = self._known_region() or self._fallback_region()
         return region.base_url.rstrip("/")
 
     async def _ensure_region(self) -> None:
         """Detect the endpoint region once when a key exists but no region is recorded."""
+        if self.settings.region_selection == "user":
+            # A user-chosen region is never probed; an unrecorded one uses the fallback.
+            return
         if not self._is_multi_region() or self._known_region() is not None or self._region_detection_attempted:
             return
         key = self._load_api_key()
@@ -264,13 +299,15 @@ class SubscriptionApiKeyClient:
         error_summary: str,
         retry_model: str,
         retry_callback: Optional[RetryCallback],
+        max_attempts: Optional[int] = None,
+        role_id: Optional[str] = None,
     ) -> None:
         info = {
             "provider": self.provider_id,
             "provider_label": self.provider_label,
             "model": retry_model,
             "retry_attempt": attempt + 1,
-            "max_attempts": self.settings.max_retries,
+            "max_attempts": max_attempts or self.settings.max_retries,
             "retry_after_seconds": delay,
             "reason": reason,
             "error_summary": error_summary,
@@ -278,7 +315,7 @@ class SubscriptionApiKeyClient:
         if retry_callback is not None:
             await retry_callback(info)
         else:
-            await assured_retry_wait(info, role_id=f"{self.provider_id}_direct")
+            await assured_retry_wait(info, role_id=role_id or f"{self.provider_id}_direct")
 
     def _request_failed(self, detail: str, *, status_code: Optional[int] = None) -> SubscriptionRequestError:
         return SubscriptionRequestError(
@@ -398,7 +435,21 @@ class SubscriptionApiKeyClient:
             provider_label=self.provider_label,
         )
 
+    def _messages_wire(self) -> Any:
+        if self._messages_wire_instance is None:
+            from backend.shared.subscription_providers.claude_messages import ClaudeMessagesWire
+
+            self._messages_wire_instance = ClaudeMessagesWire(self)
+        return self._messages_wire_instance
+
     async def _list_models_at(self, base_url: str, api_key: Optional[str]) -> List[Dict[str, Any]]:
+        if self.settings.model_list_api == "anthropic_models":
+            records = await self._messages_wire().list_models(base_url, api_key)
+        else:
+            records = await self._list_openai_models_at(base_url, api_key)
+        return self.profile.finalize_model_records(records)
+
+    async def _list_openai_models_at(self, base_url: str, api_key: Optional[str]) -> List[Dict[str, Any]]:
         try:
             headers = self._headers_for_key(api_key)
             response = await self._request_with_retry("GET", f"{base_url}/models", headers=headers)
@@ -427,12 +478,15 @@ class SubscriptionApiKeyClient:
         await self._ensure_region()
         return await self._list_models_at(self.base_url, self._load_api_key())
 
-    async def validate_candidate(self, api_key: str) -> CandidateValidation:
-        """Authenticate a candidate key without changing any stored or in-memory state."""
+    async def validate_candidate(self, api_key: str, region_id: str = "") -> CandidateValidation:
+        """Authenticate a candidate key without changing any stored or in-memory state.
+
+        ``region_id`` names the region for providers whose region the user chooses.
+        """
         key = (api_key or "").strip()
         if not key:
             raise ValueError(f"{self.provider_label} API key is required.")
-        regions = self._candidate_regions()
+        regions = self._candidate_regions(region_id)
         last_auth_error: Optional[SubscriptionAuthError] = None
         for region in regions:
             try:
@@ -740,16 +794,26 @@ class SubscriptionApiKeyClient:
         payload = {**self._chat_payload(**request), "stream": True}
         self.profile.apply_stream_options(payload)
         max_retries = self.settings.max_retries
+        default_base = self.base_url
+        chat_base = self._chat_base_urls.get(model) or default_base
+        tried_bases = {chat_base}
         for attempt in range(max_retries):
+            next_base: Optional[str] = None
             try:
                 async with self.client.stream(
                     "POST",
-                    f"{self.base_url}/chat/completions",
+                    f"{chat_base}/chat/completions",
                     json=payload,
                     headers=self._headers(),
                 ) as response:
                     if response.status_code >= 400:
                         await response.aread()
+                        alternate = self.profile.alternate_chat_base_url(chat_base, response)
+                        if alternate and alternate not in tried_bases:
+                            next_base = alternate
+                    if next_base:
+                        result = None
+                    elif response.status_code >= 400:
                         classified = await self._classified(response)
                         if classified is not None:
                             raise classified
@@ -765,6 +829,8 @@ class SubscriptionApiKeyClient:
                         result = None
                     else:
                         result = await self._consume_chat_stream(response, model)
+                        if chat_base != default_base:
+                            self._chat_base_urls[model] = chat_base
             except httpx.TransportError as exc:
                 detail = self._detail(str(exc) or repr(exc))
                 if attempt >= max_retries - 1:
@@ -777,6 +843,11 @@ class SubscriptionApiKeyClient:
                     retry_model=model,
                     retry_callback=retry_callback,
                 )
+                continue
+            if next_base:
+                # The provider serves this model on another route; no wait is needed.
+                chat_base = next_base
+                tried_bases.add(next_base)
                 continue
             if result is None:
                 await self._wait_before_retry(
@@ -834,11 +905,16 @@ class SubscriptionApiKeyClient:
             "tool_choice": tool_choice,
             "cache_scope": cache_scope,
         }
-        if self.settings.wire_api == "chat_completions_stream":
+        wire_api = self.profile.wire_api_for_model(request["model"])
+        if wire_api == "anthropic_messages":
+            return await self._messages_wire().generate(retry_callback=retry_callback, **request)
+        if wire_api == "chat_completions_stream":
             return await self._generate_via_chat_stream(retry_callback=retry_callback, **request)
         if self._messages_need_chat_completions(messages, tools):
             return await self._generate_via_chat_completions(retry_callback=retry_callback, **request)
         return await self._generate_via_responses(retry_callback=retry_callback, **request)
 
     async def close(self) -> None:
+        if self._messages_wire_instance is not None:
+            await self._messages_wire_instance.close()
         await self.client.aclose()

@@ -1,8 +1,10 @@
-"""Registered API-key subscription providers and their recovery adapters.
+"""Registered API-key cloud providers, local servers, and their recovery adapters.
 
 Each provider profile gets one ``SubscriptionApiKeyClient`` singleton and one
 ``ProviderAdapter`` registered with the shared provider-recovery registry, which
-the provider conformance suite exercises for every registered provider.
+the provider conformance suite exercises for every registered provider. A local
+server (vLLM) uses a client subclass and is routed like any other registered
+provider, but has its own setup routes instead of the API-key routes.
 """
 from __future__ import annotations
 
@@ -11,7 +13,9 @@ from typing import Any, Dict, Optional, Tuple
 from backend.shared.provider_errors import ProviderRouteIdentity
 from backend.shared.provider_recovery.models import FailureKind, ProviderFailure
 from backend.shared.provider_recovery.registry import ProviderRegistry
+from backend.shared.subscription_providers.amazon_bedrock import AMAZON_BEDROCK_PROFILE
 from backend.shared.subscription_providers.api_key_client import SubscriptionApiKeyClient
+from backend.shared.subscription_providers.claude_api import CLAUDE_API_PROFILE
 from backend.shared.subscription_providers.errors import (
     SubscriptionAuthError,
     SubscriptionContextLimitError,
@@ -21,11 +25,20 @@ from backend.shared.subscription_providers.errors import (
     SubscriptionUsageLimitError,
 )
 from backend.shared.subscription_providers.kimi_code import KIMI_CODE_PROFILE
-from backend.shared.subscription_providers.metadata import API_KEY_SUBSCRIPTION_PROVIDER_IDS
+from backend.shared.subscription_providers.metadata import (
+    API_KEY_SUBSCRIPTION_PROVIDER_IDS,
+    LOCAL_SERVER_PROVIDER_IDS,
+)
 from backend.shared.subscription_providers.profile import ApiKeyProviderProfile
 from backend.shared.subscription_providers.sakana_fugu import SAKANA_FUGU_PROFILE
+from backend.shared.subscription_providers.vllm import VLLM_PROFILE, VllmClient
 
-_PROFILES: Tuple[ApiKeyProviderProfile, ...] = (SAKANA_FUGU_PROFILE, KIMI_CODE_PROFILE)
+_PROFILES: Tuple[ApiKeyProviderProfile, ...] = (
+    SAKANA_FUGU_PROFILE,
+    KIMI_CODE_PROFILE,
+    CLAUDE_API_PROFILE,
+    AMAZON_BEDROCK_PROFILE,
+)
 
 if tuple(sorted(profile.provider_id for profile in _PROFILES)) != tuple(sorted(API_KEY_SUBSCRIPTION_PROVIDER_IDS)):
     raise RuntimeError("Every API-key subscription provider in metadata needs exactly one registered profile.")
@@ -33,6 +46,10 @@ if tuple(sorted(profile.provider_id for profile in _PROFILES)) != tuple(sorted(A
 _CLIENTS: Dict[str, SubscriptionApiKeyClient] = {
     profile.provider_id: SubscriptionApiKeyClient(profile) for profile in _PROFILES
 }
+vllm_client = VllmClient(VLLM_PROFILE)
+if (vllm_client.provider_id,) != LOCAL_SERVER_PROVIDER_IDS:
+    raise RuntimeError("Every local-server provider in metadata needs exactly one registered client.")
+_CLIENTS[vllm_client.provider_id] = vllm_client
 
 
 class SubscriptionProviderAdapter:
@@ -97,11 +114,13 @@ for _client in _CLIENTS.values():
 
 
 def get_api_key_subscription_client(provider_id: str) -> Optional[SubscriptionApiKeyClient]:
+    """Return the registered client that serves a provider's roles (API key or local server)."""
     return _CLIENTS.get(str(provider_id or "").strip())
 
 
 def api_key_subscription_clients() -> Tuple[SubscriptionApiKeyClient, ...]:
-    return tuple(_CLIENTS.values())
+    """Return the API-key cloud clients (the ones with ``/api-key`` routes)."""
+    return tuple(_CLIENTS[provider_id] for provider_id in API_KEY_SUBSCRIPTION_PROVIDER_IDS)
 
 
 async def close_api_key_subscription_clients() -> None:

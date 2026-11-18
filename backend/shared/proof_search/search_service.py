@@ -264,6 +264,9 @@ class ProofSearchService:
                 for path in files:
                     if not path.is_file() or path.suffix.lower() not in {".json", ".jsonl", ".lean"}:
                         continue
+                    # Master proof scaffold state is working state, never an indexed proof.
+                    if "master_proofs" in path.parts:
+                        continue
                     if path.stat().st_mtime > index_mtime:
                         return True
             except OSError:

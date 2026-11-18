@@ -138,6 +138,7 @@ _SECRET_PATTERNS = tuple((label, re.compile(pattern)) for label, pattern in (
     ("OpenRouter API key", r"sk-or-v1-[A-Za-z0-9]{20,}"),
     ("OpenAI-style API key", r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{40,}"),
     ("Anthropic API key", r"sk-ant-[A-Za-z0-9_-]{20,}"),
+    ("Amazon Bedrock API key", r"(?:\bABSK|bedrock-api-key-)[A-Za-z0-9+/]{40,}"),
     ("xAI API key", r"xai-[A-Za-z0-9]{40,}"),
     ("GitHub token", r"(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})"),
     ("AWS access key", r"(?:AKIA|ASIA)(?!IOSFODNN7EXAMPLE)[0-9A-Z]{16}"),

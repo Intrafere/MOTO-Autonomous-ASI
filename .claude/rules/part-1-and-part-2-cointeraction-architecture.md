@@ -106,4 +106,4 @@ existing context-overflow lifecycle if the newest entry still cannot fit.
 
 ## Other Notes
 
-IMPORTANT: When a JSON result for validation does not work you should reject the submission and alert the submitter the content and the reason isfor JSON rejection, this context should be sent to the submitters local failure feedback memory that we have defined in other areas.
+IMPORTANT: When a submitter's JSON does not work, reject the submission and send the content and the JSON-failure reason to that submitter's local failure feedback memory. When the validator's own output breaks its contract, that is operational: bounded retry, then re-validate or requeue the same submission with operational activity, never a rejection or submitter feedback.

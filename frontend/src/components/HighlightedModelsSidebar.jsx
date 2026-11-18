@@ -22,6 +22,19 @@ const OauthTag = ({ stacked = false }) => (
   </span>
 );
 
+const SuperchargedTag = () => (
+  <span
+    className="supercharged-tag-anchor"
+    tabIndex={0}
+    aria-label="Supercharged: learn about the Supercharge option"
+  >
+    <span className="supercharged-tag" aria-hidden="true">SUPERCHARGED</span>
+    <span className="supercharged-tag-tooltip" role="tooltip">
+      Run this model with Supercharge checked. Supercharge is a per-role checkbox in each settings panel: the role writes 4 full answers in parallel, then a 5th call from the same model picks or combines the best of them into one final answer. It uses 5x the API calls, so it is slower and costs more, but a low-cost model like this one gives noticeably stronger answers with it.
+    </span>
+  </span>
+);
+
 export default function HighlightedModelsSidebar() {
   const [showKothTooltip, setShowKothTooltip] = useState(false);
 
@@ -83,14 +96,16 @@ export default function HighlightedModelsSidebar() {
               <div className="model-item-badge">Powerful and affordable OAuth</div>
             </div>
 
-            <div className="model-item model-item--ranked model-item--silver model-item--oa">
-              <OauthTag stacked />
+            <div className="model-item model-item--ranked model-item--silver model-item--supercharged">
               <div className="flex-row-center">
                 <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-                <div className="model-item-name">Grok 4.7</div>
+                <div className="model-item-title">
+                  <div className="model-item-name">Claude Haiku 5.5</div>
+                  <SuperchargedTag />
+                </div>
                 <div className="ranking-badge ranking-badge--silver">🥈 SILVER</div>
               </div>
-              <div className="model-item-badge">Powerful and affordable OAuth</div>
+              <div className="model-item-badge">Low cost knowledge, generous token API allotment w/ subscription</div>
             </div>
 
             <div className="model-item model-item--ranked model-item--bronze model-item--oa">
@@ -108,7 +123,7 @@ export default function HighlightedModelsSidebar() {
             <div className="models-podium-label">Best Free OpenRouter Model</div>
             <div className="model-item model-item--ranked model-item--free model-item--os">
               <OsTag />
-              <div className="model-item-name">NVIDIA Nemotron Ultra</div>
+              <div className="model-item-name">NVIDIA Nemotron 3.5 Lightning 1000K</div>
               <div className="model-item-badge">Highly knowledgeable, 1000 free model calls per day on OpenRouter including a 1 million token context window</div>
             </div>
           </div>

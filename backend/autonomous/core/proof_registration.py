@@ -20,6 +20,8 @@ from backend.shared.models import (
     ProofDependency,
     LeanCompileReceipt,
     LocalNoveltyAssessmentProvenance,
+    MasterProofSummary,
+    ProofKind,
     PortableProofDependency,
     ProofRecord,
 )
@@ -278,6 +280,8 @@ async def register_verified_lean_proof(
     artifact_purpose: ProofArtifactPurpose | None = None,
     ownership_predicate: Optional[Callable[[], bool]] = None,
     novelty_classification: Optional[tuple[str, str]] = None,
+    proof_kind: ProofKind = "individual",
+    master_proof: Optional[MasterProofSummary] = None,
 ) -> RegisteredProof:
     """
     Classify and store Lean-verified proof code using the shared novelty tiers.
@@ -402,6 +406,8 @@ async def register_verified_lean_proof(
         run_id=resolved_run_id,
         user_prompt=user_prompt,
         solver=solver,
+        proof_kind=proof_kind,
+        master_proof=master_proof if proof_kind == "master_proof" else None,
         lean_code=lean_code,
         novel=is_novel,
         novelty_tier=novelty_tier,

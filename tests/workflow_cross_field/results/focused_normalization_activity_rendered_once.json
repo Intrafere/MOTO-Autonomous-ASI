@@ -1,0 +1,39 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "route_identity_once"
+  ],
+  "faked_dependencies": [
+    "activity payloads supplied by Vitest"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "the normalization sentence is rendered with its route identity exactly once",
+  "real_components": [
+    "frontend/src/utils/activityStyles.js"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "vitest",
+  "scenario_id": "focused_normalization_activity_rendered_once",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:dad3b239b14349c9a5f9e2504fbd1fb50be305cb8500a67d8434d1ada0272c63",
+  "test_file": "frontend/src/utils/activityStyles.test.js",
+  "test_selectors": [
+    "frontend/src/utils/activityStyles.test.js::model output normalization activity::shows the backend sentence with the route identity exactly once"
+  ]
+}

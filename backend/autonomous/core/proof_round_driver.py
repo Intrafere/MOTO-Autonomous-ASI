@@ -8,12 +8,16 @@ and provider recovery remain owned by ``ProofVerificationStage`` and its caller.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, Protocol, Tuple
+from typing import Any, Awaitable, Callable, Iterable, Optional, Protocol, Tuple, Union
 
+
+# Discovery sees at most this many of the newest round-memory entries.
+ROUND_MEMORY_MAX_ENTRIES = 5
 
 RoundResult = Any
+RoundMemory = Tuple[str, ...]
 RoundExecutor = Callable[
-    [int, str, str, str],
+    [int, str, RoundMemory, str],
     Awaitable[Tuple[str, Optional[RoundResult]]],
 ]
 ReserveSource = Callable[[str, str], Awaitable[str]]
@@ -84,8 +88,18 @@ class ContinuousPruningPolicy:
         return f"{base_trigger}_round_{round_index}"
 
 
+def normalize_round_memory(value: Union[str, Iterable[str], None]) -> RoundMemory:
+    """Return round-memory entries, oldest first, from a list or a legacy string."""
+
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value.strip(),) if value.strip() else ()
+    return tuple(str(entry).strip() for entry in value if str(entry or "").strip())
+
+
 def summarize_round_result(round_index: int, proof_result: Any) -> str:
-    """Build the bounded prior-round context used by later identification."""
+    """Describe one round's proof attempts: each result and, if verified, its novelty."""
 
     if proof_result is None:
         return f"Round {round_index}: skipped."
@@ -96,10 +110,27 @@ def summarize_round_result(round_index: int, proof_result: Any) -> str:
             f"{proof_result.novel_count} novel."
         )
     ]
-    for attempt_result in list(getattr(proof_result, "results", []) or [])[:5]:
-        status = "verified" if attempt_result.success else "failed"
-        lines.append(f"- {status}: {attempt_result.theorem_statement[:220]}")
+    for attempt_result in list(getattr(proof_result, "results", []) or []):
+        statement = " ".join(str(attempt_result.theorem_statement or "").split())
+        if attempt_result.success:
+            tier = str(getattr(attempt_result, "novelty_tier", "") or "").strip()
+            rating = tier or (
+                "novel (tier not recorded)"
+                if getattr(attempt_result, "novel", False)
+                else "not_novel"
+            )
+            lines.append(f"- Verified in Lean 4, novelty rating {rating}: {statement}")
+        else:
+            lines.append(f"- Failed to get a Lean 4 proof verified: {statement}")
     return "\n".join(lines)
+
+
+def round_memory_entry(round_index: int, proof_result: Any) -> str:
+    """Return the round-memory entry for a round, or "" when nothing was attempted."""
+
+    if proof_result is None or not list(getattr(proof_result, "results", []) or []):
+        return ""
+    return summarize_round_result(round_index, proof_result)
 
 
 class ProofRoundDriver:
@@ -116,11 +147,9 @@ class ProofRoundDriver:
         should_stop: ShouldStop,
         reserve_source: ReserveSource,
         release_source: ReleaseSource,
-        prior_summary_limit: int = 3,
+        initial_round_memory: Iterable[str] = (),
         initial_round_index: int = 1,
     ) -> None:
-        if prior_summary_limit < 1:
-            raise ValueError("prior_summary_limit must be positive")
         if initial_round_index < 1:
             raise ValueError("initial_round_index must be positive")
         self.policy = policy
@@ -131,7 +160,7 @@ class ProofRoundDriver:
         self.should_stop = should_stop
         self.reserve_source = reserve_source
         self.release_source = release_source
-        self.prior_summary_limit = prior_summary_limit
+        self.initial_round_memory = normalize_round_memory(initial_round_memory)
         self.initial_round_index = initial_round_index
 
     async def run(self) -> str:
@@ -141,7 +170,9 @@ class ProofRoundDriver:
         if self.policy.holds_source_reservation:
             reservation_token = await self.reserve_source(self.source_type, self.source_id)
 
-        prior_round_summaries: list[str] = []
+        # Round memory survives empty rounds and source resets: it records what
+        # was already attempted and how each verified proof was rated.
+        round_memory: list[str] = list(self.initial_round_memory)
         round_index = self.initial_round_index
         try:
             while self.policy.max_rounds is None or round_index <= self.policy.max_rounds:
@@ -151,9 +182,7 @@ class ProofRoundDriver:
                     self.base_trigger,
                     round_index,
                 )
-                prior_round_results = "\n".join(
-                    prior_round_summaries[-self.prior_summary_limit :]
-                )
+                prior_round_results = tuple(round_memory[-ROUND_MEMORY_MAX_ENTRIES:])
                 round_status, proof_result = await self.execute_round(
                     round_index,
                     round_trigger,
@@ -162,12 +191,9 @@ class ProofRoundDriver:
                 )
                 if round_status == "retry_same_round":
                     continue
-                if round_status == "continue_reset":
-                    prior_round_summaries.clear()
+                if round_status == "continue_empty":
                     round_index += 1
                     continue
-                if round_status == "completed_reset":
-                    prior_round_summaries.clear()
                 if round_status == "fatal_stop":
                     return "fatal_stop"
                 if round_status == "stopped":
@@ -184,9 +210,10 @@ class ProofRoundDriver:
                     return "stopped"
                 if getattr(proof_result, "had_error", False):
                     return "error_preserved"
-                prior_round_summaries.append(
-                    summarize_round_result(round_index, proof_result)
-                )
+                entry = round_memory_entry(round_index, proof_result)
+                if entry:
+                    round_memory.append(entry)
+                    del round_memory[:-ROUND_MEMORY_MAX_ENTRIES]
                 if (
                     getattr(proof_result, "total_candidates", 0) == 0
                     and not self.policy.continues_after_empty_round

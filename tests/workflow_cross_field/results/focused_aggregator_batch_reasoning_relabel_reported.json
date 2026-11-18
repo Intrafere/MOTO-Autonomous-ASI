@@ -1,0 +1,42 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "reasoning_relabeled",
+    "normalization_reported"
+  ],
+  "faked_dependencies": [
+    "validator model replies",
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "a misspelled batch reasoning key is relabeled and reported for the validator role",
+  "real_components": [
+    "backend/aggregator/agents/validator.py",
+    "backend/shared/json_key_recovery.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_aggregator_batch_reasoning_relabel_reported",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:0788fe2bbaa3c6bc39ddcc4374ba4801f5f384a2b798b56f4bb9a5662d0fbf91",
+  "test_file": "tests/regressions/test_batch_validator_contract.py",
+  "test_selectors": [
+    "tests/regressions/test_batch_validator_contract.py::test_batch_mislabeled_reasoning_key_is_relabeled_and_reported"
+  ]
+}

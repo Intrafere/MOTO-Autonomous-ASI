@@ -119,7 +119,7 @@ export default function AggregatorInterface({
         lm_studio_fallback_id: lmStudioEnabled ? (s.lmStudioFallbackId || null) : null,
         context_window: s.contextWindow,
         max_output_tokens: s.maxOutputTokens,
-        supercharge_enabled: developerModeEnabled && Boolean(s.superchargeEnabled)
+        supercharge_enabled: Boolean(s.superchargeEnabled)
       }));
 
       const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled !== false;
@@ -135,7 +135,7 @@ export default function AggregatorInterface({
         validator_lm_studio_fallback: lmStudioEnabled ? (config.validatorLmStudioFallback || null) : null,
         validator_context_size: config.validatorContextSize,
         validator_max_output_tokens: config.validatorMaxOutput,
-        validator_supercharge_enabled: developerModeEnabled && Boolean(config.validatorSuperchargeEnabled),
+        validator_supercharge_enabled: Boolean(config.validatorSuperchargeEnabled),
         assistant_provider: assistantMemoryEnabled
           ? (lmStudioEnabled ? (config.assistantProvider || config.validatorProvider || 'lm_studio') : 'openrouter')
           : (lmStudioEnabled ? (config.validatorProvider || 'lm_studio') : 'openrouter'),
@@ -151,7 +151,7 @@ export default function AggregatorInterface({
           : null,
         assistant_context_size: assistantMemoryEnabled ? (config.assistantContextSize || config.validatorContextSize) : 0,
         assistant_max_output_tokens: assistantMemoryEnabled ? (config.assistantMaxOutput || config.validatorMaxOutput) : 0,
-        assistant_supercharge_enabled: assistantMemoryEnabled && developerModeEnabled && Boolean(config.assistantSuperchargeEnabled),
+        assistant_supercharge_enabled: assistantMemoryEnabled && Boolean(config.assistantSuperchargeEnabled),
         uploaded_files: config.uploadedFiles,
       });
       setIsRunning(true);

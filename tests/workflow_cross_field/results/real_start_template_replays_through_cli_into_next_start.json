@@ -1,0 +1,48 @@
+{
+  "adapter": "real_route",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "cli_control.start_template_only_after_committed_start",
+    "cli_control.start_template_credentials_stripped",
+    "cli_control.template_replays_into_valid_start"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "committed_start_saves_template",
+    "credential_free_template",
+    "cli_replay_accepted_by_route"
+  ],
+  "faked_dependencies": [
+    "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams"
+  ],
+  "fields": [
+    "cli_control_surface",
+    "runtime_exclusivity",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "cli_control.start_template_only_after_committed_start",
+    "cli_control.start_template_credentials_stripped",
+    "cli_control.template_replays_into_valid_start"
+  ],
+  "observed_transition": "real Aggregator start saves a template; the CLI builds the next request from it; the real route accepts that request and saves the new prompt",
+  "real_components": [
+    "backend/api/routes/aggregator.py",
+    "backend/shared/cli_control.py",
+    "moto_cli.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "real_start_template_replays_through_cli_into_next_start",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:2304b134d1520388efd3a60d54fa6098d860188a82a96413ee133451e31f0289",
+  "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_cli_control_routes.py::test_real_start_template_replays_through_cli_into_the_next_real_start"
+  ]
+}

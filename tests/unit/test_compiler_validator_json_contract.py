@@ -215,16 +215,16 @@ async def test_lean_placement_does_not_force_rigor_before_structure_is_valid(
         reasoning="Place it.",
         metadata={"rigor_mode": "lean_placement"},
     )
-    result = await validator.validate_submission(
-        submission,
-        current_paper="Anchor.",
-        current_outline="I. Introduction\nII. Body\nIII. Conclusion",
-    )
+    with pytest.raises(ValidatorContractError) as raised:
+        await validator.validate_submission(
+            submission,
+            current_paper="Anchor.",
+            current_outline="I. Introduction\nII. Body\nIII. Conclusion",
+        )
 
-    assert result.decision == "reject"
-    assert result.json_valid is False
-    assert result.rigor_check is False
-    assert result.summary == "Invalid validator JSON contract"
+    # A malformed validator reply is operational, never a rejection decision.
+    assert raised.value.stage == "syntax"
+    assert raised.value.role == "compiler_validator"
 
 
 def test_full_content_is_rejected_for_non_empty_paper() -> None:

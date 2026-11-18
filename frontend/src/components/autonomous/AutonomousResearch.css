@@ -247,7 +247,7 @@
 
 .allowed-output-option {
   display: inline-grid;
-  grid-template-columns: 13px max-content;
+  grid-template-columns: 13px max-content max-content;
   align-items: center;
   gap: 0.25rem;
   margin: 0;
@@ -538,6 +538,7 @@
 }
 
 .prompt-composer-options {
+  container: composer-options / inline-size;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -1515,6 +1516,117 @@
 
 .known-models-sidebar .model-item--bronze {
   background: linear-gradient(180deg, rgba(76, 175, 80, 0.14) 0%, rgba(205, 127, 50, 0.1) 100%);
+}
+
+/* Supercharged tile: an electric aura around the tile, matched by its glowing label */
+.known-models-sidebar {
+  --supercharge-aura: rgba(110, 200, 255, 0.85);
+  --supercharge-aura-soft: rgba(150, 120, 255, 0.45);
+}
+
+.known-models-sidebar .model-item--supercharged,
+.known-models-sidebar .model-item--supercharged:hover {
+  border-color: var(--supercharge-aura);
+  box-shadow:
+    0 0 0 1px var(--supercharge-aura),
+    0 0 12px var(--supercharge-aura),
+    0 0 26px var(--supercharge-aura-soft),
+    inset 0 0 14px rgba(110, 200, 255, 0.12);
+  animation: supercharge-aura-pulse 2.6s ease-in-out infinite;
+}
+
+.known-models-sidebar .model-item--supercharged:hover,
+.known-models-sidebar .model-item--supercharged:focus-within {
+  z-index: 50;
+}
+
+.supercharged-tag-anchor {
+  position: relative;
+  display: inline-block;
+  margin-top: 0.15rem;
+  cursor: help;
+  border-radius: 3px;
+}
+
+.supercharged-tag-anchor:focus-visible {
+  outline: 1px solid var(--supercharge-aura);
+  outline-offset: 2px;
+}
+
+.supercharged-tag {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: #e8f7ff;
+  text-shadow:
+    0 0 4px var(--supercharge-aura),
+    0 0 10px var(--supercharge-aura),
+    0 0 18px var(--supercharge-aura-soft);
+  animation: supercharge-text-pulse 2.6s ease-in-out infinite;
+}
+
+.supercharged-tag-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 240px;
+  z-index: 60;
+  background: #0b1a24;
+  border: 1px solid var(--supercharge-aura);
+  border-radius: 6px;
+  padding: 0.55rem 0.75rem;
+  color: #dff3ff;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  line-height: 1.45;
+  white-space: normal;
+  box-shadow: 0 0 14px var(--supercharge-aura-soft), 0 8px 18px rgba(0, 0, 0, 0.4);
+}
+
+.supercharged-tag-anchor:hover .supercharged-tag-tooltip,
+.supercharged-tag-anchor:focus .supercharged-tag-tooltip {
+  display: block;
+}
+
+@keyframes supercharge-aura-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px var(--supercharge-aura),
+      0 0 10px var(--supercharge-aura),
+      0 0 20px var(--supercharge-aura-soft),
+      inset 0 0 12px rgba(110, 200, 255, 0.1);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px var(--supercharge-aura),
+      0 0 16px var(--supercharge-aura),
+      0 0 34px var(--supercharge-aura-soft),
+      inset 0 0 18px rgba(110, 200, 255, 0.18);
+  }
+}
+
+@keyframes supercharge-text-pulse {
+  0%, 100% {
+    text-shadow:
+      0 0 4px var(--supercharge-aura),
+      0 0 9px var(--supercharge-aura),
+      0 0 16px var(--supercharge-aura-soft);
+  }
+  50% {
+    text-shadow:
+      0 0 6px var(--supercharge-aura),
+      0 0 14px var(--supercharge-aura),
+      0 0 26px var(--supercharge-aura-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .known-models-sidebar .model-item--supercharged,
+  .supercharged-tag {
+    animation: none;
+  }
 }
 
 .model-item-note {

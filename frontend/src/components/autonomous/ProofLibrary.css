@@ -491,3 +491,12 @@
     width: 100%;
   }
 }
+
+.proof-library-master-badge {
+  color: #9bb5ff;
+  border: 1px solid rgba(155, 181, 255, 0.5);
+  background: rgba(111, 140, 255, 0.12);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-weight: 700;
+}

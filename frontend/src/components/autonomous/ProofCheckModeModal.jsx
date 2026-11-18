@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import HelpTooltip from '../HelpTooltip';
+import UsageLevelBadge from '../UsageLevelBadge';
 import './ProofCheckModeModal.css';
 
 const MODE_OPTIONS = [
@@ -158,6 +159,7 @@ export default function ProofCheckModeModal({
                   >
                     {option.help}
                   </HelpTooltip>
+                  <UsageLevelBadge featureId={`proofs.check_mode.${option.value}`} />
                 </span>
                 <small>{option.description}</small>
               </span>

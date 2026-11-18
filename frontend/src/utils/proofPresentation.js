@@ -86,6 +86,21 @@ const NOVELTY_PRESENTATION = Object.freeze({
   },
 });
 
+// A master proof is one stored proof built from a scaffold of solved steps.
+export function isMasterProof(proof = {}) {
+  return proof?.proof_kind === 'master_proof';
+}
+
+export function getMasterProofStepCount(proof = {}) {
+  const steps = proof?.master_proof?.steps;
+  return Array.isArray(steps) ? steps.length : 0;
+}
+
+export function formatMasterProofBadge(proof = {}) {
+  const count = getMasterProofStepCount(proof);
+  return count > 0 ? `Master proof · ${count} ${count === 1 ? 'step' : 'steps'}` : 'Master proof';
+}
+
 export function classifyProofNovelty(proof = {}) {
   const category = String(proof.novelty_tier || '').trim().toLowerCase();
   return {

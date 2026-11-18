@@ -7,14 +7,12 @@ CONTEXT HANDLING:
 - Tries to inject full brainstorm database for accurate exhaustion assessment
 - Falls back to RAG if database doesn't fit in context
 """
-import json
 import logging
-from typing import Optional, Tuple, Callable
+from typing import Any, Optional, Tuple, Callable
 
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
-from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text
+from backend.shared.model_output_contract import ModelOutputContractError
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
 from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
@@ -26,8 +24,51 @@ from backend.autonomous.prompts.completion_prompts import (
 )
 from backend.autonomous.memory.autonomous_rejection_logs import autonomous_rejection_logs
 from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
+from backend.autonomous.agents.output_contract import (
+    json_object,
+    optional_text,
+    parse_with_contract_retry,
+    report_model_output_contract_failure,
+    require_bool,
+    require_choice,
+    require_text,
+    response_text,
+)
 
 logger = logging.getLogger(__name__)
+
+_ASSESSMENT_SHAPE = """{
+  "decision": "continue_brainstorm | write_paper",
+  "reasoning": "string",
+  "suggested_additions": "string (optional)"
+}"""
+
+_SELF_VALIDATION_SHAPE = """{
+  "validated": true | false,
+  "reasoning": "string"
+}"""
+
+
+def _parse_assessment(data: Any, *, role: str) -> CompletionReviewResult:
+    data = json_object(data, role=role)
+    return CompletionReviewResult(
+        decision=require_choice(
+            data,
+            "decision",
+            ("continue_brainstorm", "write_paper"),
+            role=role,
+            case_insensitive=True,
+        ),
+        reasoning=require_text(data, "reasoning", role=role),
+        suggested_additions=optional_text(data, "suggested_additions", role=role),
+    )
+
+
+def _parse_self_validation(data: Any, *, role: str) -> Tuple[bool, dict]:
+    data = json_object(data, role=role)
+    validated = require_bool(data, "validated", role=role)
+    require_text(data, "reasoning", role=role)
+    return validated, data
 
 
 class CompletionReviewerAgent:
@@ -69,7 +110,11 @@ class CompletionReviewerAgent:
         # Reserve the user-configured output budget; prompt overhead is checked by
         # the normal prompt-size validation path instead of a hidden fixed cap.
         reserved_tokens = self.max_output_tokens
-        available = self.context_window - reserved_tokens
+        from backend.shared.token_calibration import token_calibration
+
+        available = token_calibration.adjusted_context_window(self.context_window) - reserved_tokens
+        if available <= 0:
+            available = self.context_window - reserved_tokens
         return max(available, 0)
     
     async def review_completion(
@@ -123,6 +168,23 @@ class CompletionReviewerAgent:
             used_rag
         )
         
+        if is_validated is None:
+            # Rule-defined fallback: an unusable self-validation reply continues the
+            # brainstorm. It is not a semantic self-validation decision, so nothing
+            # is written into durable completion feedback.
+            logger.info(
+                "CompletionReviewer: Self-validation output unusable after one retry - "
+                "continuing brainstorm (rule-defined fallback)"
+            )
+            return CompletionReviewResult(
+                decision="continue_brainstorm",
+                reasoning=(
+                    "Self-validation output did not match the required JSON format after one "
+                    "retry; continuing the brainstorm as the rule-defined fallback."
+                ),
+                suggested_additions="",
+            ), False
+
         if not is_validated:
             # Log feedback that assessment was not validated
             await autonomous_rejection_logs.add_completion_feedback(
@@ -264,48 +326,35 @@ class CompletionReviewerAgent:
                     retained_feedback = retained_feedback[1:]
                     prompt = build_prompt(retained_feedback)
             
-            if not response:
-                logger.error("CompletionReviewer: Empty response from LLM")
-                return None
-            
-            # Extract content from response (check both content and reasoning fields)
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                logger.error("CompletionReviewer: No content in response")
-                return None
-            
-            # Parse JSON using central utility (handles sanitization + parsing + array handling)
             try:
-                data = parse_json(content)
-                
-                # Validate required fields
-                decision = data.get("decision", "").lower()
-                if decision not in ["continue_brainstorm", "write_paper"]:
-                    logger.error(f"CompletionReviewer: Invalid decision: {decision}")
-                    return None
-                reasoning = data.get("reasoning")
-                if not isinstance(reasoning, str) or not reasoning.strip():
-                    logger.error("CompletionReviewer: Missing non-empty reasoning")
-                    return None
-                
-                # Notify task completed successfully
-                if self.task_tracking_callback:
-                    self.task_tracking_callback("completed", task_id)
-                
-                return CompletionReviewResult(
-                    decision=decision,
-                    reasoning=reasoning.strip(),
-                    suggested_additions=data.get("suggested_additions", "")
+                assessment = await parse_with_contract_retry(
+                    response_text(response),
+                    lambda data: _parse_assessment(data, role=self.role_id),
+                    prompt=prompt,
+                    task_id=task_id,
+                    role_id=self.role_id,
+                    model=self.model_id,
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens,
+                    response_noun="completion assessment",
+                    response_shape=_ASSESSMENT_SHAPE,
                 )
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"CompletionReviewer: JSON parse error: {e}")
-                # Notify task completed (failed but still completed)
+            except ModelOutputContractError as exc:
+                await report_model_output_contract_failure(
+                    self.role_id,
+                    exc,
+                    task_id=task_id,
+                    model=self.model_id,
+                    outcome="No completion decision was made; the brainstorm continues.",
+                )
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
                 return None
-                
+
+            if self.task_tracking_callback:
+                self.task_tracking_callback("completed", task_id)
+            return assessment
+
         except FreeModelExhaustedError:
             raise
         except RetryableProviderError:
@@ -325,12 +374,15 @@ class CompletionReviewerAgent:
         brainstorm_context: str,
         assessment: CompletionReviewResult,
         used_rag: bool
-    ) -> bool:
+    ) -> Optional[bool]:
         """
         SPECIAL SELF-VALIDATION MODE.
         The same model validates its own completion assessment.
-        
+
         Uses the same brainstorm context (direct or RAG) as the assessment phase.
+
+        Returns the self-validation decision, or None when the reply did not match
+        its JSON contract after one bounded retry (not a semantic decision).
         """
         try:
             # Convert assessment to dict
@@ -381,57 +433,50 @@ class CompletionReviewerAgent:
                 temperature=0.0  # Deterministic validation - evolving context provides diversity
             )
             
-            if not response:
-                logger.error("CompletionReviewer: Empty self-validation response")
-                return False
-            
-            # Extract content from response (check both content and reasoning fields)
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                logger.error("CompletionReviewer: No content in self-validation response")
-                return False
-            
-            # Log raw response for debugging
-            logger.info(f"CompletionReviewer: Self-validation raw content (first 500 chars): {content[:500]}")
-            
-            # Parse JSON using central utility (handles sanitization + parsing + array handling + enhanced logging)
             try:
-                data = parse_json(content)
-                from backend.shared.solution_path.integration import enqueue_optional_update
-                validated = data.get("validated")
-                reasoning = data.get("reasoning")
-                if type(validated) is not bool:
-                    logger.error("CompletionReviewer: 'validated' must be an exact boolean")
-                    return False
-                if not isinstance(reasoning, str) or not reasoning.strip():
-                    logger.error("CompletionReviewer: Self-validation requires non-empty reasoning")
-                    return False
-                await enqueue_optional_update(
-                    data,
-                    getattr(self, "solution_path_manager", None),
-                    proposer_role=self.role_id,
-                    source_task_id=task_id,
-                    source_phase="completion_self_validation",
-                    source_decision="accept" if validated else "reject",
+                validated, data = await parse_with_contract_retry(
+                    response_text(response),
+                    lambda parsed: _parse_self_validation(parsed, role=self.role_id),
+                    prompt=prompt,
+                    task_id=task_id,
+                    role_id=self.role_id,
+                    model=self.model_id,
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens,
+                    response_noun="self-validation decision",
+                    response_shape=_SELF_VALIDATION_SHAPE,
                 )
-                
-                # Notify task completed successfully
+            except ModelOutputContractError as exc:
+                await report_model_output_contract_failure(
+                    self.role_id,
+                    exc,
+                    task_id=task_id,
+                    model=self.model_id,
+                    outcome=(
+                        "Self-validation was not resolved; the brainstorm continues "
+                        "(rule-defined fallback) and no completion feedback was recorded."
+                    ),
+                )
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
-                
-                logger.info(f"CompletionReviewer: Self-validation result: validated={validated}")
-                logger.info(f"CompletionReviewer: Self-validation reasoning: {reasoning[:300]}...")
-                
-                return validated
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"CompletionReviewer: JSON parse error in self-validation: {e}")
-                # Notify task completed (failed but still completed)
-                if self.task_tracking_callback:
-                    self.task_tracking_callback("completed", task_id)
-                return False
-                
+                return None
+
+            from backend.shared.solution_path.integration import enqueue_optional_update
+            await enqueue_optional_update(
+                data,
+                getattr(self, "solution_path_manager", None),
+                proposer_role=self.role_id,
+                source_task_id=task_id,
+                source_phase="completion_self_validation",
+                source_decision="accept" if validated else "reject",
+            )
+
+            if self.task_tracking_callback:
+                self.task_tracking_callback("completed", task_id)
+
+            logger.info(f"CompletionReviewer: Self-validation result: validated={validated}")
+            return validated
+
         except FreeModelExhaustedError:
             raise
         except RetryableProviderError:

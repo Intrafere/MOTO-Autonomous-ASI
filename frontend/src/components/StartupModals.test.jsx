@@ -78,6 +78,50 @@ describe('responsive startup modals', () => {
 
     expect(screen.getByText('LM Studio Setup')).toBeInTheDocument();
     expect(screen.getByText('Cloud Provider Add-On')).toBeInTheDocument();
+    // vLLM alone never advertises the cloud add-on card, and is not listed in it.
+    expect(screen.queryByText('vLLM Setup')).not.toBeInTheDocument();
+    expect(screen.getByText(/supported subscription provider/).textContent).not.toMatch(/vLLM/);
+  });
+
+  test('offers vLLM as a startup path only when the desktop backend reports it', () => {
+    const onChooseVllm = vi.fn();
+    const { rerender } = render(
+      <StartupProviderSetupModal
+        isOpen
+        capabilities={{ lmStudioEnabled: true, vllmAvailable: true }}
+        onChooseOpenRouter={vi.fn()}
+        onConfirmLmStudio={vi.fn()}
+        onChooseVllm={onChooseVllm}
+      />,
+    );
+
+    expect(screen.getByText('vLLM Setup')).toBeInTheDocument();
+    expect(screen.queryByText('Cloud Provider Add-On')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: "I'm Running vLLM" }));
+    expect(onChooseVllm).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <StartupProviderSetupModal
+        isOpen
+        isCheckingVllm
+        capabilities={{ lmStudioEnabled: true, vllmAvailable: true }}
+        onChooseOpenRouter={vi.fn()}
+        onConfirmLmStudio={vi.fn()}
+        onChooseVllm={onChooseVllm}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Checking vLLM...' })).toBeDisabled();
+
+    rerender(
+      <StartupProviderSetupModal
+        isOpen
+        capabilities={{ lmStudioEnabled: false, genericMode: true, vllmAvailable: true }}
+        onChooseOpenRouter={vi.fn()}
+        onConfirmLmStudio={vi.fn()}
+        onChooseVllm={onChooseVllm}
+      />,
+    );
+    expect(screen.queryByText('vLLM Setup')).not.toBeInTheDocument();
   });
 
   test('does not show a scroll hint when the disclaimer content fits', () => {

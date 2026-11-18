@@ -57,7 +57,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -646,7 +648,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -1396,6 +1400,889 @@
       "test_selectors": [
         "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_manual_compiler_real_papers_only_route_start_stop",
         "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_manual_compiler_clear_archives_before_paper_clear"
+      ]
+    },
+    {
+      "adapter": "browser_smoke",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.control_file_owner_lifecycle",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "cli_control.control_file_owner_lifecycle"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "backend process lifetime (driven directly instead of through uvicorn)"
+      ],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.control_file_owner_lifecycle",
+      "observed": true,
+      "observed_transition": "the lifespan publishes the control file after ready work; CLI discovery reads it; cleanup keeps another process's file and removes its own",
+      "real_components": [
+        "backend/api/main.py",
+        "backend/shared/cli_control.py",
+        "moto_cli.py"
+      ],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "focused_cli_control_file_ready_and_owner_removed",
+      "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_control_file_published_when_ready_and_removed_only_by_owner",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+      "test_selectors": [
+        "tests/workflow_real_adapters/test_cli_control_routes.py::test_control_file_published_when_ready_and_removed_only_by_owner"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.control_file_owner_lifecycle",
+      "observed": true,
+      "observed_transition": "direct model actions preserve declared product laws",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "cli_template_chain_exclusive_start_and_hosted_boundary",
+      "source_identity": "pytest:tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+      "test_selectors": [
+        "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.control_file_owner_lifecycle",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_29",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.control_file_owner_lifecycle",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_7",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "real_coordinator",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.control_file_owner_lifecycle",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "real_route",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.control_file_owner_lifecycle",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "browser_smoke",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.hosted_writes_no_artifacts",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.hosted_writes_no_artifacts",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.hosted_writes_no_artifacts",
+      "observed": true,
+      "observed_transition": "direct model actions preserve declared product laws",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "cli_template_chain_exclusive_start_and_hosted_boundary",
+      "source_identity": "pytest:tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+      "test_selectors": [
+        "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.hosted_writes_no_artifacts",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_29",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.hosted_writes_no_artifacts",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_7",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "real_coordinator",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.hosted_writes_no_artifacts",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "real_route",
+      "asserted_invariants": [
+        "cli_control.hosted_writes_no_artifacts"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams"
+      ],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.hosted_writes_no_artifacts",
+      "observed": true,
+      "observed_transition": "a committed hosted Aggregator start and control-file publish write no CLI artifacts",
+      "real_components": [
+        "backend/api/routes/aggregator.py",
+        "backend/shared/cli_control.py"
+      ],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "real_hosted_start_writes_no_cli_artifacts",
+      "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_real_hosted_start_writes_no_cli_artifacts",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+      "test_selectors": [
+        "tests/workflow_real_adapters/test_cli_control_routes.py::test_real_hosted_start_writes_no_cli_artifacts"
+      ]
+    },
+    {
+      "adapter": "browser_smoke",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_credentials_stripped",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_credentials_stripped",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_credentials_stripped",
+      "observed": true,
+      "observed_transition": "direct model actions preserve declared product laws",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "cli_template_chain_exclusive_start_and_hosted_boundary",
+      "source_identity": "pytest:tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+      "test_selectors": [
+        "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_credentials_stripped",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_29",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_credentials_stripped",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_7",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "real_coordinator",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_credentials_stripped",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "real_route",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.template_replays_into_valid_start"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams"
+      ],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_credentials_stripped",
+      "observed": true,
+      "observed_transition": "real Aggregator start saves a template; the CLI builds the next request from it; the real route accepts that request and saves the new prompt",
+      "real_components": [
+        "backend/api/routes/aggregator.py",
+        "backend/shared/cli_control.py",
+        "moto_cli.py"
+      ],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "real_start_template_replays_through_cli_into_next_start",
+      "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_real_start_template_replays_through_cli_into_the_next_real_start",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+      "test_selectors": [
+        "tests/workflow_real_adapters/test_cli_control_routes.py::test_real_start_template_replays_through_cli_into_the_next_real_start"
+      ]
+    },
+    {
+      "adapter": "browser_smoke",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_only_after_committed_start",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_only_after_committed_start",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_only_after_committed_start",
+      "observed": true,
+      "observed_transition": "direct model actions preserve declared product laws",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "cli_template_chain_exclusive_start_and_hosted_boundary",
+      "source_identity": "pytest:tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+      "test_selectors": [
+        "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_only_after_committed_start",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_29",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_only_after_committed_start",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_7",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "real_coordinator",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_only_after_committed_start",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "real_route",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams"
+      ],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_only_after_committed_start",
+      "observed": true,
+      "observed_transition": "real Aggregator start rejected by an active Compiler leaves no CLI start template",
+      "real_components": [
+        "backend/api/routes/aggregator.py",
+        "backend/shared/cli_control.py"
+      ],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "real_conflicting_start_saves_no_cli_template",
+      "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_real_conflicting_start_saves_no_template",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+      "test_selectors": [
+        "tests/workflow_real_adapters/test_cli_control_routes.py::test_real_conflicting_start_saves_no_template"
+      ]
+    },
+    {
+      "adapter": "real_route",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.template_replays_into_valid_start"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams"
+      ],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.start_template_only_after_committed_start",
+      "observed": true,
+      "observed_transition": "real Aggregator start saves a template; the CLI builds the next request from it; the real route accepts that request and saves the new prompt",
+      "real_components": [
+        "backend/api/routes/aggregator.py",
+        "backend/shared/cli_control.py",
+        "moto_cli.py"
+      ],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "real_start_template_replays_through_cli_into_next_start",
+      "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_real_start_template_replays_through_cli_into_the_next_real_start",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+      "test_selectors": [
+        "tests/workflow_real_adapters/test_cli_control_routes.py::test_real_start_template_replays_through_cli_into_the_next_real_start"
+      ]
+    },
+    {
+      "adapter": "browser_smoke",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.template_replays_into_valid_start",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.template_replays_into_valid_start",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.template_replays_into_valid_start",
+      "observed": true,
+      "observed_transition": "direct model actions preserve declared product laws",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "cli_template_chain_exclusive_start_and_hosted_boundary",
+      "source_identity": "pytest:tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+      "test_selectors": [
+        "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.template_replays_into_valid_start",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_29",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.template_replays_into_valid_start",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_7",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "real_coordinator",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.template_replays_into_valid_start",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "real_route",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.template_replays_into_valid_start"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams"
+      ],
+      "field": "cli_control_surface",
+      "invariant_id": "cli_control.template_replays_into_valid_start",
+      "observed": true,
+      "observed_transition": "real Aggregator start saves a template; the CLI builds the next request from it; the real route accepts that request and saves the new prompt",
+      "real_components": [
+        "backend/api/routes/aggregator.py",
+        "backend/shared/cli_control.py",
+        "moto_cli.py"
+      ],
+      "risk_id": "risk.cli_control_surface_drift",
+      "runner": "pytest",
+      "scenario_id": "real_start_template_replays_through_cli_into_next_start",
+      "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_real_start_template_replays_through_cli_into_the_next_real_start",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+      "test_selectors": [
+        "tests/workflow_real_adapters/test_cli_control_routes.py::test_real_start_template_replays_through_cli_into_the_next_real_start"
       ]
     },
     {
@@ -3063,7 +3950,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -3579,7 +4468,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -6200,6 +7091,34 @@
     {
       "adapter": "model",
       "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "runtime_exclusivity",
+      "invariant_id": "runtime.single_active_workflow",
+      "observed": true,
+      "observed_transition": "direct model actions preserve declared product laws",
+      "real_components": [],
+      "risk_id": "risk.invariant.runtime.single_active_workflow",
+      "runner": "pytest",
+      "scenario_id": "cli_template_chain_exclusive_start_and_hosted_boundary",
+      "source_identity": "pytest:tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+      "test_selectors": [
+        "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
         "runtime.single_active_workflow"
       ],
       "blocked_dependencies": [],
@@ -6236,6 +7155,62 @@
       "risk_id": "risk.invariant.runtime.single_active_workflow",
       "runner": "pytest",
       "scenario_id": "generated_autonomous_paper_checkpoint_seed_7",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "runtime_exclusivity",
+      "invariant_id": "runtime.single_active_workflow",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.invariant.runtime.single_active_workflow",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_29",
+      "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+      "test_selectors": [
+        "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start",
+        "runtime.single_active_workflow"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "runtime_exclusivity",
+      "invariant_id": "runtime.single_active_workflow",
+      "observed": true,
+      "observed_transition": "seeded model planner reached the declared target",
+      "real_components": [],
+      "risk_id": "risk.invariant.runtime.single_active_workflow",
+      "runner": "pytest",
+      "scenario_id": "generated_cli_start_template_chain_seed_7",
       "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
       "status": "passed",
       "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
@@ -6829,7 +7804,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -6893,6 +7870,810 @@
       "blocked_dependencies": [],
       "declared": false,
       "faked_dependencies": [],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "validator model replies",
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "an unusable batch reply restores every dequeued submission and validates them one at a time",
+      "real_components": [
+        "backend/aggregator/agents/validator.py",
+        "backend/aggregator/core/coordinator.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_aggregator_batch_contract_failure_restored",
+      "source_identity": "pytest:tests/regressions/test_batch_validator_contract.py::test_coordinator_restores_unusable_batch_and_validates_it_one_at_a_time",
+      "status": "passed",
+      "test_file": "tests/regressions/test_batch_validator_contract.py",
+      "test_selectors": [
+        "tests/regressions/test_batch_validator_contract.py::test_coordinator_restores_unusable_batch_and_validates_it_one_at_a_time"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "validator model replies",
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "an unusable validator reply requeues the submission with operational activity and no submitter rejection",
+      "real_components": [
+        "backend/aggregator/agents/validator.py",
+        "backend/aggregator/core/coordinator.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_aggregator_validator_contract_failure_requeued",
+      "source_identity": "pytest:tests/regressions/test_batch_validator_contract.py::test_coordinator_requeues_single_contract_failure_without_submitter_feedback",
+      "status": "passed",
+      "test_file": "tests/regressions/test_batch_validator_contract.py",
+      "test_selectors": [
+        "tests/regressions/test_batch_validator_contract.py::test_coordinator_requeues_single_contract_failure_without_submitter_feedback"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "critique model replies",
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "critique and critique-validator contract failures surface as operational warnings, not provider waits",
+      "real_components": [
+        "backend/compiler/core/compiler_coordinator.py",
+        "backend/compiler/agents/high_param_submitter.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_compiler_critique_contract_failure_not_provider_wait",
+      "source_identity": "pytest:tests/unit/test_compiler_model_output_contract.py::test_critique_loop_contract_failures_are_not_provider_waits",
+      "status": "passed",
+      "test_file": "tests/unit/test_compiler_model_output_contract.py",
+      "test_selectors": [
+        "tests/unit/test_compiler_model_output_contract.py::test_critique_loop_contract_failures_are_not_provider_waits"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "validator model replies",
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "a compiler validator contract failure re-validates the same submission without recording a rejection",
+      "real_components": [
+        "backend/compiler/core/compiler_coordinator.py",
+        "backend/compiler/validation/compiler_validator.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_compiler_validator_contract_failure_revalidates",
+      "source_identity": "pytest:tests/unit/test_compiler_model_output_contract.py::test_validator_contract_failure_revalidates_same_submission",
+      "status": "passed",
+      "test_file": "tests/unit/test_compiler_model_output_contract.py",
+      "test_selectors": [
+        "tests/unit/test_compiler_model_output_contract.py::test_validator_contract_failure_revalidates_same_submission"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "self-validation model replies",
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "an unusable self-validation keeps the continue fallback without writing completion feedback",
+      "real_components": [
+        "backend/autonomous/agents/completion_reviewer.py",
+        "backend/autonomous/agents/output_contract.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_completion_self_validation_fallback_labeled",
+      "source_identity": "pytest:tests/unit/test_autonomous_output_contracts.py::CompletionReviewerTests::test_unusable_self_validation_continues_without_feedback",
+      "status": "passed",
+      "test_file": "tests/unit/test_autonomous_output_contracts.py",
+      "test_selectors": [
+        "tests/unit/test_autonomous_output_contracts.py::CompletionReviewerTests::test_unusable_self_validation_continues_without_feedback"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "marker-laden model tokens supplied by the test"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "a contract error carrying provider-like words is never classified as a provider, transient, or context failure",
+      "real_components": [
+        "backend/shared/model_error_utils.py",
+        "backend/shared/model_output_contract.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_contract_errors_never_provider_classified",
+      "source_identity": "pytest:tests/unit/test_model_output_contract.py::test_error_helpers_check_the_contract_type_first",
+      "status": "passed",
+      "test_file": "tests/unit/test_model_output_contract.py",
+      "test_selectors": [
+        "tests/unit/test_model_output_contract.py::test_error_helpers_check_the_contract_type_first"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "external providers and proof toolchains",
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "an identification contract failure ends the proof check with a typed, route-named proof_check_complete error",
+      "real_components": [
+        "backend/autonomous/core/proof_verification_stage.py",
+        "backend/shared/model_output_contract.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_proof_check_complete_reports_contract_stage",
+      "source_identity": "pytest:tests/regressions/test_proof_identification_contract_errors.py::test_stage_reports_identification_contract_failure_accurately",
+      "status": "passed",
+      "test_file": "tests/regressions/test_proof_identification_contract_errors.py",
+      "test_selectors": [
+        "tests/regressions/test_proof_identification_contract_errors.py::test_stage_reports_identification_contract_failure_accurately"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "gate model replies",
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "an unresolved proof framing gate turns framing on and publishes an unresolved decision",
+      "real_components": [
+        "backend/autonomous/core/autonomous_coordinator.py",
+        "backend/autonomous/agents/output_contract.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_proof_framing_gate_unresolved_defaults_on",
+      "source_identity": "pytest:tests/unit/test_autonomous_output_contracts.py::ProofFramingGateTests::test_unresolved_gate_defaults_framing_on_and_is_visible",
+      "status": "passed",
+      "test_file": "tests/unit/test_autonomous_output_contracts.py",
+      "test_selectors": [
+        "tests/unit/test_autonomous_output_contracts.py::ProofFramingGateTests::test_unresolved_gate_defaults_framing_on_and_is_visible"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "model replies supplied as fixed strings"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "one invalid theorem entry among valid ones raises a typed contract error naming that entry and field",
+      "real_components": [
+        "backend/autonomous/agents/proof_identification_agent.py",
+        "backend/shared/model_output_contract.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_proof_identification_contract_error_names_item_and_field",
+      "source_identity": "pytest:tests/regressions/test_proof_identification_contract_errors.py::test_one_bad_entry_names_item_and_field_without_claiming_none_were_valid",
+      "status": "passed",
+      "test_file": "tests/regressions/test_proof_identification_contract_errors.py",
+      "test_selectors": [
+        "tests/regressions/test_proof_identification_contract_errors.py::test_one_bad_entry_names_item_and_field_without_claiming_none_were_valid"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.contract_failure_not_semantic"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "validator model replies"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "a topic validator reply missing its decision raises a contract error instead of a reject",
+      "real_components": [
+        "backend/autonomous/agents/topic_validator.py",
+        "backend/autonomous/agents/output_contract.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_topic_validator_contract_failure_not_rejection",
+      "source_identity": "pytest:tests/unit/test_autonomous_output_contracts.py::ValidatorContractTests::test_topic_validator_contract_failure_is_not_a_rejection",
+      "status": "passed",
+      "test_file": "tests/unit/test_autonomous_output_contracts.py",
+      "test_selectors": [
+        "tests/unit/test_autonomous_output_contracts.py::ValidatorContractTests::test_topic_validator_contract_failure_is_not_a_rejection"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "solution_path.activation_review_fenced",
+        "proof_competition.secondary_after_primary_exhaustion",
+        "provider.exact_role_and_cooldown_scope",
+        "feedback_projection.newest_five_whole",
+        "bulk_mutation.atomic_revision_fenced",
+        "runtime_root.single_owner_bound_paths",
+        "proof_run.identity_generation_fenced",
+        "proof_framing.allowed_outputs_gate",
+        "sleep.unique_owner_released",
+        "supercharge_creativity.routing_separation",
+        "proof_novelty.group_atomic_same_run",
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": true,
+      "observed_transition": "direct model actions preserve declared product laws",
+      "real_components": [],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "model_current_product_law_families",
+      "source_identity": "pytest:tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+      "test_selectors": [
+        "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+      ]
+    },
+    {
+      "adapter": "real_coordinator",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "real_route",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.contract_failure_not_semantic",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "browser_smoke",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "validator model replies",
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "a misspelled batch reasoning key is relabeled and reported for the validator role",
+      "real_components": [
+        "backend/aggregator/agents/validator.py",
+        "backend/shared/json_key_recovery.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_aggregator_batch_reasoning_relabel_reported",
+      "source_identity": "pytest:tests/regressions/test_batch_validator_contract.py::test_batch_mislabeled_reasoning_key_is_relabeled_and_reported",
+      "status": "passed",
+      "test_file": "tests/regressions/test_batch_validator_contract.py",
+      "test_selectors": [
+        "tests/regressions/test_batch_validator_contract.py::test_batch_mislabeled_reasoning_key_is_relabeled_and_reported"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "identification model reply",
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "the observed misspelled rationale is accepted without retry and published once",
+      "real_components": [
+        "backend/autonomous/agents/proof_identification_agent.py",
+        "backend/shared/model_output_contract.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_identification_normalization_published_without_retry",
+      "source_identity": "pytest:tests/regressions/test_proof_identification_contract_errors.py::test_gemma_payload_needs_no_retry_and_publishes_one_normalization",
+      "status": "passed",
+      "test_file": "tests/regressions/test_proof_identification_contract_errors.py",
+      "test_selectors": [
+        "tests/regressions/test_proof_identification_contract_errors.py::test_gemma_payload_needs_no_retry_and_publishes_one_normalization"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "parsed objects supplied by the test"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "exact-edit anchor fields are never relabeled",
+      "real_components": [
+        "backend/shared/json_key_recovery.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_key_recovery_never_swaps_anchor_values",
+      "source_identity": "pytest:tests/unit/test_json_key_recovery.py::test_swapped_anchor_values_are_never_relabeled",
+      "status": "passed",
+      "test_file": "tests/unit/test_json_key_recovery.py",
+      "test_selectors": [
+        "tests/unit/test_json_key_recovery.py::test_swapped_anchor_values_are_never_relabeled"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "schemas supplied by the test"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "a schema cannot declare an id, discriminator, decision, or anchor key repairable",
+      "real_components": [
+        "backend/shared/json_key_recovery.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_key_recovery_protected_keys_never_repairable",
+      "source_identity": "pytest:tests/unit/test_json_key_recovery.py::test_protected_keys_can_never_be_declared_repairable",
+      "status": "passed",
+      "test_file": "tests/unit/test_json_key_recovery.py",
+      "test_selectors": [
+        "tests/unit/test_json_key_recovery.py::test_protected_keys_can_never_be_declared_repairable"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "parsed objects supplied by the test"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "each observed misspelled free-text key is relabeled to its schema key in place",
+      "real_components": [
+        "backend/shared/json_key_recovery.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_key_recovery_relabels_observed_misspellings",
+      "source_identity": "pytest:tests/unit/test_json_key_recovery.py::test_observed_gemma_misspellings_recover",
+      "status": "passed",
+      "test_file": "tests/unit/test_json_key_recovery.py",
+      "test_selectors": [
+        "tests/unit/test_json_key_recovery.py::test_observed_gemma_misspellings_recover"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "activity payloads supplied by Vitest"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "the normalization sentence is rendered with its route identity exactly once",
+      "real_components": [
+        "frontend/src/utils/activityStyles.js"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "vitest",
+      "scenario_id": "focused_normalization_activity_rendered_once",
+      "source_identity": "vitest:frontend/src/utils/activityStyles.test.js::model output normalization activity::shows the backend sentence with the route identity exactly once",
+      "status": "passed",
+      "test_file": "frontend/src/utils/activityStyles.test.js",
+      "test_selectors": [
+        "frontend/src/utils/activityStyles.test.js::model output normalization activity::shows the backend sentence with the route identity exactly once"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "WebSocket broadcaster"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "an applied repair is broadcast as route-identified model_output_normalized activity",
+      "real_components": [
+        "backend/shared/model_output_contract.py",
+        "backend/shared/api_client_manager.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_normalization_activity_route_identified",
+      "source_identity": "pytest:tests/unit/test_model_output_contract.py::test_report_helper_broadcasts_route_identified_activity",
+      "status": "passed",
+      "test_file": "tests/unit/test_model_output_contract.py",
+      "test_selectors": [
+        "tests/unit/test_model_output_contract.py::test_report_helper_broadcasts_route_identified_activity"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "WebSocket events supplied by Vitest"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "model_output_normalized rows reach the owning mode's Live Activity feed",
+      "real_components": [
+        "frontend/src/App.jsx",
+        "frontend/src/utils/activityStyles.js"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "vitest",
+      "scenario_id": "focused_normalization_activity_routed_in_frontend",
+      "source_identity": "vitest:frontend/src/components/modelOutputNormalizedActivity.test.jsx::model_output_normalized Live Activity routing::routes by workflow mode exactly like provider retry rows",
+      "status": "passed",
+      "test_file": "frontend/src/components/modelOutputNormalizedActivity.test.jsx",
+      "test_selectors": [
+        "frontend/src/components/modelOutputNormalizedActivity.test.jsx::model_output_normalized Live Activity routing::routes by workflow mode exactly like provider retry rows"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "model reply supplied as a fixed string"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "the observed stray character before a key is removed and recorded as a repair",
+      "real_components": [
+        "backend/shared/json_parser.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_parser_drops_stray_key_characters_and_reports",
+      "source_identity": "pytest:tests/unit/test_json_parser_repairs.py::test_exact_gemma_stray_line_is_dropped_and_reported",
+      "status": "passed",
+      "test_file": "tests/unit/test_json_parser_repairs.py",
+      "test_selectors": [
+        "tests/unit/test_json_parser_repairs.py::test_exact_gemma_stray_line_is_dropped_and_reported"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "model reply supplied as a fixed string"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "truncated output still raises and records no repair",
+      "real_components": [
+        "backend/shared/json_parser.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_parser_never_repairs_truncated_output",
+      "source_identity": "pytest:tests/unit/test_json_parser_repairs.py::test_truncated_output_still_raises_and_is_never_repaired",
+      "status": "passed",
+      "test_file": "tests/unit/test_json_parser_repairs.py",
+      "test_selectors": [
+        "tests/unit/test_json_parser_repairs.py::test_truncated_output_still_raises_and_is_never_repaired"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "model reply supplied as a fixed string"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "stray characters in value or array-element position are never removed",
+      "real_components": [
+        "backend/shared/json_parser.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_parser_never_repairs_value_positions",
+      "source_identity": "pytest:tests/unit/test_json_parser_repairs.py::test_value_and_array_positions_are_never_repaired",
+      "status": "passed",
+      "test_file": "tests/unit/test_json_parser_repairs.py",
+      "test_selectors": [
+        "tests/unit/test_json_parser_repairs.py::test_value_and_array_positions_are_never_repaired"
+      ]
+    },
+    {
+      "adapter": "focused_production",
+      "asserted_invariants": [
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [
+        "rigor discovery model replies"
+      ],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "a misspelled needs_theorem_work decision key is never relabeled",
+      "real_components": [
+        "backend/compiler/agents/high_param_submitter.py",
+        "backend/shared/json_key_recovery.py"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "focused_rigor_discovery_protected_decision_never_relabeled",
+      "source_identity": "pytest:tests/unit/test_compiler_model_output_contract.py::test_discovery_never_relabels_protected_decision_key",
+      "status": "passed",
+      "test_file": "tests/unit/test_compiler_model_output_contract.py",
+      "test_selectors": [
+        "tests/unit/test_compiler_model_output_contract.py::test_discovery_never_relabels_protected_decision_key"
+      ]
+    },
+    {
+      "adapter": "model",
+      "asserted_invariants": [
+        "solution_path.activation_review_fenced",
+        "proof_competition.secondary_after_primary_exhaustion",
+        "provider.exact_role_and_cooldown_scope",
+        "feedback_projection.newest_five_whole",
+        "bulk_mutation.atomic_revision_fenced",
+        "runtime_root.single_owner_bound_paths",
+        "proof_run.identity_generation_fenced",
+        "proof_framing.allowed_outputs_gate",
+        "sleep.unique_owner_released",
+        "supercharge_creativity.routing_separation",
+        "proof_novelty.group_atomic_same_run",
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "blocked_dependencies": [],
+      "declared": true,
+      "faked_dependencies": [],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": true,
+      "observed_transition": "direct model actions preserve declared product laws",
+      "real_components": [],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": "pytest",
+      "scenario_id": "model_current_product_law_families",
+      "source_identity": "pytest:tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+      "test_selectors": [
+        "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+      ]
+    },
+    {
+      "adapter": "real_coordinator",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "real_route",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
+      "field": "model_output_contract",
+      "invariant_id": "model_output.normalizations_visible_and_guarded",
+      "observed": false,
+      "observed_transition": null,
+      "real_components": [],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "runner": null,
+      "scenario_id": null,
+      "source_identity": null,
+      "status": "uncovered",
+      "test_file": null,
+      "test_selectors": []
+    },
+    {
+      "adapter": "browser_smoke",
+      "asserted_invariants": [],
+      "blocked_dependencies": [],
+      "declared": false,
+      "faked_dependencies": [],
       "field": "proof_competition",
       "invariant_id": "proof_competition.secondary_after_primary_exhaustion",
       "observed": false,
@@ -6939,7 +8720,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -7049,7 +8832,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -7159,7 +8944,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -9532,7 +11319,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -9746,7 +11535,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -9856,7 +11647,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -9966,7 +11759,9 @@
         "sleep.unique_owner_released",
         "supercharge_creativity.routing_separation",
         "proof_novelty.group_atomic_same_run",
-        "leanoj.parent_control_generation_fences_children"
+        "leanoj.parent_control_generation_fences_children",
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
       ],
       "blocked_dependencies": [],
       "declared": true,
@@ -10152,6 +11947,56 @@
       "invariant_id": "prompt.validator_excludes_assistant_memory",
       "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
       "risk_id": "risk.assistant_memory_crosses_boundary",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "cli_control_surface",
+      "gap_id": "risk.cli_control_surface_drift:cli_control.control_file_owner_lifecycle:real_route",
+      "invariant_id": "cli_control.control_file_owner_lifecycle",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.cli_control_surface_drift",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "focused_production",
+      "declared": false,
+      "field": "cli_control_surface",
+      "gap_id": "risk.cli_control_surface_drift:cli_control.hosted_writes_no_artifacts:focused_production",
+      "invariant_id": "cli_control.hosted_writes_no_artifacts",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.cli_control_surface_drift",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "focused_production",
+      "declared": false,
+      "field": "cli_control_surface",
+      "gap_id": "risk.cli_control_surface_drift:cli_control.start_template_credentials_stripped:focused_production",
+      "invariant_id": "cli_control.start_template_credentials_stripped",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.cli_control_surface_drift",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "focused_production",
+      "declared": false,
+      "field": "cli_control_surface",
+      "gap_id": "risk.cli_control_surface_drift:cli_control.start_template_only_after_committed_start:focused_production",
+      "invariant_id": "cli_control.start_template_only_after_committed_start",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.cli_control_surface_drift",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "focused_production",
+      "declared": false,
+      "field": "cli_control_surface",
+      "gap_id": "risk.cli_control_surface_drift:cli_control.template_replays_into_valid_start:focused_production",
+      "invariant_id": "cli_control.template_replays_into_valid_start",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.cli_control_surface_drift",
       "status": "uncovered"
     },
     {
@@ -10489,6 +12334,46 @@
       },
       {
         "declared_adapters": [
+          "focused_production",
+          "model"
+        ],
+        "field": "cli_control_surface",
+        "invariant_id": "cli_control.control_file_owner_lifecycle"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_route"
+        ],
+        "field": "cli_control_surface",
+        "invariant_id": "cli_control.hosted_writes_no_artifacts"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_route"
+        ],
+        "field": "cli_control_surface",
+        "invariant_id": "cli_control.start_template_credentials_stripped"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_route"
+        ],
+        "field": "cli_control_surface",
+        "invariant_id": "cli_control.start_template_only_after_committed_start"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_route"
+        ],
+        "field": "cli_control_surface",
+        "invariant_id": "cli_control.template_replays_into_valid_start"
+      },
+      {
+        "declared_adapters": [
           "model"
         ],
         "field": "websocket_api_contracts",
@@ -10624,6 +12509,22 @@
         ],
         "field": "websocket_api_contracts",
         "invariant_id": "live_activity.provider_retry_secret_safe"
+      },
+      {
+        "declared_adapters": [
+          "focused_production",
+          "model"
+        ],
+        "field": "model_output_contract",
+        "invariant_id": "model_output.contract_failure_not_semantic"
+      },
+      {
+        "declared_adapters": [
+          "focused_production",
+          "model"
+        ],
+        "field": "model_output_contract",
+        "invariant_id": "model_output.normalizations_visible_and_guarded"
       },
       {
         "declared_adapters": [
@@ -11046,6 +12947,11 @@
       },
       {
         "priority": "critical",
+        "risk_id": "risk.cli_control_surface_drift",
+        "title": "Terminal/agent control drifts from the app's start, hosted, and credential rules"
+      },
+      {
+        "priority": "critical",
         "risk_id": "risk.context_overflow_activity_loses_identity",
         "title": "Context overflow loses route identity or lifecycle semantics"
       },
@@ -11193,6 +13099,11 @@
         "priority": "critical",
         "risk_id": "risk.leanoj_parent_control_stale_commit",
         "title": "LeanOJ child overrides parent control"
+      },
+      {
+        "priority": "critical",
+        "risk_id": "risk.model_output_contract_mislabeled",
+        "title": "Malformed model output is mislabeled as a decision or silently rewritten"
       },
       {
         "priority": "high",
@@ -11382,6 +13293,561 @@
       {
         "adapter": "model",
         "asserted_invariants": [
+          "cli_control.start_template_only_after_committed_start",
+          "cli_control.start_template_credentials_stripped",
+          "cli_control.hosted_writes_no_artifacts",
+          "cli_control.control_file_owner_lifecycle",
+          "cli_control.template_replays_into_valid_start",
+          "runtime.single_active_workflow"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [],
+        "observed_transition": "direct model actions preserve declared product laws",
+        "real_components": [],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "cli_template_chain_exclusive_start_and_hosted_boundary",
+        "source_identity": "pytest:tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields",
+        "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
+        "test_selectors": [
+          "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "validator model replies",
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "an unusable batch reply restores every dequeued submission and validates them one at a time",
+        "real_components": [
+          "backend/aggregator/agents/validator.py",
+          "backend/aggregator/core/coordinator.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_aggregator_batch_contract_failure_restored",
+        "source_identity": "pytest:tests/regressions/test_batch_validator_contract.py::test_coordinator_restores_unusable_batch_and_validates_it_one_at_a_time",
+        "test_file": "tests/regressions/test_batch_validator_contract.py",
+        "test_selectors": [
+          "tests/regressions/test_batch_validator_contract.py::test_coordinator_restores_unusable_batch_and_validates_it_one_at_a_time"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "validator model replies",
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "a misspelled batch reasoning key is relabeled and reported for the validator role",
+        "real_components": [
+          "backend/aggregator/agents/validator.py",
+          "backend/shared/json_key_recovery.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_aggregator_batch_reasoning_relabel_reported",
+        "source_identity": "pytest:tests/regressions/test_batch_validator_contract.py::test_batch_mislabeled_reasoning_key_is_relabeled_and_reported",
+        "test_file": "tests/regressions/test_batch_validator_contract.py",
+        "test_selectors": [
+          "tests/regressions/test_batch_validator_contract.py::test_batch_mislabeled_reasoning_key_is_relabeled_and_reported"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "validator model replies",
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "an unusable validator reply requeues the submission with operational activity and no submitter rejection",
+        "real_components": [
+          "backend/aggregator/agents/validator.py",
+          "backend/aggregator/core/coordinator.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_aggregator_validator_contract_failure_requeued",
+        "source_identity": "pytest:tests/regressions/test_batch_validator_contract.py::test_coordinator_requeues_single_contract_failure_without_submitter_feedback",
+        "test_file": "tests/regressions/test_batch_validator_contract.py",
+        "test_selectors": [
+          "tests/regressions/test_batch_validator_contract.py::test_coordinator_requeues_single_contract_failure_without_submitter_feedback"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "cli_control.control_file_owner_lifecycle"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "backend process lifetime (driven directly instead of through uvicorn)"
+        ],
+        "observed_transition": "the lifespan publishes the control file after ready work; CLI discovery reads it; cleanup keeps another process's file and removes its own",
+        "real_components": [
+          "backend/api/main.py",
+          "backend/shared/cli_control.py",
+          "moto_cli.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_cli_control_file_ready_and_owner_removed",
+        "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_control_file_published_when_ready_and_removed_only_by_owner",
+        "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+        "test_selectors": [
+          "tests/workflow_real_adapters/test_cli_control_routes.py::test_control_file_published_when_ready_and_removed_only_by_owner"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "critique model replies",
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "critique and critique-validator contract failures surface as operational warnings, not provider waits",
+        "real_components": [
+          "backend/compiler/core/compiler_coordinator.py",
+          "backend/compiler/agents/high_param_submitter.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_compiler_critique_contract_failure_not_provider_wait",
+        "source_identity": "pytest:tests/unit/test_compiler_model_output_contract.py::test_critique_loop_contract_failures_are_not_provider_waits",
+        "test_file": "tests/unit/test_compiler_model_output_contract.py",
+        "test_selectors": [
+          "tests/unit/test_compiler_model_output_contract.py::test_critique_loop_contract_failures_are_not_provider_waits"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "validator model replies",
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "a compiler validator contract failure re-validates the same submission without recording a rejection",
+        "real_components": [
+          "backend/compiler/core/compiler_coordinator.py",
+          "backend/compiler/validation/compiler_validator.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_compiler_validator_contract_failure_revalidates",
+        "source_identity": "pytest:tests/unit/test_compiler_model_output_contract.py::test_validator_contract_failure_revalidates_same_submission",
+        "test_file": "tests/unit/test_compiler_model_output_contract.py",
+        "test_selectors": [
+          "tests/unit/test_compiler_model_output_contract.py::test_validator_contract_failure_revalidates_same_submission"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "self-validation model replies",
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "an unusable self-validation keeps the continue fallback without writing completion feedback",
+        "real_components": [
+          "backend/autonomous/agents/completion_reviewer.py",
+          "backend/autonomous/agents/output_contract.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_completion_self_validation_fallback_labeled",
+        "source_identity": "pytest:tests/unit/test_autonomous_output_contracts.py::CompletionReviewerTests::test_unusable_self_validation_continues_without_feedback",
+        "test_file": "tests/unit/test_autonomous_output_contracts.py",
+        "test_selectors": [
+          "tests/unit/test_autonomous_output_contracts.py::CompletionReviewerTests::test_unusable_self_validation_continues_without_feedback"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "marker-laden model tokens supplied by the test"
+        ],
+        "observed_transition": "a contract error carrying provider-like words is never classified as a provider, transient, or context failure",
+        "real_components": [
+          "backend/shared/model_error_utils.py",
+          "backend/shared/model_output_contract.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_contract_errors_never_provider_classified",
+        "source_identity": "pytest:tests/unit/test_model_output_contract.py::test_error_helpers_check_the_contract_type_first",
+        "test_file": "tests/unit/test_model_output_contract.py",
+        "test_selectors": [
+          "tests/unit/test_model_output_contract.py::test_error_helpers_check_the_contract_type_first"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "identification model reply",
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "the observed misspelled rationale is accepted without retry and published once",
+        "real_components": [
+          "backend/autonomous/agents/proof_identification_agent.py",
+          "backend/shared/model_output_contract.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_identification_normalization_published_without_retry",
+        "source_identity": "pytest:tests/regressions/test_proof_identification_contract_errors.py::test_gemma_payload_needs_no_retry_and_publishes_one_normalization",
+        "test_file": "tests/regressions/test_proof_identification_contract_errors.py",
+        "test_selectors": [
+          "tests/regressions/test_proof_identification_contract_errors.py::test_gemma_payload_needs_no_retry_and_publishes_one_normalization"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "parsed objects supplied by the test"
+        ],
+        "observed_transition": "exact-edit anchor fields are never relabeled",
+        "real_components": [
+          "backend/shared/json_key_recovery.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_key_recovery_never_swaps_anchor_values",
+        "source_identity": "pytest:tests/unit/test_json_key_recovery.py::test_swapped_anchor_values_are_never_relabeled",
+        "test_file": "tests/unit/test_json_key_recovery.py",
+        "test_selectors": [
+          "tests/unit/test_json_key_recovery.py::test_swapped_anchor_values_are_never_relabeled"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "schemas supplied by the test"
+        ],
+        "observed_transition": "a schema cannot declare an id, discriminator, decision, or anchor key repairable",
+        "real_components": [
+          "backend/shared/json_key_recovery.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_key_recovery_protected_keys_never_repairable",
+        "source_identity": "pytest:tests/unit/test_json_key_recovery.py::test_protected_keys_can_never_be_declared_repairable",
+        "test_file": "tests/unit/test_json_key_recovery.py",
+        "test_selectors": [
+          "tests/unit/test_json_key_recovery.py::test_protected_keys_can_never_be_declared_repairable"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "parsed objects supplied by the test"
+        ],
+        "observed_transition": "each observed misspelled free-text key is relabeled to its schema key in place",
+        "real_components": [
+          "backend/shared/json_key_recovery.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_key_recovery_relabels_observed_misspellings",
+        "source_identity": "pytest:tests/unit/test_json_key_recovery.py::test_observed_gemma_misspellings_recover",
+        "test_file": "tests/unit/test_json_key_recovery.py",
+        "test_selectors": [
+          "tests/unit/test_json_key_recovery.py::test_observed_gemma_misspellings_recover"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "activity payloads supplied by Vitest"
+        ],
+        "observed_transition": "the normalization sentence is rendered with its route identity exactly once",
+        "real_components": [
+          "frontend/src/utils/activityStyles.js"
+        ],
+        "result": "passed",
+        "runner": "vitest",
+        "scenario_id": "focused_normalization_activity_rendered_once",
+        "source_identity": "vitest:frontend/src/utils/activityStyles.test.js::model output normalization activity::shows the backend sentence with the route identity exactly once",
+        "test_file": "frontend/src/utils/activityStyles.test.js",
+        "test_selectors": [
+          "frontend/src/utils/activityStyles.test.js::model output normalization activity::shows the backend sentence with the route identity exactly once"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "an applied repair is broadcast as route-identified model_output_normalized activity",
+        "real_components": [
+          "backend/shared/model_output_contract.py",
+          "backend/shared/api_client_manager.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_normalization_activity_route_identified",
+        "source_identity": "pytest:tests/unit/test_model_output_contract.py::test_report_helper_broadcasts_route_identified_activity",
+        "test_file": "tests/unit/test_model_output_contract.py",
+        "test_selectors": [
+          "tests/unit/test_model_output_contract.py::test_report_helper_broadcasts_route_identified_activity"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "WebSocket events supplied by Vitest"
+        ],
+        "observed_transition": "model_output_normalized rows reach the owning mode's Live Activity feed",
+        "real_components": [
+          "frontend/src/App.jsx",
+          "frontend/src/utils/activityStyles.js"
+        ],
+        "result": "passed",
+        "runner": "vitest",
+        "scenario_id": "focused_normalization_activity_routed_in_frontend",
+        "source_identity": "vitest:frontend/src/components/modelOutputNormalizedActivity.test.jsx::model_output_normalized Live Activity routing::routes by workflow mode exactly like provider retry rows",
+        "test_file": "frontend/src/components/modelOutputNormalizedActivity.test.jsx",
+        "test_selectors": [
+          "frontend/src/components/modelOutputNormalizedActivity.test.jsx::model_output_normalized Live Activity routing::routes by workflow mode exactly like provider retry rows"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "model reply supplied as a fixed string"
+        ],
+        "observed_transition": "the observed stray character before a key is removed and recorded as a repair",
+        "real_components": [
+          "backend/shared/json_parser.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_parser_drops_stray_key_characters_and_reports",
+        "source_identity": "pytest:tests/unit/test_json_parser_repairs.py::test_exact_gemma_stray_line_is_dropped_and_reported",
+        "test_file": "tests/unit/test_json_parser_repairs.py",
+        "test_selectors": [
+          "tests/unit/test_json_parser_repairs.py::test_exact_gemma_stray_line_is_dropped_and_reported"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "model reply supplied as a fixed string"
+        ],
+        "observed_transition": "truncated output still raises and records no repair",
+        "real_components": [
+          "backend/shared/json_parser.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_parser_never_repairs_truncated_output",
+        "source_identity": "pytest:tests/unit/test_json_parser_repairs.py::test_truncated_output_still_raises_and_is_never_repaired",
+        "test_file": "tests/unit/test_json_parser_repairs.py",
+        "test_selectors": [
+          "tests/unit/test_json_parser_repairs.py::test_truncated_output_still_raises_and_is_never_repaired"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "model reply supplied as a fixed string"
+        ],
+        "observed_transition": "stray characters in value or array-element position are never removed",
+        "real_components": [
+          "backend/shared/json_parser.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_parser_never_repairs_value_positions",
+        "source_identity": "pytest:tests/unit/test_json_parser_repairs.py::test_value_and_array_positions_are_never_repaired",
+        "test_file": "tests/unit/test_json_parser_repairs.py",
+        "test_selectors": [
+          "tests/unit/test_json_parser_repairs.py::test_value_and_array_positions_are_never_repaired"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "external providers and proof toolchains",
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "an identification contract failure ends the proof check with a typed, route-named proof_check_complete error",
+        "real_components": [
+          "backend/autonomous/core/proof_verification_stage.py",
+          "backend/shared/model_output_contract.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_proof_check_complete_reports_contract_stage",
+        "source_identity": "pytest:tests/regressions/test_proof_identification_contract_errors.py::test_stage_reports_identification_contract_failure_accurately",
+        "test_file": "tests/regressions/test_proof_identification_contract_errors.py",
+        "test_selectors": [
+          "tests/regressions/test_proof_identification_contract_errors.py::test_stage_reports_identification_contract_failure_accurately"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "gate model replies",
+          "WebSocket broadcaster"
+        ],
+        "observed_transition": "an unresolved proof framing gate turns framing on and publishes an unresolved decision",
+        "real_components": [
+          "backend/autonomous/core/autonomous_coordinator.py",
+          "backend/autonomous/agents/output_contract.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_proof_framing_gate_unresolved_defaults_on",
+        "source_identity": "pytest:tests/unit/test_autonomous_output_contracts.py::ProofFramingGateTests::test_unresolved_gate_defaults_framing_on_and_is_visible",
+        "test_file": "tests/unit/test_autonomous_output_contracts.py",
+        "test_selectors": [
+          "tests/unit/test_autonomous_output_contracts.py::ProofFramingGateTests::test_unresolved_gate_defaults_framing_on_and_is_visible"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "model replies supplied as fixed strings"
+        ],
+        "observed_transition": "one invalid theorem entry among valid ones raises a typed contract error naming that entry and field",
+        "real_components": [
+          "backend/autonomous/agents/proof_identification_agent.py",
+          "backend/shared/model_output_contract.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_proof_identification_contract_error_names_item_and_field",
+        "source_identity": "pytest:tests/regressions/test_proof_identification_contract_errors.py::test_one_bad_entry_names_item_and_field_without_claiming_none_were_valid",
+        "test_file": "tests/regressions/test_proof_identification_contract_errors.py",
+        "test_selectors": [
+          "tests/regressions/test_proof_identification_contract_errors.py::test_one_bad_entry_names_item_and_field_without_claiming_none_were_valid"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.normalizations_visible_and_guarded"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "rigor discovery model replies"
+        ],
+        "observed_transition": "a misspelled needs_theorem_work decision key is never relabeled",
+        "real_components": [
+          "backend/compiler/agents/high_param_submitter.py",
+          "backend/shared/json_key_recovery.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_rigor_discovery_protected_decision_never_relabeled",
+        "source_identity": "pytest:tests/unit/test_compiler_model_output_contract.py::test_discovery_never_relabels_protected_decision_key",
+        "test_file": "tests/unit/test_compiler_model_output_contract.py",
+        "test_selectors": [
+          "tests/unit/test_compiler_model_output_contract.py::test_discovery_never_relabels_protected_decision_key"
+        ]
+      },
+      {
+        "adapter": "focused_production",
+        "asserted_invariants": [
+          "model_output.contract_failure_not_semantic"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "validator model replies"
+        ],
+        "observed_transition": "a topic validator reply missing its decision raises a contract error instead of a reject",
+        "real_components": [
+          "backend/autonomous/agents/topic_validator.py",
+          "backend/autonomous/agents/output_contract.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "focused_topic_validator_contract_failure_not_rejection",
+        "source_identity": "pytest:tests/unit/test_autonomous_output_contracts.py::ValidatorContractTests::test_topic_validator_contract_failure_is_not_a_rejection",
+        "test_file": "tests/unit/test_autonomous_output_contracts.py",
+        "test_selectors": [
+          "tests/unit/test_autonomous_output_contracts.py::ValidatorContractTests::test_topic_validator_contract_failure_is_not_a_rejection"
+        ]
+      },
+      {
+        "adapter": "model",
+        "asserted_invariants": [
           "outputs.proofs_only_no_paper_phase",
           "provider.pause_preserves_checkpoint",
           "provider.stop_resume_preserves_pause",
@@ -11491,6 +13957,52 @@
         "result": "passed",
         "runner": "pytest",
         "scenario_id": "generated_autonomous_paper_checkpoint_seed_7",
+        "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+        "test_selectors": [
+          "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+        ]
+      },
+      {
+        "adapter": "model",
+        "asserted_invariants": [
+          "cli_control.start_template_only_after_committed_start",
+          "cli_control.start_template_credentials_stripped",
+          "cli_control.hosted_writes_no_artifacts",
+          "cli_control.control_file_owner_lifecycle",
+          "cli_control.template_replays_into_valid_start",
+          "runtime.single_active_workflow"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [],
+        "observed_transition": "seeded model planner reached the declared target",
+        "real_components": [],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "generated_cli_start_template_chain_seed_29",
+        "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
+        "test_selectors": [
+          "tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed"
+        ]
+      },
+      {
+        "adapter": "model",
+        "asserted_invariants": [
+          "cli_control.start_template_only_after_committed_start",
+          "cli_control.start_template_credentials_stripped",
+          "cli_control.hosted_writes_no_artifacts",
+          "cli_control.control_file_owner_lifecycle",
+          "cli_control.template_replays_into_valid_start",
+          "runtime.single_active_workflow"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [],
+        "observed_transition": "seeded model planner reached the declared target",
+        "real_components": [],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "generated_cli_start_template_chain_seed_7",
         "source_identity": "pytest:tests/workflow_recombinatory/test_mode_aware_generator.py::test_every_default_target_can_complete_for_normal_seed",
         "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py",
         "test_selectors": [
@@ -11910,7 +14422,9 @@
           "sleep.unique_owner_released",
           "supercharge_creativity.routing_separation",
           "proof_novelty.group_atomic_same_run",
-          "leanoj.parent_control_generation_fences_children"
+          "leanoj.parent_control_generation_fences_children",
+          "model_output.contract_failure_not_semantic",
+          "model_output.normalizations_visible_and_guarded"
         ],
         "blocked_dependencies": [],
         "faked_dependencies": [],
@@ -12306,6 +14820,29 @@
       {
         "adapter": "real_route",
         "asserted_invariants": [
+          "cli_control.start_template_only_after_committed_start"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams"
+        ],
+        "observed_transition": "real Aggregator start rejected by an active Compiler leaves no CLI start template",
+        "real_components": [
+          "backend/api/routes/aggregator.py",
+          "backend/shared/cli_control.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "real_conflicting_start_saves_no_cli_template",
+        "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_real_conflicting_start_saves_no_template",
+        "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+        "test_selectors": [
+          "tests/workflow_real_adapters/test_cli_control_routes.py::test_real_conflicting_start_saves_no_template"
+        ]
+      },
+      {
+        "adapter": "real_route",
+        "asserted_invariants": [
           "proof_loop.continuous_explicit_ownership"
         ],
         "blocked_dependencies": [],
@@ -12421,6 +14958,29 @@
         "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py",
         "test_selectors": [
           "tests/workflow_real_adapters/test_high_value_scenarios.py::test_hosted_proof_settings_returns_desktop_unavailable"
+        ]
+      },
+      {
+        "adapter": "real_route",
+        "asserted_invariants": [
+          "cli_control.hosted_writes_no_artifacts"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams"
+        ],
+        "observed_transition": "a committed hosted Aggregator start and control-file publish write no CLI artifacts",
+        "real_components": [
+          "backend/api/routes/aggregator.py",
+          "backend/shared/cli_control.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "real_hosted_start_writes_no_cli_artifacts",
+        "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_real_hosted_start_writes_no_cli_artifacts",
+        "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+        "test_selectors": [
+          "tests/workflow_real_adapters/test_cli_control_routes.py::test_real_hosted_start_writes_no_cli_artifacts"
         ]
       },
       {
@@ -13282,6 +15842,32 @@
         "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py",
         "test_selectors": [
           "tests/workflow_real_adapters/test_build_bc_lifecycles.py::test_actual_compiler_and_aggregator_route_start_race_has_one_winner"
+        ]
+      },
+      {
+        "adapter": "real_route",
+        "asserted_invariants": [
+          "cli_control.start_template_only_after_committed_start",
+          "cli_control.start_template_credentials_stripped",
+          "cli_control.template_replays_into_valid_start"
+        ],
+        "blocked_dependencies": [],
+        "faked_dependencies": [
+          "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams"
+        ],
+        "observed_transition": "real Aggregator start saves a template; the CLI builds the next request from it; the real route accepts that request and saves the new prompt",
+        "real_components": [
+          "backend/api/routes/aggregator.py",
+          "backend/shared/cli_control.py",
+          "moto_cli.py"
+        ],
+        "result": "passed",
+        "runner": "pytest",
+        "scenario_id": "real_start_template_replays_through_cli_into_next_start",
+        "source_identity": "pytest:tests/workflow_real_adapters/test_cli_control_routes.py::test_real_start_template_replays_through_cli_into_the_next_real_start",
+        "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+        "test_selectors": [
+          "tests/workflow_real_adapters/test_cli_control_routes.py::test_real_start_template_replays_through_cli_into_the_next_real_start"
         ]
       }
     ]

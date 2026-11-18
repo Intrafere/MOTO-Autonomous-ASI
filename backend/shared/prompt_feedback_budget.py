@@ -170,3 +170,73 @@ async def fit_prompt_with_feedback_async(
                 available_tokens=available_tokens,
             )
         retained = retained[1:]
+
+
+@dataclass(frozen=True)
+class FeedbackStreamsFitResult:
+    """Newest whole-entry suffixes of several feedback streams, after fitting."""
+
+    prompt: str
+    retained_streams: Tuple[Tuple[object, ...], ...]
+    prompt_tokens: int
+    available_tokens: int
+
+    @property
+    def fits(self) -> bool:
+        return self.prompt_tokens <= self.available_tokens
+
+
+def shed_oldest_feedback(
+    retained_streams: Tuple[Tuple[T, ...], ...],
+) -> "Tuple[Tuple[T, ...], ...] | None":
+    """Drop the oldest entry of the first stream that still holds more than one.
+
+    Streams are listed in shedding order, so an earlier stream falls to its
+    newest entry before a later stream loses anything. Returns ``None`` when
+    every stream is already at its newest entry (or empty).
+    """
+
+    for index, entries in enumerate(retained_streams):
+        if len(entries) > 1:
+            return (
+                retained_streams[:index]
+                + (entries[1:],)
+                + retained_streams[index + 1 :]
+            )
+    return None
+
+
+def fit_prompt_with_feedback_streams(
+    streams: Iterable[Iterable[T]],
+    *,
+    build_prompt: Callable[[Tuple[Tuple[T, ...], ...]], str],
+    available_tokens: int,
+    max_entries: int = 5,
+) -> FeedbackStreamsFitResult:
+    """Fit several rolling feedback streams into one complete prompt.
+
+    Each stream starts at its newest ``max_entries`` whole entries; the oldest
+    entries are removed one at a time in stream order (see
+    :func:`shed_oldest_feedback`). Each stream's newest entry is always kept,
+    even if the prompt still does not fit; the caller then uses its normal
+    typed context-overflow path.
+    """
+
+    if max_entries < 1:
+        raise ValueError("max_entries must be at least 1")
+    if available_tokens < 0:
+        raise ValueError("available_tokens must be non-negative")
+
+    retained = tuple(tuple(stream)[-max_entries:] for stream in streams)
+    while True:
+        prompt = build_prompt(retained)
+        prompt_tokens = count_tokens(prompt)
+        shed = None if prompt_tokens <= available_tokens else shed_oldest_feedback(retained)
+        if shed is None:
+            return FeedbackStreamsFitResult(
+                prompt=prompt,
+                retained_streams=retained,
+                prompt_tokens=prompt_tokens,
+                available_tokens=available_tokens,
+            )
+        retained = shed

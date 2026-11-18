@@ -73,7 +73,7 @@ describe('role conversion', () => {
     }).openrouter_reasoning_effort).toBe('max');
   });
 
-  test('hosted mode resets non-OpenRouter roles and removes LM Studio fallbacks', () => {
+  test('hosted mode resets non-OpenRouter roles and removes local fallbacks', () => {
     const hosted = { lmStudioEnabled: false };
     expect(roleFromSettings({ ...SNAKE_ROLE, provider: 'lm_studio', model_id: 'lm-one' }, hosted)).toMatchObject({
       provider: 'openrouter',

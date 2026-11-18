@@ -4,7 +4,7 @@
  * Compiler settings expose Writing and Rigor & Proofs roles.
  * Now supports per-role OpenRouter model selection with provider and fallback options.
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useId } from 'react';
 import { openRouterAPI, api, autonomousAPI } from '../../services/api';
 import {
   computeCloudProviderAutoSettings,
@@ -23,8 +23,11 @@ import { refreshOpenRouterCredentialState } from '../../utils/credentialProvider
 import useCloudAccessProviders from '../../hooks/useCloudAccessProviders';
 import {
   chooseCloudAccessProvider,
+  isCloudSubscriptionProvider,
   isCloudAccessProvider,
 } from '../../utils/oauthProviders';
+import LocalServerProviderButtons from '../LocalServerProviderButtons';
+import LocalFallbackOptions from '../LocalFallbackOptions';
 import {
   AUTONOMOUS_PROFILES_STORAGE_KEY,
   RECOMMENDED_PROFILE_KEYS,
@@ -38,10 +41,13 @@ import {
 } from '../../utils/autonomousProfiles';
 import CloudProviderModelErrors from '../CloudProviderModelErrors';
 import CloudReasoningControl from '../CloudReasoningControl';
+import TokenCountNote from '../TokenCountNote';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
 import ProofStrengthBadge from '../ProofStrengthBadge';
+import UsageLevelBadge from '../UsageLevelBadge';
+import { publishProofSettings, subscribeToProofSettings } from '../../utils/proofRuntimeSettings';
 import RawSettingsEditor from '../RawSettingsEditor';
 import { readBooleanStorage } from '../../utils/safeStorage';
 import './AutonomousResearch.css';
@@ -105,6 +111,12 @@ const ModelSelector = ({
             >
               LM Studio
             </button>
+            <LocalServerProviderButtons
+              provider={provider}
+              statusByProvider={oauthStatusByProvider}
+              disabled={isRunning}
+              onSelect={onProviderChange}
+            />
             <button
               type="button"
               className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
@@ -117,7 +129,7 @@ const ModelSelector = ({
             </button>
             <button
               type="button"
-              className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
+              className={`provider-toggle-btn${isCloudSubscriptionProvider(provider) ? ' active-or-orange' : ''}`}
               onClick={() => {
                 if (configuredOAuthProviders.length > 0) {
                   onProviderChange(chooseCloudAccessProvider(oauthStatusByProvider, provider));
@@ -129,7 +141,7 @@ const ModelSelector = ({
             >
               Cloud
             </button>
-            {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
+            {isCloudSubscriptionProvider(provider) && configuredOAuthProviders.length > 1 && (
               <select
                 value={provider}
                 onChange={(event) => onProviderChange(event.target.value)}
@@ -230,21 +242,24 @@ const ModelSelector = ({
         />
       )}
 
-      {/* LM Studio Fallback (if cloud provider) */}
+      {/* Local fallback: an LM Studio or vLLM model (not for LM Studio roles) */}
       {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
         <div className="settings-row">
-          <label className="label--muted">LM Studio Fallback (optional)</label>
+          <label className="label--muted">Local Fallback (optional)</label>
           <select
             value={fallback || ''}
             onChange={(e) => onFallbackChange(e.target.value || null)}
             disabled={isRunning}
           >
-            <option value="">No fallback</option>
-            {lmStudioModels.map(m => (
-              <option key={m.id} value={m.id}>{m.id}</option>
-            ))}
+            <LocalFallbackOptions
+              lmStudioModels={lmStudioModels}
+              modelsFor={cloudProviders.modelsFor}
+              provider={effectiveProvider}
+              modelId={modelId}
+              value={fallback}
+            />
           </select>
-          <small className="settings-hint">Used if cloud provider access fails or credits run out</small>
+          <small className="settings-hint">An LM Studio or vLLM model used if this role's provider fails or credits run out</small>
         </div>
       )}
     </>
@@ -269,7 +284,6 @@ const RoleConfig = ({
   modelProviders,
   hasOpenRouterKey,
   lmStudioEnabled,
-  developerModeEnabled = false,
   showProofStrengthBadge = false,
   disabled = false,
 }) => {
@@ -335,6 +349,7 @@ const RoleConfig = ({
           max={50000000}
           step={1024}
         />
+        <TokenCountNote provider={provider} modelId={modelId} contextWindow={contextWindow} />
       </div>
 
       <div className="settings-row">
@@ -351,27 +366,26 @@ const RoleConfig = ({
         />
       </div>
 
-      {developerModeEnabled && (
-        <div className="settings-row settings-row--inline-checkbox">
-          <label className="settings-checkbox-label settings-checkbox-label--supercharge">
-            <input
-              type="checkbox"
-              checked={superchargeEnabled}
-              onChange={(e) => handleChange(`${rolePrefix}_supercharge_enabled`, e.target.checked)}
-              disabled={isRunning || disabled}
-            />
-            <HelpTooltip
-              label="Learn about Supercharge"
-              buttonContent="Supercharge"
-              buttonClassName="help-tooltip-btn--text"
-              popupClassName="help-tooltip-popup--fixed"
-              useFixedPosition
-            >
-              {SUPERCHARGE_TOOLTIP}
-            </HelpTooltip>
-          </label>
-        </div>
-      )}
+      <div className="settings-row settings-row--inline-checkbox">
+        <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+          <input
+            type="checkbox"
+            checked={superchargeEnabled}
+            onChange={(e) => handleChange(`${rolePrefix}_supercharge_enabled`, e.target.checked)}
+            disabled={isRunning || disabled}
+          />
+          <HelpTooltip
+            label="Learn about Supercharge"
+            buttonContent="Supercharge"
+            buttonClassName="help-tooltip-btn--text"
+            popupClassName="help-tooltip-popup--fixed"
+            useFixedPosition
+          >
+            {SUPERCHARGE_TOOLTIP}
+          </HelpTooltip>
+        </label>
+        <UsageLevelBadge featureId="roles.supercharge" />
+      </div>
     </div>
   );
 };
@@ -444,6 +458,8 @@ export const ProofCompetitionSettings = ({ localConfig, onChange, getAutoSetting
         }} />
       Duplicate role to compete against other AI(s)
     </label>
+    <UsageLevelBadge featureId="proofs.competition"
+      context={{ models: 1 + Math.max(1, competition.secondaries.length) }} />
     <HelpTooltip label="Learn about proof model competition" useFixedPosition>
       Each model gets up to five proof attempts. A secondary tries only after the preceding model exhausts its attempts;
       the first Lean success ends that candidate's chain. Models keep private failure feedback. Pipelined handoffs let
@@ -509,6 +525,8 @@ const AutonomousResearchSettings = ({
   const [proofSettingsLspEnabled, setProofSettingsLspEnabled] = useState(false);
   const [proofSettingsLspIdleTimeout, setProofSettingsLspIdleTimeout] = useState('600');
   const [proofSettingsMaxParallelCandidates, setProofSettingsMaxParallelCandidates] = useState('6');
+  const submitterUsageId = useId();
+  const proofParallelUsageId = useId();
   const [proofSettingsSmtEnabled, setProofSettingsSmtEnabled] = useState(false);
   const [proofSettingsSmtTimeout, setProofSettingsSmtTimeout] = useState('300');
   const [savingProofSettings, setSavingProofSettings] = useState(false);
@@ -724,6 +742,13 @@ const AutonomousResearchSettings = ({
     loadProofStatus();
   }, [genericMode]);
 
+  // Allowed Outputs proof options edit the same settings; follow their saves
+  // without discarding other unsaved edits in this panel.
+  useEffect(() => subscribeToProofSettings((status) => {
+    setProofStatus(status);
+    setProofSettingsMaxParallelCandidates(String(status.proof_max_parallel_candidates ?? 6));
+  }), []);
+
   // Fetch providers for any OpenRouter models after settings are loaded
   useEffect(() => {
     if (!isLoadedFromStorage || !hasOpenRouterKey) return;
@@ -776,7 +801,7 @@ const AutonomousResearchSettings = ({
       freeOnly,
       freeModelLooping,
       freeModelAutoSelector,
-      allowMathematicalProofs: config?.allow_mathematical_proofs ?? true,
+      allowMathematicalProofs: config?.allow_mathematical_proofs ?? false,
       allowResearchPapers: config?.allow_research_papers ?? true,
       tier3Enabled,
       creativityEmphasisBoostEnabled: config?.creativity_emphasis_boost_enabled ?? false,
@@ -841,14 +866,14 @@ const AutonomousResearchSettings = ({
     const currentConfig = {
       ...localConfig,
       submitter_configs: submitterConfigs.slice(0, numSubmitters),
-      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? true,
+      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? false,
       allow_research_papers: config?.allow_research_papers ?? true,
       tier3_enabled: tier3Enabled,
     };
     const nextConfig = {
       ...normalizedLocalConfig,
       submitter_configs: normalizedSubmitters.slice(0, numSubmitters),
-      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? true,
+      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? false,
       allow_research_papers: config?.allow_research_papers ?? true,
       tier3_enabled: tier3Enabled,
     };
@@ -867,11 +892,8 @@ const AutonomousResearchSettings = ({
 
   useEffect(() => {
     if (!isLoadedFromStorage) return;
-    const competition = normalizeProofCompetition(localConfig.proof_competition);
-    onConfigChange({ proof_competition: { ...competition, secondaries: competition.secondaries.map(role => ({
-      ...role, supercharge_enabled: developerModeEnabled && role.supercharge_enabled,
-    })) } });
-  }, [isLoadedFromStorage, localConfig.proof_competition, developerModeEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
+    onConfigChange({ proof_competition: normalizeProofCompetition(localConfig.proof_competition) });
+  }, [isLoadedFromStorage, localConfig.proof_competition]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Update LM Studio models when prop changes
   useEffect(() => {
@@ -891,7 +913,7 @@ const AutonomousResearchSettings = ({
     onConfigChange({
       ...localConfig,
       submitter_configs: submitterConfigs.slice(0, numSubmitters),
-      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? true,
+      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? false,
       allow_research_papers: config?.allow_research_papers ?? true,
       tier3_enabled: tier3Enabled
     });
@@ -1505,6 +1527,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         smt_timeout: smtTimeout,
       });
       setProofStatus(status);
+      publishProofSettings(status);
       setProofSettingsEnabled(Boolean(status.lean4_user_enabled ?? status.lean4_enabled));
       setProofSettingsTimeout(String(status.lean4_proof_timeout ?? timeout));
       setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
@@ -1662,7 +1685,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     freeOnly,
     freeModelLooping,
     freeModelAutoSelector,
-    allowMathematicalProofs: config?.allow_mathematical_proofs ?? true,
+    allowMathematicalProofs: config?.allow_mathematical_proofs ?? false,
     allowResearchPapers: config?.allow_research_papers ?? true,
     tier3Enabled,
     creativityEmphasisBoostEnabled: config?.creativity_emphasis_boost_enabled ?? false,
@@ -1951,6 +1974,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           </label>
           <select
             aria-label="Number of Submitters"
+            aria-describedby={submitterUsageId}
             value={numSubmitters}
             onChange={(e) => handleNumSubmittersChange(e.target.value)}
             disabled={isRunning}
@@ -1959,6 +1983,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <option key={count} value={count}>{count}</option>
             ))}
           </select>
+          <UsageLevelBadge
+            id={submitterUsageId}
+            featureId="brainstorm.submitter_count"
+            context={{ count: numSubmitters }}
+          />
           {numSubmitters > 1 && (
             <button 
               className="copy-btn"
@@ -2019,6 +2048,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 max={50000000}
                 step={1024}
               />
+              <TokenCountNote provider={cfg.provider} modelId={cfg.modelId} contextWindow={cfg.contextWindow} />
             </div>
 
             <div className="settings-row">
@@ -2035,27 +2065,26 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               />
             </div>
 
-            {developerModeEnabled && (
-              <div className="settings-row settings-row--inline-checkbox">
-                <label className="settings-checkbox-label settings-checkbox-label--supercharge">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(cfg.superchargeEnabled)}
-                    onChange={(e) => handleSubmitterConfigChange(idx, 'superchargeEnabled', e.target.checked)}
-                    disabled={isRunning}
-                  />
-                  <HelpTooltip
-                    label="Learn about Supercharge"
-                    buttonContent="Supercharge"
-                    buttonClassName="help-tooltip-btn--text"
-                    popupClassName="help-tooltip-popup--fixed"
-                    useFixedPosition
-                  >
-                    {SUPERCHARGE_TOOLTIP}
-                  </HelpTooltip>
-                </label>
-              </div>
-            )}
+            <div className="settings-row settings-row--inline-checkbox">
+              <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+                <input
+                  type="checkbox"
+                  checked={Boolean(cfg.superchargeEnabled)}
+                  onChange={(e) => handleSubmitterConfigChange(idx, 'superchargeEnabled', e.target.checked)}
+                  disabled={isRunning}
+                />
+                <HelpTooltip
+                  label="Learn about Supercharge"
+                  buttonContent="Supercharge"
+                  buttonClassName="help-tooltip-btn--text"
+                  popupClassName="help-tooltip-popup--fixed"
+                  useFixedPosition
+                >
+                  {SUPERCHARGE_TOOLTIP}
+                </HelpTooltip>
+              </label>
+              <UsageLevelBadge featureId="roles.supercharge" />
+            </div>
           </div>
             );
           })()
@@ -2085,7 +2114,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           lmStudioEnabled={lmStudioEnabled}
-          developerModeEnabled={developerModeEnabled}
         />
 
         <RoleConfig
@@ -2105,7 +2133,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           lmStudioEnabled={lmStudioEnabled}
-          developerModeEnabled={developerModeEnabled}
           disabled={!assistantMemoryEnabled}
         />
       </div>
@@ -2134,7 +2161,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           lmStudioEnabled={lmStudioEnabled}
-          developerModeEnabled={developerModeEnabled}
         />
 
         <RoleConfig
@@ -2154,7 +2180,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           lmStudioEnabled={lmStudioEnabled}
-          developerModeEnabled={developerModeEnabled}
           showProofStrengthBadge
         />
         <ProofCompetitionSettings
@@ -2172,7 +2197,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           lmStudioEnabled={lmStudioEnabled}
-          developerModeEnabled={developerModeEnabled}
         />
       </div>
 
@@ -2309,10 +2333,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   </div>
 
                   <div className="settings-row">
-                    <label>Concurrent Proof Attempts</label>
+                    <label htmlFor={`${proofParallelUsageId}-input`}>Concurrent Proof Attempts</label>
                     <div>
                       <input
+                        id={`${proofParallelUsageId}-input`}
                         type="number"
+                        aria-describedby={proofParallelUsageId}
                         value={proofSettingsMaxParallelCandidates}
                         onChange={(e) => setProofSettingsMaxParallelCandidates(e.target.value)}
                         disabled={isRunning || savingProofSettings}
@@ -2320,8 +2346,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                         max={1000}
                         step={1}
                       />
+                      <UsageLevelBadge
+                        id={proofParallelUsageId}
+                        className="usage-level-badge--inline-after"
+                        featureId="proofs.concurrent_attempts"
+                        context={{ count: proofSettingsMaxParallelCandidates }}
+                      />
                       <small className="settings-hint" style={{ display: 'block', marginTop: '0.35rem' }}>
-                        Default is 6. Set 0 for unlimited. Positive values run autonomous proof checks in strict batches; rigor mode stays one proof at a time. Setting this number to 0 will make the program faster but more expensive and less efficient.
+                        Default is 6. Set 0 for unlimited. Positive values run autonomous proof checks in strict batches; rigor mode stays one proof at a time. Setting this number to 0 will make the program faster but more expensive and less efficient. You can also change this under Allowed Outputs.
                       </small>
                     </div>
                   </div>
@@ -2426,7 +2458,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   disabled={isRunning}
                 />
                 <span className="settings-option-copy">
-                  <span className="settings-option-title">Enable Stage 3 Final Answer Generation (In Development)</span>
+                  <span className="settings-option-title">
+                    Enable Stage 3 Final Answer Generation (In Development)
+                    <UsageLevelBadge featureId="stage3.final_answer" />
+                  </span>
                   <span className="settings-option-description">
                     Allows the system to synthesize completed Stage 2 papers into a final answer after enough papers accumulate.
                   </span>

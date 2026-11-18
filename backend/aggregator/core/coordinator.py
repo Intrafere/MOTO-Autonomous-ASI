@@ -4,6 +4,7 @@ Manages the overall aggregator workflow.
 """
 import asyncio
 import json
+import uuid
 from typing import List, Optional, Dict, Callable, Any
 import logging
 from pathlib import Path
@@ -29,10 +30,17 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_STOP_MESSAGE,
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
+    context_overflow_token_payload,
 )
 from backend.shared.atomic_json import atomic_write_text
+from backend.shared.activity import normalize_activity_payload
+from backend.shared.model_output_contract import wait_after_repeated_contract_failure
 from backend.aggregator.agents.submitter import SubmitterAgent, free_model_exhaustion_route_identity
-from backend.aggregator.agents.validator import BatchValidationContractError, ValidatorAgent
+from backend.aggregator.agents.validator import (
+    BatchValidationInterruptedError,
+    ValidatorAgent,
+    ValidatorOutputContractError,
+)
 from backend.aggregator.core.context_allocator import ContextAllocationError
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.core.rag_manager import rag_manager
@@ -41,6 +49,14 @@ from backend.aggregator.memory.event_log import event_log
 from backend.aggregator.memory.local_training import LocalTrainingMemory
 
 logger = logging.getLogger(__name__)
+
+# Operational Live Activity: a validator reply that could not be used as decisions.
+VALIDATOR_CONTRACT_EVENT = "validator_output_contract_failed"
+# Operational Live Activity: an internal error stopped a batch validation before
+# any model reply was judged. Not a model-output contract failure.
+VALIDATOR_BATCH_INTERRUPTED_EVENT = "validator_batch_interrupted"
+# Pause before validating restored submissions after an internal batch interruption.
+BATCH_INTERRUPTION_RETRY_SECONDS = 2
 
 
 async def _cancel_and_drain_task(task: asyncio.Task) -> None:
@@ -107,9 +123,19 @@ class Coordinator:
         self.removals_proposed = 0
         self.removals_executed = 0
 
-        # Submissions restored after a malformed batch reply are validated one
-        # at a time; this counts how many single validations remain.
+        # Submissions restored after an unusable validator reply are validated
+        # one at a time; this counts how many single validations remain.
         self._individual_validations_pending = 0
+        # Unusable validator replies this run (distinct activity identity per event).
+        self.validator_contract_failures = 0
+        # Unusable validator replies since the last successful validation; from
+        # the second one each further try waits a little longer (never capped).
+        self._consecutive_validator_contract_failures = 0
+        # Stable owning-run ID set by initialize(); scopes this run's activity.
+        self.proof_context_requesting_run_id = ""
+        # Submissions already restored once after an unusable validator reply. A
+        # lone repeat goes to the back of the queue so it cannot pin the queue.
+        self._contract_restored_ids: set = set()
 
         # WebSocket broadcaster (set by FastAPI app)
         self.websocket_broadcaster: Optional[Callable] = None
@@ -290,7 +316,7 @@ class Coordinator:
             validator_provider: Provider for validator ("lm_studio" or "openrouter")
             validator_openrouter_provider: OpenRouter host provider for validator (e.g., "Anthropic")
             validator_openrouter_reasoning_effort: OpenRouter reasoning effort for validator
-            validator_lm_studio_fallback: LM Studio fallback model for validator when using OpenRouter
+            validator_lm_studio_fallback: Local fallback (LM Studio model or `vllm::<model>`) for a non-LM-Studio validator
             validator_supercharge_enabled: Whether validator answers should use Supercharge
             creativity_emphasis_boost_enabled: Whether every fifth submitter turn gets the creativity emphasis prompt
             max_total_acceptances: Optional hard cap for accepted submissions, including offset
@@ -326,6 +352,8 @@ class Coordinator:
         self.acceptance_cap_callback = acceptance_cap_callback
         self._acceptance_cap_reached = False
         self._individual_validations_pending = 0
+        self.validator_contract_failures = 0
+        self._contract_restored_ids = set()
         self.solution_path_manager = solution_path_manager
         self.solution_path_acceptance_count_owner = solution_path_acceptance_count_owner
         self.proof_database_store = proof_database_store
@@ -763,10 +791,20 @@ class Coordinator:
         if self.is_running:
             logger.warning("Coordinator already running")
             return
+
+        # A loop left alive by an earlier run must not validate beside this one.
+        current_task = asyncio.current_task()
+        for stale_task in (self._main_task, self._validator_task):
+            if stale_task is not None and stale_task is not current_task and not stale_task.done():
+                try:
+                    await _cancel_and_drain_task(stale_task)
+                except Exception as exc:
+                    logger.warning("Earlier aggregator loop ended with an error: %s", exc)
         
         self.is_running = True
         self.fatal_error_message = None
         self.fatal_error_type = None
+        self._consecutive_validator_contract_failures = 0
         logger.info("Starting coordinator...")
         
         try:
@@ -803,13 +841,17 @@ class Coordinator:
             self._validator_task = None
             raise
     
-    async def stop(self) -> None:
-        """Stop the aggregator system."""
-        tasks_alive = any(
+    @property
+    def has_live_work(self) -> bool:
+        """True while the aggregator is running or one of its own tasks is still alive."""
+        return self.is_running or any(
             task is not None and not task.done()
             for task in (self._main_task, self._validator_task, self._rechunk_task)
         )
-        if not self.is_running and not tasks_alive:
+
+    async def stop(self) -> None:
+        """Stop the aggregator system."""
+        if not self.has_live_work:
             self._notify_top_level_terminal()
             return
         
@@ -924,10 +966,14 @@ class Coordinator:
             except asyncio.CancelledError:
                 logger.info(f"Validator loop cancelled at iteration {iteration}")
                 break
-            except BatchValidationContractError as e:
+            except ValidatorOutputContractError as e:
                 restored = in_flight_submissions
                 in_flight_submissions = []
-                await self._validate_restored_batch_individually(restored, e)
+                await self._restore_after_validator_contract_failure(restored, e)
+            except BatchValidationInterruptedError as e:
+                restored = in_flight_submissions
+                in_flight_submissions = []
+                await self._restore_after_batch_interruption(restored, e)
             except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
                 await queue_manager.prepend_batch(in_flight_submissions)
@@ -1026,6 +1072,14 @@ class Coordinator:
                         break
                     if submitter.submitter_id in self.disabled_submitter_ids:
                         continue
+                    # Queue backpressure: while restored or pending work holds the
+                    # queue at its overflow threshold, validate it before adding more.
+                    await self._check_and_update_pause_state()
+                    if await self.should_pause_submitter(submitter.submitter_id):
+                        logger.info(
+                            f"Round {round_number}: Submitter {i} skipped while the queue drains"
+                        )
+                        continue
 
                     logger.debug(f"Round {round_number}: Submitter {i} generating...")
                     active_role_id = submitter.role_id
@@ -1100,10 +1154,14 @@ class Coordinator:
             except asyncio.CancelledError:
                 logger.info(f"Single-model workflow cancelled at round {round_number}")
                 break
-            except BatchValidationContractError as e:
+            except ValidatorOutputContractError as e:
                 restored = in_flight_submissions
                 in_flight_submissions = []
-                await self._validate_restored_batch_individually(restored, e)
+                await self._restore_after_validator_contract_failure(restored, e)
+            except BatchValidationInterruptedError as e:
+                restored = in_flight_submissions
+                in_flight_submissions = []
+                await self._restore_after_batch_interruption(restored, e)
             except FreeModelExhaustedError as e:
                 # All free models exhausted after retries - wait briefly and retry
                 await queue_manager.prepend_batch(in_flight_submissions)
@@ -1176,51 +1234,224 @@ class Coordinator:
         return 1 if self._individual_validations_pending > 0 else 3
 
     def _note_validations_done(self, count: int) -> None:
+        """Record a successful validation call (decisions were produced)."""
         self._individual_validations_pending = max(
             0, self._individual_validations_pending - count
         )
+        self._consecutive_validator_contract_failures = 0
 
-    async def _validate_restored_batch_individually(
+    async def _requeue_restored_submissions(self, submissions: List[Submission]) -> bool:
+        """Put submissions that received no decision back in the queue.
+
+        On a first restore the submissions go back to the front of the queue in
+        order and are validated one at a time, which has no multi-decision
+        contract and sees each earlier acceptance before judging the next one. A
+        single submission restored again goes to the back of the queue, so the
+        submissions behind it are validated in between and one reply the
+        validator cannot produce never halts the queue. Requeueing is never
+        capped. Returns True when the submission was moved to the back.
+        """
+        rotate = len(submissions) == 1 and submissions[0].submission_id in self._contract_restored_ids
+        if rotate:
+            await queue_manager.enqueue(submissions[0])
+        else:
+            await queue_manager.prepend_batch(submissions)
+            self._individual_validations_pending = max(
+                self._individual_validations_pending, len(submissions)
+            )
+            self._contract_restored_ids.update(
+                submission.submission_id for submission in submissions
+            )
+        return rotate
+
+    @staticmethod
+    def _restored_submissions_next_step(count: int, rotate: bool) -> str:
+        if rotate:
+            return (
+                "this submission failed again, so it moved to the back of the queue and the "
+                "submissions behind it are validated first."
+            )
+        if count == 1:
+            return "this submission is back at the front of the queue and will be validated again."
+        return (
+            f"these {count} submissions are back in the queue and will be validated "
+            "one at a time."
+        )
+
+    def _validator_route_fields(self) -> Dict[str, Any]:
+        try:
+            return api_client_manager.route_identity_for_role(
+                "aggregator_validator",
+                workflow_mode=self._activity_workflow_mode(),
+                model=self.validator_model or "",
+                provider=self.validator_provider or "",
+            )
+        except Exception as exc:  # Route naming must never block requeueing.
+            logger.debug("Validator activity route identity unavailable: %s", exc)
+            return {}
+
+    def _activity_scope_fields(self) -> Dict[str, Any]:
+        """Run/source scope known to this coordinator for its operational activity."""
+        scope: Dict[str, Any] = {}
+        # Only a brainstorm database or the manual accepted-submissions database
+        # names a real source; topic/title exploration children have none.
+        try:
+            stem = Path(shared_training_memory.file_path).stem
+        except Exception:
+            stem = ""
+        if stem.startswith("brainstorm_") or stem == "rag_shared_training":
+            scope["source_id"] = self._brainstorm_context_source_id()
+        if self.proof_context_requesting_run_id:
+            scope["run_id"] = self.proof_context_requesting_run_id
+        return scope
+
+    async def _publish_validator_operational_event(
+        self,
+        event: str,
+        payload: Dict[str, Any],
+        route_fields: Dict[str, Any],
+    ) -> None:
+        """Publish one operational validator activity item with its own identity."""
+        payload = merge_route_identity(
+            {
+                **payload,
+                **self._activity_scope_fields(),
+                "event_id": f"{event}:{uuid.uuid4().hex}",
+            },
+            route_fields,
+        )
+        payload["message"] = with_route_identity(payload["message"], route_fields)
+        payload = normalize_activity_payload(event, payload)
+        await self._broadcast(event, payload)
+        await self._add_persisted_event(event, payload["message"], payload)
+
+    async def _restore_after_validator_contract_failure(
         self,
         submissions: List[Submission],
-        error: BatchValidationContractError,
+        error: ValidatorOutputContractError,
     ) -> None:
-        """Restore a batch whose validator reply broke the batch contract.
+        """Restore submissions whose validator reply could not be used as decisions.
 
-        No decision was made, so nothing is accepted or rejected and no submitter
-        receives rejection feedback. The submissions go back to the front of the
-        queue in order and are validated one at a time, which has no multi-decision
-        contract and sees each earlier acceptance before judging the next one.
+        The validator already made its one bounded repair attempt. No decision was
+        made, so nothing is accepted or rejected and no submitter receives
+        rejection feedback. The submissions are requeued (see
+        ``_requeue_restored_submissions``). This is operational Live Activity,
+        never a semantic rejection or a provider wait. From the second
+        consecutive unusable reply (the count resets on any successful
+        validation) the next try waits through the shared stop-aware backoff,
+        so a validator that fails instantly cannot spin. Tries are never capped.
         """
-        await queue_manager.prepend_batch(submissions)
-        self._individual_validations_pending = max(
-            self._individual_validations_pending, len(submissions)
+        count = len(submissions)
+        rotate = await self._requeue_restored_submissions(submissions)
+        self.validator_contract_failures += 1
+        self._consecutive_validator_contract_failures += 1
+        message = (
+            "Aggregator validator reply did not match its required JSON format "
+            f"after one repair attempt ({str(error).rstrip('.')}). No decision was recorded "
+            f"and no submitter is penalized; {self._restored_submissions_next_step(count, rotate)}"
         )
         logger.warning(
-            "Validator batch reply broke the batch contract; restored %d submissions "
-            "for one-at-a-time validation: %s",
-            len(submissions),
+            "Validator reply unusable (%s); restored %d submissions: %s",
+            error.stage,
+            count,
             error,
         )
-        await api_client_manager.emit_and_wait_for_retry(
+        route_fields = self._validator_route_fields()
+        await self._publish_validator_operational_event(
+            VALIDATOR_CONTRACT_EVENT,
             {
-                "provider": self.validator_provider,
-                "provider_label": "Aggregator validator",
-                "model": self.validator_model,
                 "role_id": "aggregator_validator",
-                "retry_after_seconds": 1,
-                "reason": "validator_batch_contract",
+                "workflow_mode": self._activity_workflow_mode(),
+                "submission_ids": [submission.submission_id for submission in submissions],
+                "batch_size": count,
+                "contract_stage": error.stage,
+                "contract_fields": error.field_summary,
                 "error_summary": str(error),
-                "message": (
-                    "Aggregator validator reply was not one decision per submission "
-                    f"({str(error).rstrip('.')}). No decision was recorded and no submitter "
-                    f"is penalized; these {len(submissions)} submissions are back in the queue "
-                    "and will be validated one at a time."
-                ),
+                "attempt": self.validator_contract_failures,
+                "consecutive_failures": self._consecutive_validator_contract_failures,
+                "message": message,
+                "activity_classification": "operational",
+                "activity_category": "model_output",
+                "activity_severity": "warning",
+                "activity_outcome": "requeued",
+                "requeue_position": "back" if rotate else "front",
             },
+            route_fields,
+        )
+        await wait_after_repeated_contract_failure(
+            "aggregator_validator",
+            self._consecutive_validator_contract_failures,
+            should_stop=lambda: not self.is_running,
+            workflow_mode=self._activity_workflow_mode(),
+        )
+
+    async def _restore_after_batch_interruption(
+        self,
+        submissions: List[Submission],
+        error: BatchValidationInterruptedError,
+    ) -> None:
+        """Restore a batch an internal error stopped before any decision.
+
+        No model reply was judged, so this is neither a model-output contract
+        failure, a provider error, nor a rejection. The submissions are requeued
+        to be validated one at a time and the next try waits briefly through the
+        shared stop-aware seam. Only the exception type is published; its text
+        stays in the backend log.
+        """
+        count = len(submissions)
+        rotate = await self._requeue_restored_submissions(submissions)
+        message = (
+            f"Aggregator batch validation stopped on an internal error ({error.error_type}) "
+            "before any decision. This is not a model output format problem, a provider "
+            "error, or a rejection; no decision was recorded and no submitter is penalized; "
+            f"{self._restored_submissions_next_step(count, rotate)}"
+        )
+        logger.warning(
+            "Batch validation interrupted (%s); restored %d submissions",
+            error.error_type,
+            count,
+        )
+        route_fields = self._validator_route_fields()
+        await self._publish_validator_operational_event(
+            VALIDATOR_BATCH_INTERRUPTED_EVENT,
+            {
+                "role_id": "aggregator_validator",
+                "workflow_mode": self._activity_workflow_mode(),
+                "submission_ids": [submission.submission_id for submission in submissions],
+                "batch_size": count,
+                "error_type": error.error_type,
+                "message": message,
+                "activity_classification": "operational",
+                "activity_category": "internal",
+                "activity_severity": "warning",
+                "activity_outcome": "requeued",
+                "requeue_position": "back" if rotate else "front",
+            },
+            route_fields,
+        )
+        if not self.is_running:
+            return
+        await api_client_manager.emit_and_wait_for_retry(
+            merge_route_identity(
+                {
+                    "role_id": "aggregator_validator",
+                    "workflow_mode": self._activity_workflow_mode(),
+                    "retry_after_seconds": BATCH_INTERRUPTION_RETRY_SECONDS,
+                    "retry_layer": "workflow",
+                    "reason": VALIDATOR_BATCH_INTERRUPTED_EVENT,
+                    "error_type": error.error_type,
+                    "message": with_route_identity(
+                        f"Batch validation stopped on an internal error ({error.error_type}); "
+                        f"waiting {BATCH_INTERRUPTION_RETRY_SECONDS} seconds before validating "
+                        "the restored submissions one at a time. This is not a provider error "
+                        "and not a rejection.",
+                        route_fields,
+                    ),
+                },
+                route_fields,
+            ),
             role_id="aggregator_validator",
             should_stop=lambda: not self.is_running,
-            error=error,
         )
 
     async def _handle_acceptance(self, submission: Submission, result: ValidationResult) -> None:
@@ -1514,6 +1745,20 @@ class Coordinator:
         # Save stats
         await self._save_stats()
 
+    async def _cancel_validator_after_fatal_stop(self) -> None:
+        """Cancel the validator loop when another task stops the run for a fatal error.
+
+        A validator call still in flight would otherwise return after a later
+        Start, pass the running check, and keep validating beside the new loop.
+        """
+        task = self._validator_task
+        if task is None or task is asyncio.current_task() or task.done():
+            return
+        try:
+            await _cancel_and_drain_task(task)
+        except Exception as exc:
+            logger.warning("Validator loop ended with an error while stopping: %s", exc)
+
     async def _handle_context_overflow(self, error: ContextAllocationError, *, role_id: str) -> None:
         """Stop the workflow when mandatory direct context cannot fit."""
         self.fatal_error_type = "context_overflow"
@@ -1538,25 +1783,24 @@ class Coordinator:
                     stop_exc,
                 )
 
+        await self._cancel_validator_after_fatal_stop()
         await queue_manager.clear()
 
         config_role_id = role_id
         if role_id == "aggregator_single_model":
             config_role_id = "aggregator_validator"
+        role_config = api_client_manager.get_role_config(config_role_id)
         payload = {
             "workflow_mode": self._activity_workflow_mode(),
             "role_id": role_id,
             **context_overflow_model_payload(
-                api_client_manager.get_role_config(config_role_id),
+                role_config,
                 route=getattr(error, "route", None),
             ),
             "reason": CONTEXT_OVERFLOW_STOP_REASON,
             "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
             "error_detail": str(error),
-            "required_tokens": getattr(error, "required_tokens", None),
-            "available_tokens": getattr(error, "available_tokens", None),
-            "context_window": getattr(error, "context_window", None),
-            "output_reserve": getattr(error, "output_reserve", None),
+            **context_overflow_token_payload(error, config=role_config),
             "resolution": CONTEXT_OVERFLOW_RESOLUTION,
         }
         self.fatal_error_payload = dict(payload)
@@ -1622,6 +1866,7 @@ class Coordinator:
                 submitter.state.is_active = False
                 continue
             await submitter.stop()
+        await self._cancel_validator_after_fatal_stop()
         await queue_manager.clear()
         payload = error.to_repair_event(
             workflow_mode=self._activity_workflow_mode(),
@@ -1653,6 +1898,7 @@ class Coordinator:
                 submitter.state.is_active = False
                 continue
             await submitter.stop()
+        await self._cancel_validator_after_fatal_stop()
         await queue_manager.clear()
         payload = {
             "workflow_mode": self._activity_workflow_mode(),

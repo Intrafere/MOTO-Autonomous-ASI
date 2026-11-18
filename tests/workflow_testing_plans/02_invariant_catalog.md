@@ -23,6 +23,11 @@ second hand-maintained registry drifting from executable coverage.
 - `assistant.non_blocking_retrieval`
 - `assistant.stagnant_pack_backoff_not_shutdown`
 - `bulk_mutation.atomic_revision_fenced`
+- `cli_control.control_file_owner_lifecycle`
+- `cli_control.hosted_writes_no_artifacts`
+- `cli_control.start_template_credentials_stripped`
+- `cli_control.start_template_only_after_committed_start`
+- `cli_control.template_replays_into_valid_start`
 - `events.autonomous_mandatory_overflow_checkpoint_preserved`
 - `events.context_overflow_persists_across_reload`
 - `events.context_overflow_route_identity`
@@ -40,6 +45,8 @@ second hand-maintained registry drifting from executable coverage.
 - `live_activity.provider_retry_identity_stable`
 - `live_activity.provider_retry_persists_reload`
 - `live_activity.provider_retry_secret_safe`
+- `model_output.contract_failure_not_semantic`
+- `model_output.normalizations_visible_and_guarded`
 - `outputs.at_least_one_output_enabled`
 - `outputs.papers_only_skips_proof_work`
 - `outputs.proofs_only_no_paper_phase`
@@ -92,6 +99,23 @@ second hand-maintained registry drifting from executable coverage.
 - `supercharge_creativity.routing_separation`
 
 <!-- END GENERATED INVARIANT IDS -->
+
+## Desktop `moto` CLI control-surface laws
+
+| ID | Law |
+|----|-----|
+| `cli_control.start_template_only_after_committed_start` | Only a committed start saves a CLI start template; rejected or conflicting starts save nothing. |
+| `cli_control.start_template_credentials_stripped` | Saved start templates keep no credential-shaped fields. |
+| `cli_control.hosted_writes_no_artifacts` | Hosted mode writes neither the control file nor templates. |
+| `cli_control.control_file_owner_lifecycle` | The control file appears once the backend is ready and only its owner removes it. |
+| `cli_control.template_replays_into_valid_start` | A template one start saved replays through the CLI into a request the same route accepts. |
+
+## Model-output contract laws
+
+| ID | Law |
+|----|-----|
+| `model_output.contract_failure_not_semantic` | A broken model reply raises a typed error naming the failing item and field; it never becomes a semantic rejection, provider wait, or silent decision. Submitter output still returns to that submitter's feedback; validator/selector output is retried once, then re-asked or requeued with operational activity. |
+| `model_output.normalizations_visible_and_guarded` | Only guarded stray-character, trailing-comma, and repairable free-text key-label repairs apply (never protected keys, value positions, or truncated output), and each one is published as route-identified `model_output_normalized` activity. |
 
 ## Build 07 proof-pruning and continuous-loop laws
 

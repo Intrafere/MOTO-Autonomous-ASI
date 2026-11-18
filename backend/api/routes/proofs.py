@@ -35,6 +35,9 @@ from backend.autonomous.core.proof_round_driver import (
 from backend.autonomous.core.proof_run_manager import (
     ACTIVITY_REPLAY_PAGE_LIMIT,
     NO_DISCOVERY_LIMIT_TERMINAL_REASON,
+    ROUND_OUTCOME_COMPLETED,
+    ROUND_OUTCOME_ERROR,
+    ROUND_OUTCOME_FATAL_STOP,
     ProofRunControl,
     ProofRunSourceInvalidError,
     proof_run_manager,
@@ -83,6 +86,10 @@ from backend.shared.models import (
     ProofLiveContextBulkMutationResult,
     ProofLibraryEntry,
     ProofLibraryResponse,
+    MasterProofBundleDeclaration,
+    MasterProofBundleResponse,
+    MasterProofBundleStep,
+    MasterProofSummary,
     ProofNoveltyGroupMember,
     ProofNoveltyGroupResponse,
     ProofStageResult,
@@ -336,7 +343,11 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
     if event_type == "proof_check_candidates_found":
         count = int(data.get("count") or 0)
         subject = "proof candidate" if count == 1 else "proof candidates"
-        return f"Proof discovery found {count} {subject}; {count} will be attempted"
+        masters = int(data.get("master_proof_count") or 0)
+        note = ""
+        if masters:
+            note = f" ({masters} as master proof{'' if masters == 1 else 's'}, each built from several steps)"
+        return f"Proof discovery found {count} {subject}; {count} will be attempted{note}"
     if event_type == "proof_attempt_started":
         return f"Lean proof attempt started: {target}"
     if event_type == "proof_lean_accepted":
@@ -345,6 +356,10 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
         return _attempt_message("Proof attempt failed")
     if event_type == "proof_attempts_exhausted":
         return _attempt_message("Proof attempts exhausted")
+    if event_type == "master_proof_progress":
+        feedback = _compact(data.get("validator_feedback") or data.get("error_summary"))
+        base = f"{target}: {data.get('message') or 'Master proof update.'}"
+        return f"{base} Feedback: {feedback}" if feedback else base
     if event_type == "proof_integrity_rejected":
         return f"Proof integrity rejected: {data.get('reason') or data.get('message') or target}"
     if event_type == "proof_verified":
@@ -358,6 +373,20 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
     if event_type == "proof_dependency_added":
         return f"Proof dependency added: {target}"
     if event_type == "proof_check_complete":
+        if data.get("had_error") is True:
+            detail = _compact(data.get("message"), limit=1800)
+            prefix = "Proof verification encountered an error:"
+            if detail.startswith(prefix):
+                detail = detail[len(prefix):].strip()
+            verified = int(data.get("verified_count") or 0)
+            kept = (
+                f" after {verified} verified, {data.get('novel_count') or 0} novel"
+                if verified > 0
+                else ""
+            )
+            return f"Proof check stopped on an error{kept}" + (
+                f": {detail}" if detail else "."
+            )
         return f"Proof check complete: {data.get('verified_count') or 0} verified, {data.get('novel_count') or 0} novel"
     round_index = int(data.get("round_index") or data.get("proof_round_index") or 0)
     round_label = f"Round {round_index}" if round_index > 0 else "Proof run"
@@ -371,7 +400,20 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
             "non-blocking pruning review."
         )
     if event_type == "proof_run_round_complete":
+        round_outcome = data.get("round_outcome")
+        if round_outcome == ROUND_OUTCOME_ERROR:
+            return (
+                f"{round_label} stopped on an error before proof discovery finished, "
+                "so no next round will start. The error checkpoint is kept."
+            )
+        if round_outcome == ROUND_OUTCOME_FATAL_STOP:
+            return (
+                f"{round_label} stopped before finishing and the proof run is ending; "
+                "see the stop reason in the activity."
+            )
         candidate_count = data.get("candidate_count")
+        if candidate_count is None and round_outcome != ROUND_OUTCOME_COMPLETED:
+            return f"{round_label} ended without a usable proof discovery result."
         if candidate_count == 0:
             detail = (
                 "Discovery: the model searched for useful novel proof candidates and "
@@ -636,6 +678,53 @@ async def _get_export_lean_code(
         return await scoped_proof_database.get_lean_code(proof_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Proof not found")
+
+
+def _build_master_proof_bundle(proof: dict, lean_code: str) -> MasterProofBundleResponse:
+    """Assemble one master proof's full export from its stored record."""
+    from backend.shared.master_proof_context import build_solved_template, list_declarations
+
+    summary = MasterProofSummary.model_validate(proof.get("master_proof") or {})
+    declarations = list_declarations(lean_code)
+    by_name = {declaration.name: declaration for declaration in declarations}
+    step_names = {step.name for step in summary.steps}
+    root_name = summary.root_theorem_name or str(proof.get("theorem_name") or "")
+    return MasterProofBundleResponse(
+        proof_id=str(proof.get("proof_id") or ""),
+        run_id=str(proof.get("run_id") or ""),
+        theorem_name=str(proof.get("theorem_name") or ""),
+        theorem_statement=str(proof.get("theorem_statement") or ""),
+        novelty_tier=str(proof.get("novelty_tier") or "not_novel"),
+        novelty_reasoning=str(proof.get("novelty_reasoning") or ""),
+        master_proof=summary,
+        solved_template=build_solved_template(lean_code, summary),
+        steps=[
+            MasterProofBundleStep(
+                **step.model_dump(),
+                lean_code=by_name[step.name].text if step.name in by_name else "",
+            )
+            for step in summary.steps
+        ],
+        supporting_declarations=[
+            MasterProofBundleDeclaration(
+                name=declaration.name, kind=declaration.kind, lean_code=declaration.text
+            )
+            for declaration in declarations
+            if declaration.name not in step_names and declaration.name != root_name
+        ],
+        lean_code=lean_code,
+    )
+
+
+async def _master_proof_bundle_response(proof: dict, lean_code: str) -> JSONResponse:
+    if str(proof.get("proof_kind") or "") != "master_proof":
+        raise HTTPException(status_code=404, detail="This proof is not a master proof.")
+    payload = await asyncio.to_thread(_build_master_proof_bundle, proof, lean_code)
+    proof_id = str(proof.get("proof_id") or "proof")
+    return JSONResponse(
+        content=payload.model_dump(mode="json"),
+        headers={"Content-Disposition": f'attachment; filename="{proof_id}_master_proof.json"'},
+    )
 
 
 async def _get_archived_export(
@@ -1628,7 +1717,7 @@ async def _run_manual_proof_check(
         async def execute_round(
             round_index: int,
             round_trigger: str,
-            prior_round_results: str,
+            prior_round_results: Tuple[str, ...],
             reservation_token: str,
         ):
             nonlocal source_title, current_fingerprint, retry_activity_payload
@@ -1656,7 +1745,6 @@ async def _run_manual_proof_check(
                     last_round_summary="",
                     last_round_reference="",
                 )
-                prior_round_results = ""
             source_title = refreshed.source_title
             await proof_run_manager.begin_round(
                 run_control,
@@ -2012,6 +2100,22 @@ async def _run_manual_proof_check(
                     run_control,
                     terminal_reason=result.fatal_stop_reason,
                 )
+                round_outcome = ROUND_OUTCOME_FATAL_STOP
+            elif result.had_error:
+                round_outcome = ROUND_OUTCOME_ERROR
+                if not result.context_overflow_payload:
+                    error_detail = ProofVerificationStage._summarize_error(
+                        result.error_message or "unknown error",
+                        limit=1700,
+                    )
+                    await proof_run_manager.update(
+                        run_control,
+                        last_error_summary=(
+                            f"Round {round_index} stopped on an error: {error_detail}"
+                        ),
+                    )
+            else:
+                round_outcome = ROUND_OUTCOME_COMPLETED
             round_snapshot = await proof_run_manager.complete_round(
                 run_control,
                 round_number=round_index,
@@ -2023,6 +2127,7 @@ async def _run_manual_proof_check(
                     else run_control.snapshot.candidate_checkpoint_reference
                 ),
                 proof_set_revision=await scoped_proof_database.get_proof_set_revision(),
+                round_outcome=round_outcome,
             )
             if (
                 round_snapshot.terminal_reason
@@ -2052,8 +2157,8 @@ async def _run_manual_proof_check(
                 await asyncio.sleep(0)
                 if run_control.stop_event.is_set():
                     return "stopped", result
-                return "continue_reset", None
-            return ("completed_reset" if source_changed else "completed"), result
+                return "continue_empty", None
+            return "completed", result
 
         driver = ProofRoundDriver(
             policy=(
@@ -2134,6 +2239,7 @@ async def _run_manual_proof_check(
                     "novel_count": 0,
                     "verified_count": 0,
                     "total_candidates": 0,
+                    "had_error": True,
                     "message": (
                         "Proof verification encountered an error: "
                         f"{ProofVerificationStage._summarize_error(str(exc), limit=1800)}"
@@ -2419,6 +2525,8 @@ async def get_proofs_status():
         "lean4_proof_timeout": system_config.lean4_proof_timeout,
         "lean4_lsp_idle_timeout": system_config.lean4_lsp_idle_timeout,
         "proof_max_parallel_candidates": system_config.proof_max_parallel_candidates,
+        "proof_single_shot_enabled": bool(system_config.proof_single_shot_enabled),
+        "proof_master_proofs_enabled": bool(system_config.proof_master_proofs_enabled),
         "lsp_available": bool(system_config.lean4_enabled and system_config.lean4_lsp_enabled),
         "lsp_active": lsp_active,
         "workspace_ready": workspace_ready,
@@ -2446,6 +2554,22 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
     if system_config.generic_mode:
         raise HTTPException(status_code=501, detail={"lean4_enabled": False, "message": "Lean 4 settings are unavailable in hosted mode."})
 
+    next_single_shot = (
+        bool(request.single_shot_proofs_enabled)
+        if request.single_shot_proofs_enabled is not None
+        else bool(system_config.proof_single_shot_enabled)
+    )
+    next_master = (
+        bool(request.master_proofs_enabled)
+        if request.master_proofs_enabled is not None
+        else bool(system_config.proof_master_proofs_enabled)
+    )
+    if not (next_single_shot or next_master):
+        raise HTTPException(
+            status_code=400,
+            detail="Keep at least one proof type on: single-shot proofs or master proofs.",
+        )
+
     previous_lean_settings = (
         system_config.lean4_enabled,
         system_config.lean4_lsp_enabled,
@@ -2467,6 +2591,8 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
         system_config.lean4_lsp_idle_timeout = int(request.lean4_lsp_idle_timeout)
     if request.max_parallel_candidates is not None:
         system_config.proof_max_parallel_candidates = int(request.max_parallel_candidates)
+    system_config.proof_single_shot_enabled = next_single_shot
+    system_config.proof_master_proofs_enabled = next_master
     if request.smt_enabled is not None:
         system_config.smt_enabled = bool(request.smt_enabled)
     if request.smt_timeout is not None:
@@ -2949,6 +3075,20 @@ async def get_library_proof(
     )
 
 
+@router.get(
+    "/library/{session_id}/{proof_id}/master-proof",
+    response_model=MasterProofBundleResponse,
+)
+async def get_library_master_proof_bundle(
+    session_id: str,
+    proof_id: str,
+    scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS),
+):
+    """Download an archived master proof with its solved template and every step."""
+    proof, lean_code = await _get_archived_export(session_id, proof_id, scope)
+    return await _master_proof_bundle_response(dict(proof), lean_code)
+
+
 @router.get("/library/{session_id}/{proof_id}/certificate", response_model=ProofCertificateResponse)
 async def get_library_proof_certificate(
     session_id: str,
@@ -3083,6 +3223,14 @@ async def _certificate_response(proof, lean_code: str) -> JSONResponse:
         theorem_name=normalized.get("theorem_name", ""),
         lean_code=lean_code,
         solver=normalized.get("solver") or "Lean 4",
+        proof_kind=(
+            "master_proof" if normalized.get("proof_kind") == "master_proof" else "individual"
+        ),
+        master_proof=(
+            normalized.get("master_proof")
+            if normalized.get("proof_kind") == "master_proof"
+            else None
+        ),
         lean_version=(compile_receipt_payload.lean_version if compile_receipt_payload else ""),
         mathlib_commit=(
             compile_receipt_payload.mathlib_revision if compile_receipt_payload else ""
@@ -3176,6 +3324,18 @@ async def get_proof_certificate_lean(
             "Content-Disposition": f'attachment; filename="{proof_id}.lean"',
         },
     )
+
+
+@router.get("/{proof_id}/master-proof", response_model=MasterProofBundleResponse)
+async def get_master_proof_bundle(
+    proof_id: str,
+    scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS),
+):
+    """Download a master proof with its solved template and every step."""
+    proof = await _get_scoped_proof_database(scope).get_proof(proof_id)
+    if proof is None:
+        raise HTTPException(status_code=404, detail="Proof not found")
+    return await _master_proof_bundle_response(proof.model_dump(mode="json"), proof.lean_code)
 
 
 @router.get("/{proof_id}/novelty-group", response_model=ProofNoveltyGroupResponse)

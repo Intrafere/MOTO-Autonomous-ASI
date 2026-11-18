@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import time
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ _MIN_ORPHAN_UUID_DIRS_FOR_RESET = 64
 _MIN_ORPHAN_RATIO_FOR_RESET = 0.75
 _REBUILD_MARKER_SUFFIX = ".rebuild.json"
 _QUARANTINE_TOKEN = ".quarantine-"
+# Windows refuses to rename a folder while any file inside it is still open.
+# Chroma can release its files a moment after its client closes, so a refused
+# quarantine rename is retried briefly (about 2 seconds in total).
+_QUARANTINE_RENAME_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0)
 
 
 @dataclass(frozen=True)
@@ -148,9 +153,29 @@ def quarantine_chroma_cache(
             json.dumps({"cache": str(cache_dir), "quarantine": str(quarantine)}),
             encoding="utf-8",
         )
-        cache_dir.replace(quarantine)
+        try:
+            _rename_released_cache(cache_dir, quarantine)
+        except BaseException:
+            # Nothing moved, so the marker would only point at a missing folder.
+            marker.unlink(missing_ok=True)
+            raise
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir, quarantine
+
+
+def _rename_released_cache(cache_dir: Path, quarantine: Path) -> None:
+    """Rename the cache aside, waiting briefly for files that are still open."""
+    for delay in _QUARANTINE_RENAME_RETRY_DELAYS_SECONDS:
+        try:
+            cache_dir.replace(quarantine)
+            return
+        except PermissionError:
+            logger.info(
+                "Chroma cache files are still open; retrying the cache reset in %.2f s",
+                delay,
+            )
+            time.sleep(delay)
+    cache_dir.replace(quarantine)
 
 
 def complete_chroma_cache_rebuild(

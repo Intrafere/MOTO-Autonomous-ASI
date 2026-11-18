@@ -1,0 +1,40 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "stray_run_removed",
+    "repair_recorded"
+  ],
+  "faked_dependencies": [
+    "model reply supplied as a fixed string"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "the observed stray character before a key is removed and recorded as a repair",
+  "real_components": [
+    "backend/shared/json_parser.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_parser_drops_stray_key_characters_and_reports",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:5ac4f685da809f9b97298aeb91d9817ce9619257e3cd46c04e6c21ef53724ef5",
+  "test_file": "tests/unit/test_json_parser_repairs.py",
+  "test_selectors": [
+    "tests/unit/test_json_parser_repairs.py::test_exact_gemma_stray_line_is_dropped_and_reported"
+  ]
+}

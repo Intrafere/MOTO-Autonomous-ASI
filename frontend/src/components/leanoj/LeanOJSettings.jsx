@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
+import UsageLevelBadge from '../UsageLevelBadge';
 import { api, openRouterAPI } from '../../services/api';
 import {
   computeCloudProviderAutoSettings,
@@ -46,6 +47,7 @@ export default function LeanOJSettings({
   isRunning,
   developerModeEnabled = false,
 }) {
+  const submitterUsageId = useId();
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [modelProviders, setModelProviders] = useState(settings.modelProviders || {});
@@ -650,8 +652,13 @@ export default function LeanOJSettings({
       <div className="settings-section">
         <h3>Brainstorm Submitters</h3>
         <div className="settings-row">
-          <label>Number of Submitters</label>
-          <input type="number" min={1} max={10} disabled={isRunning} value={settings.submitterConfigs.length} onChange={(event) => setSubmitterCount(event.target.value)} />
+          <label htmlFor={`${submitterUsageId}-input`}>Number of Submitters</label>
+          <input id={`${submitterUsageId}-input`} type="number" min={1} max={10} disabled={isRunning} value={settings.submitterConfigs.length} onChange={(event) => setSubmitterCount(event.target.value)} aria-describedby={submitterUsageId} />
+          <UsageLevelBadge
+            id={submitterUsageId}
+            featureId="brainstorm.submitter_count"
+            context={{ count: settings.submitterConfigs.length }}
+          />
         </div>
         {settings.submitterConfigs.map((submitter, index) => (
           <RoleModelEditor
@@ -666,7 +673,6 @@ export default function LeanOJSettings({
             hasOpenRouterKey={hasOpenRouterKey}
             isRunning={isRunning}
             lmStudioEnabled={lmStudioEnabled}
-            developerModeEnabled={developerModeEnabled}
           />
         ))}
       </div>
@@ -689,7 +695,6 @@ export default function LeanOJSettings({
                 hasOpenRouterKey={hasOpenRouterKey}
                 isRunning={isRunning}
                 lmStudioEnabled={lmStudioEnabled}
-                developerModeEnabled={developerModeEnabled}
                 disabled={roleDisabled}
               >
                 {isAssistant && (

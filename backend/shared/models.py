@@ -624,6 +624,31 @@ class AutonomousTerminalEvent(BaseModel):
     output_reserve: Optional[int] = None
 
 
+class WorkflowRuntimeLimit(BaseModel):
+    """A user-set maximum runtime that is counting down for the active run."""
+    max_runtime_seconds: int
+    started_at: datetime
+    deadline_at: datetime
+    remaining_seconds: int
+
+
+class DirectAnswerStatus(BaseModel):
+    """Where the session's direct answer stands (the answer text has its own route)."""
+    enabled: bool = False
+    state: Literal["pending", "writing", "ready"] = "pending"
+    answer_id: Optional[str] = None
+    reason: Optional[str] = None
+    exploration_complete: bool = False
+    created_at: Optional[str] = None
+
+
+class DirectAnswerResponse(BaseModel):
+    """The newest direct answer for the current Autonomous Research session."""
+    has_answer: bool
+    writing: bool = False
+    answer: Optional[Dict[str, Any]] = None
+
+
 class AutonomousResearchStatusResponse(BaseModel):
     """Authoritative lifecycle and progress snapshot for Autonomous Research."""
     is_running: bool
@@ -636,6 +661,8 @@ class AutonomousResearchStatusResponse(BaseModel):
     tier3_status: Optional[Dict[str, Any]] = None
     stats: Dict[str, Any] = Field(default_factory=dict)
     terminal_event: Optional[AutonomousTerminalEvent] = None
+    runtime_limit: Optional[WorkflowRuntimeLimit] = None
+    direct_answer: Optional[DirectAnswerStatus] = None
 
 
 class ProofRoleRuntimeConfig(BaseModel):
@@ -752,6 +779,13 @@ class AutonomousResearchStartRequest(BaseModel):
     assistant_supercharge_enabled: bool = False
     # Tier 3 Final Answer settings
     tier3_enabled: bool = False  # Default OFF — system stops at Tier 2 paper library
+    # Optional user-set maximum runtime for this Start only. None runs until
+    # stopped. It is never saved into reusable start settings.
+    max_runtime_seconds: Optional[int] = Field(default=None, ge=60)
+    # End this run with one model call that answers the user's question from what
+    # was explored: when a topic's exploration finishes, at the runtime limit, or
+    # on request. With it on, both allowed outputs may be off.
+    direct_answer_enabled: bool = False
 
 
 # ============================================================================
@@ -788,6 +822,8 @@ class ProofCandidate(BaseModel):
     source_excerpt: str = ""
     origin_source_id: str = ""
     retry_open_target_id: str = ""
+    # "master_proof" candidates are solved as a Lean scaffold of `sorry` obligations.
+    proposal_kind: Literal["individual", "master_proof"] = "individual"
     relevant_lemmas: List[MathlibLemmaHint] = Field(default_factory=list)
     smt_hint: Optional[SmtHint] = None
 
@@ -1466,6 +1502,30 @@ class CanonicalProofLocator(BaseModel):
     canonical_lean_code_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class MasterProofStep(BaseModel):
+    """One solved scaffold obligation of a verified master proof."""
+
+    name: str
+    signature: str = ""
+    parent: str = ""
+    depth: int = 0
+    failed_attempts: int = 0
+
+
+class MasterProofSummary(BaseModel):
+    """How a verified master proof was built; its Lean code stays on the record."""
+
+    master_key: str = ""
+    root_theorem_name: str = ""
+    scaffold_revision: int = 0
+    total_attempts: int = 0
+    scaffold_failed_attempts: int = 0
+    steps: List[MasterProofStep] = Field(default_factory=list)
+
+
+ProofKind = Literal["individual", "master_proof"]
+
+
 class ProofRecord(BaseModel):
     """Stored proof metadata for the proof library and prompt injection."""
     proof_id: str
@@ -1479,6 +1539,8 @@ class ProofRecord(BaseModel):
     run_id: str = ""
     user_prompt: str = ""
     solver: str = "Lean 4"
+    proof_kind: ProofKind = "individual"
+    master_proof: Optional[MasterProofSummary] = None
     lean_code: str
     novel: bool = False
     novelty_tier: str = "not_novel"
@@ -1573,6 +1635,8 @@ class ProofLibraryEntry(BaseModel):
     run_id: str = ""
     user_prompt: str = ""
     solver: str = "Lean 4"
+    proof_kind: ProofKind = "individual"
+    master_proof: Optional[MasterProofSummary] = None
     novel: bool = False
     novelty_tier: str = "not_novel"
     novelty_reasoning: str = ""
@@ -1647,6 +1711,8 @@ class ProofCertificateResponse(BaseModel):
     theorem_name: str = ""
     lean_code: str = ""
     solver: str = "Lean 4"
+    proof_kind: ProofKind = "individual"
+    master_proof: Optional[MasterProofSummary] = None
     lean_version: str = ""
     mathlib_commit: str = ""
     verified_at: Optional[str] = None
@@ -1714,6 +1780,34 @@ class ProofNoveltyGroupResponse(BaseModel):
     proofs: List[ProofNoveltyGroupMember] = Field(default_factory=list)
 
 
+class MasterProofBundleStep(MasterProofStep):
+    """One solved scaffold step with its final verified Lean declaration."""
+
+    lean_code: str = ""
+
+
+class MasterProofBundleDeclaration(BaseModel):
+    name: str
+    kind: str = ""
+    lean_code: str = ""
+
+
+class MasterProofBundleResponse(BaseModel):
+    """Everything that makes up one verified master proof, as one text export."""
+
+    proof_id: str
+    run_id: str = ""
+    theorem_name: str = ""
+    theorem_statement: str
+    novelty_tier: str = "not_novel"
+    novelty_reasoning: str = ""
+    master_proof: MasterProofSummary
+    solved_template: str = ""
+    steps: List[MasterProofBundleStep] = Field(default_factory=list)
+    supporting_declarations: List[MasterProofBundleDeclaration] = Field(default_factory=list)
+    lean_code: str
+
+
 class ProofAttemptResult(BaseModel):
     """Outcome of one theorem proof-attempt loop."""
     theorem_id: str
@@ -1721,6 +1815,8 @@ class ProofAttemptResult(BaseModel):
     lean_code: str = ""
     success: bool = False
     novel: bool = False
+    # Stored display novelty tier of a verified proof; empty when not verified.
+    novelty_tier: str = ""
     attempts_used: int = 0
     proof_id: Optional[str] = None
     error_summary: str = ""
@@ -1992,6 +2088,8 @@ class ProofSettingsUpdateRequest(BaseModel):
     lean4_lsp_enabled: Optional[bool] = None
     lean4_lsp_idle_timeout: Optional[int] = Field(default=None, ge=60, le=7200)
     max_parallel_candidates: Optional[int] = Field(default=None, ge=0, le=1000)
+    single_shot_proofs_enabled: Optional[bool] = None
+    master_proofs_enabled: Optional[bool] = None
     smt_enabled: Optional[bool] = None
     smt_timeout: Optional[int] = Field(default=None, ge=1, le=600)
 
@@ -2013,6 +2111,8 @@ class ProofStatusResponse(BaseModel):
     lean4_proof_timeout: int
     lean4_lsp_idle_timeout: int
     proof_max_parallel_candidates: int
+    proof_single_shot_enabled: bool = True
+    proof_master_proofs_enabled: bool = True
     lsp_available: bool
     lsp_active: bool
     workspace_ready: bool

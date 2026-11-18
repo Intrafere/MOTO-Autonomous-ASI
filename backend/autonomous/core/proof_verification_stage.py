@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from backend.autonomous.agents.lemma_search_agent import MathlibLemmaSearchAgent
 from backend.autonomous.agents.proof_formalization_agent import (
@@ -35,11 +35,24 @@ from backend.autonomous.prompts.proof_prompts import (
     open_proof_target_id,
 )
 from backend.autonomous.core.proof_registration import register_verified_lean_proof
+from backend.autonomous.core.proof_round_driver import normalize_round_memory
+from backend.autonomous.agents.master_proof_agent import (
+    MasterProofAgent,
+    MasterProofScaffoldChangeValidator,
+)
+from backend.autonomous.core.master_proof import (
+    MASTER_PROOF_EVENT,
+    MasterProofSolver,
+    MasterProofState,
+    MasterProofStore,
+    master_proof_key,
+)
 from backend.shared.config import system_config
 from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_RESOLUTION,
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
+    context_overflow_token_payload,
 )
 from backend.shared.lean4_client import (
     LeanWorkspaceRepairRequiredError,
@@ -50,11 +63,15 @@ from backend.shared.lean4_client import (
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
+    is_provider_context_length_error,
     is_transient_model_call_error,
 )
+from backend.shared.model_output_contract import ModelOutputContractError
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.activity import fill_missing_activity_metadata
+from backend.shared.master_proof_context import summary_from_state_payload
 from backend.shared.models import (
+    MasterProofSummary,
     ProofAttemptFeedback,
     ProofAttemptResult,
     ProofCandidate,
@@ -71,6 +88,7 @@ from backend.shared.provider_route_identity import (
     is_model_provider,
     merge_route_identity,
     route_identity_from_error,
+    with_route_identity,
 )
 from backend.shared.smt_client import get_smt_client
 from backend.shared.utils import count_tokens
@@ -99,6 +117,10 @@ PROOF_TRUNCATION_POLICY_VERSION = "proof-truncation-v1"
 AUTONOMOUS_WORKFLOW_PROOF_OWNER = "autonomous_workflow"
 
 
+def _master_proof_count(candidates: list[ProofCandidate]) -> int:
+    return sum(1 for candidate in candidates if candidate.proposal_kind == "master_proof")
+
+
 def _candidate_fingerprint(candidate: ProofCandidate, source_type: str, source_id: str) -> str:
     normalized = "\n".join(
         [
@@ -112,6 +134,8 @@ def _candidate_fingerprint(candidate: ProofCandidate, source_type: str, source_i
             " ".join((candidate.novelty_rationale or "").split()).lower(),
             " ".join((candidate.why_not_standard_known_result or "").split()).lower(),
         ]
+        # Appended only for master proofs so existing checkpoints keep their fingerprints.
+        + (["master_proof"] if candidate.proposal_kind == "master_proof" else [])
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
@@ -350,6 +374,90 @@ class ProofVerificationStage:
         )
 
     @classmethod
+    def _stage_failure_report(
+        cls,
+        exc: BaseException,
+        *,
+        round_phase: str,
+        workflow_mode: str,
+    ) -> dict[str, Any]:
+        """Classify a stage failure by type and compose its activity message.
+
+        A model-output contract failure names the role's route and the failing
+        fields. Only identification and list-review failures say no Lean work
+        was attempted, since later phases may already have run Lean.
+        """
+        contract_error = cls._model_output_contract_error(exc)
+        before_lean = round_phase in {"identification", "list_review"}
+        if contract_error is not None:
+            route = (
+                api_client_manager.route_identity_for_role(
+                    contract_error.role,
+                    workflow_mode=workflow_mode,
+                )
+                if contract_error.role
+                else {"workflow_mode": workflow_mode}
+            )
+            stage_label = {
+                "identification": "proof-identification",
+                "list_review": "candidate-list review",
+            }.get(round_phase, "proof")
+            detail = (
+                f"The {stage_label} response did not match the required JSON format "
+                "after its bounded retry: "
+                + cls._summarize_error(str(contract_error), limit=1400).rstrip(".")
+                + "."
+                + (
+                    " No Lean work was attempted; the round stopped and its checkpoint was saved."
+                    if before_lean
+                    else " The round stopped and its checkpoint was saved."
+                )
+            )
+            contract_fields = {
+                "contract_role_id": contract_error.role,
+                "contract_stage": contract_error.stage,
+                "contract_field_summary": contract_error.field_summary,
+            }
+            if contract_error.item_path:
+                contract_fields["contract_item_path"] = contract_error.item_path
+            return {
+                "error_kind": "model_output_contract_error",
+                "route": route,
+                "contract_fields": contract_fields,
+                "message": (
+                    "Proof verification encountered an error: "
+                    + with_route_identity(detail, route)
+                ),
+            }
+        error_kind = (
+            "context_error" if is_provider_context_length_error(exc) else "internal_error"
+        )
+        return {
+            "error_kind": error_kind,
+            "route": cls._provider_error_route_identity(exc, workflow_mode=workflow_mode),
+            "contract_fields": {},
+            "message": (
+                "Proof verification encountered an error: "
+                + cls._summarize_error(str(exc), limit=1800)
+                + (" No Lean work was attempted." if before_lean else "")
+            ),
+        }
+
+    @staticmethod
+    def _model_output_contract_error(
+        exc: Optional[BaseException],
+    ) -> Optional[ModelOutputContractError]:
+        """Return the contract error carried by ``exc`` or its explicit causes."""
+        current = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen and len(seen) < 5:
+            if isinstance(current, ModelOutputContractError):
+                return current
+            seen.add(id(current))
+            current = getattr(current, "cause", None) or current.__cause__
+        return None
+
+    @classmethod
     def _get_active_sources_lock(cls) -> asyncio.Lock:
         if cls._active_sources_lock is None:
             cls._active_sources_lock = asyncio.Lock()
@@ -455,6 +563,15 @@ class ProofVerificationStage:
                 if event in {"proof_candidate_list_review_accepted", "proof_verified", "proof_lean_accepted"}
                 else "info"
             )
+            if event == MASTER_PROOF_EVENT:
+                kind = str(data.get("kind") or "")
+                if kind in {"scaffold_changed", "scaffold_change_rejected"}:
+                    classification = "semantic"
+                    outcome = "success" if kind == "scaffold_changed" else "rejected"
+                elif kind in {"attempt_failed", "failed", "scaffold_change_unreviewed"}:
+                    classification, outcome = "operational", "error"
+                elif kind in {"scaffold_accepted", "sorry_closed", "sorry_expanded", "completed"}:
+                    outcome = "success"
             await broadcast_fn(
                 event,
                 fill_missing_activity_metadata(
@@ -768,7 +885,7 @@ class ProofVerificationStage:
         content: str,
         proof_round_index: int = 1,
         proof_max_rounds: int = 1,
-        prior_round_results: str = "",
+        prior_round_results: Sequence[str] = (),
         open_proof_targets: str = "",
         open_target_sources: Optional[dict[str, str]] = None,
     ) -> list[ProofCandidate]:
@@ -1021,7 +1138,7 @@ class ProofVerificationStage:
         checkpoint_callback: ProofCheckpointCallback = None,
         proof_round_index: int = 1,
         proof_max_rounds: int = 1,
-        prior_round_results: str = "",
+        prior_round_results: Sequence[str] = (),
         open_target_source_ids: Optional[list[str]] = None,
         canonical_user_prompt: str = "",
         run_id: str = "",
@@ -1061,6 +1178,9 @@ class ProofVerificationStage:
         abort_event = asyncio.Event()
         checkpoint_revision = 0
         candidate_list_review_active = False
+        # Which part of the round is running, so a stage failure can say
+        # truthfully whether any Lean work was attempted.
+        round_phase = "identification"
         candidate_list_review_attempt = 0
         candidate_list_review_count = 0
         # Only the Autonomous workflow's own checkpoint turns a blocked round into
@@ -1199,7 +1319,7 @@ class ProofVerificationStage:
                     "trigger": trigger,
                     "proof_round_index": proof_round_index,
                     "proof_max_rounds": proof_max_rounds,
-                    "prior_round_results": prior_round_results,
+                    "prior_round_results": list(normalize_round_memory(prior_round_results)),
                     "status": status,
                     "candidates": [
                         {
@@ -1388,8 +1508,9 @@ class ProofVerificationStage:
             async def regenerate_candidate_list(
                 feedback_text: str,
             ) -> tuple[bool, list[ProofCandidate]]:
-                nonlocal generation_attempt, candidate_list_state
+                nonlocal generation_attempt, candidate_list_state, round_phase
                 generation_attempt += 1
+                round_phase = "identification"
                 await self._broadcast(
                     broadcast_fn,
                     "proof_candidate_list_regeneration_started",
@@ -1547,12 +1668,14 @@ class ProofVerificationStage:
                         **base_event,
                         "list_attempt": generation_attempt,
                         "proposed_count": len(resolved_candidates),
+                        "master_proof_count": _master_proof_count(resolved_candidates),
                         "candidate_ids": [
                             candidate.theorem_id for candidate in resolved_candidates
                         ],
                     },
                 )
                 candidate_list_review_active = True
+                round_phase = "list_review"
                 candidate_list_review_attempt = generation_attempt
                 candidate_list_review_count = len(resolved_candidates)
                 validation = await list_validator.validate(
@@ -1680,6 +1803,7 @@ class ProofVerificationStage:
                 return result
 
             result.total_candidates = max(result.total_candidates, len(resolved_candidates))
+            round_phase = "lean"
             await save_checkpoint("running")
             await self._broadcast(
                 broadcast_fn,
@@ -1691,6 +1815,7 @@ class ProofVerificationStage:
                         candidate_list_state.get("proposed_candidates", [])
                     ),
                     "approved_count": len(resolved_candidates),
+                    "master_proof_count": _master_proof_count(resolved_candidates),
                     "message": (
                         f"Validator approved {len(resolved_candidates)} of "
                         f"{len(candidate_list_state.get('proposed_candidates', []))} "
@@ -1810,6 +1935,9 @@ class ProofVerificationStage:
                     proof_pruning_pressure_callback=proof_pruning_pressure_callback,
                     proof_pruning_route_fingerprint=proof_pruning_route_fingerprint,
                     run_id=run_id,
+                    validator_model=validator_model,
+                    validator_context=validator_context,
+                    validator_max_tokens=validator_max_tokens,
                 )
 
             verification_tasks = []
@@ -1830,7 +1958,8 @@ class ProofVerificationStage:
                 await batch_events[batch_index].wait()
                 if _stop_requested():
                     raise asyncio.CancelledError()
-                if not competition.enabled:
+                # Master proofs are solved by the primary route only.
+                if not competition.enabled or theorem_candidate.proposal_kind == "master_proof":
                     return batch_index, await run_phase_a(theorem_candidate, proof_label)
                 if not canonical_user_prompt:
                     raise ValueError("Autonomous proof competition requires canonical_user_prompt for feedback isolation")
@@ -2266,6 +2395,20 @@ class ProofVerificationStage:
                         if self._first_attempt_used_smt_hint(attempts, candidate.smt_hint):
                             solver_hints.append("smt-z3")
 
+                        is_master = candidate.proposal_kind == "master_proof"
+                        master_summary = None
+                        if is_master:
+                            verification_notes = (
+                                "Master proof: Lean 4 accepted the complete file after "
+                                "every scaffold step was proved. " + verification_notes
+                            )
+                            master_summary = await self._load_master_proof_summary(
+                                novel_proofs_db,
+                                run_id=run_id,
+                                source_type=source_type,
+                                source_id=source_id,
+                                statement=candidate.statement,
+                            )
                         registration_kwargs = {
                             "proof_database": novel_proofs_db,
                             "user_prompt": canonical_user_prompt or user_prompt,
@@ -2283,8 +2426,15 @@ class ProofVerificationStage:
                             "theorem_name": stored_theorem_name,
                             "formal_sketch": stored_formal_sketch,
                             "solver": "Lean 4",
+                            "proof_kind": "master_proof" if is_master else "individual",
+                            "master_proof": master_summary,
                             "verification_notes": verification_notes,
-                            "attempt_count": len(attempts),
+                            # A master proof's final feedback carries its total Lean submissions.
+                            "attempt_count": (
+                                max(len(attempts), attempts[-1].attempt)
+                                if is_master and attempts
+                                else len(attempts)
+                            ),
                             "attempts": attempts,
                             "compile_receipt": (
                                 attempts[-1].compile_receipt if attempts else None
@@ -2322,7 +2472,8 @@ class ProofVerificationStage:
                                 if should_stop and should_stop():
                                     raise asyncio.CancelledError()
                         stored_record = registration.record
-                        if competition_reporter:
+                        # Master proofs bypass competition and carry no winner identity.
+                        if competition_reporter and outcome.competition_winner:
                             await competition_reporter.registered(
                                 winner=outcome.competition_winner,
                                 proof_id=stored_record.proof_id,
@@ -2472,6 +2623,7 @@ class ProofVerificationStage:
                                 lean_code=lean_code,
                                 success=True,
                                 novel=is_novel,
+                                novelty_tier=stored_record.novelty_tier,
                                 attempts_used=len(attempts),
                                 proof_id=stored_record.proof_id,
                                 error_summary="",
@@ -2620,6 +2772,10 @@ class ProofVerificationStage:
                     api_client_manager.get_role_config(role_id),
                     route=route,
                 ),
+                **context_overflow_token_payload(
+                    exc,
+                    config=api_client_manager.get_role_config(role_id),
+                ),
                 "reason": CONTEXT_OVERFLOW_STOP_REASON,
                 "message": (
                     f"Proof {role_label} cannot continue because its mandatory context "
@@ -2690,13 +2846,15 @@ class ProofVerificationStage:
                     role_id=f"autonomous_proof_{role_suffix}",
                     model=submitter_model,
                 ) from exc
+            failure = self._stage_failure_report(
+                exc,
+                round_phase=round_phase,
+                workflow_mode=self._proof_workflow_mode(trigger),
+            )
             await broadcast_candidate_list_interrupted(
-                error_kind=(
-                    "context_error"
-                    if "context" in str(exc).lower()
-                    else "contract_error"
-                ),
+                error_kind=failure["error_kind"],
                 error_message=str(exc),
+                error=exc,
             )
             await save_checkpoint("error")
             result.had_error = True
@@ -2710,21 +2868,25 @@ class ProofVerificationStage:
             await self._broadcast(
                 broadcast_fn,
                 "proof_check_complete",
-                {
-                    "source_type": source_type,
-                    "source_id": source_id,
-                    "source_title": source_title,
-                    "trigger": trigger,
-                    "proof_round_index": proof_round_index,
-                    "proof_max_rounds": proof_max_rounds,
-                    "novel_count": result.novel_count,
-                    "verified_count": result.verified_count,
-                    "total_candidates": result.total_candidates,
-                    "message": (
-                        "Proof verification encountered an error: "
-                        f"{self._summarize_error(str(exc), limit=1800)}"
-                    ),
-                },
+                merge_route_identity(
+                    {
+                        "source_type": source_type,
+                        "source_id": source_id,
+                        "source_title": source_title,
+                        "trigger": trigger,
+                        "proof_round_index": proof_round_index,
+                        "proof_max_rounds": proof_max_rounds,
+                        "novel_count": result.novel_count,
+                        "verified_count": result.verified_count,
+                        "total_candidates": result.total_candidates,
+                        "had_error": True,
+                        "error_kind": failure["error_kind"],
+                        "error_stage": round_phase,
+                        "message": failure["message"],
+                        **failure["contract_fields"],
+                    },
+                    failure["route"],
+                ),
             )
             return result
         finally:
@@ -2764,6 +2926,9 @@ class ProofVerificationStage:
         suppress_exhausted_event: bool = False,
         attempt_started_callback=None,
         completion_route_callback=None,
+        validator_model: str = "",
+        validator_context: int = 0,
+        validator_max_tokens: int = 0,
     ) -> _LeanVerificationOutcome:
         """Phase A for one candidate: lemma prep, SMT hint, and Lean 4 attempts.
 
@@ -2810,7 +2975,8 @@ class ProofVerificationStage:
         # Lemma search waits for Lean setup; if that setup just failed, stop
         # before the SMT hint spends a model call.
         require_lean_workspace()
-        smt_hint = None if formalization_only else await self._run_smt_check(
+        is_master_proof = candidate.proposal_kind == "master_proof" and not formalization_only
+        smt_hint = None if formalization_only or is_master_proof else await self._run_smt_check(
             user_prompt=user_prompt,
             source_type=source_type,
             source_id=source_id,
@@ -2897,6 +3063,7 @@ class ProofVerificationStage:
             )
 
         async def on_attempt_feedback(feedback, current_candidate=candidate) -> None:
+            nonlocal context_overflow_payload
             active_attempts.append(feedback)
             if attempt_checkpoint_callback:
                 await attempt_checkpoint_callback(current_candidate, active_attempts)
@@ -3111,7 +3278,41 @@ class ProofVerificationStage:
         lean_code = active_attempts[-1].lean_code if active_attempts else ""
         attempts = active_attempts
 
-        if full_remaining > 0 and tactic_attempt_count == 0:
+        if is_master_proof:
+            master_outcome = await self._run_master_proof(
+                candidate=candidate,
+                base_event=base_event,
+                proof_label=proof_label,
+                user_prompt=user_prompt,
+                source_type=source_type,
+                source_id=source_id,
+                source_content=source_content,
+                source_title=source_title,
+                submitter_model=submitter_model,
+                submitter_context=submitter_context,
+                submitter_max_tokens=submitter_max_tokens,
+                validator_model=validator_model,
+                validator_context=validator_context,
+                validator_max_tokens=validator_max_tokens,
+                role_suffix=role_suffix,
+                novel_proofs_db=novel_proofs_db,
+                run_id=run_id,
+                broadcast_fn=broadcast_fn,
+                should_stop=should_stop,
+                restart_if_failed=not active_attempts,
+            )
+            if master_outcome.overflow_feedback is not None and master_outcome.reached_feedback is not None:
+                # The master proof already reached the model, so this overflow sets
+                # aside one candidate; it is not a round where nothing could run.
+                active_attempts.append(master_outcome.reached_feedback)
+            final_feedback = master_outcome.overflow_feedback or master_outcome.final_feedback
+            if final_feedback is not None:
+                await on_attempt_feedback(final_feedback)
+            success = master_outcome.success
+            theorem_name = master_outcome.theorem_name
+            lean_code = master_outcome.lean_code
+            attempts = active_attempts
+        elif full_remaining > 0 and tactic_attempt_count == 0:
             success, theorem_name, lean_code, attempts = await formalization_agent.prove_candidate(
                 user_research_prompt=user_prompt,
                 source_type=source_type,
@@ -3131,6 +3332,7 @@ class ProofVerificationStage:
         )
         if (
             not success
+            and not is_master_proof
             and not context_overflow
             and tactic_remaining > 0
             and not (should_stop and should_stop())
@@ -3159,6 +3361,7 @@ class ProofVerificationStage:
 
         if (
             not success
+            and not is_master_proof
             and not context_overflow
             and not _truncation_chain_exhausted(attempts)
             and not suppress_exhausted_event
@@ -3191,6 +3394,123 @@ class ProofVerificationStage:
             ),
         )
 
+    @staticmethod
+    async def _load_master_proof_summary(
+        novel_proofs_db,
+        *,
+        run_id: str,
+        source_type: str,
+        source_id: str,
+        statement: str,
+    ) -> MasterProofSummary:
+        """Read how a verified master proof was built from its saved scaffold state."""
+        directory = (
+            novel_proofs_db.get_master_proofs_dir()
+            if hasattr(novel_proofs_db, "get_master_proofs_dir")
+            else None
+        )
+        key = master_proof_key(
+            run_id=run_id, source_type=source_type, source_id=source_id, statement=statement
+        )
+        state = await MasterProofStore(directory).load(key)
+        if state is None:
+            return MasterProofSummary(master_key=key)
+        return summary_from_state_payload(state.model_dump(mode="json"))
+
+    async def _run_master_proof(
+        self,
+        *,
+        candidate: ProofCandidate,
+        base_event: dict[str, Any],
+        proof_label: str,
+        user_prompt: str,
+        source_type: str,
+        source_id: str,
+        source_content: str,
+        source_title: str,
+        submitter_model: str,
+        submitter_context: int,
+        submitter_max_tokens: int,
+        validator_model: str,
+        validator_context: int,
+        validator_max_tokens: int,
+        role_suffix: str,
+        novel_proofs_db,
+        run_id: str,
+        broadcast_fn: BroadcastFn,
+        should_stop: ShouldStopFn,
+        restart_if_failed: bool,
+    ):
+        """Solve one master proof candidate through its Lean scaffold.
+
+        Saved scaffold state resumes after Stop, restart, or a provider pause. A
+        master proof that already failed is replayed as failed for the same
+        checkpointed candidate and restarted only for a fresh proposal.
+        """
+        directory = (
+            novel_proofs_db.get_master_proofs_dir()
+            if hasattr(novel_proofs_db, "get_master_proofs_dir")
+            else None
+        )
+        store = MasterProofStore(directory)
+        key = master_proof_key(
+            run_id=run_id,
+            source_type=source_type,
+            source_id=source_id,
+            statement=candidate.statement,
+        )
+        state = await store.load(key)
+        if state is None or (state.status == "failed" and restart_if_failed):
+            state = MasterProofState(
+                master_key=key,
+                theorem_id=candidate.theorem_id,
+                statement=candidate.statement,
+            )
+        solver_role_id = f"autonomous_proof_formalization_{role_suffix}"
+
+        async def emit(kind: str, payload: dict[str, Any]) -> None:
+            await self._broadcast(
+                broadcast_fn,
+                MASTER_PROOF_EVENT,
+                {
+                    **base_event,
+                    "theorem_id": candidate.theorem_id,
+                    "theorem_statement": candidate.statement,
+                    "proof_label": proof_label,
+                    "role_id": solver_role_id,
+                    "kind": kind,
+                    "retry_origin_source_id": candidate.origin_source_id,
+                    **payload,
+                },
+            )
+
+        max_parallel_raw = getattr(system_config, "proof_max_parallel_candidates", 6)
+        solver = MasterProofSolver(
+            state=state,
+            store=store,
+            agent=MasterProofAgent(
+                model_id=submitter_model,
+                context_window=submitter_context,
+                max_output_tokens=submitter_max_tokens,
+                role_id=solver_role_id,
+            ),
+            change_validator=MasterProofScaffoldChangeValidator(
+                model_id=validator_model,
+                context_window=validator_context,
+                max_output_tokens=validator_max_tokens,
+                role_id=f"autonomous_proof_novelty_{role_suffix}",
+            ),
+            candidate=candidate,
+            user_prompt=user_prompt,
+            source_type=source_type,
+            source_title=source_title,
+            source_content=source_content,
+            emit=emit,
+            should_stop=should_stop,
+            max_parallel=0 if max_parallel_raw is None else max(0, int(max_parallel_raw)),
+        )
+        return await solver.run()
+
     async def run_manual(
         self,
         *,
@@ -3221,7 +3541,7 @@ class ProofVerificationStage:
         proof_pruning_route_fingerprint: str = "",
         proof_round_index: int = 1,
         proof_max_rounds: int = 1,
-        prior_round_results: str = "",
+        prior_round_results: Sequence[str] = (),
         theorem_candidates: Optional[list[ProofCandidate]] = None,
         proof_candidate_indexes: Optional[dict[str, int]] = None,
         checkpoint_attempts_by_candidate: Optional[dict[str, list[ProofAttemptFeedback]]] = None,

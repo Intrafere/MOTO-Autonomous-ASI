@@ -193,6 +193,15 @@ def test_base_redaction_is_idempotent_and_keeps_occurrence_ids():
     assert "\n" in once
 
 
+def test_base_redaction_removes_bare_claude_and_bedrock_keys():
+    keys = ("sk-" + "ant-api03-" + "Ab3" * 10, "AB" + "SK" + "QmVk" * 11, "bedrock-" + "api-key-" + "YmVk" * 11)
+    for key in keys:
+        once = redact_sensitive_values(f"provider said {key} was rejected")
+        assert key not in once
+        assert "[redacted]" in once
+        assert redact_sensitive_values(once) == once
+
+
 def _record(name: str, msg: str, args=(), exc_info=None) -> logging.LogRecord:
     return logging.LogRecord(name, logging.ERROR, __file__, 1, msg, args, exc_info)
 

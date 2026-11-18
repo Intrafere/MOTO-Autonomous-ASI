@@ -1,0 +1,43 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "framing_on",
+    "unresolved_visible",
+    "unresolved_marker"
+  ],
+  "faked_dependencies": [
+    "gate model replies",
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "model_output_contract",
+    "provider_pause_resume",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "observed_transition": "an unresolved proof framing gate turns framing on and publishes an unresolved decision",
+  "real_components": [
+    "backend/autonomous/core/autonomous_coordinator.py",
+    "backend/autonomous/agents/output_contract.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_proof_framing_gate_unresolved_defaults_on",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:316604cabbb3edfc75db7f12243fe15a7510e1fa570cb26af83142f07b53663c",
+  "test_file": "tests/unit/test_autonomous_output_contracts.py",
+  "test_selectors": [
+    "tests/unit/test_autonomous_output_contracts.py::ProofFramingGateTests::test_unresolved_gate_defaults_framing_on_and_is_visible"
+  ]
+}

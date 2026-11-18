@@ -12,7 +12,19 @@ import {
   formatEmptyProofDiscoveryMessage,
   formatHungConnectionMessage,
   formatProofRunEventMessage,
+  formatMasterProofMessage,
   withRouteIdentity,
+  masterProofCountNote,
+  formatProofCheckCompleteText,
+  isProofCheckErrorEvent,
+  MODEL_OUTPUT_NORMALIZED_EVENT,
+  formatModelOutputNormalizedMessage,
+  MODEL_OUTPUT_CONTRACT_FAILED_EVENT,
+  VALIDATOR_OUTPUT_CONTRACT_FAILED_EVENT,
+  VALIDATOR_BATCH_INTERRUPTED_EVENT,
+  formatModelOutputContractFailedMessage,
+  formatValidatorBatchInterruptedMessage,
+  formatProofFramingDecidedMessage,
 } from '../../utils/activityStyles';
 import { DEFAULT_EMPTY_PROOF_FEEDBACK, formatProofLeanResponse } from '../../utils/proofLeanResponse';
 import './AutonomousResearch.css';
@@ -203,9 +215,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
           ? `Redundancy: Removed ${data.paper_id}` 
           : 'Redundancy: No removal needed';
       case 'proof_framing_decided':
-        return data.is_proof_amenable
-          ? 'Submitter 1 (Main Submitter) chose proof framing for this run'
-          : 'Submitter 1 (Main Submitter) did not choose proof framing for this run';
+        return formatProofFramingDecidedMessage(data, 'run');
       case 'proof_check_started':
         if (data.trigger === 'manual') {
           return `Manual proof check started for ${data.source_type} ${data.source_id}`;
@@ -226,10 +236,10 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         const count = Number(data.count || 0);
         const subject = count === 1 ? 'proof candidate' : 'proof candidates';
         const prefix = proofRoundLabel() ? `${proofRoundLabel()} discovery` : 'Proof discovery';
-        return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
+        return `${prefix} found ${count} ${subject}; ${count} will be attempted${masterProofCountNote(data)}`;
       }
       case 'proof_candidate_list_review_started':
-        return `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed)`;
+        return `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed${masterProofCountNote(data, 'proposed')})`;
       case 'proof_candidate_list_review_accepted':
         return `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`;
       case 'proof_candidate_list_review_rejected':
@@ -256,6 +266,8 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         return `${proofName} terminated: proof attempts exhausted for ${proofTarget}`;
       case 'proof_truncation_recovery_exhausted':
         return data.message || `${proofName} exhausted output-truncation recovery.`;
+      case 'master_proof_progress':
+        return formatMasterProofMessage(data);
       case 'proof_novelty_assessment_started':
         return `${proofName} novelty assessment started: ranking the mathematical result actually established by Lean-verified code.${data.verified_group_candidates_available ? ' Verified same-run group evidence is available if it establishes a stronger combined claim.' : ''}${proofTarget ? ` (${proofTarget})` : ''}`;
       case 'novel_proof_discovered':
@@ -265,8 +277,10 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'proof_registration_duplicate':
         return proofNoveltyMessage();
       case 'proof_check_complete': {
-        const detail = data.message ? ` - ${String(data.message).replace(/\s+/g, ' ').trim()}` : '';
-        return `${proofRoundLabel() || 'Proof check'} complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel${detail}`;
+        return formatProofCheckCompleteText(data, {
+          label: proofRoundLabel() || 'Proof check',
+          detail: String(data.message || '').replace(/\s+/g, ' ').trim(),
+        });
       }
       case 'proof_run_queued':
       case 'proof_run_round_started':
@@ -308,6 +322,14 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         );
       case 'hung_connection_alert':
         return formatHungConnectionMessage(data);
+      case MODEL_OUTPUT_NORMALIZED_EVENT:
+        return formatModelOutputNormalizedMessage(data);
+      case MODEL_OUTPUT_CONTRACT_FAILED_EVENT:
+      case VALIDATOR_OUTPUT_CONTRACT_FAILED_EVENT:
+      case 'compiler_warning':
+        return formatModelOutputContractFailedMessage(data);
+      case VALIDATOR_BATCH_INTERRUPTED_EVENT:
+        return formatValidatorBatchInterruptedMessage(data);
       default:
         return event.message || event.event;
     }
@@ -315,6 +337,9 @@ const AutonomousResearchLogs = ({ stats, events }) => {
 
   const getEventClass = (event) => {
     const eventName = event.event || '';
+    if (eventName === 'proof_check_complete' && isProofCheckErrorEvent(event.data || {})) {
+      return 'log-reject';
+    }
     if (
       eventName === 'proof_attempt_failed' ||
       eventName === 'proof_attempts_exhausted' ||
@@ -343,10 +368,16 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       eventName === 'hung_connection_alert'
       || eventName === 'proof_prune_provider_paused'
       || eventName === 'proof_prune_repair_required'
+      || eventName === MODEL_OUTPUT_CONTRACT_FAILED_EVENT
+      || eventName === VALIDATOR_OUTPUT_CONTRACT_FAILED_EVENT
+      || eventName === VALIDATOR_BATCH_INTERRUPTED_EVENT
+      || eventName === 'compiler_warning'
+      || (eventName === 'proof_framing_decided' && event.data?.unresolved)
     ) {
       return 'log-warning';
     }
     if (
+      eventName === MODEL_OUTPUT_NORMALIZED_EVENT ||
       eventName === 'proof_framing_decided' ||
       eventName === 'proof_check_started' ||
       eventName === 'proof_novelty_assessment_started' ||

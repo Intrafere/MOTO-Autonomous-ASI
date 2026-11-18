@@ -14,11 +14,17 @@ const HOSTED_FEATURES = {
   xai_grok_oauth_available: false,
   sakana_fugu_available: false,
   kimi_code_available: false,
+  claude_api_available: false,
+  amazon_bedrock_available: false,
+  vllm_available: false,
   subscription_providers: [
     { id: 'openai_codex_oauth', label: 'OpenAI Codex', auth_kind: 'oauth_pkce', available: false },
     { id: 'xai_grok_oauth', label: 'xAI Grok', auth_kind: 'oauth_pkce', available: false },
     { id: 'sakana_fugu', label: 'Sakana Fugu', auth_kind: 'api_key', available: false },
     { id: 'kimi_code', label: 'Kimi Code', auth_kind: 'api_key', available: false },
+    { id: 'claude_api', label: 'Anthropic Claude', auth_kind: 'api_key', available: false },
+    { id: 'amazon_bedrock', label: 'Amazon Bedrock', auth_kind: 'api_key', available: false },
+    { id: 'vllm', label: 'vLLM', auth_kind: 'local_server', available: false },
   ],
 };
 
@@ -145,6 +151,16 @@ function responseFor(method, path, state) {
   if (method === 'GET' && path === '/api/workflow/solution-path') return { active: false, state: null };
   if (method === 'GET' && path === '/api/token-stats') {
     return { total_input: 0, total_output: 0, by_model: {}, elapsed_seconds: 0 };
+  }
+  // Mirrors GET /api/token-calibration before any model has been measured.
+  if (method === 'GET' && path === '/api/token-calibration') {
+    return {
+      success: true,
+      adjust_enabled: true,
+      samples_required: 10,
+      minimum_sample_tokens: 8000,
+      models: [],
+    };
   }
   if (method === 'GET' && path === '/api/boost/status') {
     return { enabled: false, boost_next_count: 0, always_prefer: false, boosted_categories: [] };

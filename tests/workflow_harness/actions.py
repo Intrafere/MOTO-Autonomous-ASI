@@ -125,6 +125,18 @@ def try_hosted_desktop_only_route(model: WorkflowModel) -> None:
     model.try_hosted_desktop_only_route()
 
 
+def cli_start_manual_aggregator(model: WorkflowModel) -> None:
+    model.cli_start_manual_aggregator()
+
+
+def cli_replay_saved_template(model: WorkflowModel) -> None:
+    model.cli_replay_saved_template()
+
+
+def exercise_cli_control_surface(model: WorkflowModel) -> None:
+    model.exercise_cli_control_surface()
+
+
 def reset_credit(model: WorkflowModel) -> None:
     model.reset_credit()
 

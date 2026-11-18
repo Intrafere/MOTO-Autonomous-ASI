@@ -104,7 +104,7 @@ beforeEach(() => {
 });
 
 test('shows exactly the translator submitter and validator cards, without lanes or Supercharge', async () => {
-  renderPanel({ developerModeEnabled: true });
+  renderPanel();
   expect(roleTitles()).toEqual(['Translator Submitter', 'Translator Validator']);
   expect(screen.getByText(TRANSLATOR_MODELS_EXPLANATION)).toBeInTheDocument();
   expect(TRANSLATOR_MODELS_EXPLANATION).toBe(
@@ -304,7 +304,7 @@ test('hosted mode is OpenRouter only and never loads LM Studio models', async ()
   expect(api.getModels).not.toHaveBeenCalled();
   expect(screen.queryByRole('button', { name: 'LM Studio' })).not.toBeInTheDocument();
   expect(screen.getAllByText('OpenRouter is required in this deployment.')).toHaveLength(2);
-  expect(screen.queryByText('LM Studio Fallback')).not.toBeInTheDocument();
+  expect(screen.queryByText('Local Fallback')).not.toBeInTheDocument();
 });
 
 test.each([

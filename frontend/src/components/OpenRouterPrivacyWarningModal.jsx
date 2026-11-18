@@ -172,7 +172,7 @@ function OpenRouterPrivacyWarningModal({ isOpen, onClose, errorData, capabilitie
             </li>
             {lmStudioEnabled ? (
               <li>
-                Configure an LM Studio fallback model in Settings
+                Configure a local fallback (an LM Studio or vLLM model) in Settings
               </li>
             ) : (
               <li>

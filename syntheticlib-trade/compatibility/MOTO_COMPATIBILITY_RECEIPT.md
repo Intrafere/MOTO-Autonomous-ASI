@@ -16,7 +16,7 @@ clean-source release attestation.
 ## Supported MOTO package/build identity
 
 - Product: `MOTO Autonomous ASI`
-- Package version: `1.1.10`
+- Package version: `1.1.11`
 - Build commit: `40be14c63aee7027f02d36479416e1341385b6e3`
 - Update channel: `main`
 - Identity source: repository-root `moto-update-manifest.json`
@@ -27,7 +27,7 @@ release receipt.
 
 ## Contract versions
 
-- MOTO API contract version: `build6-v123`
+- MOTO API contract version: `build6-v125`
 - Compatibility matrix: `moto-syntheticlib-compatibility-matrix.v1`
 - Contract-test result: `moto-syntheticlib-contract-test-result.v1`
 - Compatibility receipt: `moto-syntheticlib-compatibility-receipt.v1`
@@ -88,12 +88,12 @@ Normalization rules:
    has no trailing newline.
 
 ```json
-{"canonicalization":"moto-canonical-json-v1","compatibility":{"reasonCode":"frozen_syntheticlib_contract_unpublished","status":"blocked","supportedForLiveProofTrade":false},"moto":{"apiContractVersion":"build6-v123","buildCommit":"40be14c63aee7027f02d36479416e1341385b6e3","manifestVersion":1,"updateChannel":"main","version":"1.1.10"},"receiptId":"moto-1.1.10-build6-v123-40be14c63aee7027f02d36479416e1341385b6e3","schemaVersion":"moto-syntheticlib-compatibility-receipt.v1","syntheticLib":{"fixtureVersion":null,"nativeClientProfileVersion":null,"proofTradeContractVersion":null,"serverRelease":null}}
+{"canonicalization":"moto-canonical-json-v1","compatibility":{"reasonCode":"frozen_syntheticlib_contract_unpublished","status":"blocked","supportedForLiveProofTrade":false},"moto":{"apiContractVersion":"build6-v125","buildCommit":"40be14c63aee7027f02d36479416e1341385b6e3","manifestVersion":1,"updateChannel":"main","version":"1.1.11"},"receiptId":"moto-1.1.11-build6-v125-40be14c63aee7027f02d36479416e1341385b6e3","schemaVersion":"moto-syntheticlib-compatibility-receipt.v1","syntheticLib":{"fixtureVersion":null,"nativeClientProfileVersion":null,"proofTradeContractVersion":null,"serverRelease":null}}
 ```
 
 Normalized receipt SHA-256:
 
-`d4353385d3d16252c7c6c47e5dfbd250843e4cd977ceabb5fb0733211387833b`
+`c2719142ac149a037b9b2534de534c6e4a6956ddd1a63b94aed9ed609286f2b5`
 
 The detached digest is `moto-compatibility-receipt.sha256`.
 

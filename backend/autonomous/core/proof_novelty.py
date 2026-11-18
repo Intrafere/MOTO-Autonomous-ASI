@@ -13,15 +13,26 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
-from backend.autonomous.prompts.proof_prompts import build_proof_novelty_prompt
+from backend.autonomous.agents.proof_identification_agent import model_output_syntax_error
+from backend.autonomous.prompts.proof_prompts import (
+    PROOF_NOVELTY_RESPONSE_SCHEMA,
+    build_proof_novelty_prompt,
+)
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.config import rag_config
+from backend.shared.json_key_recovery import recover_key_labels
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
+)
+from backend.shared.model_output_contract import (
+    ItemContractProblem,
+    ModelOutputContractError,
+    is_model_output_contract_error,
+    report_model_output_normalizations,
 )
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.response_extraction import extract_message_text
@@ -73,30 +84,78 @@ def _parse_novelty_payload(
     *,
     allowed_group_proof_ids: frozenset[str] = frozenset(),
     require_explicit_scope: bool = False,
+    role: str = "",
+    repairs: Optional[list] = None,
 ) -> ProofNoveltyAssessment:
-    data = parse_json(content)
+    """Parse the novelty JSON; contract failures raise ``ModelOutputContractError``.
+
+    ``repairs`` receives each visible normalization applied to the response.
+    """
+    applied: list = []
+    # Repairs run only for a caller that publishes them.
+    collect = repairs is not None
+    try:
+        data = parse_json(content, repairs=applied if collect else None)
+    except ValueError as exc:
+        raise model_output_syntax_error(exc, role=role) from exc
     if isinstance(data, list):
         if not data:
-            raise ValueError("Novelty validator returned an empty JSON array.")
+            raise ModelOutputContractError(
+                "Novelty validator returned an empty JSON array", role=role
+            )
         data = data[0]
     if not isinstance(data, dict):
-        raise ValueError("Novelty validator JSON was not an object.")
+        raise ModelOutputContractError("Novelty validator JSON was not an object", role=role)
+    if collect:
+        data, key_repairs = recover_key_labels(data, PROOF_NOVELTY_RESPONSE_SCHEMA)
+        applied.extend(key_repairs)
+        repairs.extend(applied)
 
     raw_tier = str(data.get("novelty_tier", "")).strip().lower()
     if not raw_tier:
-        raise ValueError("Novelty validator JSON omitted novelty_tier.")
+        raise ModelOutputContractError(
+            "Novelty validator JSON omitted novelty_tier",
+            role=role,
+            stage="missing_key",
+            missing_keys=("novelty_tier",),
+            repairs_applied=applied,
+        )
     if raw_tier not in VALID_NOVELTY_TIERS:
-        raise ValueError(f"Novelty validator returned unrecognised tier {raw_tier!r}.")
+        raise ModelOutputContractError(
+            "Novelty validator returned an unrecognised novelty tier",
+            role=role,
+            stage="invalid_value",
+            invalid_fields=("novelty_tier",),
+            repairs_applied=applied,
+        )
 
     reasoning = str(data.get("reasoning", "")).strip()
     if require_explicit_scope and "novelty_scope" not in data:
-        raise ValueError("Novelty validator JSON omitted novelty_scope.")
+        raise ModelOutputContractError(
+            "Novelty validator JSON omitted novelty_scope",
+            role=role,
+            stage="missing_key",
+            missing_keys=("novelty_scope",),
+            repairs_applied=applied,
+        )
     novelty_scope = str(data.get("novelty_scope", "standalone")).strip().lower()
     if novelty_scope not in VALID_NOVELTY_SCOPES:
-        raise ValueError(f"Novelty validator returned unrecognised scope {novelty_scope!r}.")
+        raise ModelOutputContractError(
+            "Novelty validator returned an unrecognised novelty scope",
+            role=role,
+            stage="invalid_value",
+            invalid_fields=("novelty_scope",),
+            repairs_applied=applied,
+        )
     raw_group_ids = data.get("group_proof_ids", [])
     if not isinstance(raw_group_ids, list):
-        raise ValueError("Novelty validator group_proof_ids must be an array.")
+        raise ModelOutputContractError(
+            "Novelty validator group_proof_ids must be an array",
+            role=role,
+            stage="invalid_value",
+            invalid_fields=("group_proof_ids",),
+            repairs_applied=applied,
+        )
     group_proof_ids = tuple(
         dict.fromkeys(str(proof_id).strip() for proof_id in raw_group_ids if str(proof_id).strip())
     )
@@ -106,15 +165,38 @@ def _parse_novelty_payload(
         group_claim = ""
     else:
         if not group_proof_ids:
-            raise ValueError("Group-scoped novelty requires at least one supporting proof ID.")
+            raise ModelOutputContractError(
+                "Group-scoped novelty requires at least one supporting proof ID",
+                role=role,
+                stage="missing_key",
+                missing_keys=("group_proof_ids",),
+                repairs_applied=applied,
+            )
         unknown_ids = sorted(set(group_proof_ids) - allowed_group_proof_ids)
         if unknown_ids:
-            raise ValueError(
-                "Novelty validator cited proof IDs outside the supplied verified group: "
-                + ", ".join(unknown_ids)
+            raise ModelOutputContractError(
+                "Novelty validator cited proof IDs outside the supplied verified group",
+                role=role,
+                stage="invalid_value",
+                invalid_fields=("group_proof_ids",),
+                problems=tuple(
+                    ItemContractProblem(
+                        item_path="group_proof_ids",
+                        item_id=proof_id,
+                        detail="not a supplied verified proof ID",
+                    )
+                    for proof_id in unknown_ids[:8]
+                ),
+                repairs_applied=applied,
             )
         if not group_claim:
-            raise ValueError("Group-scoped novelty requires a non-empty group_claim.")
+            raise ModelOutputContractError(
+                "Group-scoped novelty requires a non-empty group_claim",
+                role=role,
+                stage="missing_key",
+                missing_keys=("group_claim",),
+                repairs_applied=applied,
+            )
 
     return ProofNoveltyAssessment(
         novelty_tier=raw_tier,
@@ -123,6 +205,28 @@ def _parse_novelty_payload(
         group_claim=group_claim,
         group_proof_ids=group_proof_ids,
     )
+
+
+async def _parse_and_report_novelty(
+    content: str,
+    *,
+    role_id: str,
+    task_id: str,
+    allowed_group_proof_ids: frozenset[str],
+    require_explicit_scope: bool,
+) -> ProofNoveltyAssessment:
+    repairs: list = []
+    assessment = _parse_novelty_payload(
+        content,
+        allowed_group_proof_ids=allowed_group_proof_ids,
+        require_explicit_scope=require_explicit_scope,
+        role=role_id,
+        repairs=repairs,
+    )
+    # Published only for an accepted reply, so "Accepted ..." is never shown
+    # for a reply that was rejected.
+    await report_model_output_normalizations(role_id, repairs, task_id=task_id)
+    return assessment
 
 
 async def _retry_novelty_payload(
@@ -189,10 +293,29 @@ async def _retry_novelty_payload(
         temperature=0.0,
     )
     retry_content = _extract_novelty_content(retry_response, "retry")
-    return _parse_novelty_payload(
+    return await _parse_and_report_novelty(
         retry_content,
+        role_id=role_id,
+        task_id=f"{task_id}_retry",
         allowed_group_proof_ids=allowed_group_proof_ids,
         require_explicit_scope=require_explicit_scope,
+    )
+
+
+def _conservative_fallback_reasoning(retry_exc: BaseException) -> str:
+    """Name the rule-defined not_novel fallback without storing error text."""
+    if is_model_output_contract_error(retry_exc):
+        fields = getattr(retry_exc, "field_summary", "") or getattr(retry_exc, "stage", "")
+        cause = (
+            "the novelty validator's output did not match the required JSON format"
+            + (f" ({fields})" if fields else "")
+        )
+    else:
+        cause = f"the novelty validator call failed ({type(retry_exc).__name__})"
+    return (
+        "Novelty validator JSON retry failed after retry exhaustion: "
+        f"{cause}. This Lean-verified proof was stored conservatively as not_novel; "
+        "no novelty judgment was made."
     )
 
 
@@ -286,8 +409,10 @@ async def assess_proof_novelty_details(
     content = ""
     try:
         content = _extract_novelty_content(response, "initial")
-        return _parse_novelty_payload(
+        return await _parse_and_report_novelty(
             content,
+            role_id=role_id,
+            task_id=task_id,
             allowed_group_proof_ids=allowed_group_proof_ids,
             require_explicit_scope=bool(verified_group_candidates),
         )
@@ -318,10 +443,7 @@ async def assess_proof_novelty_details(
             )
             return ProofNoveltyAssessment(
                 novelty_tier="not_novel",
-                reasoning=(
-                    "Novelty validator JSON retry failed after retry exhaustion: "
-                    f"initial error: {exc}; retry error: {retry_exc}"
-                ),
+                reasoning=_conservative_fallback_reasoning(retry_exc),
                 assessment_origin="conservative_fallback",
             )
 

@@ -1,0 +1,65 @@
+.mpg-graphic {
+  --mpg-blue: #9bb5ff;
+  --mpg-green: #1eff1c;
+  --mpg-text: #d8d8f4;
+  margin: 0.4rem 0 1.1rem;
+  padding: 1.1rem 1.15rem 0.95rem;
+  border-radius: 14px;
+  background: rgba(8, 9, 24, 0.6);
+  border: 1px solid rgba(30, 255, 28, 0.2);
+}
+
+.mpg-row { padding: 0.2rem 0 0.9rem; }
+.mpg-row--master { padding-top: 0.9rem; border-top: 1px solid rgba(155, 181, 255, 0.18); }
+.mpg-row__label {
+  display: block;
+  margin-bottom: 0.55rem;
+  color: var(--mpg-text);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.mpg-row--master .mpg-row__label { color: var(--mpg-green); }
+
+/* Both rows share these columns, so the Lean 4 proof boxes line up. */
+.mpg-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.5fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.mpg-box {
+  min-width: 0;
+  padding: 0.6rem 0.5rem;
+  border-radius: 10px;
+  border: 2px solid rgba(216, 216, 244, 0.45);
+  background: rgba(216, 216, 244, 0.07);
+  color: #fff;
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+}
+.mpg-box--big { padding-top: 1.5rem; padding-bottom: 1.5rem; font-size: 1.02rem; }
+.mpg-box--lean { border-color: var(--mpg-blue); background: rgba(111, 140, 255, 0.18); }
+.mpg-box--done { border-color: var(--mpg-green); background: rgba(30, 255, 28, 0.12); color: var(--mpg-green); }
+
+.mpg-arrow { color: var(--mpg-text); font-size: 1.3rem; line-height: 1; }
+
+.mpg-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.45rem; min-width: 0; }
+.mpg-step { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0.5rem; margin: 0; padding: 0; }
+.mpg-step__name { color: var(--mpg-text); font-size: 0.82rem; font-weight: 700; white-space: nowrap; }
+
+.mpg-caption { margin: 0.2rem auto 0; max-width: 640px; color: var(--mpg-text); font-size: 0.88rem; line-height: 1.55; text-align: center; }
+
+@media (max-width: 520px) {
+  .mpg-graphic { padding: 0.8rem 0.6rem; }
+  .mpg-flow { gap: 0.3rem; }
+  .mpg-box { padding: 0.5rem 0.25rem; font-size: 0.78rem; }
+  .mpg-box--big { padding-top: 1rem; padding-bottom: 1rem; font-size: 0.82rem; }
+  .mpg-step { grid-template-columns: minmax(0, 1fr); gap: 0.15rem; }
+  .mpg-step__name { font-size: 0.72rem; }
+  .mpg-arrow { font-size: 1rem; }
+}

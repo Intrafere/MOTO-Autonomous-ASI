@@ -1,0 +1,40 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "truncation_raises",
+    "no_repairs"
+  ],
+  "faked_dependencies": [
+    "model reply supplied as a fixed string"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "truncated output still raises and records no repair",
+  "real_components": [
+    "backend/shared/json_parser.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_parser_never_repairs_truncated_output",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:64f3fbeafd26e582bd42424e8a9ded99effa054154d6f6c5be0e3f442354f251",
+  "test_file": "tests/unit/test_json_parser_repairs.py",
+  "test_selectors": [
+    "tests/unit/test_json_parser_repairs.py::test_truncated_output_still_raises_and_is_never_repaired"
+  ]
+}

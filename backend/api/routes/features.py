@@ -22,13 +22,13 @@ logger = logging.getLogger(__name__)
 
 
 class SubscriptionProviderCapability(BaseModel):
-    """Capability-only description of one desktop subscription provider."""
+    """Capability-only description of one desktop subscription or local-server provider."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     id: str
     label: str
-    auth_kind: Literal["oauth_pkce", "api_key"]
+    auth_kind: Literal["oauth_pkce", "api_key", "local_server"]
     available: bool
 
 
@@ -48,6 +48,9 @@ class FeaturesResponse(BaseModel):
     xai_grok_oauth_available: bool
     sakana_fugu_available: bool
     kimi_code_available: bool
+    claude_api_available: bool
+    amazon_bedrock_available: bool
+    vllm_available: bool
     subscription_providers: List[SubscriptionProviderCapability]
     syntheticlib_product_state: Literal[
         "coming_soon",

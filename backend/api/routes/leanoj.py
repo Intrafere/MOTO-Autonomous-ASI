@@ -17,6 +17,7 @@ from backend.leanoj.core.leanoj_proof_views import (
     _leanoj_created_at,
     _leanoj_prompt,
 )
+from backend.shared.cli_control import remember_start_request
 from backend.shared.config import system_config
 from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.models import LeanOJStartRequest, ProofNoveltyGroupResponse
@@ -305,6 +306,7 @@ async def start_leanoj(request: LeanOJStartRequest):
             else:
                 from backend.shared.lean4_client import start_lean4_workspace_bootstrap
                 start_lean4_workspace_bootstrap()
+            remember_start_request("leanoj", request)
             return {
                 "success": True,
                 "message": "Proof Solver resumed" if resumed else "Proof Solver started",

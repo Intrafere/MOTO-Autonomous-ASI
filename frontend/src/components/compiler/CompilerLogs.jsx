@@ -8,11 +8,18 @@ import {
   formatEmptyProofDiscoveryMessage,
   formatHungConnectionMessage,
   formatProofRunEventMessage,
+  formatMasterProofMessage,
   formatSolutionPathEventMessage,
   getActivityClass,
   getActivityIcon,
   hasRecentAssistantProofPackDuplicate,
   hasRecentProofActivityDuplicate,
+  masterProofCountNote,
+  MASTER_PROOF_EXPANSION_EVENT,
+  formatMasterProofExpansionMessage,
+  MODEL_OUTPUT_NORMALIZED_EVENT,
+  formatModelOutputNormalizedMessage,
+  formatProofCheckCompleteText,
 } from '../../utils/activityStyles';
 import {
   formatValidatorDecisionActivity,
@@ -24,6 +31,7 @@ import {
 } from '../../utils/manualProofSources';
 import {
   compactCompilerActivityEvents,
+  mergeCompilerActivityEvents,
   shouldIncludeCompilerContextOverflow,
   shouldIncludeCompilerProofContextOverflow,
   shouldIncludeCompilerSolutionPathEvent,
@@ -48,6 +56,7 @@ const MANUAL_PROOF_EVENTS = [
   'proof_lean_accepted',
   'proof_attempt_failed',
   'proof_attempts_exhausted',
+  'master_proof_progress',
   'proof_integrity_rejected',
   'proof_novelty_assessment_started',
   'proof_verified',
@@ -121,15 +130,7 @@ function CompilerLogs({ providerActivity = [] }) {
   const [events, setEvents] = useState([]);
 
   useEffect(() => {
-    setEvents(prev => {
-      const known = new Set(
-        prev.map(item => item?.data?.notification_key).filter(Boolean)
-      );
-      const incoming = providerActivity.filter(
-        item => !known.has(item?.data?.notification_key)
-      );
-      return [...incoming, ...prev].slice(0, MAX_COMPILER_ACTIVITY_EVENTS);
-    });
+    setEvents(prev => mergeCompilerActivityEvents(prev, providerActivity));
   }, [providerActivity]);
   const [status, setStatus] = useState({ current_mode: 'idle' });
   const [error, setError] = useState(null);
@@ -281,6 +282,7 @@ function CompilerLogs({ providerActivity = [] }) {
     websocket.on('model_recovery_success', handleRecoverySuccess);
     websocket.on('model_recovery_failed', handleRecoveryFailed);
     websocket.on('hung_connection_alert', handleHungConnectionAlert);
+    websocket.on(MASTER_PROOF_EXPANSION_EVENT, handleMasterProofExpansion);
     websocket.on('assistant_proof_pack_updated', handleAssistantProofPackUpdated);
     websocket.on('assistant_proof_pack_failed', handleAssistantProofPackFailed);
     const solutionPathEvents = [
@@ -340,6 +342,7 @@ function CompilerLogs({ providerActivity = [] }) {
       websocket.off('model_recovery_success', handleRecoverySuccess);
       websocket.off('model_recovery_failed', handleRecoveryFailed);
       websocket.off('hung_connection_alert', handleHungConnectionAlert);
+      websocket.off(MASTER_PROOF_EXPANSION_EVENT, handleMasterProofExpansion);
       websocket.off('assistant_proof_pack_updated', handleAssistantProofPackUpdated);
       websocket.off('assistant_proof_pack_failed', handleAssistantProofPackFailed);
 
@@ -439,20 +442,37 @@ function CompilerLogs({ providerActivity = [] }) {
     addEvent({ type: 'hung_connection_alert', data });
   };
 
+  const handleMasterProofExpansion = (data = {}) => {
+    const roleId = String(data.role_id || '').toLowerCase();
+    const sourceId = String(data.source_id || '');
+    const isManualCompilerProof = String(data.workflow_mode || '') === 'manual_proof_check'
+      && (
+        sourceId === MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID
+        || sourceId.startsWith('manual_compiler_')
+        || sourceId.startsWith('compiler_manual_')
+      );
+    if (!roleId.startsWith('compiler_') && !isManualCompilerProof) {
+      return;
+    }
+    addEvent({ type: MASTER_PROOF_EXPANSION_EVENT, data });
+  };
+
   // Load events from localStorage on mount
   useEffect(() => {
     try {
       const savedEvents = localStorage.getItem(COMPILER_ACTIVITY_STORAGE_KEY);
       if (savedEvents) {
         const parsed = JSON.parse(savedEvents);
-        setEvents(Array.isArray(parsed) ? parsed.filter((event) => (
+        const saved = Array.isArray(parsed) ? parsed.filter((event) => (
           event?.type !== 'proof_run_idle'
           && event?.type !== 'proof_run_next_round_required'
           && event?.data?.status !== 'idle_between_rounds'
           && !/waiting for Run Next Round/i.test(
             String(event?.message || ''),
           )
-        )).map((event) => normalizeActivityEvent(event)).slice(0, MAX_COMPILER_ACTIVITY_EVENTS) : []);
+        )) : [];
+        // Provider rows handed down before this load already sit in `prev`.
+        setEvents(prev => mergeCompilerActivityEvents(prev, saved));
       }
     } catch (e) {
       console.error('Failed to load events from localStorage:', e);
@@ -580,10 +600,10 @@ function CompilerLogs({ providerActivity = [] }) {
         ? `Proof round ${round}${!isUnbounded && maxRounds > 1 ? `/${maxRounds}` : ''} discovery`
         : 'Proof discovery';
       const subject = count === 1 ? 'proof candidate' : 'proof candidates';
-      return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
+      return `${prefix} found ${count} ${subject}; ${count} will be attempted${masterProofCountNote(data)}`;
     }
     if (type === 'proof_candidate_list_review_started') {
-      return `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed)`;
+      return `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed${masterProofCountNote(data, 'proposed')})`;
     }
     if (type === 'proof_candidate_list_review_accepted') {
       return `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`;
@@ -609,6 +629,9 @@ function CompilerLogs({ providerActivity = [] }) {
     if (type === 'proof_attempts_exhausted') {
       return formatLeanProofAttempt('Proof attempts exhausted', data);
     }
+    if (type === 'master_proof_progress') {
+      return formatMasterProofMessage(data);
+    }
     if (type === 'proof_integrity_rejected') {
       return `Proof feedback: integrity check rejected this attempt — ${data.reason || data.message || proofTargetLabel(data)}`;
     }
@@ -631,8 +654,9 @@ function CompilerLogs({ providerActivity = [] }) {
       return `Proof dependency added: ${proofTargetLabel(data, 'verified proof')}`;
     }
     if (type === 'proof_check_complete') {
-      const detail = data.message ? ` - ${compactProofText(data.message)}` : '';
-      return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel${detail}`;
+      return formatProofCheckCompleteText(data, {
+        detail: data.message ? compactProofText(data.message) : '',
+      });
     }
     if (type === 'proof_retry_scheduled' || type === 'proof_retry_started') {
       return data.message || formatProofRunEventMessage(type, data);
@@ -660,6 +684,12 @@ function CompilerLogs({ providerActivity = [] }) {
     }
     if (type === 'hung_connection_alert') {
       return formatHungConnectionMessage(data);
+    }
+    if (type === MASTER_PROOF_EXPANSION_EVENT) {
+      return formatMasterProofExpansionMessage(data);
+    }
+    if (type === MODEL_OUTPUT_NORMALIZED_EVENT) {
+      return formatModelOutputNormalizedMessage(data);
     }
     if (typeof event.message === 'string' && event.message.trim()) {
       return event.message;

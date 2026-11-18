@@ -8,6 +8,8 @@ import os
 import uuid
 from pathlib import Path
 
+from backend.shared.atomic_json import replace_file
+
 
 class CompilerCompetitionState:
     def __init__(self, session_dir: Path, run_id: str, source_id: str):
@@ -37,7 +39,7 @@ class CompilerCompetitionState:
                     stream.write(payload)
                     stream.flush()
                     os.fsync(stream.fileno())
-                os.replace(temporary, self.path)
+                replace_file(temporary, self.path)
             finally:
                 temporary.unlink(missing_ok=True)
         # Retain write ownership on cancellation so a later save cannot be
