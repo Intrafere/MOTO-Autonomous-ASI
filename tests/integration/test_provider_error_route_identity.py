@@ -585,7 +585,7 @@ class ProviderErrorRouteIdentityTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(self.transport.models, [MODEL, MODEL, ALT_MODEL, ALT_MODEL, ALT_MODEL])
         self.free_models.mark_model_failed.assert_any_call(MODEL)
-        # No route is left and no LM Studio fallback exists, so the alternative's
+        # No route is left and no local fallback exists, so the alternative's
         # transient failure is raised for workflow retry and the model is skipped.
         self.free_models.mark_model_failed.assert_any_call(ALT_MODEL)
         self.assertEqual(error.route_kind, "free_rotation")
@@ -725,7 +725,7 @@ class ProviderErrorRouteIdentityTests(IsolatedAsyncioTestCase):
         self.assertEqual(error.configured_host_provider, "")
         self.assertEqual(
             str(error),
-            f"All free model options exhausted for role '{ROLE}'. No LM Studio fallback configured.",
+            f"All free model options exhausted for role '{ROLE}'. No local fallback configured.",
         )
 
     async def test_transient_rotation_failure_moves_on_to_next_alternative(self) -> None:

@@ -168,6 +168,56 @@ class RuntimeUpdateNoticeTests(IsolatedAsyncioTestCase):
         self.assertFalse(result["update_available"])
 
 
+class UpdateRouteZipRollbackTests(IsolatedAsyncioTestCase):
+    async def test_zip_update_restores_install_when_overlay_fails_midway(self) -> None:
+        import shutil
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir) / "install"
+            repo_root.mkdir()
+            (repo_root / "moto_launcher.py").write_text("old launcher\n", encoding="utf-8")
+            (repo_root / "moto_updater.py").write_text("old updater\n", encoding="utf-8")
+
+            def fake_download_archive(remote_manifest: BuildManifest, archive_path: Path) -> None:
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.writestr("MOTO/moto_launcher.py", "new launcher\n")
+                    archive.writestr("MOTO/moto_updater.py", "new updater\n")
+                    archive.writestr("MOTO/docs/guide.txt", "new docs\n")
+
+            real_copy2 = shutil.copy2
+            install_copies = 0
+
+            def copy2_failing_on_third_install_copy(source, destination, *args, **kwargs):
+                nonlocal install_copies
+                if repo_root in Path(destination).parents:
+                    install_copies += 1
+                    if install_copies == 3:
+                        raise OSError("simulated locked file")
+                return real_copy2(source, destination, *args, **kwargs)
+
+            local_manifest = BuildManifest("1.0.9", "old-local", "main", "build5-v1")
+            remote_manifest = BuildManifest("1.1.0", "new-remote", "main", "build5-v2")
+            state_lines: list[str] = []
+            with mock.patch.object(update_route, "_REPO_ROOT", repo_root):
+                with mock.patch("moto_updater.load_local_manifest", return_value=local_manifest):
+                    with mock.patch("moto_updater.fetch_remote_manifest", return_value=remote_manifest):
+                        with mock.patch("moto_updater.cleanup_launcher_state", return_value=[]):
+                            with mock.patch("moto_updater._download_archive", side_effect=fake_download_archive):
+                                with mock.patch(
+                                    "moto_updater.shutil.copy2",
+                                    side_effect=copy2_failing_on_third_install_copy,
+                                ):
+                                    with self.assertRaises(OSError):
+                                        update_route._run_zip_update_sync(state_lines)
+
+            # Two files had already been overlaid when the third copy failed.
+            self.assertEqual((repo_root / "moto_launcher.py").read_text(encoding="utf-8"), "old launcher\n")
+            self.assertEqual((repo_root / "moto_updater.py").read_text(encoding="utf-8"), "old updater\n")
+            self.assertFalse((repo_root / "docs" / "guide.txt").exists())
+            self.assertIn("Rollback complete — previous install restored.", state_lines)
+
+
 class UpdateVersionComparisonTests(IsolatedAsyncioTestCase):
     async def test_downgrade_guard_treats_zero_padded_release_as_same_version(self) -> None:
         self.assertFalse(update_route._is_downgrade("1.1.00", "1.1.0"))

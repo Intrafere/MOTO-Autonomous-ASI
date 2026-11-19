@@ -32,6 +32,9 @@ export function resolveOpenRouterKeyPresence(status) {
 }
 
 function connectedLabel(provider) {
+  if (provider.authKind === 'local_server') {
+    return `${provider.label} is set up`;
+  }
   return provider.authKind === 'api_key'
     ? `${provider.label} API key is saved`
     : `${provider.loginLabel} is connected`;

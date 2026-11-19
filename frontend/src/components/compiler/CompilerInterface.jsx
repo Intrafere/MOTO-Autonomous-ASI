@@ -6,6 +6,8 @@ import {
   normalizeOpenRouterReasoningEffort,
 } from '../../utils/openRouterSelection';
 import TextFileUploader from '../TextFileUploader';
+import AllowedOutputsRow from '../AllowedOutputsRow';
+import { buildProofSettingsPayload, publishProofSettings } from '../../utils/proofRuntimeSettings';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
 import usePromptDraft from '../../hooks/usePromptDraft';
 import '../autonomous/AutonomousResearch.css';
@@ -46,7 +48,6 @@ function CompilerInterface({
   capabilities,
   anyWorkflowRunning = false,
   onWorkflowRunningChange = null,
-  developerModeEnabled = false,
   connectivityStatus = null,
 }) {
   const [compilerPrompt, setCompilerPrompt] = usePromptDraft(
@@ -64,14 +65,16 @@ function CompilerInterface({
   const [paperVersion, setPaperVersion] = useState(1);
   const [proofOutputUpdating, setProofOutputUpdating] = useState(false);
   const [allowedOutputs, setAllowedOutputs] = useState(() => {
+    // New users start with Mathematical Proofs off; a saved choice is kept.
     try {
-      const parsed = JSON.parse(localStorage.getItem('compiler_allowed_outputs') || '{}');
+      const saved = localStorage.getItem('compiler_allowed_outputs');
+      const parsed = JSON.parse(saved || '{}');
       return {
-        mathematicalProofs: parsed.mathematicalProofs ?? true,
+        mathematicalProofs: parsed.mathematicalProofs ?? (saved !== null),
         researchPapers: parsed.researchPapers ?? true,
       };
     } catch {
-      return { mathematicalProofs: true, researchPapers: true };
+      return { mathematicalProofs: false, researchPapers: true };
     }
   });
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
@@ -268,7 +271,7 @@ function CompilerInterface({
         validator_lm_studio_fallback: lmStudioEnabled ? (settings.validatorLmStudioFallback || null) : null,
         validator_context_size: settings.validatorContextSize ?? validatorContextSize,
         validator_max_output_tokens: settings.validatorMaxOutput,
-        validator_supercharge_enabled: developerModeEnabled && Boolean(settings.validatorSuperchargeEnabled),
+        validator_supercharge_enabled: Boolean(settings.validatorSuperchargeEnabled),
         // Writing submitter config with OpenRouter support
         writer_provider: lmStudioEnabled ? (settings.writerProvider || 'lm_studio') : 'openrouter',
         writer_model: settings.writerModel,
@@ -277,7 +280,7 @@ function CompilerInterface({
         writer_lm_studio_fallback: lmStudioEnabled ? (settings.writerLmStudioFallback || null) : null,
         writer_context_size: settings.writerContextSize ?? writerContextSize,
         writer_max_output_tokens: settings.writerMaxOutput,
-        writer_supercharge_enabled: developerModeEnabled && Boolean(settings.writerSuperchargeEnabled),
+        writer_supercharge_enabled: Boolean(settings.writerSuperchargeEnabled),
         // Rigor & Proofs Submitter config with OpenRouter support
         high_param_provider: lmStudioEnabled ? (settings.highParamProvider || 'lm_studio') : 'openrouter',
         high_param_model: settings.highParamModel,
@@ -286,7 +289,7 @@ function CompilerInterface({
         high_param_lm_studio_fallback: lmStudioEnabled ? (settings.highParamLmStudioFallback || null) : null,
         high_param_context_size: settings.highParamContextSize ?? highParamContextSize,
         high_param_max_output_tokens: settings.highParamMaxOutput,
-        high_param_supercharge_enabled: developerModeEnabled && Boolean(settings.highParamSuperchargeEnabled),
+        high_param_supercharge_enabled: Boolean(settings.highParamSuperchargeEnabled),
         // Deprecated critique fields mirror Rigor & Proofs for compatibility.
         critique_submitter_provider: lmStudioEnabled ? (settings.highParamProvider || 'lm_studio') : 'openrouter',
         critique_submitter_model: settings.highParamModel,
@@ -295,7 +298,7 @@ function CompilerInterface({
         critique_submitter_lm_studio_fallback: lmStudioEnabled ? (settings.highParamLmStudioFallback || null) : null,
         critique_submitter_context_window: settings.highParamContextSize ?? highParamContextSize,
         critique_submitter_max_tokens: settings.highParamMaxOutput,
-        critique_submitter_supercharge_enabled: developerModeEnabled && Boolean(settings.highParamSuperchargeEnabled),
+        critique_submitter_supercharge_enabled: Boolean(settings.highParamSuperchargeEnabled),
         assistant_provider: assistantMemoryEnabled
           ? (lmStudioEnabled ? (settings.assistantProvider || settings.validatorProvider || 'lm_studio') : 'openrouter')
           : (lmStudioEnabled ? (settings.validatorProvider || 'lm_studio') : 'openrouter'),
@@ -311,7 +314,7 @@ function CompilerInterface({
           : null,
         assistant_context_size: assistantMemoryEnabled ? (settings.assistantContextSize || settings.validatorContextSize || validatorContextSize) : 0,
         assistant_max_output_tokens: assistantMemoryEnabled ? (settings.assistantMaxOutput || settings.validatorMaxOutput) : 0,
-        assistant_supercharge_enabled: assistantMemoryEnabled && developerModeEnabled && Boolean(settings.assistantSuperchargeEnabled),
+        assistant_supercharge_enabled: assistantMemoryEnabled && Boolean(settings.assistantSuperchargeEnabled),
         allow_mathematical_proofs: Boolean(mathematicalProofsAllowed),
         allow_research_papers: Boolean(researchPapersAllowed)
       });
@@ -354,15 +357,8 @@ function CompilerInterface({
     setProofOutputUpdating(true);
     try {
       const status = await autonomousAPI.getProofStatus();
-      const updatedStatus = await autonomousAPI.updateProofSettings({
-        enabled,
-        timeout: status.lean4_proof_timeout ?? 2000,
-        lean4_lsp_enabled: Boolean(status.lean4_lsp_enabled),
-        lean4_lsp_idle_timeout: status.lean4_lsp_idle_timeout ?? 600,
-        max_parallel_candidates: status.proof_max_parallel_candidates ?? 6,
-        smt_enabled: Boolean(status.smt_enabled),
-        smt_timeout: status.smt_timeout ?? 300,
-      });
+      const updatedStatus = await autonomousAPI.updateProofSettings(buildProofSettingsPayload(status, { enabled }));
+      publishProofSettings(updatedStatus);
       if (enabled) {
         const leanVersion = String(updatedStatus.lean4_version || updatedStatus.lean_version || '').trim();
         const leanVersionUnavailable = /not found|no such file|not recognized/i.test(leanVersion);
@@ -543,36 +539,25 @@ function CompilerInterface({
           </div>
         </div>
         <div className="prompt-composer-options">
-          <div
-            className="allowed-outputs-row"
-            title="Allowed Outputs controls which products this workflow may generate. At least one output must remain enabled."
-          >
-            <span className="allowed-outputs-label">Allowed Outputs:</span>
-            <label
-              className="allowed-output-option"
-              title="Mathematical Proofs enables Lean 4 proof verification and proof-library output for this run."
-            >
-              <input
-                type="checkbox"
-                checked={proofOutputsAvailable && Boolean(allowedOutputs.mathematicalProofs)}
-                onChange={(event) => updateAllowedOutput('mathematicalProofs', event.target.checked)}
-                disabled={status.is_running || proofOutputUpdating || !proofOutputsAvailable}
-              />
-              <span className="allowed-output-text">Mathematical Proofs</span>
-            </label>
-            <label
-              className="allowed-output-option"
-              title="Research Papers enables the Single Paper Writer compilation output. When disabled, the writer runs proof extraction over the aggregator database instead of compiling a paper."
-            >
-              <input
-                type="checkbox"
-                checked={Boolean(allowedOutputs.researchPapers)}
-                onChange={(event) => updateAllowedOutput('researchPapers', event.target.checked)}
-                disabled={status.is_running}
-              />
-              <span className="allowed-output-text">Research Papers</span>
-            </label>
-          </div>
+          <AllowedOutputsRow
+            rowTitle="Allowed Outputs controls which products this workflow may generate. At least one output must remain enabled."
+            proofOutputsAvailable={proofOutputsAvailable}
+            optionsLocked={Boolean(status.is_running)}
+            getProofStatus={autonomousAPI.getProofStatus}
+            updateProofSettings={autonomousAPI.updateProofSettings}
+            proofs={{
+              title: 'Mathematical Proofs enables Lean 4 proof verification and proof-library output for this run.',
+              checked: proofOutputsAvailable && Boolean(allowedOutputs.mathematicalProofs),
+              onChange: (event) => updateAllowedOutput('mathematicalProofs', event.target.checked),
+              disabled: status.is_running || proofOutputUpdating || !proofOutputsAvailable,
+            }}
+            papers={{
+              title: 'Research Papers enables the Single Paper Writer compilation output. When disabled, the writer runs proof extraction over the aggregator database instead of compiling a paper.',
+              checked: Boolean(allowedOutputs.researchPapers),
+              onChange: (event) => updateAllowedOutput('researchPapers', event.target.checked),
+              disabled: status.is_running,
+            }}
+          />
         </div>
         <small>This prompt directs the compiler on what kind of rigorous paper or solution report to create from the aggregated database. View your in-progress and final answer in the "Live Paper" tab.</small>
       </div>

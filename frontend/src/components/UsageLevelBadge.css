@@ -1,0 +1,98 @@
+.usage-level-badge {
+  --usage-level-color: #9e9e9e;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--usage-level-color) 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--usage-level-color) 12%, transparent);
+  color: var(--usage-level-color);
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.usage-level-badge--inline-after {
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+.settings-row > .usage-level-badge {
+  align-self: flex-start;
+  width: fit-content;
+  margin-top: 0.35rem;
+}
+
+.usage-level-badge--compact {
+  padding: 0.15rem 0.3rem;
+}
+
+.settings-row--inline-checkbox > .usage-level-badge {
+  margin-top: 0;
+  align-self: center;
+}
+
+.connectivity-row__indicators {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.connectivity-row__usage {
+  display: inline-flex;
+}
+
+.proof-check-mode-modal__option-title .usage-level-badge,
+.settings-option-title .usage-level-badge {
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
+.auto-translate-service__main > .usage-level-badge {
+  margin-left: 0.5rem;
+  align-self: center;
+}
+
+.usage-level-badge--low { --usage-level-color: #66bb6a; }
+.usage-level-badge--medium { --usage-level-color: #ffca28; }
+.usage-level-badge--high { --usage-level-color: #ffa726; }
+.usage-level-badge--very_high { --usage-level-color: #ef5350; }
+
+.usage-level-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 9px;
+}
+
+.usage-level-bar {
+  width: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.25;
+}
+
+.usage-level-bar:nth-child(1) { height: 3px; }
+.usage-level-bar:nth-child(2) { height: 5px; }
+.usage-level-bar:nth-child(3) { height: 7px; }
+.usage-level-bar:nth-child(4) { height: 9px; }
+
+.usage-level-bar.is-filled {
+  opacity: 1;
+}
+
+.usage-level-badge .visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

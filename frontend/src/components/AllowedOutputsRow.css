@@ -1,0 +1,405 @@
+/* Options cards under Allowed Outputs. The pill row itself is styled in
+   autonomous/AutonomousResearch.css; these rules add the expansion arrows, the
+   card that opens under an arrow, and the proof options inside it. */
+
+.allowed-output-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.allowed-outputs-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--border-default, rgba(255, 255, 255, 0.1));
+}
+
+.allowed-output-expand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary, #9d9db0);
+  cursor: pointer;
+  transition: background var(--transition-fast, 0.15s ease),
+    color var(--transition-fast, 0.15s ease),
+    border-color var(--transition-fast, 0.15s ease);
+}
+
+.allowed-output-expand svg {
+  transition: transform var(--transition-normal, 0.25s ease);
+}
+
+.allowed-output-expand:hover {
+  color: var(--text-primary, #e4e4ec);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border-default, rgba(255, 255, 255, 0.1));
+}
+
+.allowed-output-expand:focus-visible {
+  outline: 2px solid var(--gold, #1eff1c);
+  outline-offset: 1px;
+}
+
+.allowed-output-expand.is-expanded {
+  color: var(--gold, #1eff1c);
+  background: var(--gold-glow, rgba(30, 255, 28, 0.12));
+  border-color: color-mix(in srgb, var(--gold, #1eff1c) 35%, transparent);
+}
+
+.allowed-output-expand.is-expanded svg {
+  transform: rotate(180deg);
+}
+
+/* The pill wraps inside the space it has instead of running past the edge. A
+   radius of half its one-line height keeps the pill shape on one line and
+   gives a rounded card when the options wrap onto more lines. */
+.prompt-composer-options .allowed-outputs-row.allowed-outputs-row--with-options {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  column-gap: 0.5rem;
+  row-gap: 0.4rem;
+  max-width: 100%;
+  box-sizing: border-box;
+  border-radius: 16px;
+  overflow: visible;
+  white-space: normal;
+}
+
+/* A whole line of the composer options row: always after the pill and the
+   buttons, never sharing their line, so opening it never moves them. The card
+   inside is moved under its arrow by an inline margin measured in JS. */
+.allowed-output-panel-slot {
+  order: 1;
+  flex: 0 0 100%;
+  min-width: 0;
+}
+
+.allowed-output-panel {
+  --allowed-output-panel-bg: #18181c;
+  position: relative;
+  box-sizing: border-box;
+  width: min(100%, 460px);
+  margin-top: 4px;
+  padding: 0.85rem 1rem 0.9rem;
+  border: 1px solid var(--border-default, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-md, 10px);
+  background: var(--allowed-output-panel-bg);
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.45));
+  color: var(--text-secondary, #9d9db0);
+  text-align: left;
+  animation: allowed-output-panel-in 0.2s var(--ease-out, ease-out);
+}
+
+/* The pointer at the top edge, aimed at the arrow that opened the card. It
+   appears once the card knows where that arrow is. */
+.allowed-output-panel::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  left: var(--allowed-output-caret, 50%);
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border-top: 1px solid var(--border-default, rgba(255, 255, 255, 0.1));
+  border-left: 1px solid var(--border-default, rgba(255, 255, 255, 0.1));
+  background: var(--allowed-output-panel-bg);
+  transform: translateX(-50%) rotate(45deg);
+  visibility: hidden;
+}
+
+.allowed-output-panel.is-placed::before {
+  visibility: visible;
+}
+
+@keyframes allowed-output-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .allowed-output-panel,
+  .allowed-output-expand svg {
+    animation: none;
+    transition: none;
+  }
+}
+
+.proof-options-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.proof-options-panel__title {
+  margin: 0;
+  color: var(--text-primary, #e4e4ec);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.proof-options-panel__saving {
+  color: var(--text-muted, #666680);
+  font-size: 0.7rem;
+}
+
+.proof-options-panel__group {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.proof-options-panel__legend {
+  margin-bottom: 0.3rem;
+  padding: 0;
+  color: var(--text-muted, #666680);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.proof-kind-option {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: start;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.07));
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+  transition: border-color var(--transition-fast, 0.15s ease),
+    background var(--transition-fast, 0.15s ease);
+}
+
+.proof-kind-option:hover {
+  border-color: var(--border-strong, rgba(255, 255, 255, 0.16));
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.proof-kind-option:has(input:checked) {
+  border-color: color-mix(in srgb, var(--gold, #1eff1c) 28%, transparent);
+  background: color-mix(in srgb, var(--gold, #1eff1c) 5%, transparent);
+}
+
+.proof-kind-option input {
+  width: 14px;
+  height: 14px;
+  margin: 0.1rem 0 0;
+  cursor: inherit;
+}
+
+.proof-kind-option:has(input:focus-visible) {
+  outline: 2px solid var(--gold, #1eff1c);
+  outline-offset: 1px;
+}
+
+.proof-kind-option__copy,
+.proof-options-panel__concurrency-copy {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.proof-kind-option__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.proof-options-panel__option-title {
+  color: var(--text-primary, #e4e4ec);
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.proof-options-panel__option-description {
+  color: var(--text-secondary, #9d9db0);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.proof-options-panel__concurrency {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.07));
+}
+
+.proof-options-panel__concurrency-copy {
+  flex: 1 1 180px;
+}
+
+.proof-options-panel__concurrency-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+}
+
+.proof-options-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  height: 28px;
+  border: 1px solid var(--border-default, rgba(255, 255, 255, 0.1));
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.proof-options-stepper:focus-within {
+  border-color: color-mix(in srgb, var(--gold, #1eff1c) 45%, transparent);
+}
+
+.proof-options-stepper__button {
+  width: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary, #9d9db0);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition-fast, 0.15s ease), color var(--transition-fast, 0.15s ease);
+}
+
+.proof-options-stepper__button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-primary, #e4e4ec);
+}
+
+.proof-options-stepper__button:focus-visible {
+  outline: 2px solid var(--gold, #1eff1c);
+  outline-offset: -2px;
+}
+
+.proof-options-stepper__button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.proof-options-stepper__input {
+  width: 42px;
+  min-width: 0;
+  margin: 0;
+  padding: 0 0.25rem;
+  border: 0;
+  border-left: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.07));
+  border-right: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.07));
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary, #e4e4ec);
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  box-shadow: none;
+}
+
+.proof-options-stepper__input:focus {
+  outline: none;
+}
+
+.proof-options-panel fieldset:disabled .proof-kind-option,
+.proof-options-panel__concurrency:has(.proof-options-stepper__input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.proof-options-panel fieldset:disabled .proof-kind-option:hover {
+  border-color: var(--border-subtle, rgba(255, 255, 255, 0.07));
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.proof-options-panel__note {
+  margin: 0.7rem 0 0;
+  color: var(--text-muted, #666680);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.proof-options-panel__note.is-error {
+  color: #ff8a80;
+}
+
+/* Narrow composer (phones, split windows, a wide sidebar): the pill and the
+   card span the row, and the pill stacks its label above the options. This
+   follows the row's own width, not the window's. */
+@container composer-options (max-width: 600px) {
+  .allowed-output-panel {
+    width: 100%;
+  }
+
+  .prompt-composer-options .allowed-outputs-row.allowed-outputs-row--with-options {
+    display: flex;
+    width: 100%;
+    padding: 0.45rem 0.75rem;
+    border-radius: var(--radius-lg, 14px);
+  }
+
+  .allowed-outputs-row--with-options .allowed-outputs-label {
+    flex-basis: 100%;
+  }
+
+  .allowed-outputs-row--with-options .allowed-outputs-divider {
+    display: none;
+  }
+}
+
+/* Very narrow composer: an option's usage badge (and the arrow) may drop to a
+   second line instead of running past the pill. */
+@container composer-options (max-width: 320px) {
+  .allowed-outputs-row--with-options .allowed-output-group {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .allowed-outputs-row--with-options .allowed-output-option {
+    grid-template-columns: 13px minmax(0, max-content);
+    row-gap: 0.3rem;
+    white-space: normal;
+  }
+
+  .allowed-outputs-row--with-options .allowed-output-option > :nth-child(n + 3) {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+@media (max-width: 420px) {
+  .allowed-output-panel {
+    padding: 0.75rem;
+  }
+
+  .proof-options-panel__concurrency-controls {
+    flex-wrap: wrap;
+  }
+}

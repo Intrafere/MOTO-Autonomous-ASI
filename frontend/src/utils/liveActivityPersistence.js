@@ -1,4 +1,4 @@
-import { formatContextOverflowActivityMessage } from './activityStyles';
+import { formatContextOverflowActivityMessage, MODEL_OUTPUT_NORMALIZED_EVENT } from './activityStyles';
 import { sanitizePersistedActivityValue } from './activityPersistence';
 import { normalizeActivityEvent } from './activityNormalization';
 
@@ -122,6 +122,14 @@ export function readPersistedLiveActivity(storageKey) {
     console.error(`Failed to load ${storageKey}:`, error);
     return [];
   }
+}
+
+// Rows a feed must keep in browser storage because the backend has no durable
+// recovery for them.
+export function selectModelOutputNormalizedActivity(events = []) {
+  return Array.isArray(events)
+    ? events.filter((event) => (event?.event || event?.type) === MODEL_OUTPUT_NORMALIZED_EVENT)
+    : [];
 }
 
 export function shouldRecordWorkflowStoppedActivity(eventName, data = {}) {

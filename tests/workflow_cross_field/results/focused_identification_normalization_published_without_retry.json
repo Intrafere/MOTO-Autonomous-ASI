@@ -1,0 +1,42 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "one_model_call",
+    "one_normalization_event"
+  ],
+  "faked_dependencies": [
+    "identification model reply",
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "the observed misspelled rationale is accepted without retry and published once",
+  "real_components": [
+    "backend/autonomous/agents/proof_identification_agent.py",
+    "backend/shared/model_output_contract.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_identification_normalization_published_without_retry",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:840a25379956ad62222dde18fc15323e987a1d33b4ff043f292189903be42e09",
+  "test_file": "tests/regressions/test_proof_identification_contract_errors.py",
+  "test_selectors": [
+    "tests/regressions/test_proof_identification_contract_errors.py::test_gemma_payload_needs_no_retry_and_publishes_one_normalization"
+  ]
+}

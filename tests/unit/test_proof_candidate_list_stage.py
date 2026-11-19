@@ -2,6 +2,9 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from backend.autonomous.agents.proof_candidate_list_validator import (
+    ProofCandidateListContractError,
+)
 from backend.autonomous.core.proof_verification_stage import (
     ProofVerificationStage,
     _candidate_list_review_scope,
@@ -394,6 +397,21 @@ class ProofCandidateListStageTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_validator_failure_is_not_recorded_as_semantic_rejection(self):
+        contract_error = ProofCandidateListContractError(
+            "The candidate-list review did not match the required JSON format",
+            role="autonomous_proof_novelty",
+            stage="invalid_value",
+            invalid_fields=("results.0.decision",),
+        )
+        cases = (
+            (RuntimeError("provider transport failed"), "internal_error"),
+            (contract_error, "model_output_contract_error"),
+        )
+        for error, expected_kind in cases:
+            with self.subTest(error_kind=expected_kind):
+                await self._assert_list_review_failure_is_operational(error, expected_kind)
+
+    async def _assert_list_review_failure_is_operational(self, error, expected_kind):
         candidates = [_candidate("thm-0")]
         events = []
         checkpoints = []
@@ -407,7 +425,7 @@ class ProofCandidateListStageTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "backend.autonomous.core.proof_verification_stage."
             "ProofCandidateListValidator.validate",
-            new=AsyncMock(side_effect=RuntimeError("provider transport failed")),
+            new=AsyncMock(side_effect=error),
         ):
             result = await self._run_stage(
                 candidates=candidates,
@@ -432,7 +450,15 @@ class ProofCandidateListStageTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(interrupted), 1)
         self.assertEqual(interrupted[0]["list_attempt"], 1)
-        self.assertEqual(interrupted[0]["error_kind"], "contract_error")
+        self.assertEqual(interrupted[0]["error_kind"], expected_kind)
+        complete = [
+            payload for event, payload in events if event == "proof_check_complete"
+        ]
+        if expected_kind == "model_output_contract_error":
+            message = complete[-1]["error"] if complete and "error" in complete[-1] else str(complete)
+            self.assertIn("candidate-list review response did not match", message)
+            self.assertIn("No Lean work was attempted", message)
+            self.assertIn("results.0.decision", message)
 
     async def test_rejected_checkpoint_regenerates_before_revalidation(self):
         rejected = _candidate("rejected")

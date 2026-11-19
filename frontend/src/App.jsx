@@ -46,6 +46,7 @@ import useSyntheticLibPrivateSurface from './hooks/useSyntheticLibPrivateSurface
 import useDeveloperModeShortcut from './hooks/useDeveloperModeShortcut';
 import WolframAlphaAccessModal from './components/WolframAlphaAccessModal';
 import LMStudioConnectivityModal from './components/LMStudioConnectivityModal';
+import VllmConnectivityModal from './components/VllmConnectivityModal';
 import AgentConversationMemoryModal from './components/AgentConversationMemoryModal';
 import AutoTranslateProvider from './components/translation/AutoTranslateProvider';
 import AutoTranslateModal, { TranslationDeveloperModesGate } from './components/translation/AutoTranslateModal';
@@ -73,13 +74,16 @@ import {
   leanojAPI,
   openRouterAPI,
   translationAPI,
+  vllmAPI,
 } from './services/api';
 import {
   LM_STUDIO_STARTUP_CHOICE,
+  VLLM_STARTUP_CHOICE,
   STARTUP_PROVIDER_CHOICE_STORAGE_KEY,
   mergeAutonomousConfig,
   validateAutonomousConfig,
   applyLmStudioStartupDefaults,
+  applyVllmStartupDefaults,
   getStoredAutonomousSettings,
   settingsToAutonomousConfig,
   persistAutonomousSettings,
@@ -93,13 +97,21 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from './utils/openRouterSelection';
-import { CLOUD_ACCESS_PROVIDERS, getCloudAccessProvider, isCloudAccessProvider } from './utils/oauthProviders';
+import {
+  CLOUD_ACCESS_PROVIDERS,
+  CLOUD_SUBSCRIPTION_PROVIDERS,
+  VLLM_PROVIDER,
+  getCloudAccessProvider,
+  isCloudAccessProvider,
+  isLocalServerProvider,
+} from './utils/oauthProviders';
 import { resolveOpenRouterKeyPresence } from './utils/credentialProviderRefresh';
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
   formatEmptyProofDiscoveryMessage,
   formatProofRunEventMessage,
+  formatMasterProofMessage,
   formatProviderUsageLimitActivityMessage,
   formatProviderUsageLimitResumedMessage,
   formatProviderRetryCooldownMessage,
@@ -113,6 +125,18 @@ import {
   shouldAddRejectionFeedbackNotice,
   formatHungConnectionMessage,
   withRouteIdentity,
+  masterProofCountNote,
+  MASTER_PROOF_EXPANSION_EVENT,
+  formatMasterProofExpansionMessage,
+  MODEL_OUTPUT_NORMALIZED_EVENT,
+  formatModelOutputNormalizedMessage,
+  MODEL_OUTPUT_CONTRACT_EVENTS,
+  VALIDATOR_OUTPUT_CONTRACT_FAILED_EVENT,
+  VALIDATOR_BATCH_INTERRUPTED_EVENT,
+  formatModelOutputContractFailedMessage,
+  formatValidatorBatchInterruptedMessage,
+  formatProofFramingDecidedMessage,
+  formatProofCheckCompleteText,
 } from './utils/activityStyles';
 import {
   compactLiveActivityEvent,
@@ -120,6 +144,7 @@ import {
   MAX_LIVE_ACTIVITY_EVENTS,
   persistDismissedProviderNotificationId,
   readPersistedLiveActivity,
+  selectModelOutputNormalizedActivity,
   shouldRecordWorkflowStoppedActivity,
 } from './utils/liveActivityPersistence';
 import {
@@ -161,6 +186,11 @@ const SEEN_HIGH_SCORE_CRITIQUES_STORAGE_KEY = 'seenHighScoreCritiqueNotification
 const MAX_SEEN_HIGH_SCORE_CRITIQUES = 500;
 const AUTONOMOUS_LIVE_ACTIVITY_STORAGE_KEY = 'autonomous_live_activity_events';
 const LEANOJ_LIVE_ACTIVITY_STORAGE_KEY = 'leanoj_live_activity_events';
+// Aggregator and Compiler provider rows are recovered from durable backend
+// notifications; only model-output normalization rows, which have no backend
+// recovery, are kept in browser storage for those two feeds.
+const AGGREGATOR_MODEL_OUTPUT_ACTIVITY_STORAGE_KEY = 'aggregator_model_output_activity_events';
+const COMPILER_MODEL_OUTPUT_ACTIVITY_STORAGE_KEY = 'compiler_model_output_activity_events';
 const MAX_PROOF_NOTIFICATIONS = 20;
 const UPDATE_NOTICE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_CAPABILITIES = Object.freeze({
@@ -192,7 +222,31 @@ function AutoTranslateRefreshBridge({ refreshRef }) {
 }
 
 function hasConfiguredCloudAccessProvider(cloudStatus = {}) {
-  return CLOUD_ACCESS_PROVIDERS.some((provider) => Boolean(cloudStatus.providers?.[provider.id]?.configured));
+  return CLOUD_SUBSCRIPTION_PROVIDERS.some((provider) => Boolean(cloudStatus.providers?.[provider.id]?.configured));
+}
+
+// vLLM can be the only startup provider when it serves both a chat model and an
+// embedding model (RAG embeddings need no other provider then).
+function isVllmStartupReady(vllmStatus) {
+  return Boolean(
+    vllmStatus?.configured
+    && vllmStatus?.available
+    && vllmStatus?.has_usable_chat_model
+    && vllmStatus?.embedding_ready
+  );
+}
+
+function describeVllmStartupGap(vllmStatus) {
+  if (!vllmStatus?.configured) {
+    return 'vLLM is not set up yet. Add your vLLM server address, then try again.';
+  }
+  if (!vllmStatus.available) {
+    return `The saved vLLM servers are not answering${vllmStatus.error ? `: ${vllmStatus.error}` : '.'} Start them, then try again.`;
+  }
+  if (!vllmStatus.embedding_ready) {
+    return 'vLLM is running, but no embedding model is set up. Start a vLLM server for an embedding model (for example nomic-ai/nomic-embed-text-v1.5), add it in the vLLM setup, then try again.';
+  }
+  return 'vLLM is running, but no chat model was detected. Start a vLLM server for a chat model, add it in the vLLM setup, then try again.';
 }
 
 function readDeveloperModeEnabled() {
@@ -288,7 +342,7 @@ function buildOAuthProviderNotification(data = {}, fallbackProvider = 'oauth') {
       ? formatProviderUsageLimitActivityMessage(data, data.provider_label)
       : (
         data.message
-        || `Check your ${isCodex ? 'OpenAI Codex' : 'OAuth provider'} connection, sign in again, and retry.`
+        || `Check your ${provider === 'openai_codex_oauth' ? 'OpenAI Codex' : 'OAuth provider'} connection, sign in again, and retry.`
       ),
     timestamp: data.created_at || data._serverTimestamp || data.timestamp || new Date().toISOString(),
     cooldown_until: data.cooldown_until,
@@ -376,9 +430,42 @@ const getManualProofProviderActivityFeed = (notification = {}) => {
   return notification.retry_layer === 'workflow' ? '' : manualFeed;
 };
 
-// Returns the Live Activity feed that owns a provider row, or '' to drop it.
+// Operational model-role activity: contract failures, internal batch
+// interruptions, and compiler warnings. None is a semantic rejection.
+const OPERATIONAL_ACTIVITY_EVENTS = [
+  ...MODEL_OUTPUT_CONTRACT_EVENTS,
+  VALIDATOR_BATCH_INTERRUPTED_EVENT,
+  'compiler_warning',
+];
+
+const SCOPED_ACTIVITY_EVENT_TYPES = new Set([
+  'provider_retry_cooldown',
+  MODEL_OUTPUT_NORMALIZED_EVENT,
+  ...OPERATIONAL_ACTIVITY_EVENTS,
+]);
+
+// The scoped Live Activity row for a model-output contract failure or an
+// internal batch interruption, or null. The manual Aggregator already shows its
+// validator requeues through its persisted event log, so only an Autonomous
+// child aggregator's copy is routed.
+// Compiler warnings are routed only from an Autonomous-owned compiler; the
+// manual Compiler feed subscribes to them itself.
+export function contractFailureActivityNotification(eventType, data = {}) {
+  const workflowMode = String(data.workflow_mode || '').toLowerCase();
+  const validatorRequeue = eventType === VALIDATOR_OUTPUT_CONTRACT_FAILED_EVENT
+    || eventType === VALIDATOR_BATCH_INTERRUPTED_EVENT;
+  if (validatorRequeue && workflowMode === 'aggregator') return null;
+  if (eventType === 'compiler_warning') {
+    if (workflowMode !== 'autonomous') return null;
+    return { ...data, event_type: eventType, message: data.message || data.warning || '' };
+  }
+  return { ...data, event_type: eventType };
+}
+
+// Returns the Live Activity feed that owns a provider or model-output row, or
+// '' to drop it.
 export function getScopedProviderActivityFeed(notification = {}) {
-  if (!notification.notification_key && notification.event_type !== 'provider_retry_cooldown') return '';
+  if (!notification.notification_key && !SCOPED_ACTIVITY_EVENT_TYPES.has(notification.event_type)) return '';
   const workflowMode = String(notification.workflow_mode || '').toLowerCase();
   if (workflowMode === 'manual_proof_check') return getManualProofProviderActivityFeed(notification);
   return SCOPED_PROVIDER_ACTIVITY_FEEDS.has(workflowMode) ? workflowMode : '';
@@ -693,6 +780,8 @@ function App() {
   const [openRouterKeyReason, setOpenRouterKeyReason] = useState('setup');
   const [showWolframModal, setShowWolframModal] = useState(false);
   const [showLmStudioModal, setShowLmStudioModal] = useState(false);
+  const [showVllmModal, setShowVllmModal] = useState(false);
+  const vllmStartupPendingRef = useRef(false);
   const [showAgentMemoryModal, setShowAgentMemoryModal] = useState(false);
   const [showAutoTranslateModal, setShowAutoTranslateModal] = useState(false);
   const autoTranslateRefreshRef = useRef(null);
@@ -856,8 +945,12 @@ function App() {
   const [leanojActivity, setLeanojActivity] = useState(() => (
     readPersistedLiveActivity(LEANOJ_LIVE_ACTIVITY_STORAGE_KEY)
   ));
-  const [aggregatorProviderActivity, setAggregatorProviderActivity] = useState([]);
-  const [compilerProviderActivity, setCompilerProviderActivity] = useState([]);
+  const [aggregatorProviderActivity, setAggregatorProviderActivity] = useState(() => (
+    readPersistedLiveActivity(AGGREGATOR_MODEL_OUTPUT_ACTIVITY_STORAGE_KEY)
+  ));
+  const [compilerProviderActivity, setCompilerProviderActivity] = useState(() => (
+    readPersistedLiveActivity(COMPILER_MODEL_OUTPUT_ACTIVITY_STORAGE_KEY)
+  ));
   const [leanojSettings, setLeanojSettings] = useState(() => getStoredLeanOJSettings());
   const [leanojProofRefreshToken, setLeanojProofRefreshToken] = useState(0);
   
@@ -870,6 +963,7 @@ function App() {
   const [showStartupSetupModal, setShowStartupSetupModal] = useState(false);
   const [startupSetupMessage, setStartupSetupMessage] = useState('');
   const [checkingLmStudioStartupChoice, setCheckingLmStudioStartupChoice] = useState(false);
+  const [checkingVllmStartupChoice, setCheckingVllmStartupChoice] = useState(false);
   
   // OpenRouter privacy warning modal state
   const [showPrivacyWarning, setShowPrivacyWarning] = useState(false);
@@ -905,6 +999,12 @@ function App() {
         ? formatProviderUsageLimitResumedMessage(notification, notification.provider_label)
         : notification.event_type === 'provider_retry_cooldown'
           ? formatProviderRetryCooldownMessage(notification)
+        : notification.event_type === MODEL_OUTPUT_NORMALIZED_EVENT
+          ? formatModelOutputNormalizedMessage(notification)
+        : notification.event_type === VALIDATOR_BATCH_INTERRUPTED_EVENT
+          ? formatValidatorBatchInterruptedMessage(notification)
+        : OPERATIONAL_ACTIVITY_EVENTS.includes(notification.event_type)
+          ? formatModelOutputContractFailedMessage(notification)
         : (
           notification.reason === 'usage_limit_reached'
             ? buildOAuthUsageLimitActivityMessage(notification, notification.provider_label)
@@ -932,6 +1032,20 @@ function App() {
   useEffect(() => {
     persistLiveActivity(LEANOJ_LIVE_ACTIVITY_STORAGE_KEY, leanojActivity);
   }, [leanojActivity]);
+
+  useEffect(() => {
+    persistLiveActivity(
+      AGGREGATOR_MODEL_OUTPUT_ACTIVITY_STORAGE_KEY,
+      selectModelOutputNormalizedActivity(aggregatorProviderActivity),
+    );
+  }, [aggregatorProviderActivity]);
+
+  useEffect(() => {
+    persistLiveActivity(
+      COMPILER_MODEL_OUTPUT_ACTIVITY_STORAGE_KEY,
+      selectModelOutputNormalizedActivity(compilerProviderActivity),
+    );
+  }, [compilerProviderActivity]);
 
   // Live refs used by websocket listeners (which are registered once)
   const autonomousRunningRef = useRef(autonomousRunning);
@@ -1104,7 +1218,7 @@ function App() {
         critique_submitter_max_tokens: autonomousConfig.high_param_max_tokens,
         critique_submitter_supercharge_enabled: autonomousConfig.high_param_supercharge_enabled,
       },
-      allowMathematicalProofs: autonomousConfig.allow_mathematical_proofs ?? existingSettings.allowMathematicalProofs ?? true,
+      allowMathematicalProofs: autonomousConfig.allow_mathematical_proofs ?? existingSettings.allowMathematicalProofs ?? false,
       allowResearchPapers: autonomousConfig.allow_research_papers ?? existingSettings.allowResearchPapers ?? true,
       tier3Enabled: autonomousConfig.tier3_enabled ?? existingSettings.tier3Enabled ?? false,
       creativityEmphasisBoostEnabled: autonomousConfig.creativity_emphasis_boost_enabled ?? existingSettings.creativityEmphasisBoostEnabled ?? false,
@@ -1210,6 +1324,15 @@ function App() {
       oauthConfigured = false;
     }
 
+    let vllmStatus = { configured: false, available: false };
+    if (nextCapabilities.vllmAvailable && !nextCapabilities.genericMode) {
+      try {
+        vllmStatus = await vllmAPI.getAvailability();
+      } catch (err) {
+        console.debug('Failed to check vLLM availability:', err);
+      }
+    }
+
     const keyPresence = resolveOpenRouterKeyPresence(keyStatus);
     const finalHasOpenRouterKey = keyPresence.hasKey;
     if (keyPresence.unreachable) {
@@ -1244,6 +1367,7 @@ function App() {
       hasLmStudioEmbeddingModel,
       lmStudioStatus: nextLmStudioStatus,
       defaultLmStudioModelId: usableLmStudioChatModelId,
+      vllmStatus,
     };
   }, []);
 
@@ -1315,7 +1439,8 @@ function App() {
       return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
     });
 
-    if (localStorage.getItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY) === LM_STUDIO_STARTUP_CHOICE) {
+    const startupChoice = localStorage.getItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY);
+    if (startupChoice === LM_STUDIO_STARTUP_CHOICE || startupChoice === VLLM_STARTUP_CHOICE) {
       localStorage.removeItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY);
     }
   }, [capabilities.lmStudioEnabled]);
@@ -1725,7 +1850,7 @@ function App() {
       const roundLabel = proofRoundLabel(data);
       const subject = count === 1 ? 'proof candidate' : 'proof candidates';
       const prefix = roundLabel ? `${roundLabel} discovery` : 'Proof discovery';
-      return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
+      return `${prefix} found ${count} ${subject}; ${count} will be attempted${masterProofCountNote(data)}`;
     };
     const proofLeanResponse = (data = {}) => formatProofLeanResponse(data, {
       formatError: (text) => formatReason(text, 960),
@@ -1804,18 +1929,11 @@ function App() {
       if (data.source_type === 'compiler_rigor' && !isAutonomousTier2Active()) return false;
       return shouldShowAutonomousProofNovelty(data) || isManualButtonProofEvent(data);
     };
-    const formatProofCheckCompleteMessage = (data = {}) => {
-      const verified = data.verified_count ?? 0;
-      const novel = data.novel_count ?? 0;
-      const hasTotal = data.total_candidates !== undefined && data.total_candidates !== null;
-      const roundLabel = proofRoundLabel(data);
-      const baseMessage = hasTotal
-        ? `Proof check complete: ${verified}/${data.total_candidates} candidates verified, ${novel} novel`
-        : `Proof check complete: ${verified} verified`;
-      const base = roundLabel ? `${roundLabel} complete: ${baseMessage}` : baseMessage;
-      const detail = formatReason(data.message, 1800);
-      return detail ? `${base} - ${detail}` : base;
-    };
+    const formatProofCheckCompleteMessage = (data = {}) => formatProofCheckCompleteText(data, {
+      label: proofRoundLabel(data) || 'Proof check',
+      detail: formatReason(data.message, 1800),
+      includeTotal: true,
+    });
     
     // Topic exploration events (pre-brainstorm candidate collection)
     unsubscribers.push(websocket.on('topic_exploration_started', (data) => {
@@ -2106,9 +2224,7 @@ function App() {
       addActivity({
         event: 'proof_framing_decided',
         timestamp: getTimestamp(data),
-        message: data.is_proof_amenable
-          ? 'Submitter 1 (Main Submitter) chose proof framing for this research run'
-          : 'Submitter 1 (Main Submitter) did not choose proof framing for this research run',
+        message: formatProofFramingDecidedMessage(data),
         data
       });
     }));
@@ -2217,7 +2333,7 @@ function App() {
         if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
         const messages = {
           proof_candidate_list_review_started:
-            `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed)`,
+            `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed${masterProofCountNote(data, 'proposed')})`,
           proof_candidate_list_review_accepted:
             `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`,
           proof_candidate_list_review_rejected:
@@ -2356,6 +2472,16 @@ function App() {
         event: 'proof_attempts_exhausted',
         timestamp: getTimestamp(data),
         message: `${proofName(data)} terminated: proof attempts exhausted for ${proofTarget(data)}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('master_proof_progress', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
+      addActivity({
+        event: 'master_proof_progress',
+        timestamp: getTimestamp(data),
+        message: formatMasterProofMessage(data),
         data
       });
     }));
@@ -2837,14 +2963,14 @@ function App() {
       });
     }));
 
-    // OpenRouter fallback event (credit exhaustion triggered fallback to LM Studio)
+    // OpenRouter fallback event (credit exhaustion moved the role to its local fallback)
     unsubscribers.push(websocket.on('openrouter_fallback', (data) => {
       console.warn('OpenRouter fallback triggered:', data);
       addActivity({
         event: 'openrouter_fallback',
         timestamp: getTimestamp(data),
         ...data,
-        message: withRouteIdentity(data.message || `⚠️ OpenRouter credits exhausted for ${data.role_id} — fell back to ${data.fallback_model || 'LM Studio'}`, data),
+        message: withRouteIdentity(data.message || `⚠️ OpenRouter credits exhausted for ${data.role_id} — fell back to ${data.fallback_model || 'its local fallback'}`, data),
       });
       setCreditExhaustionNotifications(prev => {
         const reason = data.reason || 'credit_exhaustion';
@@ -2855,6 +2981,7 @@ function App() {
           reason,
           message: data.message,
           fallback_model: data.fallback_model,
+          fallback_provider: data.fallback_provider,
           timestamp: getTimestamp(data)
         }];
       });
@@ -2924,6 +3051,20 @@ function App() {
         event_type: 'provider_retry_cooldown',
       });
     }));
+
+    unsubscribers.push(websocket.on(MODEL_OUTPUT_NORMALIZED_EVENT, (data) => {
+      addScopedProviderActivity({
+        ...data,
+        event_type: MODEL_OUTPUT_NORMALIZED_EVENT,
+      });
+    }));
+
+    OPERATIONAL_ACTIVITY_EVENTS.forEach((eventType) => {
+      unsubscribers.push(websocket.on(eventType, (data) => {
+        const notification = contractFailureActivityNotification(eventType, data);
+        if (notification) addScopedProviderActivity(notification);
+      }));
+    });
 
     unsubscribers.push(websocket.on('leanoj_provider_paused', (data) => {
       console.warn('Proof Solver paused for provider credits:', data);
@@ -3033,6 +3174,23 @@ function App() {
       };
       if (String(data.role_id || '').toLowerCase().startsWith('leanoj_')) {
         addLeanOJActivityFromGlobalAlert(event);
+      } else if (shouldAddHungAlertToAutonomousFeed(data)) {
+        addActivity(event);
+      }
+    }));
+
+    unsubscribers.push(websocket.on(MASTER_PROOF_EXPANSION_EVENT, (data = {}) => {
+      const event = {
+        event: MASTER_PROOF_EXPANSION_EVENT,
+        timestamp: getTimestamp(data),
+        message: formatMasterProofExpansionMessage(data),
+        data
+      };
+      if (String(data.role_id || '').toLowerCase().startsWith('leanoj_')) {
+        addLeanOJActivityFromGlobalAlert(event);
+      } else if (String(data.workflow_mode || '').toLowerCase() === 'manual_proof_check') {
+        // A manual check's row belongs to the feed that owns its source.
+        if (getManualProofProviderActivityFeed(data) === 'autonomous') addActivity(event);
       } else if (shouldAddHungAlertToAutonomousFeed(data)) {
         addActivity(event);
       }
@@ -3399,7 +3557,7 @@ function App() {
       ['known_proof_verified', (data) => addLeanOJSharedProofActivity('known_proof_verified', data, leanOJNoveltyMessage)],
       ['proof_registration_duplicate', (data) => addLeanOJSharedProofActivity('proof_registration_duplicate', data, (eventData) => leanOJNoveltyMessage({ ...eventData, duplicate: true }))],
       ['proof_dependency_added', (data) => addLeanOJSharedProofActivity('proof_dependency_added', data, () => 'Proof Solver proof dependency added')],
-      ['proof_check_complete', (data) => addLeanOJSharedProofActivity('proof_check_complete', data, (eventData) => `Proof check complete: ${eventData.verified_count || 0} verified, ${eventData.novel_count || 0} novel`)],
+      ['proof_check_complete', (data) => addLeanOJSharedProofActivity('proof_check_complete', data, (eventData) => formatProofCheckCompleteText(eventData, { detail: String(eventData.message || '').replace(/\s+/g, ' ').trim() }))],
       ['leanoj_error', (data) => addLeanOJActivity('leanoj_error', data, data.message || 'Proof Solver error')],
       ['leanoj_cleared', (data) => {
         setLeanojRunning(false);
@@ -3485,7 +3643,6 @@ function App() {
     try {
       validateAutonomousConfig(autonomousConfig, { assistantEnabled: assistantMemoryEnabled && autonomousConfig.allow_mathematical_proofs !== false });
       const lmStudioEnabled = capabilities.lmStudioEnabled;
-      const superchargeAllowed = developerModeEnabled;
 
       // Convert frontend camelCase to backend snake_case for submitter_configs (includes OpenRouter fields)
       const submitterConfigs = autonomousConfig.submitter_configs?.map(cfg => ({
@@ -3497,7 +3654,7 @@ function App() {
         lm_studio_fallback_id: lmStudioEnabled ? (cfg.lmStudioFallbackId || null) : null,
         context_window: coercePositiveIntegerSetting(cfg.contextWindow, DEFAULT_CONTEXT_WINDOW),
         max_output_tokens: coercePositiveIntegerSetting(cfg.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS),
-        supercharge_enabled: superchargeAllowed && Boolean(cfg.superchargeEnabled || cfg.supercharge_enabled)
+        supercharge_enabled: Boolean(cfg.superchargeEnabled || cfg.supercharge_enabled)
       })) || [];
 
       await autonomousAPI.start({
@@ -3517,7 +3674,7 @@ function App() {
           : null,
         validator_context_window: coercePositiveIntegerSetting(autonomousConfig.validator_context_window, DEFAULT_CONTEXT_WINDOW),
         validator_max_tokens: coercePositiveIntegerSetting(autonomousConfig.validator_max_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
-        validator_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.validator_supercharge_enabled),
+        validator_supercharge_enabled: Boolean(autonomousConfig.validator_supercharge_enabled),
         // Writing submitter config with OpenRouter support
         writer_provider: normalizeRuntimeProvider(
           autonomousConfig.writer_provider,
@@ -3531,7 +3688,7 @@ function App() {
           : null,
         writer_context_window: coercePositiveIntegerSetting(autonomousConfig.writer_context_window, DEFAULT_CONTEXT_WINDOW),
         writer_max_tokens: coercePositiveIntegerSetting(autonomousConfig.writer_max_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
-        writer_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.writer_supercharge_enabled),
+        writer_supercharge_enabled: Boolean(autonomousConfig.writer_supercharge_enabled),
         // Rigor & Proofs Submitter config with OpenRouter support
         high_param_provider: normalizeRuntimeProvider(
           autonomousConfig.high_param_provider,
@@ -3545,7 +3702,7 @@ function App() {
           : null,
         high_param_context_window: coercePositiveIntegerSetting(autonomousConfig.high_param_context_window, DEFAULT_CONTEXT_WINDOW),
         high_param_max_tokens: coercePositiveIntegerSetting(autonomousConfig.high_param_max_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
-        high_param_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_param_supercharge_enabled),
+        high_param_supercharge_enabled: Boolean(autonomousConfig.high_param_supercharge_enabled),
         proof_competition: {
           enabled: Boolean(autonomousConfig.proof_competition?.enabled),
           secondaries: enabledCompetitionSecondaries(autonomousConfig.proof_competition).map(({ max_tokens, ...route }) => ({
@@ -3553,7 +3710,7 @@ function App() {
             max_output_tokens: route.max_output_tokens ?? max_tokens,
             provider: normalizeRuntimeProvider(route.provider, lmStudioEnabled),
             lm_studio_fallback_id: lmStudioEnabled ? route.lm_studio_fallback_id || null : null,
-            supercharge_enabled: superchargeAllowed && Boolean(route.supercharge_enabled),
+            supercharge_enabled: Boolean(route.supercharge_enabled),
           })),
         },
         // Deprecated critique fields mirror Rigor & Proofs for compatibility.
@@ -3569,7 +3726,7 @@ function App() {
           : null,
         critique_submitter_context_window: coercePositiveIntegerSetting(autonomousConfig.high_param_context_window, DEFAULT_CONTEXT_WINDOW),
         critique_submitter_max_tokens: coercePositiveIntegerSetting(autonomousConfig.high_param_max_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
-        critique_submitter_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_param_supercharge_enabled),
+        critique_submitter_supercharge_enabled: Boolean(autonomousConfig.high_param_supercharge_enabled),
         assistant_provider: assistantMemoryEnabled
           ? normalizeRuntimeProvider(
               autonomousConfig.assistant_provider,
@@ -3598,8 +3755,8 @@ function App() {
               DEFAULT_MAX_OUTPUT_TOKENS
             )
           : 0,
-        assistant_supercharge_enabled: assistantMemoryEnabled && superchargeAllowed && Boolean(autonomousConfig.assistant_supercharge_enabled),
-        allow_mathematical_proofs: !capabilities.genericMode && (autonomousConfig.allow_mathematical_proofs ?? true),
+        assistant_supercharge_enabled: assistantMemoryEnabled && Boolean(autonomousConfig.assistant_supercharge_enabled),
+        allow_mathematical_proofs: !capabilities.genericMode && (autonomousConfig.allow_mathematical_proofs ?? false),
         allow_research_papers: autonomousConfig.allow_research_papers ?? true,
         tier3_enabled: autonomousConfig.tier3_enabled ?? false
       });
@@ -3692,7 +3849,7 @@ function App() {
       model_id: shouldResetLmState ? '' : (roleConfig.model_id || ''),
       openrouter_provider: shouldResetLmState ? null : (roleConfig.openrouter_provider || null),
       lm_studio_fallback_id: lmStudioEnabled ? (roleConfig.lm_studio_fallback_id || null) : null,
-      supercharge_enabled: developerModeEnabled && Boolean(roleConfig.supercharge_enabled),
+      supercharge_enabled: Boolean(roleConfig.supercharge_enabled),
     };
   };
 
@@ -3956,7 +4113,11 @@ function App() {
     setModelErrorNotifications(prev => prev.filter(item => item.notification_key !== notificationKey));
   };
 
-  const handleOpenCloudAccessFromCodexNotification = () => {
+  const handleOpenCloudAccessFromCodexNotification = (notification) => {
+    if (isLocalServerProvider(notification?.provider)) {
+      setShowVllmModal(true);
+      return;
+    }
     setOpenRouterKeyReason('codex_oauth_error');
     setShowOpenRouterKeyModal(true);
   };
@@ -4001,6 +4162,7 @@ function App() {
       keyStatusReachable,
       hasUsableLmStudioChatModel,
       hasLmStudioEmbeddingModel,
+      vllmStatus,
     } = await syncProviderAvailability();
     if (keyPresent) {
       return;
@@ -4023,6 +4185,15 @@ function App() {
           'This deployment runs in hosted web mode, so LM Studio is intentionally disabled here. Configure OpenRouter to continue.'
         );
       }
+      setShowStartupSetupModal(true);
+      return;
+    }
+
+    if (startupChoice === VLLM_STARTUP_CHOICE) {
+      if (isVllmStartupReady(vllmStatus)) {
+        return;
+      }
+      setStartupSetupMessage(`vLLM was previously selected, but it is not fully ready. ${describeVllmStartupGap(vllmStatus)}`);
       setShowStartupSetupModal(true);
       return;
     }
@@ -4074,7 +4245,9 @@ function App() {
       lmStudioAvailable,
       lmStudioStatus,
       startupChoice,
-    });
+    }) || (
+      startupChoice === VLLM_STARTUP_CHOICE && isVllmStartupReady(connectivityStatus?.inference?.vllm)
+    );
     const shouldReturnToStartup = STARTUP_CLOUD_ACCESS_REASONS.has(openRouterKeyReason)
       && !keyWasJustSaved
       && !cloudAccessWasJustConfigured
@@ -4135,6 +4308,90 @@ function App() {
     } finally {
       setCheckingLmStudioStartupChoice(false);
     }
+  };
+
+  // Confirms vLLM as the startup provider. Returns true once vLLM serves a chat
+  // model and an embedding model and the first-launch role defaults are applied.
+  const confirmVllmStartup = async () => {
+    let vllmStatus = { configured: false, available: false };
+    try {
+      vllmStatus = await vllmAPI.getAvailability({ refresh: true });
+    } catch (error) {
+      setStartupSetupMessage(error.message || 'The vLLM servers could not be checked.');
+      return false;
+    }
+    if (!isVllmStartupReady(vllmStatus)) {
+      setStartupSetupMessage(describeVllmStartupGap(vllmStatus));
+      return false;
+    }
+    let startupModel = { id: vllmStatus.models?.[0] || '' };
+    try {
+      const result = await cloudAccessAPI.getProviderModels(VLLM_PROVIDER);
+      startupModel = (result.models || [])[0] || startupModel;
+    } catch (error) {
+      console.debug('Failed to load vLLM models for startup defaults:', error);
+    }
+    const { config: nextAutonomousConfig } = applyVllmStartupDefaults(startupModel);
+    setAutonomousConfig(nextAutonomousConfig);
+    localStorage.setItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY, VLLM_STARTUP_CHOICE);
+    setStartupSetupMessage('');
+    setShowStartupSetupModal(false);
+    return true;
+  };
+
+  const handleStartupVllmChoice = async () => {
+    if (!capabilities.vllmAvailable || capabilities.genericMode) {
+      setStartupSetupMessage('vLLM is not available in this deployment. Configure OpenRouter to continue.');
+      return;
+    }
+    setCheckingVllmStartupChoice(true);
+    setStartupSetupMessage('');
+    try {
+      let configured = false;
+      try {
+        configured = Boolean((await vllmAPI.getStatus()).status?.configured);
+      } catch (error) {
+        console.debug('Failed to read vLLM status:', error);
+      }
+      if (!configured) {
+        // Nothing saved yet: collect the server address first, then confirm.
+        vllmStartupPendingRef.current = true;
+        setShowStartupSetupModal(false);
+        setShowVllmModal(true);
+        return;
+      }
+      await confirmVllmStartup();
+    } finally {
+      setCheckingVllmStartupChoice(false);
+    }
+  };
+
+  const handleVllmChanged = async () => {
+    setCredentialStatusRefreshToken((token) => token + 1);
+    refreshConnectivityStatus();
+    if (vllmStartupPendingRef.current && await confirmVllmStartup()) {
+      vllmStartupPendingRef.current = false;
+      setShowVllmModal(false);
+    }
+  };
+
+  const handleCloseVllmModal = () => {
+    setShowVllmModal(false);
+    if (vllmStartupPendingRef.current) {
+      // Startup setup was left unfinished: return to the startup chooser.
+      vllmStartupPendingRef.current = false;
+      setShowStartupSetupModal(true);
+    }
+  };
+
+  const handleRefreshVllmStatus = async () => {
+    try {
+      await vllmAPI.getAvailability({ refresh: true });
+    } catch (error) {
+      console.debug('Failed to refresh vLLM availability:', error);
+    }
+    setCredentialStatusRefreshToken((token) => token + 1);
+    await refreshConnectivityStatus();
   };
 
   const handleCloudAccessChanged = async (configured, provider = 'cloud', options = {}) => {
@@ -4379,6 +4636,7 @@ function App() {
             setShowOpenRouterKeyModal(true);
           }}
           onOpenLmStudio={() => setShowLmStudioModal(true)}
+          onOpenVllm={() => setShowVllmModal(true)}
           onOpenSyntheticLib4={syntheticLibSurface.open}
           onOpenAgentMemory={() => setShowAgentMemoryModal(true)}
           onOpenWolfram={() => setShowWolframModal(true)}
@@ -4729,7 +4987,6 @@ function App() {
               connectivityStatus={connectivityStatus}
               anyWorkflowRunning={anyWorkflowRunning}
               onWorkflowRunningChange={setAnyWorkflowRunning}
-              developerModeEnabled={developerModeEnabled}
             />
           )}
           {/* Full-width settings screens with model sidebars are rendered outside the padded tab container. */}
@@ -4887,8 +5144,10 @@ function App() {
         lmStudioError={lmStudioStatus.error || ''}
         statusMessage={startupSetupMessage}
         isCheckingLmStudio={checkingLmStudioStartupChoice}
+        isCheckingVllm={checkingVllmStartupChoice}
         onChooseOpenRouter={handleStartupOpenRouterChoice}
         onConfirmLmStudio={handleStartupLmStudioChoice}
+        onChooseVllm={handleStartupVllmChoice}
       />
       
       {/* Boost Control Modal */}
@@ -4896,7 +5155,6 @@ function App() {
         isOpen={showBoostModal}
         onClose={() => setShowBoostModal(false)}
         capabilities={capabilities}
-        developerModeEnabled={developerModeEnabled}
       />
       
       {/* OpenRouter API Key Modal */}
@@ -4916,6 +5174,15 @@ function App() {
         status={lmStudioStatus}
         capabilities={capabilities}
         onRefresh={syncProviderAvailability}
+      />
+
+      <VllmConnectivityModal
+        isOpen={showVllmModal}
+        onClose={handleCloseVllmModal}
+        status={connectivityStatus?.inference?.vllm}
+        capabilities={capabilities}
+        onChanged={handleVllmChanged}
+        onRefresh={handleRefreshVllmStatus}
       />
 
       {!syntheticLibSurface.privateSurfaceOpen ? (
@@ -5030,7 +5297,6 @@ function App() {
           paperTitle={selectedCritiquePaper.paper_title}
           onGenerateCritique={handleGenerateCritique}
           onGetCritiques={handleGetCritiques}
-          developerModeEnabled={developerModeEnabled}
         />
       )}
       

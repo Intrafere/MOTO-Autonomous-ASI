@@ -17,13 +17,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config, system_config
 from backend.shared.credential_locks import subscription_api_key_lock
+from backend.shared.embedding_readiness import check_vllm_availability, reset_vllm_embedding_status_cache
 from backend.shared.oauth_pkce import generate_oauth_state
 from backend.shared.openai_codex_client import OpenAICodexAuthError, openai_codex_client
 from backend.shared.provider_notification_store import list_provider_notifications
 from backend.shared.secret_store import SecretStoreError
 from backend.shared.subscription_providers.api_key_client import SubscriptionApiKeyClient
 from backend.shared.subscription_providers.errors import SubscriptionProviderError
-from backend.shared.subscription_providers.registry import api_key_subscription_clients
+from backend.shared.subscription_providers.registry import api_key_subscription_clients, vllm_client
+from backend.shared.subscription_providers.vllm import normalize_vllm_servers
 from backend.shared.xai_grok_client import XAIGrokAuthError, xai_grok_client
 
 router = APIRouter(prefix="/api/cloud-access", tags=["cloud-access"])
@@ -32,6 +34,8 @@ logger = logging.getLogger(__name__)
 _PENDING_CODEX_OAUTH: Dict[str, Dict[str, Any]] = {}
 _PENDING_XAI_GROK_OAUTH: Dict[str, Dict[str, Any]] = {}
 _PENDING_TTL_SECONDS = 15 * 60
+_CALLBACK_REQUEST_LINE_TIMEOUT_SECONDS = 15
+_CALLBACK_SERVER_CLOSE_TIMEOUT_SECONDS = 2
 _OAUTH_CALLBACK_INPUT_MAX_LENGTH = 8192
 _OAUTH_EXPIRY_TASKS: set[asyncio.Task] = set()
 
@@ -104,6 +108,20 @@ class XAIGrokOAuthExchangeRequest(BaseModel):
 
 class SubscriptionApiKeyRequest(BaseModel):
     api_key: str = Field(max_length=4096)
+    # Endpoint region for providers whose region the user chooses (Amazon Bedrock).
+    region: Optional[str] = Field(default=None, max_length=64)
+
+
+class VllmTestRequest(BaseModel):
+    servers: list[str] = Field(max_length=16)
+    # Omitted: use the stored key (if any). The key is never echoed back.
+    api_key: Optional[str] = Field(default=None, max_length=4096)
+    # Empty: use the first served model that answers an embedding request.
+    embedding_model: str = Field(default="", max_length=512)
+
+
+class VllmConfigRequest(VllmTestRequest):
+    clear_api_key: bool = False
 
 
 class ProviderNotificationRecord(BaseModel):
@@ -244,15 +262,31 @@ def _xai_grok_callback_binding(redirect_uri: Optional[str] = None) -> tuple[str,
     return host, int(parsed.port), parsed.path or "/callback"
 
 
+async def _close_callback_server(server: asyncio.AbstractServer) -> None:
+    """Stop a loopback callback listener without waiting on idle client sockets.
+
+    ``close()`` releases the listening port at once. From Python 3.12,
+    ``wait_closed()`` also waits for every open client connection, and a browser
+    may hold an idle one open for minutes, so that wait is bounded.
+    """
+    server.close()
+    close_clients = getattr(server, "close_clients", None)
+    if callable(close_clients):
+        close_clients()
+    try:
+        await asyncio.wait_for(server.wait_closed(), timeout=_CALLBACK_SERVER_CLOSE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.debug("OAuth callback listener closed with a client connection still open.")
+
+
 async def _stop_codex_callback_server_if_idle() -> None:
     """Release the conventional Codex OAuth callback port when no login is pending."""
     async with _CODEX_CALLBACK_SERVER_STATE.lock:
         server = _CODEX_CALLBACK_SERVER_STATE.server
         if _PENDING_CODEX_OAUTH or server is None:
             return
-        server.close()
-        await server.wait_closed()
         _CODEX_CALLBACK_SERVER_STATE.server = None
+        await _close_callback_server(server)
 
 
 async def _stop_xai_grok_callback_server_if_idle() -> None:
@@ -261,9 +295,8 @@ async def _stop_xai_grok_callback_server_if_idle() -> None:
         server = _XAI_GROK_CALLBACK_SERVER_STATE.server
         if _PENDING_XAI_GROK_OAUTH or server is None:
             return
-        server.close()
-        await server.wait_closed()
         _XAI_GROK_CALLBACK_SERVER_STATE.server = None
+        await _close_callback_server(server)
 
 
 async def _prune_pending() -> None:
@@ -289,6 +322,21 @@ def _schedule_pending_expiry() -> None:
     task.add_done_callback(_OAUTH_EXPIRY_TASKS.discard)
 
 
+async def _read_callback_request_line(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+) -> Optional[bytes]:
+    """Read the callback request line; drop a connection that never sends one."""
+    try:
+        return await asyncio.wait_for(
+            reader.readline(), timeout=_CALLBACK_REQUEST_LINE_TIMEOUT_SECONDS
+        )
+    except (asyncio.TimeoutError, ValueError, ConnectionError):
+        # Idle speculative connection, an oversized request line, or a reset peer.
+        writer.close()
+        return None
+
+
 async def _write_http_response(writer: asyncio.StreamWriter, status: str, body: str) -> None:
     payload = body.encode("utf-8", errors="replace")
     writer.write(
@@ -307,7 +355,9 @@ async def _write_http_response(writer: asyncio.StreamWriter, status: str, body: 
 
 async def _handle_codex_callback(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
-        request_line = await reader.readline()
+        request_line = await _read_callback_request_line(reader, writer)
+        if request_line is None:
+            return
         parts = request_line.decode("ascii", errors="ignore").split()
         path = parts[1] if len(parts) >= 2 else ""
         parsed = urlparse(path)
@@ -362,7 +412,9 @@ async def _handle_codex_callback(reader: asyncio.StreamReader, writer: asyncio.S
 
 async def _handle_xai_grok_callback(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
-        request_line = await reader.readline()
+        request_line = await _read_callback_request_line(reader, writer)
+        if request_line is None:
+            return
         parts = request_line.decode("ascii", errors="ignore").split()
         path = parts[1] if len(parts) >= 2 else ""
         parsed = urlparse(path)
@@ -732,7 +784,10 @@ def _register_api_key_subscription_routes(client: SubscriptionApiKeyClient) -> N
         _ensure_desktop_subscription_allowed(client)
         async with lock:
             try:
-                validation = await client.validate_candidate(request.api_key)
+                if request.region:
+                    validation = await client.validate_candidate(request.api_key, region_id=request.region)
+                else:
+                    validation = await client.validate_candidate(request.api_key)
                 client.set_api_key(request.api_key, region_id=validation.region_id)
             except (ValueError, SubscriptionProviderError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -787,3 +842,127 @@ def _register_api_key_subscription_routes(client: SubscriptionApiKeyClient) -> N
 
 for _subscription_client in api_key_subscription_clients():
     _register_api_key_subscription_routes(_subscription_client)
+
+
+_VLLM_UNAVAILABLE_STATUS = {"configured": False, "available": False, "desktop_only": True}
+
+
+def _ensure_desktop_vllm_allowed() -> None:
+    if system_config.generic_mode:
+        raise HTTPException(
+            status_code=501,
+            detail="vLLM servers are a desktop-only provider. Hosted mode uses OpenRouter.",
+        )
+
+
+def _vllm_servers_or_400(servers: list[str]) -> tuple[str, ...]:
+    try:
+        normalized = normalize_vllm_servers(servers)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Enter at least one vLLM server address.")
+    return normalized
+
+
+@router.get("/vllm/status")
+async def get_vllm_status() -> Dict[str, Any]:
+    """Return the saved vLLM setup (never the API key) without contacting any server."""
+    if system_config.generic_mode:
+        return {"success": True, "status": dict(_VLLM_UNAVAILABLE_STATUS)}
+    return {"success": True, "status": {**await vllm_client.status(), **vllm_client.cached_overview()}}
+
+
+@router.get("/vllm/availability")
+async def get_vllm_availability(refresh: bool = False) -> Dict[str, Any]:
+    """Check the saved vLLM servers: reachability, served chat models, and embedding readiness."""
+    if system_config.generic_mode:
+        return {"success": True, **_VLLM_UNAVAILABLE_STATUS, "generic_mode": True}
+    try:
+        return {"success": True, **await check_vllm_availability(force_refresh=refresh)}
+    except Exception as exc:
+        logger.warning("vLLM availability check failed: %s", type(exc).__name__)
+        return {
+            "success": True,
+            **await vllm_client.status(),
+            "available": False,
+            "has_usable_chat_model": False,
+            "has_embedding_model": False,
+            "embedding_ready": False,
+            "models": [],
+            "model_count": 0,
+            "error": "Failed to check the vLLM servers.",
+        }
+
+
+@router.get("/vllm/models")
+async def get_vllm_models() -> Dict[str, Any]:
+    """Return the chat models the saved vLLM servers serve, with detected context windows."""
+    _ensure_desktop_vllm_allowed()
+    try:
+        models = await vllm_client.list_models()
+    except SubscriptionProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, "models": models}
+
+
+@router.post("/vllm/test")
+async def test_vllm_servers(request: VllmTestRequest) -> Dict[str, Any]:
+    """Check candidate vLLM servers and detect their models without saving anything."""
+    _ensure_desktop_vllm_allowed()
+    servers = _vllm_servers_or_400(request.servers)
+    api_key = (request.api_key or "").strip() or vllm_client._load_api_key()
+    try:
+        result = await vllm_client.probe(servers, api_key, embedding_model=request.embedding_model)
+    except (ValueError, SubscriptionProviderError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, "provider": vllm_client.provider_id, **result.to_payload()}
+
+
+@router.post("/vllm/config")
+async def set_vllm_config(request: VllmConfigRequest) -> Dict[str, Any]:
+    """Validate vLLM servers, then save them (and a new API key when one is given)."""
+    _ensure_desktop_vllm_allowed()
+    servers = _vllm_servers_or_400(request.servers)
+    async with subscription_api_key_lock(vllm_client.provider_id):
+        try:
+            result = await vllm_client.configure(
+                servers,
+                api_key=request.api_key,
+                clear_api_key=request.clear_api_key,
+                embedding_model=request.embedding_model,
+            )
+        except (ValueError, SubscriptionProviderError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except SecretStoreError as exc:
+            logger.warning("vLLM API key could not be saved to the keyring: %s", type(exc).__name__)
+            raise HTTPException(
+                status_code=500,
+                detail="The vLLM API key could not be saved to the system keyring.",
+            ) from exc
+        reset_vllm_embedding_status_cache()
+        await api_client_manager.reset_provider_fallbacks(vllm_client.provider_id)
+        return {
+            "success": True,
+            "provider": vllm_client.provider_id,
+            "status": await vllm_client.status(),
+            "models": [vllm_client._model_record(model) for model in result.chat_models],
+            **result.to_payload(),
+        }
+
+
+@router.delete("/vllm")
+async def clear_vllm_config() -> Dict[str, Any]:
+    """Forget the saved vLLM servers, embedding choice, and API key."""
+    _ensure_desktop_vllm_allowed()
+    async with subscription_api_key_lock(vllm_client.provider_id):
+        try:
+            await vllm_client.clear_configuration()
+        except SecretStoreError as exc:
+            logger.warning("vLLM API key could not be removed from the keyring: %s", type(exc).__name__)
+            raise HTTPException(
+                status_code=500,
+                detail="The vLLM API key could not be removed from the system keyring. Nothing was changed.",
+            ) from exc
+        reset_vllm_embedding_status_cache()
+    return {"success": True, "message": "vLLM setup cleared"}

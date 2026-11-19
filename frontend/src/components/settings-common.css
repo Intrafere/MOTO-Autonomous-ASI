@@ -357,8 +357,11 @@
   line-height: 1.4;
 }
 
-.settings-row--inline-checkbox {
-  grid-template-columns: 1fr;
+.settings-row.settings-row--inline-checkbox {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .settings-checkbox-label--supercharge {

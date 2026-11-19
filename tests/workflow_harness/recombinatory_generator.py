@@ -139,6 +139,11 @@ INVARIANT_ACTIVATION_EVIDENCE: dict[str, frozenset[str]] = {
     "prompt.direct_sources_excluded_from_rag": frozenset({"rag_source_exclusion"}),
     "prompt.mandatory_source_overflow_fails_visible": frozenset({"mandatory_source_overflow"}),
     "prompt.generated_appendices_stripped": frozenset({"prompt_context"}),
+    "cli_control.start_template_only_after_committed_start": frozenset({"cli_template_saved_after_commit", "cli_rejected_start_no_template"}),
+    "cli_control.start_template_credentials_stripped": frozenset({"cli_template_replayed"}),
+    "cli_control.hosted_writes_no_artifacts": frozenset({"cli_hosted_no_artifacts"}),
+    "cli_control.control_file_owner_lifecycle": frozenset({"cli_control_file_owner_removed"}),
+    "cli_control.template_replays_into_valid_start": frozenset({"cli_template_replayed"}),
     **{
         invariant_id: frozenset({"current_product_laws"})
         for invariant_id in (
@@ -154,6 +159,8 @@ INVARIANT_ACTIVATION_EVIDENCE: dict[str, frozenset[str]] = {
             "supercharge_creativity.routing_separation",
             "proof_novelty.group_atomic_same_run",
             "leanoj.parent_control_generation_fences_children",
+            "model_output.contract_failure_not_semantic",
+            "model_output.normalizations_visible_and_guarded",
         )
     },
 }
@@ -289,6 +296,36 @@ ACTION_SPECS: tuple[ActionSpec, ...] = (
         ("runtime_exclusivity", "workflow_filesystem_state"),
         _idle,
         advances=("manual_aggregator_accept", "manual_aggregator_clear", "stop_resume"),
+    ),
+    ActionSpec(
+        "cli_start_manual_aggregator",
+        actions.cli_start_manual_aggregator,
+        ("cli_control_surface", "runtime_exclusivity", "workflow_filesystem_state"),
+        _idle,
+        advances=("cli_template_replayed", "cli_rejected_start_no_template", "start_blocked"),
+        produces=("cli_template_saved_after_commit",),
+    ),
+    ActionSpec(
+        "cli_start_while_workflow_active",
+        actions.cli_start_manual_aggregator,
+        ("cli_control_surface", "runtime_exclusivity"),
+        lambda model: model.mode is not WorkflowMode.NONE,
+        produces=("cli_rejected_start_no_template", "start_blocked"),
+    ),
+    ActionSpec(
+        "cli_replay_saved_template",
+        actions.cli_replay_saved_template,
+        ("cli_control_surface", "websocket_api_contracts", "workflow_filesystem_state"),
+        lambda model: model.cli_saved_template is not None
+        and "cli_template_replayed" not in model.exercise_observations,
+        produces=("cli_template_replayed",),
+    ),
+    ActionSpec(
+        "exercise_cli_control_surface",
+        actions.exercise_cli_control_surface,
+        ("cli_control_surface", "websocket_api_contracts", "workflow_filesystem_state"),
+        lambda model: "cli_hosted_no_artifacts" not in model.exercise_observations,
+        produces=("cli_hosted_no_artifacts", "cli_control_file_owner_removed"),
     ),
     ActionSpec(
         "accept_manual_aggregator_submission",
@@ -486,6 +523,7 @@ ACTION_SPECS: tuple[ActionSpec, ...] = (
             "answer_wrappers",
             "group_novelty",
             "leanoj_parent_control",
+            "model_output_contract",
         ),
         lambda model: not model.law_observations,
         produces=("current_product_laws",),
@@ -709,6 +747,31 @@ DEFAULT_TARGETS: tuple[GenerationTarget, ...] = (
         invariants=("runtime.single_active_workflow",),
         must_exercise=("paper_checkpoint", "start_blocked"),
         max_steps=7,
+    ),
+    GenerationTarget(
+        target_id="generated_cli_start_template_chain",
+        fields=(
+            "cli_control_surface",
+            "runtime_exclusivity",
+            "workflow_filesystem_state",
+            "websocket_api_contracts",
+        ),
+        invariants=(
+            "cli_control.start_template_only_after_committed_start",
+            "cli_control.start_template_credentials_stripped",
+            "cli_control.hosted_writes_no_artifacts",
+            "cli_control.control_file_owner_lifecycle",
+            "cli_control.template_replays_into_valid_start",
+            "runtime.single_active_workflow",
+        ),
+        must_exercise=(
+            "cli_template_saved_after_commit",
+            "cli_rejected_start_no_template",
+            "cli_template_replayed",
+            "cli_hosted_no_artifacts",
+            "start_blocked",
+        ),
+        max_steps=8,
     ),
 )
 
@@ -1030,6 +1093,7 @@ def _planning_signature(
         frozenset(event.event_type for event in model.persisted_events),
         frozenset(model.exercise_observations),
         frozenset(model.law_observations),
+        model.cli_saved_template is not None,
     )
     return (_signature_value(eligibility_state), observed, observed_fields)
 

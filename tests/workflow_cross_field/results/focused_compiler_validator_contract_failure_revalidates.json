@@ -1,0 +1,43 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "same_submission_revalidated",
+    "no_rejection_log",
+    "operational_compiler_warning"
+  ],
+  "faked_dependencies": [
+    "validator model replies",
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "model_output_contract",
+    "provider_pause_resume",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "observed_transition": "a compiler validator contract failure re-validates the same submission without recording a rejection",
+  "real_components": [
+    "backend/compiler/core/compiler_coordinator.py",
+    "backend/compiler/validation/compiler_validator.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_compiler_validator_contract_failure_revalidates",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:91d35a86a3d78dad785748512d91988fdea4a350610836181bb39542c942e9d7",
+  "test_file": "tests/unit/test_compiler_model_output_contract.py",
+  "test_selectors": [
+    "tests/unit/test_compiler_model_output_contract.py::test_validator_contract_failure_revalidates_same_submission"
+  ]
+}

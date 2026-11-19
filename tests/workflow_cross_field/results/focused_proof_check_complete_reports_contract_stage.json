@@ -1,0 +1,43 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "error_kind_model_output_contract",
+    "error_stage_identification",
+    "no_lean_work_note"
+  ],
+  "faked_dependencies": [
+    "external providers and proof toolchains",
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "model_output_contract",
+    "provider_pause_resume",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "observed_transition": "an identification contract failure ends the proof check with a typed, route-named proof_check_complete error",
+  "real_components": [
+    "backend/autonomous/core/proof_verification_stage.py",
+    "backend/shared/model_output_contract.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_proof_check_complete_reports_contract_stage",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:47ad296f407959d650096bc0d5b7552565359ea82b0cc6e1589b3c4c83ae8409",
+  "test_file": "tests/regressions/test_proof_identification_contract_errors.py",
+  "test_selectors": [
+    "tests/regressions/test_proof_identification_contract_errors.py::test_stage_reports_identification_contract_failure_accurately"
+  ]
+}

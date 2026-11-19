@@ -575,6 +575,10 @@ class LMStudioClient:
                             f"In LM Studio: Increase 'Context Length (n_ctx)' to at least {approx_tokens + 5000} tokens.",
                             route=ProviderRouteIdentity(provider="lm_studio", model=model),
                             cause=e,
+                            required_tokens=approx_tokens,
+                            context_window=(
+                                context_limit if isinstance(context_limit, int) else None
+                            ),
                         ) from e
                     
                     # Retry on transient 400 errors
@@ -994,7 +998,9 @@ class LMStudioClient:
                 import json
                 from backend.shared.json_parser import sanitize_json_response
                 
-                sanitized_content = sanitize_json_response(content)
+                # The compatibility test qualifies a model, so it accepts only
+                # JSON the model wrote correctly: no visible normalizations.
+                sanitized_content = sanitize_json_response(content, allow_repairs=False)
                 parsed_json = json.loads(sanitized_content)
                 logger.info(
                     "Model '%s' produced valid JSON with keys: %s",

@@ -1,6 +1,6 @@
 {
   "action_ids": [
-    "start_leanoj",
+    "cli_start_manual_aggregator",
     "attempt_conflicting_start"
   ],
   "adapter": "model",
@@ -10,10 +10,11 @@
   ],
   "blocked_dependencies": [],
   "diagnostics": {
-    "final_mode": "leanoj",
-    "final_phase": "leanoj_brainstorm"
+    "final_mode": "manual_aggregator",
+    "final_phase": "manual_aggregation"
   },
   "evidence": [
+    "cli_template_saved_after_commit",
     "start_blocked"
   ],
   "exercised_invariants": [
@@ -30,6 +31,7 @@
     "runtime.single_active_workflow"
   ],
   "observed_fields": [
+    "cli_control_surface",
     "runtime_exclusivity",
     "websocket_api_contracts",
     "workflow_filesystem_state"
@@ -37,7 +39,8 @@
   "observed_transition": "seeded model planner reached the declared target",
   "real_components": [],
   "replay": [
-    "start_leanoj()",
+    "cli_start_manual_aggregator()",
+    "start_manual_aggregator()",
     "start_manual_compiler()"
   ],
   "result": "passed",

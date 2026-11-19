@@ -11,6 +11,9 @@ import json
 import logging
 import re
 import hashlib
+from typing import Any, Optional
+
+from backend.shared.model_output_contract import OutputRepair
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +299,252 @@ def sanitize_model_output_for_retry_context(raw: str, max_chars: int = 2000) -> 
     return content or RETRY_CONTEXT_EMPTY_PLACEHOLDER
 
 
-def sanitize_json_response(raw_content: str, *, escape_newline_latex_commands: bool = True) -> str:
+class JsonObject(dict):
+    """A parsed JSON object that remembers keys the model wrote more than once.
+
+    It behaves exactly like ``dict`` (the last duplicate's value wins and keeps
+    the first position, as ``json.loads`` does); ``duplicate_keys`` only lets key
+    recovery refuse objects whose key order cannot be trusted.
+    """
+
+    duplicate_keys: tuple[str, ...] = ()
+
+
+def _json_object_pairs_hook(pairs: list[tuple[str, Any]]) -> JsonObject:
+    result = JsonObject(pairs)
+    if len(result) != len(pairs):
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for key, _value in pairs:
+            if key in seen and key not in duplicates:
+                duplicates.append(key)
+            seen.add(key)
+        result.duplicate_keys = tuple(duplicates)
+    return result
+
+
+_JSON_WHITESPACE = " \t\r\n"
+_JSON_STRUCTURAL = "{}[],:"
+# A stray run may never contain characters that could belong to JSON structure,
+# a string, an escape, or a number, nor comment markers: a member the model
+# commented out (``// "key": ...``, ``# "key": ...``, ``/* ... */``) must stay
+# a syntax failure instead of becoming a real member again.
+_STRAY_FORBIDDEN_CHARS = frozenset('"{}[],:\\-.0123456789/#*')
+_STRAY_MAX_CHARS = 3
+_MAX_SYNTAX_REPAIRS = 5
+
+
+def _lex_json_tokens(text: str) -> Optional[list[tuple[str, int, int]]]:
+    """Split text into ``(kind, start, end)`` tokens; None on an unclosed string.
+
+    Kinds are ``str``, one structural character, or ``bare`` (any other run of
+    non-whitespace characters: literals, numbers, or stray characters).
+    """
+    tokens: list[tuple[str, int, int]] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char in _JSON_WHITESPACE:
+            index += 1
+            continue
+        if char == '"':
+            end = index + 1
+            while end < length:
+                if text[end] == "\\":
+                    end += 2
+                    continue
+                if text[end] == '"':
+                    break
+                end += 1
+            if end >= length:
+                return None
+            tokens.append(("str", index, end + 1))
+            index = end + 1
+            continue
+        if char in _JSON_STRUCTURAL:
+            tokens.append((char, index, index + 1))
+            index += 1
+            continue
+        end = index
+        while (
+            end < length
+            and text[end] not in _JSON_WHITESPACE
+            and text[end] != '"'
+            and text[end] not in _JSON_STRUCTURAL
+        ):
+            end += 1
+        tokens.append(("bare", index, end))
+        index = end
+    return tokens
+
+
+def _decoded_key(text: str) -> str:
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return text[1:-1]
+    return value if isinstance(value, str) else ""
+
+
+def _child_path(parent: str, segment: str) -> str:
+    if segment.startswith("["):
+        return f"{parent}{segment}"
+    return f"{parent}.{segment}" if parent else segment
+
+
+def _plan_syntax_repairs(text: str) -> Optional[tuple[str, list[OutputRepair]]]:
+    """Return text with stray key-position characters and trailing commas removed.
+
+    Walks the token stream with a JSON state machine. Only two token kinds may be
+    removed: a 1-3 character bare run in object-key position (after ``{`` or
+    ``,``) that is followed by whitespace and then a string, and a comma that is
+    followed only by whitespace and then ``}`` or ``]``. Any other structural
+    surprise refuses the whole repair, and the result must strictly parse with
+    every remaining token unchanged.
+    """
+    tokens = _lex_json_tokens(text)
+    if not tokens:
+        return None
+
+    removed: set[int] = set()
+    repairs: list[OutputRepair] = []
+    stack: list[dict[str, Any]] = [{"type": "root", "state": "value", "path": ""}]
+
+    def open_value(frame: dict[str, Any], kind: str) -> Optional[dict[str, Any]]:
+        if frame["type"] == "obj":
+            path = _child_path(frame["path"], frame["key"])
+        elif frame["type"] == "arr":
+            path = _child_path(frame["path"], f"[{frame['index']}]")
+            frame["index"] += 1
+        else:
+            path = ""
+        frame["state"] = "done" if frame["type"] == "root" else "comma_or_end"
+        if kind == "{":
+            return {"type": "obj", "state": "key_or_end", "key": "", "path": path}
+        if kind == "[":
+            return {"type": "arr", "state": "value_or_end", "index": 0, "path": path}
+        return None
+
+    for position, (kind, start, end) in enumerate(tokens):
+        frame = stack[-1]
+        state = frame["state"]
+        following = tokens[position + 1] if position + 1 < len(tokens) else None
+
+        if kind == "," and state == "comma_or_end":
+            if following is not None and following[0] in ("}", "]"):
+                removed.add(position)
+                repairs.append(OutputRepair(kind="trailing_comma", item_path=frame["path"]))
+            else:
+                frame["state"] = "key" if frame["type"] == "obj" else "value"
+            continue
+
+        if frame["type"] == "obj" and state in ("key_or_end", "key"):
+            if kind == "bare":
+                run = text[start:end]
+                if (
+                    len(run) <= _STRAY_MAX_CHARS
+                    and not (set(run) & _STRAY_FORBIDDEN_CHARS)
+                    and following is not None
+                    and following[0] == "str"
+                    and following[1] > end
+                    and not text[end:following[1]].strip(_JSON_WHITESPACE)
+                ):
+                    removed.add(position)
+                    repairs.append(OutputRepair(
+                        kind="stray_characters",
+                        item_path=frame["path"],
+                        removed_chars=len(run),
+                    ))
+                    continue
+                return None
+            if kind == "str":
+                frame["key"] = _decoded_key(text[start:end])
+                frame["state"] = "colon"
+                continue
+            if kind == "}" and state == "key_or_end":
+                stack.pop()
+                continue
+            return None
+
+        if frame["type"] == "obj" and state == "colon":
+            if kind != ":":
+                return None
+            frame["state"] = "value"
+            continue
+
+        if state in ("value", "value_or_end"):
+            if kind == "]" and state == "value_or_end":
+                stack.pop()
+                continue
+            if kind in ("str", "bare", "{", "["):
+                child = open_value(frame, kind)
+                if child is not None:
+                    stack.append(child)
+                continue
+            return None
+
+        if state == "comma_or_end":
+            if kind == ("}" if frame["type"] == "obj" else "]"):
+                stack.pop()
+                continue
+            return None
+
+        return None
+
+    if len(stack) != 1 or stack[0]["state"] != "done":
+        return None
+    if not removed or len(removed) > _MAX_SYNTAX_REPAIRS:
+        return None
+
+    pieces: list[str] = []
+    cursor = 0
+    for position in sorted(removed):
+        _kind, start, end = tokens[position]
+        pieces.append(text[cursor:start])
+        cursor = end
+    pieces.append(text[cursor:])
+    repaired = "".join(pieces)
+
+    try:
+        json.loads(repaired)
+    except ValueError:
+        return None
+    repaired_tokens = _lex_json_tokens(repaired) or []
+    kept = [text[start:end] for index, (_kind, start, end) in enumerate(tokens) if index not in removed]
+    if kept != [repaired[start:end] for _kind, start, end in repaired_tokens]:
+        return None
+    return repaired, repairs
+
+
+def _apply_syntax_repairs(content: str, repairs: Optional[list]) -> str:
+    """Last-resort visible syntax repairs for otherwise complete JSON."""
+    try:
+        json.loads(content)
+        return content
+    except ValueError:
+        pass
+    planned = _plan_syntax_repairs(content)
+    if planned is None:
+        return content
+    repaired, applied = planned
+    logger.info(
+        "Normalized model JSON syntax: %s (%s)",
+        [repair.as_payload() for repair in applied],
+        _content_diagnostics(content),
+    )
+    if repairs is not None:
+        repairs.extend(applied)
+    return repaired
+
+
+def sanitize_json_response(
+    raw_content: str,
+    *,
+    escape_newline_latex_commands: bool = True,
+    allow_repairs: bool = True,
+    repairs: Optional[list] = None,
+) -> str:
     """
     Sanitize JSON response to handle LaTeX expressions and invalid escape sequences.
     
@@ -328,6 +576,16 @@ def sanitize_json_response(raw_content: str, *, escape_newline_latex_commands: b
             \\neq, \\neg, \\not, \\nu), so a JSON ``\\n`` line break before a word
             such as "using" stays a line break. For callers whose model text
             carries no raw LaTeX math (it is masked as placeholders).
+        allow_repairs: When True (default), ``repairs`` is a list, and the text
+            still fails strict parsing after every step above, drop 1-3 stray
+            characters that sit outside strings in object-key position and
+            remove trailing commas, but only when the result parses strictly
+            with every other token unchanged. Never runs on truncated output
+            (step 4.8 raises first).
+        repairs: Optional list that receives one ``OutputRepair`` per applied
+            normalization. Repairs run only when it is supplied, so a caller
+            that cannot publish them (``model_output_normalized``) never gets
+            them silently.
 
     Returns:
         Sanitized JSON string ready for parsing
@@ -926,11 +1184,23 @@ def sanitize_json_response(raw_content: str, *, escape_newline_latex_commands: b
             
             sanitized = escape_control_chars_in_strings(sanitized)
             logger.debug("Escaped raw control characters in JSON string values (preserved structural whitespace)")
-    
+
+    # STEP 7: Last-resort visible syntax normalizations (stray characters in
+    # key position, trailing commas), verified by a strict reparse. They run
+    # only for callers that collect them in ``repairs`` so every applied
+    # repair can be published; other callers keep strict parsing.
+    if allow_repairs and repairs is not None:
+        sanitized = _apply_syntax_repairs(sanitized, repairs)
     return sanitized
 
 
-def parse_json(response_content: str, *, escape_newline_latex_commands: bool = True) -> dict:
+def parse_json(
+    response_content: str,
+    *,
+    escape_newline_latex_commands: bool = True,
+    allow_repairs: bool = True,
+    repairs: Optional[list] = None,
+) -> dict:
     """
     Parse JSON response from LLM with sanitization.
 
@@ -942,9 +1212,14 @@ def parse_json(response_content: str, *, escape_newline_latex_commands: bool = T
         escape_newline_latex_commands: Passed to ``sanitize_json_response``;
             False keeps JSON ``\\n`` escapes before words such as "using" or
             "neg..." as line breaks instead of reading them as LaTeX commands.
+        allow_repairs: Passed to ``sanitize_json_response``; False accepts only
+            JSON the model wrote correctly.
+        repairs: Optional list receiving one ``OutputRepair`` per applied
+            syntax normalization; repairs run only when it is supplied.
 
     Returns:
-        Parsed JSON dict
+        Parsed JSON dict. Every object is a ``JsonObject`` (a plain ``dict``
+        subclass) whose ``duplicate_keys`` names keys written more than once.
         
     Raises:
         json.JSONDecodeError: If parsing fails after sanitization
@@ -976,8 +1251,10 @@ def parse_json(response_content: str, *, escape_newline_latex_commands: bool = T
         sanitized_content = sanitize_json_response(
             response_content,
             escape_newline_latex_commands=escape_newline_latex_commands,
+            allow_repairs=allow_repairs,
+            repairs=repairs,
         )
-        result = json.loads(sanitized_content)
+        result = json.loads(sanitized_content, object_pairs_hook=_json_object_pairs_hook)
     except ValueError as e:
         # Handle explicit "No JSON found" errors from sanitization
         if "No JSON found" in str(e):

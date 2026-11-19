@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 import uuid
@@ -11,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterable
 
+from backend.shared.atomic_json import replace_file
 from backend.shared.proof_identity import CANONICAL_PROOF_IDENTITY_VERSION
 from backend.shared.proof_search.models import (
     CorpusOverview,
@@ -41,7 +41,7 @@ class ProofSearchIndexer:
             temporary_indexer._populate_new_index(unique_records.values())
             if not temporary_indexer.is_compatible():
                 raise RuntimeError("Rebuilt proof-search index failed compatibility validation")
-            os.replace(temporary_path, self.db_path)
+            replace_file(temporary_path, self.db_path)
         finally:
             for candidate in (
                 temporary_path,

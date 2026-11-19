@@ -224,6 +224,18 @@ class WorkflowModel:
     fenced_adverse_order_attempts: int = 0
     mutation_attempts: int = 0
     atomic_mutations: int = 0
+    cli_start_attempts: int = 0
+    cli_committed_starts: int = 0
+    cli_templates_saved: int = 0
+    cli_templates_after_rejected_start: int = 0
+    cli_template_credential_leaks: int = 0
+    cli_template_replays: int = 0
+    cli_template_replays_rejected: int = 0
+    cli_hosted_attempts: int = 0
+    cli_hosted_artifacts_written: int = 0
+    cli_control_file_written_before_ready: int = 0
+    cli_control_file_foreign_removals: int = 0
+    cli_saved_template: dict[str, object] | None = None
     checkpoint: dict[str, object] = field(default_factory=dict)
     events: list[WorkflowEvent] = field(default_factory=list)
     replay: list[str] = field(default_factory=list)
@@ -341,6 +353,8 @@ class WorkflowModel:
                 "supercharge_creativity.routing_separation",
                 "proof_novelty.group_atomic_same_run",
                 "leanoj.parent_control_generation_fences_children",
+                "model_output.contract_failure_not_semantic",
+                "model_output.normalizations_visible_and_guarded",
             }
         )
 
@@ -613,6 +627,58 @@ class WorkflowModel:
         self.hosted_route_attempts.update(route_categories)
         self.hosted_route_unavailable.update(route_categories)
         self.emit("route_unavailable", deployment="hosted", reason="desktop_only")
+
+    # --- Desktop `moto` CLI control surface (moto_cli.py + backend/shared/cli_control.py) ---
+
+    _CLI_CREDENTIAL_MARKERS = ("api_key", "secret", "password", "access_token", "refresh_token")
+
+    def cli_start_manual_aggregator(self) -> None:
+        """A CLI start goes through the same exclusive start; only a committed start saves a template."""
+        self.record("cli_start_manual_aggregator")
+        self.cli_start_attempts += 1
+        was_idle = self.mode is WorkflowMode.NONE
+        self.start_manual_aggregator()
+        if was_idle and self.mode is WorkflowMode.MANUAL_AGGREGATOR:
+            self.cli_committed_starts += 1
+            request = {
+                "user_prompt": f"cli prompt {self.cli_start_attempts}",
+                "validator_model": "validator",
+                "openrouter_api_key": "sk-model-secret",
+            }
+            self.cli_saved_template = {
+                "mode": "aggregator",
+                "request": {
+                    key: value
+                    for key, value in request.items()
+                    if not any(marker in key for marker in self._CLI_CREDENTIAL_MARKERS)
+                },
+            }
+            self.cli_templates_saved += 1
+            self.exercise_observations.add("cli_template_saved_after_commit")
+        else:
+            self.exercise_observations.add("cli_rejected_start_no_template")
+
+    def cli_replay_saved_template(self) -> None:
+        """Feed the template one start produced into the next CLI start request."""
+        self.record("cli_replay_saved_template")
+        template = self.cli_saved_template
+        if template is None:
+            return
+        request = dict(template.get("request") or {})
+        self.cli_template_replays += 1
+        if any(marker in key for key in request for marker in self._CLI_CREDENTIAL_MARKERS):
+            self.cli_template_credential_leaks += 1
+        request["user_prompt"] = "replayed prompt"
+        if template.get("mode") != "aggregator" or not request.get("validator_model"):
+            self.cli_template_replays_rejected += 1
+        self.exercise_observations.add("cli_template_replayed")
+
+    def exercise_cli_control_surface(self) -> None:
+        """Hosted mode writes no CLI artifacts; the control file is owned by one backend."""
+        self.record("exercise_cli_control_surface")
+        self.cli_hosted_attempts += 1
+        self.emit("cli_control_unavailable", deployment="hosted", reason="desktop_only")
+        self.exercise_observations.update({"cli_hosted_no_artifacts", "cli_control_file_owner_removed"})
 
     def attempt_disabled_lean_checkpoint(self) -> None:
         self.record("attempt_disabled_lean_checkpoint")

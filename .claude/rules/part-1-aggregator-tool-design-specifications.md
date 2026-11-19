@@ -12,7 +12,7 @@ Submitters run in parallel; single validator reviews and updates the shared data
 ## AI Node Clusters and Validator Structure
 Configurable 1-10 submitters + exactly 1 validator (default 3 submitters). Each submitter has its own model, context window, and max output tokens. First submitter labeled "Main Submitter" in UI.
 
-**Single Validator Constraint**: Only one validator allowed — multiple validators would cause divergent database evolution, breaking coherent Markov chain alignment.
+**Single Validator Constraint**: Only one validator allowed — multiple validators would cause divergent database evolution, breaking coherent Markov chain alignment. A fatal self-stop cancels the validator loop, and Start drains any loop left alive by an earlier run.
 
 Validator accepts a submission if adding it makes the training database more useful toward finding solutions. Ordinary submissions aggressively pursue the strongest credible and genuinely novel solution to the user's exact objective, using the contribution form and claim-type rigor appropriate to the problem; mathematics, theorem discovery, proof, and formalization remain first-class whenever relevant, but non-mathematical work is not rejected merely for lacking mathematical form. Submissions first prefer avenues that aggressively attack the user's WHOLE question as stated; an impossibility answer counts as answering the whole question. Directness orders preference, never admission: genuinely novel pieces, incremental steps, and indirect routes with a plausible path toward the prompt are acceptable, while non-novel easy/practical/background detours without such a path are rejected. Validators judge each submission's own novelty and progress rather than rejecting it because a stronger step might exist. On a fresh cleared run the accepted-submissions database starts blank; on normal desktop runs it reloads persisted accepted submissions, stats, and top-level manual run activity from the active data root. Manual read-only results/events views hydrate persisted data without requiring Start; autonomous/mini-aggregators must not write the manual event log. Distributor updates all submitters after each acceptance.
 
@@ -51,9 +51,16 @@ parser, context, and transport failures remain operational activity rather than 
 validator decisions. Rejection activity should also make clear that rejections are
 normal and extended streaks can be expected on difficult problems. Batched validators
 retain one ordered decision, reasoning/summary, and stable identity for every item;
-malformed batch contracts are operational and preserve/requeue dequeued work rather
-than silently discarding it or fabricating semantic decisions; the restored submissions
-are then validated one at a time.
+single or batch validator replies that still break the contract after one bounded
+repair are operational (`validator_output_contract_failed`), never submitter feedback,
+and preserve/requeue dequeued work rather than silently discarding it or fabricating
+semantic decisions; the restored submissions are then validated one at a time, and a
+lone restored submission that fails again moves to the back of the queue (never capped).
+Each failure is a distinct activity item scoped to its run; from the second consecutive
+failure (reset by any usable validation) the next try waits 1, 2, 4 … 30 s through the
+stop-aware retry seam, never capped. An internal error that stops a batch before any
+decision is not a contract failure: it is published as `validator_batch_interrupted`
+(exception type only), and the restored work is retried singly after a short stop-aware wait.
 
 **Submission context injection**: Submitter context direct-injects first and offloads existing context to RAG when needed. Validator submissions under review are mandatory direct context; if a single or batch validation prompt still does not fit after normal allocation, or the provider rejects it as too large, the normal context-overflow lifecycle stops the affected workflow rather than indexing the pending submission as RAG.
 
@@ -92,20 +99,21 @@ When ALL submitters AND validator use the same model → single-model mode:
 - Submitters run SEQUENTIALLY (S1 → S2 → ... → Sn)
 - Validator processes all queued submissions after each full submitter round
 - Prevents queue overflow from parallel tasks flooding when LLM completes
+- Queue backpressure still applies: a submitter whose pause threshold is reached skips generation that round, so restored or overflowing work drains through validation first
 - Exception: if LM Studio reports multiple loaded same-base numeric `:#` instances for that model, submitters may still run in parallel while the LM Studio client routes independent calls to idle sibling instances.
 - Boost does NOT affect single-model detection (routing only, not model config)
 
 ## Multi-Submitter Configuration
 
-Per-submitter: provider (LM Studio / OpenRouter / desktop-only cloud providers such as OpenAI Codex OAuth, xAI Grok OAuth, or a Sakana Fugu or Kimi Code API key in default mode; OpenRouter only in generic mode), model, OpenRouter host provider when applicable, LM Studio fallback for cloud providers (default mode only), context window, max output tokens, and Supercharge checkbox. Assistant has the same provider/context/output setting shape but is not a submitter and is not counted in submitter parallelism. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
+Per-submitter: provider (LM Studio / vLLM / OpenRouter / desktop-only cloud providers such as OpenAI Codex OAuth, xAI Grok OAuth, or a Sakana Fugu or Kimi Code API key in default mode; OpenRouter only in generic mode), model, OpenRouter host provider when applicable, local fallback (an LM Studio or vLLM model) for non-LM-Studio providers (default mode only), context window, max output tokens, and Supercharge checkbox. Assistant has the same provider/context/output setting shape but is not a submitter and is not counted in submitter parallelism. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
 
 OpenRouter auto-fill rule: selecting an OpenRouter model auto-fills context from the model-level `context_length`. Max output tokens use `min(20% of model context_length, endpoint max_completion_tokens)`: auto provider mode filters weak/low-cap endpoints and uses the smallest remaining capable endpoint cap, while an explicit host selection uses that host's largest exposed endpoint cap. Endpoint `context_length` / `max_prompt_tokens` rows are diagnostics, not context shrink limits. If endpoint output caps are incomplete, preserve current values (no guessing).
 
-Embeddings for RAG: Default mode uses LM Studio first, falls back to OpenRouter (`openai/text-embedding-3-small`) if LM Studio unavailable. Generic mode uses in-process FastEmbed (see `rag-design-for-overall-program.md`).
+Embeddings for RAG: Default mode uses LM Studio first, then a configured vLLM embedding model, and falls back to OpenRouter (`openai/text-embedding-3-small`) if neither is available. Generic mode uses in-process FastEmbed (see `rag-design-for-overall-program.md`).
 
 ## Database Management
 
-Accepted submissions database: never truncated. Live preview shows exact non-truncated log. Validator reasoning/results NOT included in the database (accepted submissions only).
+Accepted submissions database: never truncated. Live preview shows exact non-truncated log. Validator reasoning/results NOT included in the database (accepted submissions only). Proof-appendix-only saves (append or clear) first load submissions from disk when memory holds none, so they never drop accepted submissions.
 
 ## Progressive Solution Path
 
@@ -139,7 +147,7 @@ Proof live-context pruning projects linked inline Lean-proof submissions out of 
 
 JSON formatting is used for all submission/validation communication. Ordinary submissions must meet domain- and claim-appropriate standards of correctness and defensibility with no unfounded claims, fabricated support, or logical fallacies. Mathematical claims specifically require sound derivation, proof, or explicit assumptions.
 
-JSON validation failure: reject submission, send reason + content to submitter's local failure feedback memory.
+Submitter JSON failure: reject submission, send reason + content to submitter's local failure feedback memory. Validator-output JSON failure is operational (see validation activity above).
 
 ## Optional Lean 4 Proof Submissions
 

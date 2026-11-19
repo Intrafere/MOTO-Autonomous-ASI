@@ -12,6 +12,11 @@ Schema version: 2.
 | `assistant.non_blocking_retrieval` | uncovered | uncovered | uncovered | uncovered |
 | `assistant.stagnant_pack_backoff_not_shutdown` | uncovered | uncovered | uncovered | uncovered |
 | `bulk_mutation.atomic_revision_fenced` | passed | uncovered | uncovered | uncovered |
+| `cli_control.control_file_owner_lifecycle` | passed | uncovered | uncovered | uncovered |
+| `cli_control.hosted_writes_no_artifacts` | passed | passed | uncovered | uncovered |
+| `cli_control.start_template_credentials_stripped` | passed | passed | uncovered | uncovered |
+| `cli_control.start_template_only_after_committed_start` | passed | passed | uncovered | uncovered |
+| `cli_control.template_replays_into_valid_start` | passed | passed | uncovered | uncovered |
 | `events.autonomous_mandatory_overflow_checkpoint_preserved` | passed | uncovered | uncovered | uncovered |
 | `events.context_overflow_persists_across_reload` | passed | uncovered | passed | passed |
 | `events.context_overflow_route_identity` | passed | uncovered | passed | passed |
@@ -29,6 +34,8 @@ Schema version: 2.
 | `live_activity.provider_retry_identity_stable` | passed | uncovered | uncovered | uncovered |
 | `live_activity.provider_retry_persists_reload` | passed | uncovered | uncovered | passed |
 | `live_activity.provider_retry_secret_safe` | passed | uncovered | uncovered | uncovered |
+| `model_output.contract_failure_not_semantic` | passed | uncovered | uncovered | uncovered |
+| `model_output.normalizations_visible_and_guarded` | passed | uncovered | uncovered | uncovered |
 | `outputs.at_least_one_output_enabled` | passed | passed | uncovered | passed |
 | `outputs.papers_only_skips_proof_work` | passed | uncovered | uncovered | uncovered |
 | `outputs.proofs_only_no_paper_phase` | passed | uncovered | passed | uncovered |

@@ -262,7 +262,7 @@ ACTIVITY_POLICIES: tuple[ActivityPolicy, ...] = (
     _policy(_AGGREGATOR, "Coordinator._single_model_workflow", "_broadcast", "free_models_exhausted", ATTRIBUTED, _FREE_ROTATION_ROUTE),
     _policy(_AGGREGATOR, "Coordinator._single_model_workflow", _EMIT, _RETRY, ATTRIBUTED, _FREE_ROTATION_ROUTE),
     _policy(_AGGREGATOR, "Coordinator._single_model_workflow", _EMIT, _RETRY, ATTRIBUTED, _ERROR_SUPPLIES_ROUTE, occurrence=2),
-    _policy(_AGGREGATOR, "Coordinator._validate_restored_batch_individually", _EMIT, _RETRY, ATTRIBUTED, "Batch-contract retry names the validator's configured model and provider."),
+    _policy(_AGGREGATOR, "Coordinator._restore_after_batch_interruption", _EMIT, _RETRY, ATTRIBUTED, "Internal batch-interruption pacing merges the validator role's route identity; only the exception type is published."),
     *(
         _policy(_AGGREGATOR, scope, call, event, ATTRIBUTED, "Repair payload names the error's model and provider and merges the role's route identity.")
         for scope, event in (
@@ -325,8 +325,7 @@ ACTIVITY_POLICIES: tuple[ActivityPolicy, ...] = (
         _policy(_COMPILER, "CompilerCoordinator._initial_paper_loop", _EMIT, _RETRY, ATTRIBUTED, _ERROR_SUPPLIES_ROUTE, occurrence=occurrence)
         for occurrence in (2, 3)
     ),
-    _policy(_COMPILER, "CompilerCoordinator._run_critique_aggregation", _EMIT, _RETRY, EXEMPT, "Empty critique submission retry; " + _NON_MODEL_LOOP),
-    _policy(_COMPILER, "CompilerCoordinator._run_critique_aggregation", _EMIT, _RETRY, ATTRIBUTED, _ERROR_SUPPLIES_ROUTE, occurrence=2),
+    _policy(_COMPILER, "CompilerCoordinator._run_critique_aggregation", _EMIT, _RETRY, ATTRIBUTED, _ERROR_SUPPLIES_ROUTE),
     *(
         _policy(_LEANOJ, scope, "_persist_and_broadcast", event, ATTRIBUTED, "Pause/resume payload is built by _route_identity_payload for the paused role and error.")
         for scope in ("LeanOJCoordinator.start", "LeanOJCoordinator._pause_for_provider_credits")
@@ -389,6 +388,7 @@ ACTIVITY_POLICIES: tuple[ActivityPolicy, ...] = (
     _policy("backend/shared/openrouter_client.py", "OpenRouterClient._execute_completion_request.wait_before_retry", "assured_retry_wait", _RETRY, ATTRIBUTED, "OpenRouter retry payload names model, provider, configured and upstream host and request id."),
     _policy(_ASSISTANT, "AssistantProofSearchCoordinator._select_and_publish_assistant_pack", "_broadcast_event", "assistant_proof_pack_failed", ATTRIBUTED, "Assistant failure payload merges _assistant_failure_route_identity for the Assistant role."),
     _policy(_RECOVERY_RUNTIME, "assured_retry_wait", _EMIT, _RETRY, EXEMPT, _PASS_THROUGH),
+    _policy("backend/shared/model_output_contract.py", "wait_after_repeated_contract_failure", _EMIT, _RETRY, ATTRIBUTED, "Shared contract-retry backoff merges route_identity_for_role for the role whose reply broke its JSON contract."),
     _policy("backend/shared/subscription_providers/api_key_client.py", "SubscriptionApiKeyClient._wait_before_retry", "assured_retry_wait", _RETRY, ATTRIBUTED, _ADAPTER_ROUTE),
     *_policies(_SOLUTION_PATH, "SolutionPathEngine._review_loop", "_broadcast", "solution_path_proposal_user_repair_required", 3, ATTRIBUTED, "Reviewer repair payload merges _reviewer_route_identity for the Main Submitter 1 review route."),
     _policy(_TRANSLATION, "TranslationService._validator_contract_retry", _EMIT, _RETRY, EXEMPT, "Translator Validator JSON-contract retry re-judges the same attempts; a parser failure with no typed provider error in scope, so it names mode and role only."),

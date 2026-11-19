@@ -34,7 +34,6 @@ from backend.shared.api_client_manager import RetryableProviderError, api_client
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.token_tracker import token_tracker
-from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
@@ -80,6 +79,23 @@ from backend.autonomous.agents.topic_validator import TopicValidatorAgent
 from backend.autonomous.agents.completion_reviewer import CompletionReviewerAgent
 from backend.autonomous.agents.reference_selector import ReferenceSelectorAgent
 from backend.autonomous.agents.paper_title_selector import PaperTitleSelectorAgent
+from backend.autonomous.agents.output_contract import (
+    ContractFailurePacer,
+    json_object,
+    optional_text,
+    parse_contract_reply,
+    parse_with_contract_retry,
+    report_model_output_contract_failure,
+    require_bool,
+    require_choice,
+    require_string_list,
+    require_text,
+    response_text,
+)
+from backend.shared.model_output_contract import (
+    ModelOutputContractError,
+    report_model_output_normalizations,
+)
 from backend.autonomous.prompts.proof_prompts import (
     PROOF_FRAMING_CONTEXT,
     build_proof_framing_gate_prompt,
@@ -92,9 +108,12 @@ from backend.autonomous.core.proof_verification_stage import (
 )
 from backend.autonomous.core.proof_pruning_coordinator import ProofPruningCoordinator
 from backend.autonomous.core.proof_round_driver import (
+    ROUND_MEMORY_MAX_ENTRIES,
     AutomaticMultiRoundPolicy,
     OneRoundPolicy,
     ProofRoundDriver,
+    normalize_round_memory,
+    round_memory_entry,
 )
 from backend.shared.proof_search.assistant_coordinator import (
     assistant_proof_search_coordinator,
@@ -124,6 +143,70 @@ from backend.compiler.memory.outline_memory import outline_memory
 from backend.aggregator.core.rag_manager import rag_manager
 
 logger = logging.getLogger(__name__)
+
+MAX_RUNTIME_STOP_REASON = "max_runtime_reached"
+DIRECT_ANSWER_COMPLETE_STOP_REASON = "direct_answer_complete"
+DIRECT_ANSWER_FAILED_STOP_REASON = "direct_answer_failed"
+# Why a direct answer was written; stored with the answer.
+DIRECT_ANSWER_REASON_EXPLORATION_COMPLETE = "exploration_complete"
+DIRECT_ANSWER_REASON_TIME_LIMIT = "time_limit"
+DIRECT_ANSWER_REASON_FINISH_REQUESTED = "finish_requested"
+_DIRECT_ANSWER_ASSEMBLY_MARGIN = 200
+_DIRECT_ANSWER_MIN_TOPIC_TOKENS = 1000
+_DIRECT_ANSWER_MAX_CHARS = 2_000_000
+
+PROOF_FRAMING_GATE_ROLE_ID = "autonomous_proof_framing_gate"
+PROOF_FRAMING_UNRESOLVED_MESSAGE = (
+    "The proof framing decision could not be read after one retry, so proof framing "
+    "is on for this run; the decision is asked again if the run resumes."
+)
+_PROOF_FRAMING_SHAPE = """{
+  "is_proof_amenable": true | false,
+  "reasoning": "string"
+}"""
+
+CONTINUATION_ROLE_ID = "autonomous_topic_selector"
+_CONTINUATION_SHAPE = """{
+  "decision": "write_another_paper | move_on",
+  "reasoning": "string"
+}"""
+
+_BRAINSTORM_REFERENCE_ROLE_ID = "autonomous_reference_selector"
+
+
+def _parse_proof_framing_decision(data: Any, *, role: str) -> tuple[bool, str]:
+    """Strictly read the gate decision; a non-boolean is a contract failure."""
+    data = json_object(data, role=role)
+    return require_bool(data, "is_proof_amenable", role=role), optional_text(
+        data, "reasoning", role=role
+    )
+
+
+def _parse_continuation_decision(data: Any, *, role: str) -> Dict[str, str]:
+    data = json_object(data, role=role)
+    return {
+        "decision": require_choice(
+            data, "decision", ("write_another_paper", "move_on"), role=role
+        ),
+        "reasoning": require_text(data, "reasoning", role=role),
+    }
+
+
+def _parse_brainstorm_reference_selection(data: Any, *, role: str) -> List[str]:
+    data = json_object(data, role=role)
+    selected = require_string_list(data, "selected_brainstorms", role=role)
+    optional_text(data, "reasoning", role=role)
+    return selected
+
+
+def _format_runtime_limit(seconds: int) -> str:
+    """Render a runtime limit the way a person would say it (for example 1h 30m)."""
+    parts = []
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m"), (1, "s")):
+        count, seconds = divmod(seconds, size)
+        if count:
+            parts.append(f"{count}{unit}")
+    return " ".join(parts) or "0s"
 
 
 def _proof_recovery_config_fingerprint(config: Dict[str, Any]) -> str:
@@ -244,7 +327,19 @@ class AutonomousCoordinator:
         self._lifecycle_generation: int = 0
         self.solution_path_manager = None
         self._ownership_handoff_active = False
-        
+        # Optional user-set maximum runtime for the current Start (None = no limit).
+        self.runtime_limit_stop_callback: Optional[Callable[[], Any]] = None
+        self._runtime_limit_task: Optional[asyncio.Task] = None
+        self._runtime_limit: Optional[Dict[str, Any]] = None
+        # Optional direct answer: one model call that answers the user's question
+        # when the exploration ends on its own, at its time limit, or on request.
+        self.direct_answer_finish_callback: Optional[Callable[[str], Any]] = None
+        self._direct_answer_enabled = False
+        self._direct_answer_writing = False
+        self._direct_answer_baseline_topics: set = set()
+        self._direct_answer_sequence = 0
+        self._api_log_callback: Optional[Callable[..., Any]] = None
+
         # Configuration (set during initialize)
         self._user_research_prompt: str = ""
         self._submitter_configs: List[SubmitterConfig] = []  # Per-submitter configs for brainstorm aggregation
@@ -344,6 +439,10 @@ class AutonomousCoordinator:
         self._proof_framing_active: bool = False
         self._proof_framing_context: str = ""
         self._proof_framing_reasoning: str = ""
+        # True when the framing gate's reply could not be read: framing defaulted
+        # on (rule 7f) and a resumed run asks the gate again.
+        self._proof_framing_unresolved: bool = False
+        self._proof_framing_gate_pending: bool = False
         self._proof_verification_stage = ProofVerificationStage()
         self._proof_pruning_coordinator: Optional[ProofPruningCoordinator] = None
         
@@ -541,6 +640,28 @@ class AutonomousCoordinator:
     def _untrack_child_aggregator(self, aggregator: Optional[AggregatorCoordinator]) -> None:
         if aggregator in self._active_child_aggregators:
             self._active_child_aggregators.remove(aggregator)
+
+    async def _stop_child_aggregator_on_phase_exit(
+        self,
+        aggregator: Optional[AggregatorCoordinator],
+        phase: str,
+    ) -> None:
+        """Stop a child aggregator that is still alive when its phase exits.
+
+        A phase can exit through an exception from the parent's own work (for
+        example a provider failure during completion review) while its child
+        keeps running. An unstopped child would keep calling providers, could
+        not be reached by Stop once replaced, and would write through the shared
+        training memory after that memory is pointed back at another database.
+        A child that already stopped is left alone.
+        """
+        if aggregator is None or not getattr(aggregator, "has_live_work", False):
+            return
+        try:
+            async with self._brainstorm_start_stop_lock:
+                await aggregator.stop()
+        except Exception as exc:
+            logger.warning("Error stopping child aggregator after %s exit: %s", phase, exc)
 
     async def _await_parent_phase_shutdown(
         self,
@@ -847,11 +968,20 @@ class AutonomousCoordinator:
         return coordinator
 
     async def _run_proof_framing_gate(self) -> None:
-        """Run the one-time proof-framing decision before fresh research begins."""
+        """Run the one-time proof-framing decision before research begins.
+
+        Provider failures propagate to the main loop's shared provider recovery,
+        which retries the gate. A reply that does not match the gate's contract
+        gets one bounded retry; if it still fails, proof framing is ON for this
+        run (rule 7f eager-true bias), the decision is shown as unresolved, and
+        the unresolved marker is persisted so a resumed run asks the gate again.
+        """
+        self._proof_framing_gate_pending = False
         if not self._allow_mathematical_proofs:
             self._proof_framing_active = False
             self._proof_framing_context = ""
             self._proof_framing_reasoning = "Mathematical proof outputs are disabled for this run."
+            self._proof_framing_unresolved = False
             logger.info("Proof framing gate skipped: mathematical proof outputs disabled")
             return
         if not self._submitter_configs:
@@ -861,34 +991,50 @@ class AutonomousCoordinator:
         base_prompt = self._base_user_research_prompt or self._user_research_prompt
         prompt = build_proof_framing_gate_prompt(base_prompt)
         first_submitter = self._submitter_configs[0]
+        task_id = "proof_framing_gate_000"
 
-        reasoning = ""
-        is_proof_amenable = False
+        self._proof_framing_gate_pending = True
+        response = await api_client_manager.generate_completion(
+            task_id=task_id,
+            role_id=PROOF_FRAMING_GATE_ROLE_ID,
+            model=first_submitter.model_id,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=first_submitter.max_output_tokens,
+            temperature=0.0,
+        )
+        unresolved = False
         try:
-            response = await api_client_manager.generate_completion(
-                task_id="proof_framing_gate_000",
-                role_id="autonomous_proof_framing_gate",
+            is_proof_amenable, reasoning = await parse_with_contract_retry(
+                response_text(response),
+                lambda parsed: _parse_proof_framing_decision(
+                    parsed, role=PROOF_FRAMING_GATE_ROLE_ID
+                ),
+                prompt=prompt,
+                task_id=task_id,
+                role_id=PROOF_FRAMING_GATE_ROLE_ID,
                 model=first_submitter.model_id,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=first_submitter.max_output_tokens,
-                temperature=0.0,
+                context_window=first_submitter.context_window,
+                max_output_tokens=first_submitter.max_output_tokens,
+                response_noun="proof framing decision",
+                response_shape=_PROOF_FRAMING_SHAPE,
             )
-            if response and response.get("choices"):
-                message = response["choices"][0].get("message", {})
-                content = extract_message_text(message)
-                if content:
-                    parsed = parse_json(content)
-                    if isinstance(parsed, list):
-                        parsed = parsed[0] if parsed else {}
-                    is_proof_amenable = bool(parsed.get("is_proof_amenable", False))
-                    reasoning = str(parsed.get("reasoning", "")).strip()
-        except Exception as exc:
-            logger.warning("Proof framing gate failed, continuing without proof framing: %s", exc)
-            reasoning = f"Proof framing gate failed: {exc}"
+        except ModelOutputContractError as exc:
+            unresolved = True
+            is_proof_amenable = True
+            reasoning = PROOF_FRAMING_UNRESOLVED_MESSAGE
+            await report_model_output_contract_failure(
+                PROOF_FRAMING_GATE_ROLE_ID,
+                exc,
+                task_id=task_id,
+                model=first_submitter.model_id,
+                outcome=PROOF_FRAMING_UNRESOLVED_MESSAGE,
+            )
+        self._proof_framing_gate_pending = False
 
         self._proof_framing_active = is_proof_amenable
         self._proof_framing_context = PROOF_FRAMING_CONTEXT if is_proof_amenable else ""
         self._proof_framing_reasoning = reasoning
+        self._proof_framing_unresolved = unresolved
         self._user_research_prompt = base_prompt
 
         await research_metadata.set_proof_framing_state(
@@ -899,13 +1045,45 @@ class AutonomousCoordinator:
             reasoning=self._proof_framing_reasoning,
         )
         await self._save_workflow_state()
-        await self._broadcast(
-            "proof_framing_decided",
-            {
-                "is_proof_amenable": self._proof_framing_active,
-                "reasoning": self._proof_framing_reasoning,
-            },
-        )
+        decided_payload: Dict[str, Any] = {
+            "is_proof_amenable": self._proof_framing_active,
+            "reasoning": self._proof_framing_reasoning,
+            "unresolved": unresolved,
+        }
+        if unresolved:
+            decided_payload["message"] = PROOF_FRAMING_UNRESOLVED_MESSAGE
+            decided_payload["activity_classification"] = "operational"
+        await self._broadcast("proof_framing_decided", decided_payload)
+
+    def _restored_proof_round_memory(
+        self,
+        checkpoint: Optional[Dict[str, Any]],
+        *,
+        base_trigger: str,
+    ) -> tuple[str, ...]:
+        """Rebuild proof-round memory from this source's saved checkpoint.
+
+        The checkpoint keeps the memory its round started with; a finished
+        round also adds its own entry. Checkpoints of another trigger family
+        restore nothing.
+        """
+        if not checkpoint:
+            return ()
+        checkpoint_trigger = str(checkpoint.get("trigger") or "")
+        if checkpoint_trigger != base_trigger and not checkpoint_trigger.startswith(
+            f"{base_trigger}_round_"
+        ):
+            return ()
+        memory = list(normalize_round_memory(checkpoint.get("prior_round_results")))
+        if checkpoint.get("status") in {"complete", "trigger_complete"}:
+            checkpoint_result = self._deserialize_proof_checkpoint(checkpoint)[-2]
+            entry = round_memory_entry(
+                max(1, int(checkpoint.get("proof_round_index") or 1)),
+                checkpoint_result,
+            )
+            if entry:
+                memory.append(entry)
+        return tuple(memory[-ROUND_MEMORY_MAX_ENTRIES:])
 
     def _deserialize_proof_checkpoint(
         self,
@@ -1088,7 +1266,7 @@ class AutonomousCoordinator:
         async def run_single_proof_round(
             proof_round_index: int,
             round_trigger: str,
-            prior_round_results: str,
+            prior_round_results: tuple[str, ...],
             source_reservation_token: str,
         ):
             automatic_role_base = (
@@ -1567,6 +1745,10 @@ class AutonomousCoordinator:
             should_stop=self._stop_event.is_set,
             reserve_source=ProofVerificationStage.reserve_source,
             release_source=release_source,
+            initial_round_memory=self._restored_proof_round_memory(
+                await research_metadata.get_proof_checkpoint(source_type, source_id),
+                base_trigger=trigger,
+            ),
         )
         try:
             return await driver.run()
@@ -1879,7 +2061,21 @@ class AutonomousCoordinator:
         # PRIORITY 1: Check for interrupted session in auto_sessions/
         # This takes precedence over legacy paths and new session creation
         interrupted_session = await session_manager.find_interrupted_session(system_config.auto_sessions_base_dir)
-        
+
+        # Chroma is derived state. Windows startup replaces prior-process native
+        # state before any workflow opens it; session resume then lazily indexes
+        # the durable sources it needs. A new run also requests an empty
+        # in-process cache so no previous active workflow sources remain. This
+        # happens before any new session folder is created, so a failed reset
+        # leaves no empty session behind.
+        await autonomous_rag_manager.reset()
+        if interrupted_session:
+            logger.info("Autonomous session resume will rebuild required RAG sources lazily")
+        else:
+            logger.info("Preparing fresh atomic RAG cache for new autonomous session...")
+            await rag_manager.clear_all_documents_async()
+            logger.info("Fresh autonomous RAG cache prepared")
+
         metadata_prompt = user_research_prompt
         if interrupted_session:
             session_id = interrupted_session["session_id"]
@@ -1949,19 +2145,7 @@ class AutonomousCoordinator:
         self._base_user_research_prompt = await research_metadata.get_base_user_prompt()
         if not self._base_user_research_prompt:
             self._base_user_research_prompt = self._user_research_prompt
-        
-        # Chroma is derived state. Windows startup replaces prior-process native
-        # state before any workflow opens it; session resume then lazily indexes
-        # the durable sources it needs. A new session also requests an empty
-        # in-process cache so no previous active workflow sources remain.
-        await autonomous_rag_manager.reset()
-        if interrupted_session:
-            logger.info("Autonomous session resume will rebuild required RAG sources lazily")
-        else:
-            logger.info("Preparing fresh atomic RAG cache for new autonomous session...")
-            await rag_manager.clear_all_documents_async()
-            logger.info("Fresh autonomous RAG cache prepared")
-        
+
         # Now initialize with fresh state
         await autonomous_rag_manager.initialize()
         
@@ -2033,6 +2217,8 @@ class AutonomousCoordinator:
             validator_max_output_tokens=validator_max_tokens,
         )
         await self._initialize_solution_path_manager()
+        for agent in (self._certainty_assessor, self._format_selector, self._volume_organizer):
+            agent.should_stop = self._stop_event.is_set
         for agent in (
             self._topic_selector, self._topic_validator, self._completion_reviewer,
             self._reference_selector, self._title_selector, self._redundancy_checker,
@@ -2485,6 +2671,7 @@ class AutonomousCoordinator:
         # Check for interrupted workflow (crash recovery) BEFORE initializing tier3 tracking
         # This ensures we restore the saved value if it exists
         has_crash_recovery = research_metadata.has_interrupted_workflow()
+        self._proof_framing_unresolved = False
         await self._check_resume_state()
         
         # Initialize Tier 3 check tracking from actual library count
@@ -2538,6 +2725,9 @@ class AutonomousCoordinator:
                 self._proof_framing_active = workflow_state.get("proof_framing_active", False)
                 self._proof_framing_context = workflow_state.get("proof_framing_context", "")
                 self._proof_framing_reasoning = workflow_state.get("proof_framing_reasoning", "")
+                self._proof_framing_unresolved = (
+                    workflow_state.get("proof_framing_unresolved") is True
+                )
             else:
                 self._proof_framing_active = False
                 self._proof_framing_context = ""
@@ -3132,6 +3322,7 @@ class AutonomousCoordinator:
             "proof_framing_active": self._proof_framing_active,
             "proof_framing_context": self._proof_framing_context,
             "proof_framing_reasoning": self._proof_framing_reasoning,
+            "proof_framing_unresolved": self._proof_framing_unresolved,
             "allow_mathematical_proofs": self._allow_mathematical_proofs,
             "allow_research_papers": self._allow_research_papers,
             # Tier 3 Final Answer crash recovery fields
@@ -3164,6 +3355,394 @@ class AutonomousCoordinator:
             or self._state.is_running
             or (self._main_task is not None and not self._main_task.done())
         )
+
+    def arm_runtime_limit(self, max_runtime_seconds: Optional[float]) -> None:
+        """Apply the user's maximum runtime to the run that was just started.
+
+        ``None`` means no limit. The limit belongs to one Start: a later Start
+        replaces it, and it follows the run across internal phase handoffs.
+        """
+        self._cancel_runtime_limit()
+        if not max_runtime_seconds or max_runtime_seconds <= 0:
+            return
+        started_at = datetime.now()
+        loop = asyncio.get_running_loop()
+        self._runtime_limit = {
+            "max_runtime_seconds": int(max_runtime_seconds),
+            "started_at": started_at,
+            "deadline_at": datetime.fromtimestamp(started_at.timestamp() + max_runtime_seconds),
+            "deadline_monotonic": loop.time() + max_runtime_seconds,
+        }
+        self._runtime_limit_task = asyncio.create_task(
+            self._enforce_runtime_limit(float(max_runtime_seconds)),
+            name="autonomous-runtime-limit",
+        )
+
+    def _cancel_runtime_limit(self) -> None:
+        task = self._runtime_limit_task
+        self._runtime_limit_task = None
+        self._runtime_limit = None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    def get_runtime_limit(self) -> Optional[Dict[str, Any]]:
+        """The active run's runtime limit for status, or None when there is none."""
+        limit = self._runtime_limit
+        if limit is None or not self.is_active:
+            return None
+        remaining = limit["deadline_monotonic"] - asyncio.get_running_loop().time()
+        return {
+            "max_runtime_seconds": limit["max_runtime_seconds"],
+            "started_at": limit["started_at"],
+            "deadline_at": limit["deadline_at"],
+            "remaining_seconds": max(0, int(remaining)),
+        }
+
+    async def _enforce_runtime_limit(self, max_runtime_seconds: float) -> None:
+        """Stop the run once its user-set maximum runtime has passed."""
+        limit = self._runtime_limit
+        await asyncio.sleep(max_runtime_seconds)
+        if self._runtime_limit is not limit or not self.is_active:
+            return
+        label = _format_runtime_limit(int(max_runtime_seconds))
+        logger.info("Autonomous research reached its maximum runtime of %s; stopping", label)
+        if self._direct_answer_enabled and self.direct_answer_finish_callback is not None:
+            # A direct-answer run ends its exploration here and answers from it.
+            self._runtime_limit_task = None
+            self._runtime_limit = None
+            try:
+                if await self.direct_answer_finish_callback(
+                    f"{DIRECT_ANSWER_REASON_TIME_LIMIT}:{label}"
+                ):
+                    return
+            except Exception:
+                logger.exception("Failed to hand the run to its direct answer at the maximum runtime")
+            if not self.is_active:
+                return
+        self._mark_terminal_stop(
+            reason=MAX_RUNTIME_STOP_REASON,
+            message=(
+                f"Autonomous research stopped because it reached the maximum runtime of {label} "
+                "set when it was started. Progress is saved."
+            ),
+            payload={
+                "title": "Maximum runtime reached",
+                "recoverable": True,
+                "fatal": False,
+                "terminal_guidance": (
+                    "Start Autonomous Research again to continue from where it stopped."
+                ),
+            },
+        )
+        self._runtime_limit_task = None
+        self._runtime_limit = None
+        try:
+            if self.runtime_limit_stop_callback is not None:
+                await self.runtime_limit_stop_callback()
+            else:
+                await self.stop()
+        except Exception:
+            logger.exception("Failed to stop Autonomous research at its maximum runtime")
+
+    # ------------------------------------------------------------------
+    # Direct answer (one model call that answers the user's question)
+    # ------------------------------------------------------------------
+
+    def set_direct_answer_enabled(self, enabled: bool) -> None:
+        """Choose whether this Start ends with a direct answer to the user's question."""
+        self._direct_answer_enabled = bool(enabled)
+
+    @property
+    def direct_answer_enabled(self) -> bool:
+        return self._direct_answer_enabled
+
+    @property
+    def direct_answer_writing(self) -> bool:
+        return self._direct_answer_writing
+
+    async def _completed_brainstorm_ids(self) -> set:
+        return {
+            item.topic_id
+            for item in await brainstorm_memory.get_all_brainstorms()
+            if item.status == "complete"
+        }
+
+    async def _direct_answer_due(self, resume_state: Optional[Dict[str, Any]]) -> bool:
+        """True at a topic boundary once this run has finished exploring one topic."""
+        if not self._direct_answer_enabled:
+            return False
+        if resume_state and resume_state.get("paper_phase") != "topic_exploration":
+            return False  # saved work from the current topic still has to finish
+        return bool(await self._completed_brainstorm_ids() - self._direct_answer_baseline_topics)
+
+    async def _direct_answer_exploration_results(self, question: str, token_budget: int) -> tuple:
+        """Collect what the exploration produced, direct first and retrieval when too large."""
+        from backend.shared.utils import count_tokens
+
+        blocks: List[str] = []
+        basis: Dict[str, Any] = {
+            "topics": [], "topics_left_out": [], "papers": 0, "proofs_included": False,
+            "used_retrieval": False,
+        }
+        remaining = token_budget
+
+        async def add_block(text: str) -> bool:
+            nonlocal remaining
+            tokens = await asyncio.to_thread(count_tokens, text)
+            if tokens > remaining:
+                return False
+            blocks.append(text)
+            remaining -= tokens
+            return True
+
+        if self._allow_research_papers:
+            papers = await paper_library.get_all_papers()
+            if papers:
+                listing = "\n\n".join(
+                    f"Paper: {paper.title}\nAbstract: {paper.abstract or '(none)'}" for paper in papers
+                )
+                if await add_block(f"PAPERS WRITTEN DURING THE EXPLORATION (abstracts):\n{listing}"):
+                    basis["papers"] = len(papers)
+
+        if self._allow_mathematical_proofs:
+            run_id = self._run_id or getattr(session_manager, "session_id", "") or ""
+            proofs_block = proof_database.get_novel_proofs_for_injection(run_id)
+            if proofs_block and await add_block(proofs_block):
+                basis["proofs_included"] = True
+
+        topics = await brainstorm_memory.get_all_brainstorms()
+        topics.sort(key=lambda item: item.topic_id != self._current_topic_id)  # current topic first
+        for topic in topics:
+            if not topic.submission_count:
+                continue
+            header = f"EXPLORATION TOPIC: {topic.topic_prompt}\nACCEPTED IDEAS:\n"
+            room = remaining - await asyncio.to_thread(count_tokens, header)
+            if room < _DIRECT_ANSWER_MIN_TOPIC_TOKENS:
+                basis["topics_left_out"].append(topic.topic_id)
+                continue
+            content, used_retrieval = await autonomous_rag_manager.get_brainstorm_context(
+                topic.topic_id, room, query=question
+            )
+            if not content.strip() or not await add_block(header + content):
+                basis["topics_left_out"].append(topic.topic_id)
+                continue
+            basis["topics"].append(topic.topic_id)
+            basis["used_retrieval"] = basis["used_retrieval"] or used_retrieval
+        return "\n\n".join(blocks), basis
+
+    async def _write_direct_answer(self, reason: str) -> Dict[str, Any]:
+        """Ask Main Submitter 1 once to answer the user's question, then save the answer."""
+        from backend.autonomous.memory.direct_answer_memory import direct_answer_memory
+        from backend.autonomous.prompts.direct_answer_prompts import (
+            build_direct_answer_messages,
+        )
+        from backend.shared.json_parser import (
+            RETRY_CONTEXT_EMPTY_PLACEHOLDER,
+            sanitize_model_output_for_retry_context,
+        )
+        from backend.shared.utils import count_tokens
+
+        primary = next(
+            (config for config in self._submitter_configs if config.submitter_id == 1), None
+        )
+        if primary is None:
+            raise ValueError("Autonomous Main Submitter 1 is required to write the direct answer.")
+        role_id = "autonomous_direct_answer"
+        api_client_manager.configure_role(
+            role_id,
+            ModelConfig(
+                provider=primary.provider,
+                model_id=primary.model_id,
+                openrouter_model_id=primary.model_id if primary.provider == "openrouter" else None,
+                openrouter_provider=primary.openrouter_provider,
+                openrouter_reasoning_effort=primary.openrouter_reasoning_effort,
+                lm_studio_fallback_id=primary.lm_studio_fallback_id,
+                context_window=primary.context_window,
+                max_output_tokens=primary.max_output_tokens,
+                supercharge_enabled=primary.supercharge_enabled,
+            ),
+        )
+        question = self._base_user_research_prompt or self._user_research_prompt
+        ended_early = reason != DIRECT_ANSWER_REASON_EXPLORATION_COMPLETE
+        available = rag_config.get_available_input_tokens(
+            primary.context_window, primary.max_output_tokens
+        )
+        fixed = build_direct_answer_messages(question, "", ended_early=ended_early)
+        fixed_tokens = await asyncio.to_thread(
+            count_tokens, "\n".join(message["content"] for message in fixed)
+        )
+        budget = available - fixed_tokens - _DIRECT_ANSWER_ASSEMBLY_MARGIN
+        if budget < 0:
+            raise ValueError(
+                "The question does not fit Main Submitter 1's context window, so the direct "
+                "answer cannot be written. Raise that model's context window or shorten the question."
+            )
+        results, basis = await self._direct_answer_exploration_results(question, budget)
+        messages = build_direct_answer_messages(question, results, ended_early=ended_early)
+
+        self._direct_answer_writing = True
+        await self._broadcast("direct_answer_started", {
+            "reason": reason,
+            "message": "Writing the direct answer to the question from what was explored.",
+        })
+        try:
+            answer_text = ""
+            for _attempt in range(2):  # one bounded retry when the model returns no answer
+                self._direct_answer_sequence += 1
+                response = await api_client_manager.generate_completion(
+                    task_id=f"agg_sub1_direct_answer_{self._direct_answer_sequence:03d}",
+                    role_id=role_id,
+                    model=primary.model_id,
+                    messages=messages,
+                    max_tokens=primary.max_output_tokens,
+                    temperature=0.0,
+                )
+                answer_text = sanitize_model_output_for_retry_context(
+                    extract_message_text(response["choices"][0]["message"]),
+                    max_chars=_DIRECT_ANSWER_MAX_CHARS,
+                ).strip()
+                if answer_text == RETRY_CONTEXT_EMPTY_PLACEHOLDER:
+                    answer_text = ""  # only private reasoning or nothing came back
+                if answer_text:
+                    break
+            if not answer_text:
+                raise RuntimeError("The model returned no answer text.")
+        finally:
+            self._direct_answer_writing = False
+
+        record = {
+            "answer_id": hashlib.sha256(
+                f"{self._run_id}:{self._lifecycle_generation}:{self._direct_answer_sequence}".encode("utf-8")
+            ).hexdigest()[:16],
+            "run_id": self._run_id or getattr(session_manager, "session_id", "") or "legacy",
+            "question": question,
+            "answer": answer_text,
+            "word_count": len(answer_text.split()),
+            "reason": reason,
+            "exploration_complete": not ended_early,
+            "created_at": datetime.now().isoformat(),
+            "model": primary.model_id,
+            "provider": primary.provider,
+            "basis": basis,
+        }
+        await direct_answer_memory.save(record)
+        await self._broadcast("direct_answer_ready", {
+            "answer_id": record["answer_id"],
+            "reason": reason,
+            "word_count": record["word_count"],
+            "message": "The direct answer to the question is ready.",
+        })
+        return record
+
+    def _mark_direct_answer_stop(self, reason: str) -> None:
+        """Explain the stop that follows a written direct answer."""
+        kind, _, limit_label = reason.partition(":")
+        if kind == DIRECT_ANSWER_REASON_TIME_LIMIT:
+            self._mark_terminal_stop(
+                reason=MAX_RUNTIME_STOP_REASON,
+                message=(
+                    "Autonomous research reached its maximum runtime"
+                    + (f" of {limit_label}" if limit_label else "")
+                    + " and wrote its direct answer from what it explored. Progress is saved."
+                ),
+                payload={
+                    "title": "Maximum runtime reached",
+                    "recoverable": True,
+                    "fatal": False,
+                    "terminal_guidance": "Start Autonomous Research again to keep exploring.",
+                },
+            )
+            return
+        self._mark_terminal_stop(
+            reason=DIRECT_ANSWER_COMPLETE_STOP_REASON,
+            message=(
+                "Autonomous research finished exploring and wrote its direct answer."
+                if kind == DIRECT_ANSWER_REASON_EXPLORATION_COMPLETE
+                else "Autonomous research stopped exploring on request and wrote its direct answer. "
+                     "Progress is saved."
+            ),
+            payload={
+                "title": "Direct answer ready",
+                "recoverable": kind != DIRECT_ANSWER_REASON_EXPLORATION_COMPLETE,
+                "fatal": False,
+            },
+        )
+
+    async def _finish_exploration_with_direct_answer(self) -> None:
+        """End a run whose exploration finished on its own: answer, then retire the session."""
+        await self._write_direct_answer(DIRECT_ANSWER_REASON_EXPLORATION_COMPLETE)
+        try:
+            await research_metadata.clear_workflow_state()
+            if session_manager.is_session_active:
+                await session_manager.update_metadata({"status": "complete"})
+        except Exception:
+            logger.exception("Could not mark the answered session as complete")
+        self._mark_direct_answer_stop(DIRECT_ANSWER_REASON_EXPLORATION_COMPLETE)
+
+    def start_direct_answer_in_background(self, reason: str) -> bool:
+        """After a Stop, write the direct answer as the run's tracked final task."""
+        if self._main_task and not self._main_task.done():
+            return False
+        self._running = True
+        self._state.is_running = True
+        self._stop_event.clear()
+        self._stop_broadcast_sent = False
+        self._terminal_event = None
+        self._main_task = asyncio.create_task(
+            self._direct_answer_phase(reason), name="autonomous-direct-answer"
+        )
+        self._main_task.add_done_callback(self._on_main_task_done)
+        return True
+
+    async def _direct_answer_phase(self, reason: str) -> None:
+        """Write the direct answer after the exploration was ended early, then stop."""
+        api_client_manager.set_autonomous_logger_callback(self._api_log_callback)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    await self._write_direct_answer(reason)
+                    self._mark_direct_answer_stop(reason)
+                    break
+                except RetryableProviderError as error:
+                    await api_client_manager.wait_for_retryable_provider_error(
+                        error,
+                        role_id=error.role_id or "autonomous_direct_answer",
+                        should_stop=self._stop_event.is_set,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except ProviderRepairRequiredError as error:
+            logger.error("Direct answer stopped for provider repair: %s", error)
+            self._mark_provider_repair_stop(error)
+        except Exception as error:
+            logger.exception("Direct answer failed")
+            self._mark_terminal_stop(
+                reason=DIRECT_ANSWER_FAILED_STOP_REASON,
+                message=(
+                    "Autonomous research stopped exploring, but the direct answer could not be "
+                    f"written ({type(error).__name__}). Progress is saved."
+                ),
+                payload={
+                    "title": "Direct answer could not be written",
+                    "recoverable": True,
+                    "fatal": False,
+                    "error_detail": redact_log_text(error, 600),
+                    "terminal_guidance": (
+                        "Fix the cause (for example provider access or Main Submitter 1's context "
+                        "window), then start again and ask for the answer."
+                    ),
+                },
+            )
+        finally:
+            api_client_manager.set_autonomous_logger_callback(None)
+            self._running = False
+            self._state.is_running = False
+            await self._broadcast_stopped_once()
+            if not self._ownership_handoff_active and self.top_level_terminal_callback is not None:
+                try:
+                    self.top_level_terminal_callback()
+                except Exception:
+                    logger.exception("Autonomous top-level terminal callback failed")
 
     def start_in_background(self) -> bool:
         """Launch the autonomous loop and retain a task handle for cancellation."""
@@ -3418,6 +3997,7 @@ class AutonomousCoordinator:
                     logger.error(f"Failed to log API call in autonomous logger: {e}")
 
             api_client_manager.set_autonomous_logger_callback(log_callback)
+            self._api_log_callback = log_callback
             logger.info("Autonomous API logging enabled")
             token_tracker.reset()
             token_tracker.start_timer()
@@ -3426,12 +4006,32 @@ class AutonomousCoordinator:
             logger.info("AutonomousCoordinator started")
 
             resume_state = await self._get_resume_point()
-            if not resume_state:
-                await self._run_proof_framing_gate()
+            # A direct answer is due once this run finishes a topic of its own;
+            # topics already complete before a fresh start do not count.
+            self._direct_answer_baseline_topics = (
+                await self._completed_brainstorm_ids()
+                if self._direct_answer_enabled and not resume_state
+                else set()
+            )
+            # The gate runs inside the main loop so its provider failures use the
+            # shared provider recovery; an unresolved earlier gate runs again.
+            self._proof_framing_gate_pending = (
+                not resume_state or self._proof_framing_unresolved
+            )
 
             # Main research loop
             while self._running and not self._stop_event.is_set():
               try:
+                if self._proof_framing_gate_pending:
+                    await self._run_proof_framing_gate()
+                    if self._stop_event.is_set():
+                        break
+
+                if await self._direct_answer_due(resume_state):
+                    # The exploration finished on its own: answer the question and end.
+                    await self._finish_exploration_with_direct_answer()
+                    break
+
                 # Check if resuming from interrupted state (CHECK THIS FIRST)
                 if resume_state:
                     resume_tier = resume_state.get("current_tier")
@@ -4356,14 +4956,18 @@ class AutonomousCoordinator:
             logger.debug("Failed to recover resume point from metadata: %s", exc)
             return None
     
-    async def stop(self) -> None:
+    async def stop(self, announce: bool = True) -> None:
         """Stop the autonomous research gracefully.
         
         IMPORTANT: This method preserves workflow state for resume capability.
         The user can resume their session by pressing Start again.
         Only the clear_all_data() method should delete workflow state.
+
+        ``announce=False`` is used when the run goes on to write its direct
+        answer: that final phase announces the stop instead.
         """
         logger.info("Stopping AutonomousCoordinator...")
+        self._cancel_runtime_limit()
         self._stop_event.set()
         self._running = False
         self._state.is_running = False
@@ -4371,7 +4975,10 @@ class AutonomousCoordinator:
             await self.solution_path_manager.stop()
         if self._proof_pruning_coordinator is not None:
             await self._proof_pruning_coordinator.drain(preserve_pending=True)
-        await self._broadcast_stopped_once()
+        if announce:
+            await self._broadcast_stopped_once()
+        else:
+            self._stop_broadcast_sent = True
 
         async def _run_shutdown_step(label: str, awaitable, timeout: float = 5.0) -> bool:
             task = asyncio.create_task(awaitable)
@@ -5125,26 +5732,31 @@ class AutonomousCoordinator:
                     logger.warning("Error stopping topic exploration aggregator after phase error: %s", stop_exc)
             return ""
         finally:
-            self._untrack_child_aggregator(exploration_aggregator)
+            try:
+                await self._stop_child_aggregator_on_phase_exit(
+                    exploration_aggregator, "topic exploration"
+                )
+            finally:
+                self._untrack_child_aggregator(exploration_aggregator)
 
-            # Restore original shared training path
-            system_config.shared_training_file = original_shared_path
-            shared_training_memory.file_path = original_memory_path
+                # Restore original shared training path
+                system_config.shared_training_file = original_shared_path
+                shared_training_memory.file_path = original_memory_path
             
-            # Clear in-memory data to prevent cross-contamination
-            async with shared_training_memory._lock:
-                shared_training_memory.insights.clear()
-                shared_training_memory.submission_count = 0
-                shared_training_memory.last_ragged_submission_count = 0
-            logger.info("Exploration: Restored shared_training_memory state")
+                # Clear in-memory data to prevent cross-contamination
+                async with shared_training_memory._lock:
+                    shared_training_memory.insights.clear()
+                    shared_training_memory.submission_count = 0
+                    shared_training_memory.last_ragged_submission_count = 0
+                logger.info("Exploration: Restored shared_training_memory state")
             
-            # Clean up only after the target is reached; interrupted/failed runs
-            # must not masquerade as completed candidate exploration.
-            if exploration_completed and exploration_db_path.exists():
-                try:
-                    exploration_db_path.unlink()
-                except OSError as cleanup_exc:
-                    logger.debug("Failed to remove topic exploration database %s: %s", exploration_db_path, cleanup_exc)
+                # Clean up only after the target is reached; interrupted/failed runs
+                # must not masquerade as completed candidate exploration.
+                if exploration_completed and exploration_db_path.exists():
+                    try:
+                        exploration_db_path.unlink()
+                    except OSError as cleanup_exc:
+                        logger.debug("Failed to remove topic exploration database %s: %s", exploration_db_path, cleanup_exc)
     
     # ========================================================================
     # PHASE 1: TOPIC SELECTION
@@ -5163,20 +5775,38 @@ class AutonomousCoordinator:
         api_client_manager.set_autonomous_phase("topic_selection")
         
         attempt = 0
+        # A proposal whose validator reply was unusable is validated again rather
+        # than regenerated or recorded as a rejection.
+        pending_submission: Optional[TopicSelectionSubmission] = None
+        contract_pacer = ContractFailurePacer(self._stop_event.is_set)
         while not self._stop_event.is_set():
             attempt += 1
             logger.info(f"Topic selection attempt {attempt}")
-            
+
             brainstorms_summary = await autonomous_rag_manager.get_all_brainstorms_summary()
             papers_summary = await autonomous_rag_manager.get_all_papers_summary()
-            
-            submission = await self._topic_selector.select_topic(
-                user_research_prompt=self._get_effective_user_research_prompt(),
-                brainstorms_summary=brainstorms_summary,
-                papers_summary=papers_summary,
-                candidate_questions=candidate_questions
-            )
-            
+
+            submission = pending_submission
+            pending_submission = None
+            if submission is None:
+                try:
+                    submission = await self._topic_selector.select_topic(
+                        user_research_prompt=self._get_effective_user_research_prompt(),
+                        brainstorms_summary=brainstorms_summary,
+                        papers_summary=papers_summary,
+                        candidate_questions=candidate_questions
+                    )
+                except ModelOutputContractError as exc:
+                    await report_model_output_contract_failure(
+                        self._topic_selector.role_id,
+                        exc,
+                        model=self._topic_selector.model_id,
+                        outcome="No topic was proposed; topic selection runs again.",
+                    )
+                    await contract_pacer.after_failure(self._topic_selector.role_id)
+                    continue
+                contract_pacer.reset()
+
             if submission is None:
                 logger.warning("Failed to generate topic selection")
                 await api_client_manager.emit_and_wait_for_retry(
@@ -5193,13 +5823,28 @@ class AutonomousCoordinator:
                 )
                 continue
             
-            validation = await self._topic_validator.validate(
-                submission=submission,
-                user_research_prompt=self._get_effective_user_research_prompt(),
-                brainstorms_summary=brainstorms_summary,
-                papers_summary=papers_summary
-            )
-            
+            try:
+                validation = await self._topic_validator.validate(
+                    submission=submission,
+                    user_research_prompt=self._get_effective_user_research_prompt(),
+                    brainstorms_summary=brainstorms_summary,
+                    papers_summary=papers_summary
+                )
+            except ModelOutputContractError as exc:
+                await report_model_output_contract_failure(
+                    self._topic_validator.role_id,
+                    exc,
+                    model=self._topic_validator.model_id,
+                    outcome=(
+                        "The proposed topic was not judged and will be validated again; "
+                        "no rejection was recorded."
+                    ),
+                )
+                pending_submission = submission
+                await contract_pacer.after_failure(self._topic_validator.role_id)
+                continue
+            contract_pacer.reset()
+
             if validation.decision == "accept":
                 if self._stop_event.is_set():
                     logger.info("Topic selection cancelled - stop event set after validation")
@@ -5343,10 +5988,14 @@ class AutonomousCoordinator:
         
         attempt = 0
         rejection_history = []
-        
+        # A decision whose validator reply was unusable is validated again rather
+        # than regenerated or recorded as a rejection.
+        pending_decision: Optional[Dict[str, str]] = None
+        contract_pacer = ContractFailurePacer(self._stop_event.is_set)
+
         while not self._stop_event.is_set():
             attempt += 1
-            
+
             logger.info(f"Brainstorm continuation decision attempt {attempt}")
             
             max_input = rag_config.get_available_input_tokens(
@@ -5382,64 +6031,100 @@ class AutonomousCoordinator:
                 )
             
             task_id = f"auto_cd_{self._topic_selector.task_sequence:03d}"
-            self._topic_selector.task_sequence += 1
-            
-            if self._topic_selector.task_tracking_callback:
-                self._topic_selector.task_tracking_callback("started", task_id)
-            
+
             try:
-                while True:
+                if pending_decision is not None:
+                    proposed = pending_decision
+                    pending_decision = None
+                else:
+                    self._topic_selector.task_sequence += 1
+                    if self._topic_selector.task_tracking_callback:
+                        self._topic_selector.task_tracking_callback("started", task_id)
+                    proposed = None
                     try:
-                        response = await api_client_manager.generate_completion(
+                        while True:
+                            try:
+                                response = await api_client_manager.generate_completion(
+                                    task_id=task_id,
+                                    role_id=CONTINUATION_ROLE_ID,
+                                    model=self._topic_selector.model_id,
+                                    messages=[{"role": "user", "content": prompt}],
+                                    temperature=0.0,
+                                    max_tokens=self._topic_selector.max_output_tokens
+                                )
+                                break
+                            except ProviderContextLengthError:
+                                if len(retained_rejections) <= 1:
+                                    raise
+                                retained_rejections = retained_rejections[1:]
+                                prompt = build_prompt(retained_rejections)
+
+                        proposed = await parse_with_contract_retry(
+                            response_text(response),
+                            lambda parsed: _parse_continuation_decision(
+                                parsed, role=CONTINUATION_ROLE_ID
+                            ),
+                            prompt=prompt,
                             task_id=task_id,
-                            role_id="autonomous_topic_selector",
+                            role_id=CONTINUATION_ROLE_ID,
                             model=self._topic_selector.model_id,
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.0,
-                            max_tokens=self._topic_selector.max_output_tokens
+                            context_window=self._topic_selector.context_window,
+                            max_output_tokens=self._topic_selector.max_output_tokens,
+                            response_noun="continuation decision",
+                            response_shape=_CONTINUATION_SHAPE,
                         )
-                        break
-                    except ProviderContextLengthError:
-                        if len(retained_rejections) <= 1:
-                            raise
-                        retained_rejections = retained_rejections[1:]
-                        prompt = build_prompt(retained_rejections)
-                
-                msg = response.get("choices", [{}])[0].get("message", {})
-                content = extract_message_text(msg)
-                
-                result = parse_json(content)
-                decision = result.get("decision", "move_on")
-                reasoning = result.get("reasoning", "")
-                
-                if decision not in ("write_another_paper", "move_on"):
-                    logger.warning(f"Invalid continuation decision: {decision}, defaulting to move_on")
-                    decision = "move_on"
-                
-                if self._topic_selector.task_tracking_callback:
-                    self._topic_selector.task_tracking_callback("completed", task_id)
-                
-                proposed = {"decision": decision, "reasoning": reasoning}
-                
-                validation = await self._topic_validator.validate(
-                    submission=TopicSelectionSubmission(
-                        action="new_topic",
-                        topic_prompt=f"[CONTINUATION DECISION: {decision}]",
-                        reasoning=reasoning[:200]
-                    ),
-                    user_research_prompt=self._get_effective_user_research_prompt(),
-                    brainstorms_summary=await autonomous_rag_manager.get_all_brainstorms_summary(),
-                    papers_summary=await autonomous_rag_manager.get_all_papers_summary(),
-                    override_prompt=build_continuation_validation_prompt(
+                    except ModelOutputContractError as exc:
+                        await report_model_output_contract_failure(
+                            CONTINUATION_ROLE_ID,
+                            exc,
+                            task_id=task_id,
+                            model=self._topic_selector.model_id,
+                            outcome="No continuation decision was made; the decision is asked again.",
+                        )
+                    finally:
+                        if self._topic_selector.task_tracking_callback:
+                            self._topic_selector.task_tracking_callback("completed", task_id)
+                    if proposed is None:
+                        await contract_pacer.after_failure(CONTINUATION_ROLE_ID)
+                        continue
+                    contract_pacer.reset()
+
+                decision = proposed["decision"]
+                reasoning = proposed["reasoning"]
+                try:
+                    validation = await self._topic_validator.validate(
+                        submission=TopicSelectionSubmission(
+                            action="new_topic",
+                            topic_prompt=f"[CONTINUATION DECISION: {decision}]",
+                            reasoning=reasoning[:200]
+                        ),
                         user_research_prompt=self._get_effective_user_research_prompt(),
-                        topic_prompt=topic_prompt,
-                        brainstorm_summary=brainstorm_summary,
-                        papers_from_brainstorm=papers_context,
-                        papers_written_count=self._brainstorm_paper_count,
-                        proposed_decision=proposed
+                        brainstorms_summary=await autonomous_rag_manager.get_all_brainstorms_summary(),
+                        papers_summary=await autonomous_rag_manager.get_all_papers_summary(),
+                        override_prompt=build_continuation_validation_prompt(
+                            user_research_prompt=self._get_effective_user_research_prompt(),
+                            topic_prompt=topic_prompt,
+                            brainstorm_summary=brainstorm_summary,
+                            papers_from_brainstorm=papers_context,
+                            papers_written_count=self._brainstorm_paper_count,
+                            proposed_decision=proposed
+                        )
                     )
-                )
-                
+                except ModelOutputContractError as exc:
+                    await report_model_output_contract_failure(
+                        self._topic_validator.role_id,
+                        exc,
+                        model=self._topic_validator.model_id,
+                        outcome=(
+                            "The continuation decision was not judged and will be validated "
+                            "again; no rejection was recorded."
+                        ),
+                    )
+                    pending_decision = proposed
+                    await contract_pacer.after_failure(self._topic_validator.role_id)
+                    continue
+                contract_pacer.reset()
+
                 if validation.decision == "accept":
                     logger.info(f"Brainstorm continuation decision accepted: {decision}")
                     await self._broadcast("brainstorm_continuation_decided", {
@@ -5476,6 +6161,27 @@ class AutonomousCoordinator:
         
         return "move_on"
     
+    async def _select_references_or_report(self, **kwargs: Any) -> List[str]:
+        """Run reference selection; an unusable model reply adds no references.
+
+        A reply that still does not match its JSON contract after one retry is
+        reported as operational activity, and work continues with the references
+        already selected (none are added). It is never treated as a selection.
+        """
+        try:
+            return await self._reference_selector.select_references(**kwargs)
+        except ModelOutputContractError as exc:
+            await report_model_output_contract_failure(
+                self._reference_selector.role_id,
+                exc,
+                model=self._reference_selector.model_id,
+                outcome=(
+                    "No references were added from this selection; work continues with "
+                    "the references already selected."
+                ),
+            )
+            return []
+
     async def _pre_brainstorm_reference_selection(self) -> List[str]:
         """
         Select reference papers BEFORE brainstorming begins.
@@ -5515,7 +6221,7 @@ class AutonomousCoordinator:
         })
         
         # Run reference selection in "initial" mode (before brainstorm)
-        selected_ids = await self._reference_selector.select_references(
+        selected_ids = await self._select_references_or_report(
             user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt=topic_prompt,
             brainstorm_summary=brainstorm_summary,
@@ -5607,46 +6313,64 @@ class AutonomousCoordinator:
         })
 
         selected_ids: List[str] = []
-        last_error = ""
+        last_error: Optional[ModelOutputContractError] = None
+        reference_model = (
+            self._submitter_configs[0].model_id if self._submitter_configs else self._writer_model
+        )
         for attempt in range(1, 3):
+            task_id = (
+                self._reference_selector.get_current_task_id()
+                if self._reference_selector else "agg_sub1_000"
+            )
+            response = await api_client_manager.generate_completion(
+                task_id=task_id,
+                role_id=_BRAINSTORM_REFERENCE_ROLE_ID,
+                model=reference_model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self._submitter_configs[0].max_output_tokens if self._submitter_configs else self._writer_max_tokens,
+                temperature=0.0,
+            )
+            if self._reference_selector:
+                self._reference_selector.task_sequence += 1
             try:
-                response = await api_client_manager.generate_completion(
-                    task_id=self._reference_selector.get_current_task_id() if self._reference_selector else "agg_sub1_000",
-                    role_id="autonomous_reference_selector",
-                    model=self._submitter_configs[0].model_id if self._submitter_configs else self._writer_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=self._submitter_configs[0].max_output_tokens if self._submitter_configs else self._writer_max_tokens,
-                    temperature=0.0,
+                requested, repairs = parse_contract_reply(
+                    response_text(response),
+                    lambda parsed: _parse_brainstorm_reference_selection(
+                        parsed, role=_BRAINSTORM_REFERENCE_ROLE_ID
+                    ),
+                    role=_BRAINSTORM_REFERENCE_ROLE_ID,
                 )
-                if self._reference_selector:
-                    self._reference_selector.task_sequence += 1
-                raw_content = response["choices"][0]["message"]["content"]
-                parsed = parse_json(raw_content)
-                if isinstance(parsed, list):
-                    parsed = parsed[0] if parsed else {}
-                requested = parsed.get("selected_brainstorms", [])
-                if not isinstance(requested, list):
-                    raise ValueError("selected_brainstorms must be an array")
-                allowed_ids = {str(item.get("topic_id")) for item in available}
-                for topic_id in requested:
-                    topic_id = str(topic_id or "").strip()
-                    if topic_id in allowed_ids and topic_id not in selected_ids:
-                        selected_ids.append(topic_id)
-                    if len(selected_ids) >= max_reference_brainstorms:
-                        break
-                last_error = ""
-                break
-            except FreeModelExhaustedError:
-                raise
-            except Exception as exc:
-                last_error = str(exc)
+            except ModelOutputContractError as exc:
+                last_error = exc
                 logger.warning("Brainstorm reference selection attempt %s failed: %s", attempt, exc)
-                prompt = build_prompt(prompt_candidates, retry_feedback=f"Previous response was invalid: {last_error}")
+                prompt = build_prompt(prompt_candidates, retry_feedback=f"Previous response was invalid: {exc}")
+                continue
+            await report_model_output_normalizations(
+                _BRAINSTORM_REFERENCE_ROLE_ID,
+                repairs,
+                task_id=task_id,
+                model=reference_model,
+            )
+            allowed_ids = {str(item.get("topic_id")) for item in available}
+            for topic_id in requested:
+                if topic_id in allowed_ids and topic_id not in selected_ids:
+                    selected_ids.append(topic_id)
+                if len(selected_ids) >= max_reference_brainstorms:
+                    break
+            last_error = None
+            break
 
-        if last_error and not selected_ids:
+        if last_error is not None:
+            await report_model_output_contract_failure(
+                _BRAINSTORM_REFERENCE_ROLE_ID,
+                last_error,
+                model=reference_model,
+                outcome="No reference brainstorms were chosen; the brainstorm starts without them.",
+            )
             await self._broadcast("brainstorm_reference_selection_failed", {
                 "topic_id": self._current_topic_id,
-                "reason": last_error[:300],
+                "reason": "model_output_contract_failed",
+                "error_summary": str(last_error)[:300],
                 "available_brainstorms": len(available),
             })
 
@@ -6162,18 +6886,23 @@ class AutonomousCoordinator:
             return False
             
         finally:
-            # Restore original shared training path
-            system_config.shared_training_file = original_shared_path
-            shared_training_memory.file_path = original_memory_path
+            try:
+                await self._stop_child_aggregator_on_phase_exit(
+                    self._brainstorm_aggregator, "brainstorm aggregation"
+                )
+            finally:
+                # Restore original shared training path
+                system_config.shared_training_file = original_shared_path
+                shared_training_memory.file_path = original_memory_path
             
-            # CRITICAL: Clear in-memory data that was loaded from brainstorm database
-            # This prevents cross-contamination if Part 1 manual mode starts after autonomous mode
-            # Part 1 will re-initialize and reload its own database from the original path
-            async with shared_training_memory._lock:
-                shared_training_memory.insights.clear()
-                shared_training_memory.submission_count = 0
-                shared_training_memory.last_ragged_submission_count = 0
-            logger.info("Cleared shared_training_memory in-memory data (will reload from file when needed)")
+                # CRITICAL: Clear in-memory data that was loaded from brainstorm database
+                # This prevents cross-contamination if Part 1 manual mode starts after autonomous mode
+                # Part 1 will re-initialize and reload its own database from the original path
+                async with shared_training_memory._lock:
+                    shared_training_memory.insights.clear()
+                    shared_training_memory.submission_count = 0
+                    shared_training_memory.last_ragged_submission_count = 0
+                logger.info("Cleared shared_training_memory in-memory data (will reload from file when needed)")
     
     async def _check_early_completion_triggers(self) -> bool:
         """
@@ -6820,7 +7549,7 @@ class AutonomousCoordinator:
         })
         
         # Run reference selection in "additional" mode
-        additional_ids = await self._reference_selector.select_references(
+        additional_ids = await self._select_references_or_report(
             user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt=topic_prompt,
             brainstorm_summary=brainstorm_summary,
@@ -7146,22 +7875,27 @@ class AutonomousCoordinator:
                     logger.warning("Error stopping paper title exploration aggregator after phase error: %s", stop_exc)
             return ""
         finally:
-            self._untrack_child_aggregator(exploration_aggregator)
+            try:
+                await self._stop_child_aggregator_on_phase_exit(
+                    exploration_aggregator, "paper title exploration"
+                )
+            finally:
+                self._untrack_child_aggregator(exploration_aggregator)
 
-            system_config.shared_training_file = original_shared_path
-            shared_training_memory.file_path = original_memory_path
+                system_config.shared_training_file = original_shared_path
+                shared_training_memory.file_path = original_memory_path
             
-            async with shared_training_memory._lock:
-                shared_training_memory.insights.clear()
-                shared_training_memory.submission_count = 0
-                shared_training_memory.last_ragged_submission_count = 0
-            logger.info("TitleExploration: Restored shared_training_memory state")
+                async with shared_training_memory._lock:
+                    shared_training_memory.insights.clear()
+                    shared_training_memory.submission_count = 0
+                    shared_training_memory.last_ragged_submission_count = 0
+                logger.info("TitleExploration: Restored shared_training_memory state")
             
-            if exploration_completed and title_db_path.exists():
-                try:
-                    title_db_path.unlink()
-                except OSError as cleanup_exc:
-                    logger.debug("Failed to remove paper title exploration database %s: %s", title_db_path, cleanup_exc)
+                if exploration_completed and title_db_path.exists():
+                    try:
+                        title_db_path.unlink()
+                    except OSError as cleanup_exc:
+                        logger.debug("Failed to remove paper title exploration database %s: %s", title_db_path, cleanup_exc)
     
     async def _compile_paper(
         self,
@@ -7831,9 +8565,6 @@ class AutonomousCoordinator:
             from backend.shared.solution_path.integration import with_validator_hook
             prompt = with_validator_hook(prompt, self.solution_path_manager)
             
-            # Wrap in messages list for API call
-            messages = [{"role": "user", "content": prompt}]
-            
             # Check context window (attribute is _validator_context, not _validator_context_window)
             prompt_tokens = count_tokens(prompt)
             available_tokens = self._validator_context - self._validator_max_tokens - 500
@@ -7866,28 +8597,29 @@ class AutonomousCoordinator:
             critique_task_id = (
                 f"auto_paper_critique_{paper_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             )
-            response = await api_client_manager.generate_completion(
-                task_id=critique_task_id,
-                role_id="paper_critic",
-                model=self._validator_model,
-                messages=messages,
-                max_tokens=self._validator_max_tokens,
-                temperature=0.0
+            from backend.shared.critique_prompts import generate_validated_paper_critique
+            from backend.shared.model_output_contract import ModelOutputContractError
+            from backend.autonomous.agents.output_contract import (
+                report_model_output_contract_failure,
             )
-            
-            # Parse response
-            response_content = ""
-            if response.get("choices"):
-                message = response["choices"][0].get("message", {})
-                response_content = extract_message_text(message)
-            
-            if not response_content:
-                logger.error(f"Empty response from validator model for paper {paper_id}")
+
+            try:
+                critique_data = await generate_validated_paper_critique(
+                    prompt=prompt,
+                    task_id=critique_task_id,
+                    model=self._validator_model,
+                    context_window=self._validator_context,
+                    max_output_tokens=self._validator_max_tokens,
+                )
+            except ModelOutputContractError as exc:
+                await report_model_output_contract_failure(
+                    "paper_critic",
+                    exc,
+                    task_id=critique_task_id,
+                    model=self._validator_model,
+                    outcome="The automatic critique for this paper was skipped.",
+                )
                 return
-            
-            # Parse JSON with lenient fallback for truncated responses
-            from backend.shared.critique_prompts import parse_critique_response
-            critique_data = parse_critique_response(response_content)
             from backend.shared.solution_path.integration import enqueue_optional_update
             await enqueue_optional_update(
                 critique_data,
@@ -8207,6 +8939,9 @@ class AutonomousCoordinator:
                 )
                 
                 if format_selection is None:
+                    if self._stop_event.is_set():
+                        # Stopped mid-step: keep Tier 3 state so the next Start resumes it.
+                        return False
                     logger.error("Tier 3 resume: Format selection failed")
                     await final_answer_memory.set_active(False)
                     return False
@@ -8502,6 +9237,9 @@ class AutonomousCoordinator:
             )
             
             if assessment is None:
+                if self._stop_event.is_set():
+                    # Stopped mid-step: keep Tier 3 state so the next Start resumes it.
+                    return False
                 logger.error("Tier 3: Certainty assessment failed")
                 await final_answer_memory.set_active(False)
                 return False
@@ -8542,6 +9280,9 @@ class AutonomousCoordinator:
             )
             
             if format_selection is None:
+                if self._stop_event.is_set():
+                    # Stopped mid-step: keep Tier 3 state so the next Start resumes it.
+                    return False
                 logger.error("Tier 3: Format selection failed")
                 await final_answer_memory.set_active(False)
                 return False
@@ -8792,7 +9533,7 @@ class AutonomousCoordinator:
         max_reference_papers = system_config.autonomous_tier3_short_form_max_reference_papers
 
         # For Tier 3, we browse ALL papers and select those most useful for answering
-        selected_ids = await self._reference_selector.select_references(
+        selected_ids = await self._select_references_or_report(
             user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt="[Tier 3 Final Answer - selecting papers to answer the research question]",
             brainstorm_summary="[No brainstorm - Tier 3 operates on completed papers only]",

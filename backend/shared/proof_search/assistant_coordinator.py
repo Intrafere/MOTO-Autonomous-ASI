@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 from backend.shared.config import system_config
 from backend.shared.activity import fill_missing_activity_metadata
 from backend.shared.json_parser import parse_json
+from backend.shared.log_redaction import bound_single_line
 from backend.shared.proof_identity import canonical_proof_identity
 from backend.shared.proof_search.assistant_cache import AssistantCooldownState, AssistantRankCache, goal_hash_for_snapshot
 from backend.shared.proof_search.assistant_models import (
@@ -362,8 +363,8 @@ class AssistantProofSearchCoordinator:
         if target_hash != self._latest_pack_target_hash and not self._pack_matches_latest_pack(target_hash):
             logger.debug(
                 "Ignoring Assistant memory consumption for stale target role=%s task=%s target=%s latest=%s",
-                role_id or "unknown",
-                task_id or "unknown",
+                bound_single_line(role_id or "unknown"),
+                bound_single_line(task_id or "unknown"),
                 target_hash[:12],
                 self._latest_pack_target_hash[:12],
             )
@@ -374,8 +375,8 @@ class AssistantProofSearchCoordinator:
         )
         logger.info(
             "Assistant memory pack consumed by solver role=%s task=%s target=%s receiver_reads=%s/%s",
-            role_id or "unknown",
-            task_id or "unknown",
+            bound_single_line(role_id or "unknown"),
+            bound_single_line(task_id or "unknown"),
             target_hash[:12],
             self._latest_pack_consumption_count,
             _ASSISTANT_PACK_REFRESH_RECEIVER_READS,

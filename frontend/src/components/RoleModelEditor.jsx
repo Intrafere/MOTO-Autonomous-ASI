@@ -13,9 +13,14 @@ import {
 import {
   chooseCloudAccessProvider,
   isCloudAccessProvider,
+  isCloudSubscriptionProvider,
 } from '../utils/oauthProviders';
 import CloudReasoningControl from './CloudReasoningControl';
+import LocalServerProviderButtons from './LocalServerProviderButtons';
+import LocalFallbackOptions from './LocalFallbackOptions';
 import HelpTooltip from './HelpTooltip';
+import UsageLevelBadge from './UsageLevelBadge';
+import TokenCountNote from './TokenCountNote';
 
 const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer attempts, then run a 5th same-model call to choose or synthesize the best final answer. It uses 5x the API calls, so it is about 5x slower and 5x more costly, but can produce more intelligent answers.';
 
@@ -26,7 +31,7 @@ const NO_CLOUD_PROVIDERS = {
   modelsFor: () => [],
 };
 
-// Provider / model / host / reasoning / LM Studio fallback rows for one role.
+// Provider / model / host / reasoning / local (LM Studio or vLLM) fallback rows for one role.
 export function RoleModelSelector({
   config = {},
   onChange,
@@ -78,6 +83,18 @@ export function RoleModelSelector({
             >
               LM Studio
             </button>
+            <LocalServerProviderButtons
+              provider={provider}
+              statusByProvider={oauthStatusByProvider}
+              disabled={isRunning}
+              onSelect={(providerId) => onChange({
+                ...config,
+                provider: providerId,
+                modelId: '',
+                openrouterProvider: null,
+                openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+              })}
+            />
             <button
               type="button"
               className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
@@ -99,7 +116,7 @@ export function RoleModelSelector({
             </button>
             <button
               type="button"
-              className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
+              className={`provider-toggle-btn${isCloudSubscriptionProvider(provider) ? ' active-or-orange' : ''}`}
               disabled={isRunning || configuredOAuthProviders.length === 0}
               onClick={() => onChange({
                 ...config,
@@ -112,7 +129,7 @@ export function RoleModelSelector({
             >
               Cloud
             </button>
-            {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
+            {isCloudSubscriptionProvider(provider) && configuredOAuthProviders.length > 1 && (
               <select
                 value={provider}
                 disabled={isRunning}
@@ -218,17 +235,20 @@ export function RoleModelSelector({
 
       {provider !== 'lm_studio' && lmStudioEnabled && (
         <div className="settings-row">
-          <label htmlFor={`${fieldId}-fallback`}>LM Studio Fallback</label>
+          <label htmlFor={`${fieldId}-fallback`}>Local Fallback</label>
           <select
             id={`${fieldId}-fallback`}
             value={config.lmStudioFallbackId || ''}
             disabled={isRunning}
             onChange={(event) => onChange({ ...config, provider, lmStudioFallbackId: event.target.value || null })}
           >
-            <option value="">No fallback</option>
-            {lmStudioModels.map((model) => (
-              <option key={model.id} value={model.id}>{model.id}</option>
-            ))}
+            <LocalFallbackOptions
+              lmStudioModels={lmStudioModels}
+              modelsFor={cloudProviders.modelsFor}
+              provider={provider}
+              modelId={config.modelId}
+              value={config.lmStudioFallbackId}
+            />
           </select>
         </div>
       )}
@@ -237,7 +257,7 @@ export function RoleModelSelector({
 }
 
 // One role card: title, optional caller-provided notes (children), model selection,
-// Context Window, Max Output Tokens, and the developer-only Supercharge checkbox.
+// Context Window, Max Output Tokens, and the Supercharge checkbox.
 export function RoleModelEditor({
   title,
   children,
@@ -250,7 +270,6 @@ export function RoleModelEditor({
   hasOpenRouterKey,
   lmStudioEnabled,
   isRunning,
-  developerModeEnabled = false,
   disabled = false,
   showSupercharge = true,
 }) {
@@ -291,6 +310,11 @@ export function RoleModelEditor({
           disabled={controlsDisabled}
           onChange={(event) => updateNumber('contextWindow', event.target.value, '')}
         />
+        <TokenCountNote
+          provider={config.provider}
+          modelId={config.modelId}
+          contextWindow={config.contextWindow}
+        />
       </div>
       <div className="settings-row">
         <label htmlFor={`${fieldId}-max-output`}>Max Output Tokens</label>
@@ -304,7 +328,7 @@ export function RoleModelEditor({
           onChange={(event) => updateNumber('maxOutputTokens', event.target.value, '')}
         />
       </div>
-      {showSupercharge && developerModeEnabled && (
+      {showSupercharge && (
         <div className="settings-row settings-row--inline-checkbox">
           <label className="settings-checkbox-label settings-checkbox-label--supercharge">
             <input
@@ -323,6 +347,7 @@ export function RoleModelEditor({
               {SUPERCHARGE_TOOLTIP}
             </HelpTooltip>
           </label>
+          <UsageLevelBadge featureId="roles.supercharge" />
         </div>
       )}
     </div>

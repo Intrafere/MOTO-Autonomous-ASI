@@ -1,0 +1,44 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "cli_control.control_file_owner_lifecycle"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "published_after_ready",
+    "cli_discovery_reads_file",
+    "foreign_file_kept",
+    "owner_removed"
+  ],
+  "faked_dependencies": [
+    "backend process lifetime (driven directly instead of through uvicorn)"
+  ],
+  "fields": [
+    "cli_control_surface",
+    "runtime_exclusivity",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "cli_control.control_file_owner_lifecycle"
+  ],
+  "observed_transition": "the lifespan publishes the control file after ready work; CLI discovery reads it; cleanup keeps another process's file and removes its own",
+  "real_components": [
+    "backend/api/main.py",
+    "backend/shared/cli_control.py",
+    "moto_cli.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_cli_control_file_ready_and_owner_removed",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:d07bf6d41ee39e3175b2e411b3ec8f101a94d1d5e73fda553b8f35ea1a862b74",
+  "test_file": "tests/workflow_real_adapters/test_cli_control_routes.py",
+  "test_selectors": [
+    "tests/workflow_real_adapters/test_cli_control_routes.py::test_control_file_published_when_ready_and_removed_only_by_owner"
+  ]
+}

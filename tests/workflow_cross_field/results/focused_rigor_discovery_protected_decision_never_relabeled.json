@@ -1,0 +1,40 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "decision_key_untouched"
+  ],
+  "faked_dependencies": [
+    "rigor discovery model replies"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "a misspelled needs_theorem_work decision key is never relabeled",
+  "real_components": [
+    "backend/compiler/agents/high_param_submitter.py",
+    "backend/shared/json_key_recovery.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_rigor_discovery_protected_decision_never_relabeled",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:423d54d1d8511137b2560dd65e72d17c1a7404137d55499730df10ae1830469f",
+  "test_file": "tests/unit/test_compiler_model_output_contract.py",
+  "test_selectors": [
+    "tests/unit/test_compiler_model_output_contract.py::test_discovery_never_relabels_protected_decision_key"
+  ]
+}

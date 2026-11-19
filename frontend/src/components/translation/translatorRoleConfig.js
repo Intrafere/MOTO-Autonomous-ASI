@@ -50,7 +50,7 @@ export function createEmptyTranslatorRole({ lmStudioEnabled = true } = {}) {
 }
 
 // Hosted (generic) mode supports OpenRouter only: any other provider resets to
-// a blank OpenRouter role and LM Studio fallbacks are dropped.
+// a blank OpenRouter role and local fallbacks are dropped.
 export function normalizeRoleForMode(role, { lmStudioEnabled = true } = {}) {
   if (lmStudioEnabled) {
     return role;

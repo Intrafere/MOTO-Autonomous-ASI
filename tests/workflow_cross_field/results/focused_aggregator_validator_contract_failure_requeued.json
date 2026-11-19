@@ -1,0 +1,43 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "requeued_one_at_a_time",
+    "no_submitter_feedback",
+    "operational_activity"
+  ],
+  "faked_dependencies": [
+    "validator model replies",
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "model_output_contract",
+    "provider_pause_resume",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "model_output.contract_failure_not_semantic"
+  ],
+  "observed_transition": "an unusable validator reply requeues the submission with operational activity and no submitter rejection",
+  "real_components": [
+    "backend/aggregator/agents/validator.py",
+    "backend/aggregator/core/coordinator.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_aggregator_validator_contract_failure_requeued",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:78751c6fb120d4ef52d64afaf0ecba6135c65ed6ba568aa5a0ff2f4b5fff070c",
+  "test_file": "tests/regressions/test_batch_validator_contract.py",
+  "test_selectors": [
+    "tests/regressions/test_batch_validator_contract.py::test_coordinator_requeues_single_contract_failure_without_submitter_feedback"
+  ]
+}

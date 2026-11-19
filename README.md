@@ -1,6 +1,6 @@
 # MOTO Autonomous ASI
 ## Autonomous Prototype Superintelligence for Rigorous Research and Solution Generation, with Optional Lean 4 Proof Verification
-**Version: 1.1.10**
+**Version: 1.1.11**
 
 **Runtime & License**
 
@@ -14,8 +14,11 @@
 [![SuperGrok Subscription](https://img.shields.io/badge/SuperGrok_Subscription-xAI_OAuth-black.svg)](https://grok.com/)
 [![Sakana Fugu Subscription](https://img.shields.io/badge/Sakana_Fugu-Subscription_API-e85d75.svg)](https://sakana.ai/fugu/)
 [![Kimi Code Subscription](https://img.shields.io/badge/Kimi_Code-Subscription_API-1f6feb.svg)](https://www.kimi.com/code/)
+[![Claude API: API Key](https://img.shields.io/badge/Claude_API-API_Key-d97757.svg)](https://platform.claude.com/)
+[![Amazon Bedrock: API Key](https://img.shields.io/badge/Amazon_Bedrock-API_Key-ff9900.svg)](https://aws.amazon.com/bedrock/)
 [![OpenRouter: API Key](https://img.shields.io/badge/OpenRouter-API_Key-6467f2.svg)](https://openrouter.ai/)
 [![LM Studio: Local Models](https://img.shields.io/badge/LM_Studio-Local_Models-7c3aed.svg)](https://lmstudio.ai/)
+[![vLLM: Local Server](https://img.shields.io/badge/vLLM-Local_Server-30a2ff.svg)](https://docs.vllm.ai/)
 
 **A breakthrough in AI-automated theorem generation. Press the one-click launcher file "Click To Launch MOTO.bat" to run the program. MOTO is an autonomous research and solution-generation system powered by Intrafere Research Group's prototype-superintelligence discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/): a combination of reiterative brainstorming, validation, feedback, and pruning that creates prototype-level superintelligence using creative/combinatory multi-model data from nearly any combination of AI models. When relevant and enabled, MOTO pairs this exploration with automated theorem generation and Lean 4 machine-checked proofs for the exact formal statements it successfully proves.**
 
@@ -60,7 +63,8 @@ On Windows desktop, MOTO holds system-required, execution-required, and display-
 ### Key Features
 
 - 🤖 **Autonomous Topic Selection, Brainstorming, and Paper Generation**: AI chooses research avenues based on high-level goals and produces you a final answer with ZERO extra user input. Let MOTO run for days using the best models without touching it, or for a few hours using a faster draft model. How deep you research and how long it takes is left up to you, the user.
-- **OpenRouter/OAuth**: Supports local LM Studio models, OpenRouter API-key models, and desktop-only OAuth subscription logins as separate provider paths. Run local LM Studio models offline, use OpenRouter to access many third-party providers, or add OpenAI Codex/ChatGPT or xAI Grok/SuperGrok OAuth for subscription-backed chat/model roles. OAuth is supplementary because RAG embeddings are routed separately through LM Studio, OpenRouter, or hosted FastEmbed.
+- **OpenRouter/OAuth**: Supports local LM Studio models, OpenRouter API-key models, and desktop-only OAuth subscription logins as separate provider paths. Run local LM Studio models offline, use OpenRouter to access many third-party providers, or add OpenAI Codex/ChatGPT or xAI Grok/SuperGrok OAuth for subscription-backed chat/model roles. OAuth is supplementary because RAG embeddings are routed separately through LM Studio, vLLM, OpenRouter, or hosted FastEmbed.
+- **vLLM (desktop only)**: Point MOTO at your own vLLM servers under `Inference Connectivity > vLLM`. MOTO detects each served model and its context window, lets every role use vLLM as its provider, and can use a vLLM embedding model for RAG, so vLLM can replace LM Studio or cloud providers entirely.
 - **Optional Automated Theorem Generation (Lean 4)**: When enabled, every brainstorm and paper is run through a parallel proof pipeline that identifies theorem/lemma candidates, searches Mathlib for relevant lemmas, optionally runs Z3/SMT for conservative early-exit hints, then attempts Lean 4 formalization (up to 5 retries per candidate with failure-hint direct injection). Only Lean 4-verified proofs are stored, and novel proofs are fed back into subsequent brainstorming as highest-priority context. Secondary to Top-P Exploration and silent when disabled.
 
 ---
@@ -82,6 +86,7 @@ Before installation, you need:
    - If using OpenRouter, then download and load at least one model (e.g., DeepSeek, Llama, Qwen - older models and some models below 12 billion parameters may struggle; however, it is always worth a try!)
    - **Load the LM Studio RAG agent [optional but HIGHLY recommended for much faster outputs/answers]**: Load the embedding model `nomic-ai/nomic-embed-text-v1.5` in your LM Studio "Developer" tab (server tab) (search for "nomic-ai/nomic-embed-text-v1.5" to download it in the LM Studio downloads center). Please note: you may need to enable "Power User" or "Developer" to see this developer tab - this server will let you load the amount and capacity of simultaneous models that your PC will support. In this developer tab is where you load both your nomic-ai embedding agent and any optional local hosted agents you want to use in the program (e.g., GPT OSS 20b, DeepSeek 32B, etc.). **If you do not download LM Studio and enable the Nomic agent the system will run much slower and cost slightly more due to having to use the paid service OpenRouter for RAG calls.**
    - Start the local server (port 1234)
+   - **Using vLLM instead?** Start a vLLM server for a chat model and another for an embedding model such as `nomic-ai/nomic-embed-text-v1.5`, each on its own port and not on port 8000 (MOTO uses it), for example `vllm serve <model> --port 8001`. Then add the server addresses under `Inference Connectivity > vLLM`; models and context windows are detected for you.
 4. **If using cloud AI - configure OpenRouter/OAuth**:
    - **OpenRouter API key**: Sign up at OpenRouter.ai and get a paid or free API key to use cloud models from many providers. You can see which models are free by checking the "show only free models" checkbox(es) in MOTO settings.
    - **oAuth login (desktop only)**: In the `OpenRouter/OAuth` overlay, choose the `OAuth` section to sign in through a supported subscription OAuth provider such as OpenAI Codex/ChatGPT or xAI Grok/SuperGrok. This is separate from regular API-key billing, unavailable in hosted/generic mode, and supplementary to an OpenRouter key or LM Studio because OAuth providers do not supply MOTO's RAG embeddings.
@@ -211,6 +216,36 @@ bash linux-ubuntu-launcher.sh
 5. Watch real-time paper construction in **Live Paper** tab
 6. Monitor metrics in **Compiler Logs** tab
 
+### Terminal and AI-agent control (`moto` command)
+
+The launcher installs a `moto` command (plus the `moto-asi` alias) so people and AI agents such as OpenClaw or Claude Code can drive MOTO from any terminal. The command files go in a MOTO-owned folder (`%LOCALAPPDATA%\MOTO\bin` on Windows, `~/.local/bin` on Linux). On Windows that folder is added to the end of your user PATH, so existing commands keep priority. If another program already uses the name `moto`, MOTO leaves it alone and installs only `moto-asi`. Open a new terminal after the first launch.
+
+```bash
+moto status                                   # is MOTO running, what is it doing, does anything need attention?
+moto launch --no-browser                      # start MOTO without opening the app
+moto keys set openrouter < key.txt            # save a provider key (read from stdin, never typed as an argument)
+moto vllm set http://127.0.0.1:8001 http://127.0.0.1:8002   # use your vLLM servers (models and context windows are detected)
+moto autonomous start --model openai/gpt-5 --prompt "Your research question"
+moto events                                   # follow live activity (reconnects if the stream drops)
+moto wait --papers 1                          # block until the first paper is done
+moto autonomous papers                        # list completed papers
+moto autonomous stop                          # stop; progress is kept
+moto think start --prompt-file question.txt --max-runtime 2h   # hand MOTO one hard question
+moto think answer                             # MOTO's one answer to that question
+moto shutdown                                 # stop the workflow, then close MOTO cleanly
+moto --help                                   # every command
+```
+
+- **Deep thinking for AI agents (`moto think`)**: an agent such as OpenClaw or Hermes Agent can work normally and hand MOTO any decision or idea that deserves much deeper thought. `moto think start` explores the question with your saved model settings (parallel brainstorming checked by a validator), then makes one model call that answers the original question from what it explored. It does not assume you want a paper: `--papers` and `--proofs` add research papers or Lean-verified proofs only when asked. MOTO writes the answer when the exploration finishes on its own, when the optional `--max-runtime` (for example `45m`, `2h`, `1d`) is reached, or on `moto think finish`; MOTO enforces the limit itself. The agent checks back with `moto think status` or `moto think wait --timeout SECONDS` and reads the result with `moto think answer`. `moto think resume` explores further and answers again. `moto autonomous start` accepts `--max-runtime` too; a limit applies to that one start and is never remembered.
+
+- Start commands reuse the model settings from the last time you started that workflow. On a fresh install, `--model` builds settings that use one model for every role (OpenRouter context and output limits are filled in; other providers need `--context` and `--max-tokens`). `moto config init <mode> --model ... -o FILE` writes those settings to a file you can edit and pass back with `--config FILE`. `--set` changes single fields, including nested ones such as `submitter_configs.*.model_id=...`.
+- Other commands: `login codex|grok` (subscription sign-in), `proofs` (proof checks, records, certificates, search, Lean settings), `settings`, `retry openrouter|solution-path`, `alerts`, and `update check|apply`.
+- `moto routes [text] --schema` lists every REST route with its request shape, and `moto api METHOD PATH` calls any of them (`--data JSON`, `--file` uploads, `-o FILE` downloads).
+- Add `--json` for machine-readable output. Exit codes: 0 ok, 1 error, 2 usage, 3 MOTO not running, 4 request rejected by MOTO.
+- `moto skill install` installs an agent skill for OpenClaw (`--target claude` for Claude Code). `moto skill show` prints it.
+- Manage the command with `moto install-cli` / `moto uninstall-cli`. Set `MOTO_SKIP_CLI_INSTALL=1` to stop the launcher installing it.
+- The running backend writes `<data root>/.moto_control.json` (its loopback URL and per-launch access token) so `moto` can find it. The file is removed at shutdown and is never written in hosted mode.
+
 ---
 
 ## 🛠️ System Architecture
@@ -219,8 +254,8 @@ bash linux-ubuntu-launcher.sh
 
 - **Backend**: Python 3.10+, FastAPI, Uvicorn
 - **Frontend**: React, Vite, Tailwind CSS
-- **AI**: LM Studio API, OpenRouter API, desktop OAuth providers such as OpenAI Codex/ChatGPT and xAI Grok/SuperGrok
-- **RAG**: ChromaDB, Nomic Embeddings, or OpenRouter embeddings fallback if LM Studio is unavailable (not recommended - slower).
+- **AI**: LM Studio API, vLLM OpenAI-compatible servers, OpenRouter API, desktop OAuth providers such as OpenAI Codex/ChatGPT and xAI Grok/SuperGrok
+- **RAG**: ChromaDB, Nomic Embeddings (LM Studio or a vLLM embedding server), or OpenRouter embeddings fallback if no local embedding model is available (not recommended - slower).
 - **WebSocket**: Real-time updates
 
 ### Key Components
@@ -286,10 +321,10 @@ moto-math-variant/
 ### OpenRouter/OAuth
 
 Each role supports:
-- **Provider**: LM Studio (local), OpenRouter (cloud API key), or desktop OAuth providers such as OpenAI Codex and xAI Grok/SuperGrok
+- **Provider**: LM Studio (local), vLLM (your own local or LAN server), OpenRouter (cloud API key), or desktop OAuth providers such as OpenAI Codex and xAI Grok/SuperGrok
 - **Model Selection**: Choose from available models
 - **Host/Provider**: Select a specific OpenRouter provider when needed
-- **Fallback**: Optional LM Studio fallback if a cloud provider fails or runs out of credits
+- **Fallback**: Optional local fallback (an LM Studio or vLLM model) if a role's provider fails or runs out of credits
 
 `OpenRouter/OAuth` in the header is where you manage OpenRouter credentials and desktop OAuth logins. OpenRouter keys are stored through the backend keyring in desktop/default mode and in memory in hosted/generic mode. Desktop OAuth logins store tokens securely on the desktop backend and are selected through the `oAuth` provider dropdown; supported providers include OpenAI Codex/ChatGPT and xAI Grok/SuperGrok. These OAuth paths are separate from regular API-key billing, are not available in hosted/generic mode, and cannot be the only startup provider because MOTO's RAG embeddings are not routed through OAuth providers.
 

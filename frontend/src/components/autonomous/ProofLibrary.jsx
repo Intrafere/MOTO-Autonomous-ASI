@@ -6,10 +6,13 @@ import {
   classifyProofLiveContext,
   classifyProofNovelty,
   getCanonicalProofIdentity,
+  formatMasterProofBadge,
   getNoveltyGroupAnchorIds,
+  isMasterProof,
   sanitizeDomId,
   getProofTranslationParts,
 } from '../../utils/proofPresentation';
+import MasterProofDetails from './MasterProofDetails';
 import { readBooleanStorage } from '../../utils/safeStorage';
 import useTranslatedDocuments from '../../hooks/useTranslatedDocuments';
 import SyntheticLibOfferPanel from './SyntheticLibOfferPanel';
@@ -926,6 +929,11 @@ export default function ProofLibrary({
                                   {liveContext.badgeLabel}
                                 </span>
                               )}
+                              {isMasterProof(proof) && (
+                                <span className="word-count proof-library-master-badge">
+                                  {formatMasterProofBadge(proof)}
+                                </span>
+                              )}
                               <span className="word-count">
                                 {proof.solver || 'Lean 4'}
                               </span>
@@ -1010,6 +1018,15 @@ export default function ProofLibrary({
                                       <p>Ranked with: {expandedProof.novelty_group_proof_ids.join(', ')}</p>
                                     )}
                                   </div>
+
+                                  <MasterProofDetails
+                                    proof={expandedProof}
+                                    loadBundle={(target) => autonomousAPI.getLibraryMasterProofBundle(
+                                      target.session_id || expandedProof.session_id,
+                                      target.proof_id,
+                                      proofScope
+                                    )}
+                                  />
 
                                   {expandedProof.verification_notes && (
                                     <div className="proof-detail-section">
@@ -1132,6 +1149,11 @@ export default function ProofLibrary({
                     {liveContext.isPruned && (
                       <span className={`proof-library-live-context-badge ${liveContext.badgeClass}`}>
                         {liveContext.badgeLabel}
+                      </span>
+                    )}
+                    {isMasterProof(proof) && (
+                      <span className="word-count proof-library-master-badge">
+                        {formatMasterProofBadge(proof)}
                       </span>
                     )}
                     <span className="word-count">

@@ -34,7 +34,7 @@ _DEFAULT_MANIFEST = {
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build6-v123",
+    "api_contract_version": "build6-v125",
 }
 
 _DEFAULT_PRESERVED_ROOTS = {
@@ -942,8 +942,15 @@ def sync_snapshot_into_install(
     destination_root: Path,
     preserved_relatives: set[str],
     backup_root: Path,
+    journal: _CopyJournal | None = None,
 ) -> _CopyJournal:
-    journal = _CopyJournal()
+    """Copy a snapshot over the install, recording every change in ``journal``.
+
+    Pass the journal in so the caller still holds the changes made so far when
+    a copy fails partway and can restore them from the backups.
+    """
+    if journal is None:
+        journal = _CopyJournal()
     for source_path in source_root.rglob("*"):
         if source_path.is_dir():
             continue
@@ -1074,12 +1081,22 @@ def apply_zip_update(
     try:
         _download_archive(remote_manifest, archive_path)
         extracted_source = _extract_archive(archive_path, extract_root)
-        journal = sync_snapshot_into_install(extracted_source, REPO_ROOT, preserved_relatives, backup_root)
+        sync_snapshot_into_install(
+            extracted_source, REPO_ROOT, preserved_relatives, backup_root, journal
+        )
         _write_installed_manifest(remote_manifest)
         _relaunch_launcher(launcher_args, [backup_root, work_root], env)
         return True, "Update applied successfully. Relaunching MOTO with the new build."
     except Exception as exc:
-        restore_snapshot_from_backup(REPO_ROOT, backup_root, journal)
+        try:
+            restore_snapshot_from_backup(REPO_ROOT, backup_root, journal)
+        except Exception as restore_exc:
+            # Keep the backups: they are the only copy of the replaced files.
+            cleanup_path(work_root)
+            return False, (
+                f"Update failed ({exc}) and the previous install could not be fully "
+                f"restored ({restore_exc}). The replaced files are kept in {backup_root}."
+            )
         cleanup_path(work_root)
         cleanup_path(backup_root)
         return False, f"Update failed and the previous install was restored: {exc}"

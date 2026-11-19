@@ -10,6 +10,7 @@ from datetime import datetime
 import aiofiles
 
 from backend.api.routes import websocket
+from backend.shared.cli_control import remember_start_request
 from backend.shared.models import CompilerStartRequest, CompilerState, CritiqueRequest, ModelConfig
 from backend.shared.config import system_config
 from backend.shared.credential_locks import wolfram_credential_mutation
@@ -611,6 +612,7 @@ async def start_compiler(request: CompilerStartRequest):
                                 owner_token=reservation_token,
                             )
                         raise
+                remember_start_request("compiler", request)
                 return {
                     "status": "proof_check_started",
                     "message": "Compiler proof verification started over the Aggregator database",
@@ -788,6 +790,7 @@ async def start_compiler(request: CompilerStartRequest):
                 from backend.shared.lean4_client import start_lean4_workspace_bootstrap
                 start_lean4_workspace_bootstrap()
 
+            remember_start_request("compiler", request)
             return {"status": "started", "message": "Compiler started successfully"}
     
     except HTTPException:
@@ -1396,7 +1399,11 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
         # Calculate available input tokens (context window - output reserve - safety margin)
         output_reserve = validator_max_tokens
         safety_margin = int(validator_context_window * 0.1)  # 10% safety margin
-        available_input = validator_context_window - output_reserve - safety_margin
+        from backend.shared.token_calibration import token_calibration
+
+        available_input = (
+            token_calibration.adjusted_context_window(validator_context_window) - output_reserve - safety_margin
+        )
         
         # Check if paper fits in context window
         if prompt_tokens > available_input:
@@ -1411,11 +1418,6 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
                     f"A complete and honest review requires direct context injection - please select a validator with a larger context window."
                 )
             )
-        
-        # Build messages for API call
-        messages = [
-            {"role": "user", "content": full_prompt}
-        ]
         
         # Configure the paper_critic role with the validator settings BEFORE making the API call
         # This ensures routing goes to the correct provider (OpenRouter vs LM Studio)
@@ -1440,28 +1442,23 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
             redact_log_text(validator_model, 160),
         )
         
-        response = await api_client_manager.generate_completion(
-            task_id=f"compiler_paper_critique_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            role_id="paper_critic",
-            model=validator_model,
-            messages=messages,
-            max_tokens=validator_max_tokens,
-            temperature=0.0
+        from backend.shared.critique_prompts import (
+            critique_contract_failure_detail,
+            generate_validated_paper_critique,
         )
-        
-        # Parse the response - extract from OpenAI-compatible response structure
-        response_content = ""
-        if response.get("choices"):
-            message = response["choices"][0].get("message", {})
-            response_content = extract_message_text(message)
-        
-        if not response_content:
-            raise HTTPException(status_code=500, detail="Empty response from validator model")
-        
-        # Parse with lenient fallback for truncated critique responses
-        from backend.shared.critique_prompts import parse_critique_response
-        critique_data = parse_critique_response(response_content)
-        
+        from backend.shared.model_output_contract import ModelOutputContractError
+
+        try:
+            critique_data = await generate_validated_paper_critique(
+                prompt=full_prompt,
+                task_id=f"compiler_paper_critique_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                model=validator_model,
+                context_window=validator_context_window,
+                max_output_tokens=validator_max_tokens,
+            )
+        except ModelOutputContractError as exc:
+            raise HTTPException(status_code=502, detail=critique_contract_failure_detail(exc)) from exc
+
         # Create critique object
         critique = PaperCritique(
             critique_id=str(uuid.uuid4()),

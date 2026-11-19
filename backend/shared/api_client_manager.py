@@ -43,8 +43,13 @@ from backend.shared.subscription_providers.errors import (
     SubscriptionProviderError,
     SubscriptionUsageLimitError,
 )
-from backend.shared.subscription_providers.metadata import CLOUD_PROVIDER_IDS, CLOUD_PROVIDERS
-from backend.shared.subscription_providers.registry import get_api_key_subscription_client
+from backend.shared.subscription_providers.metadata import (
+    CLOUD_PROVIDER_IDS,
+    CLOUD_PROVIDERS,
+    cloud_provider_label,
+    split_local_fallback,
+)
+from backend.shared.subscription_providers.registry import get_api_key_subscription_client, vllm_client
 from backend.shared.xai_grok_client import (
     XAIGrokError,
     XAIGrokSpendingLimitError,
@@ -88,7 +93,14 @@ from backend.shared.provider_route_identity import (
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.response_extraction import drop_unfinished_thinking, extract_response_text
+from backend.shared.token_calibration import normalize_model_key, token_calibration
 from backend.shared.token_tracker import token_tracker
+from backend.shared.master_proof_context import withdraw_expansion_offers
+from backend.shared.master_proof_expansion import (
+    ExpansionCall,
+    offers_master_proof_expansion,
+    resolve_master_proof_expansions,
+)
 from backend.shared.utils import count_tokens
 from backend.shared.workflow_start_guard import workflow_start_guard
 
@@ -98,11 +110,14 @@ logger = logging.getLogger(__name__)
 OAUTH_LIVE_ERROR_MAX_CHARS = 1800
 # Embedding spaces ("<provider>:<model>"): one RAG index holds vectors from one space only.
 EMBEDDING_SPACE_LM_STUDIO = "lm_studio"
+EMBEDDING_SPACE_VLLM = "vllm"
 EMBEDDING_SPACE_OPENROUTER = "openrouter"
 EMBEDDING_SPACE_FASTEMBED = "fastembed"
 # An index already built from LM Studio vectors retries LM Studio (about 45 s of
 # backoff, enough for a just-in-time model reload) instead of switching models.
 PINNED_LM_STUDIO_EMBEDDING_ATTEMPTS = 8
+# The same budget for an index built from vLLM vectors (a restarting server).
+PINNED_VLLM_EMBEDDING_ATTEMPTS = 8
 _TRUNCATION_SUFFIX = "..."
 _HARD_CODEX_REQUEST_ERROR_MARKERS = (
     "authentication failed",
@@ -305,12 +320,19 @@ def _configured_role_model(config: ModelConfig) -> str:
 
 
 def _role_route_model(config: ModelConfig, provider: str) -> str:
-    """Return the model a role calls on ``provider``: its own or its LM Studio fallback."""
+    """Return the model a role calls on ``provider``: its own or its local fallback."""
     if provider == config.provider:
         return _configured_role_model(config)
+    fallback_provider, fallback_model = split_local_fallback(config.lm_studio_fallback_id)
+    return fallback_model if provider == fallback_provider else ""
+
+
+def _local_fallback_route(fallback_id: Any) -> Tuple[str, str, str, str]:
+    """Return (provider, provider label, model, route kind) for a role's local fallback value."""
+    provider, model = split_local_fallback(fallback_id)
     if provider == "lm_studio":
-        return str(config.lm_studio_fallback_id or "")
-    return ""
+        return provider, "LM Studio", model, "fallback"
+    return provider, cloud_provider_label(provider), model, f"{provider}_fallback"
 
 
 def _route_log_host(fields: Dict[str, Any]) -> str:
@@ -626,7 +648,10 @@ class APIClientManager:
         # User-visible source of calls made by run-scoped roles (manual proof
         # checks), so their provider activity can be routed to the owning feed.
         self._role_activity_sources: Dict[str, Dict[str, str]] = {}
-        
+
+        # In-flight comparisons of MOTO's token estimate with a provider's own count.
+        self._token_measurement_tasks: set[asyncio.Task] = set()
+
         # Lock for thread-safe state updates
         self._state_lock = asyncio.Lock()
 
@@ -822,8 +847,10 @@ class APIClientManager:
                     and configured_provider != "lm_studio"
                     and config.lm_studio_fallback_id
                 ):
-                    provider = "lm_studio"
-                    identity.setdefault("route_kind", "fallback")
+                    provider, _label, _model, fallback_kind = _local_fallback_route(
+                        config.lm_studio_fallback_id
+                    )
+                    identity.setdefault("route_kind", fallback_kind)
                 else:
                     provider = configured_provider
                 identity["provider"] = provider
@@ -982,7 +1009,7 @@ class APIClientManager:
             "recoverable": False,
             "workflow_mode": _retry_workflow_mode(role_id),
             "message": (
-                "OpenAI Codex failed and no LM Studio fallback is configured. "
+                "OpenAI Codex failed and no local fallback is configured. "
                 "Please check your OpenAI Codex OAuth connection in OpenRouter/OAuth, "
                 "sign in again, and retry."
             ),
@@ -1039,8 +1066,11 @@ class APIClientManager:
                 f"{label} could not serve this request. {terminal_guidance}"
                 if terminal_guidance
                 else (
-                    f"{label} failed and no LM Studio fallback is configured. "
-                    f"Please check your {label} API key in OpenRouter/OAuth and retry."
+                    f"{label} failed and no local fallback is configured. "
+                    + (
+                        client.settings.repair_hint
+                        or f"Please check your {label} API key in OpenRouter/OAuth and retry."
+                    )
                 )
             ),
             "error_summary": redact_log_text(str(error), 700),
@@ -1100,7 +1130,7 @@ class APIClientManager:
                 error.safe_message
                 if isinstance(error, ProviderRepairRequiredError)
                 else (
-                    "xAI Grok failed and no LM Studio fallback is configured. "
+                    "xAI Grok failed and no local fallback is configured. "
                     "Please check your xAI Grok OAuth connection in OpenRouter/OAuth, "
                     "sign in again, and retry. If xAI reports subscription or credit limits, "
                     "check your SuperGrok/X Premium entitlement."
@@ -1640,10 +1670,12 @@ class APIClientManager:
         role_id = notify_payload.get("role_id", "a role")
         resets_in_seconds = notify_payload.get("resets_in_seconds")
         if fallback_model:
+            fallback_provider, fallback_label, fallback_model, _kind = _local_fallback_route(fallback_model)
             notify_payload["fallback_model"] = fallback_model
+            notify_payload["fallback_provider"] = fallback_provider
             notify_payload["message"] = (
                 f"{provider_label} usage limit reached for "
-                f"{role_id}. Using LM Studio fallback model {fallback_model} "
+                f"{role_id}. Using {fallback_label} fallback model {fallback_model} "
                 f"until the provider reset."
             )
         elif notify_payload.get("reason") == "usage_limit_reached":
@@ -1901,6 +1933,76 @@ class APIClientManager:
         }
         return response
 
+    def _schedule_token_measurement(
+        self,
+        response: Any,
+        messages: List[Dict[str, Any]],
+        *,
+        role_id: str,
+        uses_tools: bool,
+    ) -> None:
+        """Compare the provider's reported input tokens with MOTO's own count.
+
+        Uses only what the completed call already returned, so it costs no extra
+        request. Counting runs in a background thread and never delays the answer.
+        Tool conversations are skipped because tool schemas and protocol turns add
+        tokens MOTO's prompt budgets do not count.
+        """
+        try:
+            if uses_tools or not isinstance(response, dict):
+                return
+            provider_tokens = (response.get("usage") or {}).get("prompt_tokens")
+            if isinstance(provider_tokens, bool) or not isinstance(provider_tokens, int) or provider_tokens <= 0:
+                return
+            metadata = response.get(self.CALL_METADATA_KEY) or {}
+            effective_key = normalize_model_key(
+                metadata.get("effective_provider"), metadata.get("effective_model")
+            )
+            if effective_key is None:
+                return
+            texts: List[str] = []
+            for message in messages:
+                content = message.get("content")
+                if not isinstance(content, str) or message.get("tool_calls") or message.get("role") == "tool":
+                    return
+                texts.append(content)
+            role_config = self._role_model_configs.get(role_id)
+            role_key = token_calibration.role_model_key(role_id)
+            # A role's primary route is measured under its configured model (a
+            # provider may resolve a MOTO alias to another id); Boost, fallback, and
+            # free-model rotation calls are measured under the model that answered.
+            key = effective_key
+            if role_config is not None and role_key is not None and not metadata.get("boosted"):
+                if role_config.provider == effective_key[0] and (
+                    role_config.provider != "openrouter" or role_key == effective_key
+                ):
+                    key = role_key
+            context_window = int(role_config.context_window or 0) if role_config is not None and key == role_key else 0
+            if not token_calibration.wants_sample(key, sum(len(text) for text in texts), context_window):
+                return
+            task = asyncio.create_task(
+                self._measure_token_ratio(key, "\n".join(texts), provider_tokens, context_window)
+            )
+        except Exception as exc:
+            logger.debug("Token measurement skipped: %s", redact_log_text(exc, 240))
+            return
+        self._token_measurement_tasks.add(task)
+        task.add_done_callback(self._token_measurement_tasks.discard)
+
+    async def _measure_token_ratio(
+        self,
+        key: Tuple[str, str],
+        text: str,
+        provider_tokens: int,
+        context_window: int,
+    ) -> None:
+        try:
+            moto_tokens = await asyncio.to_thread(count_tokens, text)
+            if token_calibration.record(key, moto_tokens, provider_tokens, context_window):
+                await token_calibration.save()
+        except Exception as exc:
+            logger.debug("Token measurement failed: %s", redact_log_text(exc, 240))
+
     def extract_call_metadata(self, response: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Return routing metadata attached to a successful API response."""
         if not isinstance(response, dict):
@@ -2031,14 +2133,20 @@ class APIClientManager:
                 )
             elif config.lm_studio_fallback_id:
                 logger.warning(
-                    "Generic mode is OpenRouter-only. Dropping LM Studio fallback for role '%s'.",
+                    "Generic mode is OpenRouter-only. Dropping the local fallback for role '%s'.",
                     role_id,
                 )
                 config = config.model_copy(update={"lm_studio_fallback_id": None})
 
         self._role_model_configs[role_id] = config
         self._oauth_cooldown_fallback_roles.discard(role_id)
-        
+        token_calibration.register_role(
+            role_id,
+            config.provider,
+            (config.openrouter_model_id or config.model_id) if config.provider == "openrouter" else config.model_id,
+            config.context_window,
+        )
+
         # Set initial fallback state based on provider
         if config.provider == "openrouter" or config.provider in CLOUD_PROVIDER_IDS:
             self._role_fallback_state[role_id] = config.provider
@@ -2695,13 +2803,23 @@ class APIClientManager:
         )
 
         supercharge_enabled = bool(getattr(role_config, "supercharge_enabled", False)) and not disable_supercharge
-        # Tool-call conversations need exact assistant/tool turn pairing, so keep them single-shot.
-        if not supercharge_enabled or tools or tool_choice is not None:
-            response = await self._generate_completion_once(
+        uses_tools = bool(tools) or tool_choice is not None
+        if uses_tools and offers_master_proof_expansion(messages):
+            # Tool-call conversations keep their exact turns, so an expansion request
+            # could not be served. Do not offer one.
+            messages = [
+                {**message, "content": withdraw_expansion_offers(message["content"])}
+                if isinstance(message.get("content"), str)
+                else message
+                for message in messages
+            ]
+
+        async def generate_once(call_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+            return await self._generate_completion_once(
                 task_id=task_id,
                 role_id=role_id,
                 model=model,
-                messages=messages,
+                messages=call_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format=response_format,
@@ -2709,16 +2827,47 @@ class APIClientManager:
                 tool_choice=tool_choice,
                 **kwargs
             )
-        else:
-            response = await self._generate_supercharged_completion(
+
+        async def generate_answer(call_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+            # Tool-call conversations need exact assistant/tool turn pairing, so keep them single-shot.
+            if not supercharge_enabled or uses_tools:
+                return await generate_once(call_messages)
+            return await self._generate_supercharged_completion(
                 task_id=task_id,
                 role_id=role_id,
                 model=model,
-                messages=messages,
+                messages=call_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format=response_format,
                 **kwargs
+            )
+
+        response = await generate_answer(messages)
+        # A model shown a master proof's solved template may ask to view its hidden Lean
+        # code. Tool-call conversations keep their exact turns and are left alone.
+        if not uses_tools and offers_master_proof_expansion(messages):
+            response = await resolve_master_proof_expansions(
+                ExpansionCall(
+                    task_id=task_id,
+                    role_id=role_id,
+                    model=model,
+                    messages=messages,
+                    generate=generate_answer,
+                    generate_review=generate_once,
+                    fits=lambda text: self._prompt_fits_role_budget(
+                        text,
+                        role_config=role_config,
+                        explicit_max_tokens=max_tokens,
+                        role_id=role_id,
+                    ),
+                    response_text=self._response_text,
+                    broadcast=self._broadcast,
+                    route_fields=self._master_proof_expansion_route_fields(
+                        role_id, model=model, task_id=task_id
+                    ),
+                ),
+                response,
             )
         if assistant_memory_target_hash:
             assistant_proof_search_coordinator.mark_pack_consumed_by_solver(
@@ -2727,6 +2876,17 @@ class APIClientManager:
                 task_id=task_id,
             )
         return response
+
+    def _master_proof_expansion_route_fields(
+        self, role_id: str, *, model: str, task_id: str
+    ) -> Dict[str, str]:
+        """Route identity for master proof expansion activity; empty when unknown."""
+        try:
+            fields = dict(self.route_identity_for_role(role_id, model=model, task_id=task_id))
+        except Exception:
+            fields = {}
+        # A manual proof check's role carries its source so the row reaches that feed.
+        return {**self._role_activity_source_fields(role_id), **fields}
 
     @staticmethod
     def _response_text(response: Dict[str, Any]) -> str:
@@ -2923,6 +3083,12 @@ class APIClientManager:
                 **kwargs,
             )
             drop_unfinished_thinking(response, context=task_id)
+            self._schedule_token_measurement(
+                response,
+                messages,
+                role_id=role_id,
+                uses_tools=bool(tools) or tool_choice is not None,
+            )
             return response
         except (ProviderRouteError, ProviderContextLengthError) as error:
             if error.route.role_id == role_id and error.route.task_id == task_id:
@@ -3251,7 +3417,7 @@ class APIClientManager:
                         "Free models on OpenRouter require this setting because they are "
                         "subsidized through training data collection. Alternatively, you can:\n\n"
                         "• Use a paid OpenRouter model instead\n"
-                        "• Configure an LM Studio fallback model in settings"
+                        "• Configure a local fallback model in settings"
                     )
                 }, self.route_identity_for_role(
                     role_id,
@@ -3444,8 +3610,8 @@ class APIClientManager:
                     # No API key AND no fallback - cannot proceed
                     error_msg = (
                         f"Role '{role_id}' is configured for OpenRouter but no API key is set "
-                        f"and no LM Studio fallback is configured. Please set OpenRouter API key "
-                        f"or configure an LM Studio fallback model."
+                        f"and no local fallback is configured. Please set OpenRouter API key "
+                        f"or configure a local fallback model."
                     )
                     logger.error(error_msg)
                     raise ProviderRepairRequiredError(
@@ -3457,7 +3623,7 @@ class APIClientManager:
                         message=error_msg,
                         terminal_guidance=(
                             "Set a valid OpenRouter API key, change this role's provider, "
-                            "or configure an LM Studio fallback."
+                            "or configure a local fallback."
                         ),
                         configured_provider=role_config.provider,
                         configured_model=role_config.openrouter_model_id or role_config.model_id,
@@ -3468,7 +3634,7 @@ class APIClientManager:
                     )
                 else:
                     # No API key but fallback exists - use fallback
-                    logger.warning(f"Role '{role_id}' configured for OpenRouter but no API key set. Using LM Studio fallback: {role_config.lm_studio_fallback_id}")
+                    logger.warning(f"Role '{role_id}' configured for OpenRouter but no API key set. Using local fallback: {role_config.lm_studio_fallback_id}")
                     model = role_config.lm_studio_fallback_id
                     # Skip OpenRouter block entirely, go to LM Studio
             
@@ -3481,7 +3647,7 @@ class APIClientManager:
                 if is_free and free_model_manager.is_account_exhausted():
                     if role_config.lm_studio_fallback_id:
                         logger.warning(
-                            f"Account free credits exhausted. Using LM Studio fallback for role '{role_id}': "
+                            f"Account free credits exhausted. Using local fallback for role '{role_id}': "
                             f"{role_config.lm_studio_fallback_id}"
                         )
                         model = role_config.lm_studio_fallback_id
@@ -3490,7 +3656,7 @@ class APIClientManager:
                             "role_id": role_id,
                             "model": openrouter_model,
                             "provider": "openrouter",
-                            "message": "OpenRouter account free credits depleted. Add credits at openrouter.ai or configure LM Studio fallback."
+                            "message": "OpenRouter account free credits depleted. Add credits at openrouter.ai or configure a local fallback."
                         }, self.route_identity_for_role(
                             role_id,
                             model=openrouter_model,
@@ -3500,7 +3666,7 @@ class APIClientManager:
                             configured_host_provider=openrouter_provider or "",
                         )))
                         raise FreeModelExhaustedError(
-                            f"Account free credits exhausted and no LM Studio fallback for role '{role_id}'.",
+                            f"Account free credits exhausted and no local fallback for role '{role_id}'.",
                             role_id=role_id,
                             model=openrouter_model,
                             provider="openrouter",
@@ -3676,7 +3842,7 @@ class APIClientManager:
                         free_model_manager.clear_failed_models()  # Success - clear failures
                         return rotated_result
                     
-                    # Rotation chain exhausted — try LM Studio fallback
+                    # Rotation chain exhausted — try local fallback
                     if not role_config.lm_studio_fallback_id:
                         rotation_ran = (
                             free_model_manager.looping_enabled
@@ -3684,7 +3850,7 @@ class APIClientManager:
                         )
                         raise FreeModelExhaustedError(
                             f"All free model options exhausted for role '{role_id}'. "
-                            f"No LM Studio fallback configured.",
+                            f"No local fallback configured.",
                             role_id=role_id,
                             model=openrouter_model,
                             provider="openrouter",
@@ -3702,12 +3868,12 @@ class APIClientManager:
                     fallback_model = role_config.lm_studio_fallback_id
                     logger.info(
                         f"Free model rotation exhausted for role '{role_id}'. "
-                        f"Temporarily using LM Studio fallback: {fallback_model}"
+                        f"Temporarily using local fallback: {fallback_model}"
                     )
                     model = fallback_model
                 
                 except OpenRouterPrivacyPolicyError as e:
-                    # Privacy policy error - try LM Studio fallback if configured
+                    # Privacy policy error - try local fallback if configured
                     duration_ms = (time.time() - start_time) * 1000
                     
                     # Log to autonomous API logger if callback set
@@ -3745,7 +3911,7 @@ class APIClientManager:
                             "Free models on OpenRouter require this setting because they are "
                             "subsidized through training data collection. Alternatively, you can:\n\n"
                             "• Use a paid OpenRouter model instead\n"
-                            "• Configure an LM Studio fallback model in settings"
+                            "• Configure a local fallback model in settings"
                         )
                     }, self.route_identity_for_role(
                         role_id,
@@ -3762,7 +3928,7 @@ class APIClientManager:
                         # NO FALLBACK - raise clear error
                         error_msg = (
                             f"OpenRouter privacy settings are blocking free models for role '{role_id}' "
-                            f"and no LM Studio fallback configured. "
+                            f"and no local fallback configured. "
                             f"Please visit https://openrouter.ai/settings/privacy and enable "
                             f"'Allow my data to be used for model training', OR configure an LM Studio "
                             f"fallback model in settings."
@@ -3777,7 +3943,7 @@ class APIClientManager:
                             message=error_msg,
                             terminal_guidance=(
                                 "Update OpenRouter privacy settings, select another provider, "
-                                "or configure an LM Studio fallback."
+                                "or configure a local fallback."
                             ),
                             configured_provider=role_config.provider,
                             configured_model=openrouter_model,
@@ -3824,7 +3990,7 @@ class APIClientManager:
                         # NO FALLBACK - raise clear error
                         error_msg = (
                             f"OpenRouter credits exhausted for role '{role_id}' "
-                            f"and no LM Studio fallback configured. "
+                            f"and no local fallback configured. "
                             f"Please add credits to OpenRouter or configure an LM Studio "
                             f"fallback model in settings."
                         )
@@ -3855,7 +4021,7 @@ class APIClientManager:
                             message=error_msg,
                             terminal_guidance=(
                                 "Add OpenRouter credits, select another provider, "
-                                "or configure an LM Studio fallback."
+                                "or configure a local fallback."
                             ),
                             configured_provider=role_config.provider,
                             configured_model=openrouter_model,
@@ -3882,7 +4048,8 @@ class APIClientManager:
                         "provider": "openrouter",
                         "reason": "credit_exhaustion",
                         "message": "Credits exhausted, falling back to alternative model",
-                        "fallback_model": fallback_model
+                        "fallback_model": _local_fallback_route(fallback_model)[2],
+                        "fallback_provider": _local_fallback_route(fallback_model)[0],
                     }, self.route_identity_for_role(
                         role_id,
                         error=e,
@@ -3929,7 +4096,7 @@ class APIClientManager:
                         # No fallback configured - re-raise the error
                         logger.error(
                             f"OpenRouter error for role '{role_id}': {e}, "
-                            f"and no LM Studio fallback configured"
+                            f"and no local fallback configured"
                         )
                         if is_transient_model_call_error(e):
                             raise self._as_retryable_provider_error(
@@ -3978,7 +4145,7 @@ class APIClientManager:
                         fallback_model=role_config.lm_studio_fallback_id,
                     )
                     logger.warning(
-                        "%s cooldown active for role '%s'; using LM Studio fallback model %s until reset",
+                        "%s cooldown active for role '%s'; using local fallback model %s until reset",
                         subscription_label,
                         role_id,
                         role_config.lm_studio_fallback_id,
@@ -4352,7 +4519,7 @@ class APIClientManager:
                         fallback_model=role_config.lm_studio_fallback_id,
                     )
                     logger.warning(
-                        "OpenAI Codex cooldown active for role '%s'; using LM Studio fallback model %s until reset",
+                        "OpenAI Codex cooldown active for role '%s'; using local fallback model %s until reset",
                         role_id,
                         role_config.lm_studio_fallback_id,
                     )
@@ -4573,7 +4740,7 @@ class APIClientManager:
                                 reason="usage_limit_reached",
                                 terminal_guidance=(
                                     "Wait for or restore the OpenAI Codex usage allowance, "
-                                    "change this role's provider, or configure an LM Studio fallback."
+                                    "change this role's provider, or configure a local fallback."
                                 ),
                             )
                             await self._broadcast_unrecoverable_codex_error(
@@ -4927,11 +5094,11 @@ class APIClientManager:
                             reason="spending_limit_reached",
                             message=(
                                 f"xAI Grok spending limit reached for role '{role_id}' "
-                                "and no LM Studio fallback is configured."
+                                "and no local fallback is configured."
                             ),
                             terminal_guidance=(
                                 "Increase or restore the xAI Grok spending/subscription allowance, "
-                                "change this role's provider, or configure an LM Studio fallback."
+                                "change this role's provider, or configure a local fallback."
                             ),
                             configured_provider=role_config.provider,
                             configured_model=xai_model,
@@ -5049,6 +5216,26 @@ class APIClientManager:
             model = role_config.lm_studio_fallback_id
 
         lm_studio_route_kind = "fallback" if role_config.provider != "lm_studio" else "primary"
+        if lm_studio_route_kind == "fallback" and not system_config.generic_mode:
+            fallback_provider, _label, fallback_model, fallback_kind = _local_fallback_route(model)
+            fallback_client = get_api_key_subscription_client(fallback_provider)
+            if fallback_client is not None:
+                # The role's fallback names a model on a local server (vLLM), not LM Studio.
+                return await self._complete_with_local_server_fallback(
+                    fallback_client,
+                    role_config=role_config,
+                    role_id=role_id,
+                    task_id=task_id,
+                    requested_model=requested_model,
+                    model=fallback_model,
+                    route_kind=fallback_kind,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                )
         if system_config.generic_mode:
             raise ProviderRepairRequiredError(
                 provider="lm_studio",
@@ -5209,6 +5396,139 @@ class APIClientManager:
                 ),
             ) from e
     
+    async def _complete_with_local_server_fallback(
+        self,
+        client: Any,
+        *,
+        role_config: ModelConfig,
+        role_id: str,
+        task_id: str,
+        requested_model: str,
+        model: str,
+        route_kind: str,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: Optional[int],
+        response_format: Optional[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        tool_choice: Optional[Any],
+    ) -> Dict[str, Any]:
+        """Serve one fallback call on a local server (vLLM) instead of LM Studio."""
+        provider = client.provider_id
+        label = client.provider_label
+        configured_model = _configured_role_model(role_config)
+        logger.debug(
+            "Role %s using %s fallback: %s",
+            redact_log_text(role_id, 120),
+            label,
+            redact_log_text(model, 160),
+        )
+        start_time = time.time()
+
+        async def log_call(*, response: str, tokens_used: Optional[int], error: Optional[str]) -> None:
+            if not self._autonomous_logger_callback:
+                return
+            await self._autonomous_logger_callback(
+                task_id=task_id,
+                role_id=role_id,
+                model=model,
+                provider=provider,
+                prompt=self._prompt_for_logging(messages),
+                response=response,
+                tokens_used=tokens_used,
+                duration_ms=(time.time() - start_time) * 1000,
+                success=error is None,
+                error=error,
+                phase=self._current_autonomous_phase,
+            )
+
+        try:
+            result = await self._with_hung_connection_watchdog(
+                client.generate_completion(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
+                    response_format=response_format,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    retry_callback=self._provider_retry_callback(
+                        role_id,
+                        route_kind=route_kind,
+                        task_id=task_id,
+                        configured_model=configured_model,
+                        configured_provider=role_config.provider,
+                    ),
+                ),
+                role_id=role_id,
+                model=model,
+                provider=label,
+                provider_id=provider,
+                route_kind=route_kind,
+                task_id=task_id,
+            )
+            if not result.get("choices"):
+                duration_ms = (time.time() - start_time) * 1000
+                logger.error(
+                    "%s response missing 'choices' after %.0fms - %s",
+                    label,
+                    duration_ms,
+                    _response_shape_for_logging(result),
+                )
+                raise ValueError(f"{label} response missing 'choices' after {duration_ms:.0f}ms")
+            response_content = extract_response_text(result, context=task_id)
+            usage = result.get("usage") or {}
+            if usage.get("prompt_tokens") is not None and usage.get("completion_tokens") is not None:
+                token_tracker.track(model, usage["prompt_tokens"], usage["completion_tokens"])
+                await self._broadcast("token_usage_updated", token_tracker.get_stats())
+            result = self._annotate_response_with_call_metadata(
+                result,
+                task_id=task_id,
+                role_id=role_id,
+                configured_model=requested_model,
+                actual_model=model,
+                configured_provider=role_config.provider,
+                actual_provider=provider,
+                boosted=False,
+                boost_mode=None,
+            )
+            await log_call(response=response_content, tokens_used=usage.get("total_tokens"), error=None)
+            await self._track_model_usage(model)
+            return result
+        except Exception as e:
+            await log_call(response="", tokens_used=None, error=provider_live_activity_error_message(e))
+            if isinstance(e, (ProviderRepairRequiredError, ProviderContextLengthError)):
+                raise
+            if is_retryable_model_output_error(e):
+                raise
+            if _is_provider_context_length_error(e):
+                raise _typed_provider_context_error(e, provider=provider, model=model) from e
+            if is_transient_model_call_error(e):
+                raise self._as_retryable_provider_error(
+                    provider=provider,
+                    provider_label=label,
+                    role_id=role_id,
+                    model=model,
+                    error=e,
+                    route_kind=route_kind,
+                    task_id=task_id,
+                    configured_provider=role_config.provider,
+                    configured_model=configured_model,
+                ) from e
+            raise self._as_provider_repair_error(
+                provider=provider,
+                provider_label=label,
+                role_id=role_id,
+                model=model,
+                error=e,
+                reason="local_model_unavailable",
+                terminal_guidance=(
+                    str(getattr(e, "terminal_guidance", "") or "")
+                    or client.settings.repair_hint
+                    or f"Check the {label} server that serves this role's fallback model, or change the fallback."
+                ),
+            ) from e
+
     async def _try_free_model_rotation(
         self,
         task_id: str,
@@ -5230,7 +5550,7 @@ class APIClientManager:
         Returns API result on success, None if all options exhausted.
 
         A transient failure of one rotation route moves on to the next route.
-        If no route succeeds and the role has no LM Studio fallback, the last
+        If no route succeeds and the role has no local fallback, the last
         transient failure is raised as a route-identified retryable error.
         """
         if not self._openrouter_client:
@@ -5472,7 +5792,7 @@ class APIClientManager:
             except (RateLimitError, CreditExhaustionError) as inner_e:
                 logger.warning(f"Auto-selector '{auto_model}' also failed: {inner_e}")
 
-        # With an LM Studio fallback the caller uses it; otherwise the last
+        # With a local fallback the caller uses it; otherwise the last
         # transient route failure is retried by the workflow under its own route.
         if last_transient_failure is not None and not has_lm_studio_fallback:
             failure, cause = last_transient_failure
@@ -5593,7 +5913,7 @@ class APIClientManager:
         return reset_roles
     
     async def get_embeddings(self, texts: List[str], model: str = None) -> List[List[float]]:
-        """Embed texts with LM Studio first, then OpenRouter (see ``get_embeddings_in_space``)."""
+        """Embed texts with LM Studio, then vLLM, then OpenRouter (see ``get_embeddings_in_space``)."""
         embeddings, _space = await self.get_embeddings_in_space(texts, model=model)
         return embeddings
 
@@ -5610,10 +5930,11 @@ class APIClientManager:
         Vectors from different embedding models cannot share one index: their
         dimensions usually differ, and even equal-length vectors are not
         comparable. With no ``embedding_space``, LM Studio is tried first (local,
-        free) and OpenRouter is the fallback. With an ``embedding_space``, only
-        that provider and model are used: LM Studio is retried with backoff
-        instead of falling back, so an index built from LM Studio vectors never
-        receives OpenRouter vectors.
+        free), then a configured vLLM embedding model (local, free), and
+        OpenRouter is the last fallback. With an ``embedding_space``, only that
+        provider and model are used: LM Studio or vLLM is retried with backoff
+        instead of falling back, so an index built from one model's vectors
+        never receives another model's vectors.
 
         Returns:
             (vectors, embedding_space)
@@ -5634,7 +5955,17 @@ class APIClientManager:
         openrouter_space = (
             f"{EMBEDDING_SPACE_OPENROUTER}:{model or OpenRouterClient.DEFAULT_EMBEDDING_MODEL}"
         )
-        if embedding_space is not None and embedding_space not in (lm_studio_space, openrouter_space):
+        # vLLM serves its own configured embedding model, so a caller's model override
+        # (an LM Studio/OpenRouter model name) never applies to it.
+        vllm_space = vllm_client.embedding_space() if model in (None, rag_config.embedding_model) else None
+        is_vllm_pinned = bool(embedding_space) and embedding_space.startswith(f"{EMBEDDING_SPACE_VLLM}:")
+        if is_vllm_pinned and embedding_space != vllm_space:
+            raise RuntimeError(
+                f"Embeddings unavailable: this RAG index was built with {embedding_space}, but that vLLM "
+                "embedding model is no longer set up. Add it again in Inference Connectivity > vLLM or "
+                "clear the run to rebuild the index."
+            )
+        if embedding_space is not None and embedding_space not in (lm_studio_space, openrouter_space, vllm_space):
             self._require_embedding_space(embedding_space, lm_studio_space)
         if not texts:
             return [], embedding_space or lm_studio_space
@@ -5649,6 +5980,22 @@ class APIClientManager:
             return await self._openrouter_client.get_embeddings(texts, model), openrouter_space
 
         retry_callback = self._provider_retry_callback("embeddings", route_kind="embeddings")
+        if is_vllm_pinned:
+            try:
+                embeddings = await vllm_client.get_embeddings(
+                    texts,
+                    retry_callback=retry_callback,
+                    max_attempts=PINNED_VLLM_EMBEDDING_ATTEMPTS,
+                )
+            except Exception as vllm_error:
+                raise RuntimeError(
+                    "Embeddings unavailable: vLLM did not return embeddings "
+                    f"([{type(vllm_error).__name__}] {vllm_error}). This RAG index was built with "
+                    "vLLM's embedding model, and vectors from another embedding model cannot be "
+                    "mixed into it, so MOTO is not falling back to another provider. Check that "
+                    "the vLLM embedding server is running."
+                ) from vllm_error
+            return embeddings, vllm_space
         if embedding_space == lm_studio_space:
             try:
                 embeddings = await lm_studio_client.get_embeddings(
@@ -5667,18 +6014,32 @@ class APIClientManager:
                 ) from lm_error
             return embeddings, lm_studio_space
 
-        # No index space yet: LM Studio first (local, free), then OpenRouter.
+        # No index space yet: LM Studio first (local, free), then vLLM, then OpenRouter.
         try:
             return (
-                await lm_studio_client.get_embeddings(texts, model, retry_callback=retry_callback),
+                await lm_studio_client.get_embeddings(
+                    texts,
+                    model,
+                    quiet=vllm_space is not None,
+                    retry_callback=retry_callback,
+                ),
                 lm_studio_space,
             )
         except Exception as lm_error:
-            logger.warning(
-                "LM Studio embeddings unavailable: [%s] %s",
-                type(lm_error).__name__,
-                lm_error,
-            )
+            vllm_error: Optional[Exception] = None
+            if vllm_space is not None:
+                try:
+                    return await vllm_client.get_embeddings(texts, retry_callback=retry_callback), vllm_space
+                except Exception as exc:
+                    vllm_error = exc
+                    logger.warning("vLLM embeddings unavailable: [%s] %s", type(exc).__name__, exc)
+            else:
+                logger.warning(
+                    "LM Studio embeddings unavailable: [%s] %s",
+                    type(lm_error).__name__,
+                    lm_error,
+                )
+            vllm_detail = f", vLLM error ({vllm_error})" if vllm_error is not None else ""
 
             # Fall back to OpenRouter if configured
             if self._openrouter_client:
@@ -5691,9 +6052,15 @@ class APIClientManager:
                 except Exception as or_error:
                     logger.error(f"OpenRouter embeddings also failed: {or_error}")
                     raise RuntimeError(
-                        f"Embeddings unavailable: LM Studio error ({lm_error}), "
+                        f"Embeddings unavailable: LM Studio error ({lm_error}){vllm_detail}, "
                         f"OpenRouter error ({or_error})"
                     )
+            elif vllm_error is not None:
+                raise RuntimeError(
+                    f"Embeddings unavailable: LM Studio error ({lm_error}){vllm_detail}, and OpenRouter "
+                    "is not configured. Start the vLLM embedding server or LM Studio, or configure an "
+                    "OpenRouter API key."
+                )
             else:
                 raise RuntimeError(
                     "Embeddings unavailable: LM Studio is down and OpenRouter is not configured. "

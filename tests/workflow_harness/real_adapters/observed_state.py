@@ -62,6 +62,17 @@ class RealWorkflowObservation:
     exercise_observations: set[str] = field(default_factory=set)
     persisted_events: list[WorkflowEvent] = field(default_factory=list)
     terminal_stop_events: int = 0
+    cli_start_attempts: int = 0
+    cli_committed_starts: int = 0
+    cli_templates_saved: int = 0
+    cli_templates_after_rejected_start: int = 0
+    cli_template_credential_leaks: int = 0
+    cli_template_replays: int = 0
+    cli_template_replays_rejected: int = 0
+    cli_hosted_attempts: int = 0
+    cli_hosted_artifacts_written: int = 0
+    cli_control_file_written_before_ready: int = 0
+    cli_control_file_foreign_removals: int = 0
     checkpoint: dict[str, object] = field(default_factory=dict)
     events: list[WorkflowEvent] = field(default_factory=list)
     replay: list[str] = field(default_factory=list)

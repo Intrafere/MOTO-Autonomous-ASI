@@ -2,9 +2,9 @@ import React from 'react';
 import './settings-common.css';
 import './StartupModals.css';
 import useOverflowAssist from '../hooks/useOverflowAssist';
-import { CLOUD_ACCESS_PROVIDERS } from '../utils/oauthProviders';
+import { CLOUD_SUBSCRIPTION_PROVIDERS } from '../utils/oauthProviders';
 
-const SUBSCRIPTION_PROVIDER_NAMES = CLOUD_ACCESS_PROVIDERS.map((provider) => provider.label).join(', ');
+const SUBSCRIPTION_PROVIDER_NAMES = CLOUD_SUBSCRIPTION_PROVIDERS.map((provider) => provider.label).join(', ');
 
 export default function StartupProviderSetupModal({
   isOpen,
@@ -16,8 +16,10 @@ export default function StartupProviderSetupModal({
   lmStudioError = '',
   statusMessage = '',
   isCheckingLmStudio = false,
+  isCheckingVllm = false,
   onChooseOpenRouter,
   onConfirmLmStudio,
+  onChooseVllm,
 }) {
   const {
     scrollRef,
@@ -30,7 +32,8 @@ export default function StartupProviderSetupModal({
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
   // Startup only advertises add-ons the backend explicitly reported as available.
   const oauthAvailable = !capabilities?.genericMode
-    && CLOUD_ACCESS_PROVIDERS.some((provider) => capabilities?.[provider.capabilityKey] === true);
+    && CLOUD_SUBSCRIPTION_PROVIDERS.some((provider) => capabilities?.[provider.capabilityKey] === true);
+  const vllmAvailable = lmStudioEnabled && !capabilities?.genericMode && capabilities?.vllmAvailable === true;
 
   return (
     <div
@@ -59,8 +62,8 @@ export default function StartupProviderSetupModal({
         <p style={{ color: '#ddd', lineHeight: '1.6', marginBottom: '0.9rem' }}>
           {lmStudioEnabled ? (
             <>
-              MOTO needs <strong>OpenRouter or a running LM Studio server</strong> before you start.
-              Cloud role providers are supplementary because RAG embeddings still need OpenRouter or LM Studio.
+              MOTO needs <strong>OpenRouter or a running local server (LM Studio{vllmAvailable ? ' or vLLM' : ''})</strong> before you start.
+              Cloud role providers are supplementary because RAG embeddings still need OpenRouter or a local embedding model.
             </>
           ) : (
             <>
@@ -141,13 +144,13 @@ export default function StartupProviderSetupModal({
               <h3 style={{ marginTop: 0, color: '#ff9f4a' }}>Cloud Provider Add-On</h3>
               <ol style={{ margin: '0 0 1rem 1.1rem', padding: 0, color: '#d7d7e8', lineHeight: '1.55' }}>
                 <li>Use a supported subscription provider ({SUBSCRIPTION_PROVIDER_NAMES}) for chat/model roles.</li>
-                <li>Set up OpenRouter or LM Studio first so RAG embeddings are available.</li>
+                <li>Set up OpenRouter or a local server first so RAG embeddings are available.</li>
                 <li>After startup, add cloud provider access from OpenRouter & Cloud Subscriptions and select it in role settings.</li>
               </ol>
               <button
                 type="button"
                 disabled
-                title="OAuth cannot be the only startup provider because RAG embeddings require OpenRouter, LM Studio, or hosted FastEmbed."
+                title="OAuth cannot be the only startup provider because RAG embeddings require OpenRouter, LM Studio, vLLM, or hosted FastEmbed."
                 style={{
                   width: '100%',
                   padding: '0.8rem 1rem',
@@ -199,6 +202,44 @@ export default function StartupProviderSetupModal({
                 }}
               >
                 {isCheckingLmStudio ? 'Checking LM Studio...' : "I'm Running LM Studio"}
+              </button>
+            </div>
+          )}
+
+          {vllmAvailable && (
+            <div
+              style={{
+                padding: '1rem',
+                borderRadius: '10px',
+                backgroundColor: '#1c1c33',
+                border: '1px solid #2f5c36',
+              }}
+            >
+              <h3 style={{ marginTop: 0, color: '#7CFC90' }}>vLLM Setup</h3>
+              <ol style={{ margin: '0 0 1rem 1.1rem', padding: 0, color: '#d7d7e8', lineHeight: '1.55' }}>
+                <li>Install vLLM from <a href="https://docs.vllm.ai/" target="_blank" rel="noopener noreferrer" style={{ color: '#8ab4ff' }}>docs.vllm.ai</a>.</li>
+                <li>Start a vLLM server for a chat model on a port other than 8000, for example <code>vllm serve &lt;model&gt; --port 8001</code>.</li>
+                <li>Start a second vLLM server for an embedding model such as <code>nomic-ai/nomic-embed-text-v1.5</code>.</li>
+                <li>Enter the server addresses in MOTO. Models and context windows are detected for you.</li>
+              </ol>
+              <button
+                type="button"
+                onClick={onChooseVllm}
+                disabled={isCheckingVllm}
+                style={{
+                  width: '100%',
+                  padding: '0.8rem 1rem',
+                  backgroundColor: '#21492a',
+                  border: '1px solid #2f8f45',
+                  borderRadius: '8px',
+                  color: '#fff',
+                  fontSize: '0.95rem',
+                  fontWeight: '600',
+                  cursor: isCheckingVllm ? 'not-allowed' : 'pointer',
+                  opacity: isCheckingVllm ? 0.7 : 1,
+                }}
+              >
+                {isCheckingVllm ? 'Checking vLLM...' : "I'm Running vLLM"}
               </button>
             </div>
           )}

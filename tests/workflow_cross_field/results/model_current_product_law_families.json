@@ -13,7 +13,9 @@
     "sleep.unique_owner_released",
     "supercharge_creativity.routing_separation",
     "proof_novelty.group_atomic_same_run",
-    "leanoj.parent_control_generation_fences_children"
+    "leanoj.parent_control_generation_fences_children",
+    "model_output.contract_failure_not_semantic",
+    "model_output.normalizations_visible_and_guarded"
   ],
   "blocked_dependencies": [],
   "diagnostics": {},
@@ -34,6 +36,7 @@
     "answer_wrappers",
     "group_novelty",
     "leanoj_parent_control",
+    "model_output_contract",
     "runtime_exclusivity",
     "workflow_filesystem_state"
   ],
@@ -49,7 +52,9 @@
     "sleep.unique_owner_released",
     "supercharge_creativity.routing_separation",
     "proof_novelty.group_atomic_same_run",
-    "leanoj.parent_control_generation_fences_children"
+    "leanoj.parent_control_generation_fences_children",
+    "model_output.contract_failure_not_semantic",
+    "model_output.normalizations_visible_and_guarded"
   ],
   "observed_transition": "direct model actions preserve declared product laws",
   "real_components": [],
@@ -62,7 +67,7 @@
   "schema_version": 2,
   "seed": null,
   "source": "curated",
-  "source_identity": "workflow-source-v1:7da72d567769d2cccad992c6a15007b2023f6bd658502555b139547e473ba958",
+  "source_identity": "workflow-source-v1:d8ca4ad20cc8aab87d27633b325bd93310fd486315f295c4c66f3382daad61bf",
   "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py",
   "test_selectors": [
     "tests/workflow_scenarios/test_cross_field_analysis.py::test_model_cross_field_scenarios_preserve_invariants_and_exercise_fields"

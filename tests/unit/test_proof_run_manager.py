@@ -173,6 +173,38 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         self.assertTrue(payload["next_round_automatic"])
         self.assertIn("0/0 candidates", payload["round_summary"])
 
+    async def test_errored_round_never_announces_an_automatic_next_round(self):
+        events = []
+
+        async def event_callback(event_type, payload):
+            events.append((event_type, payload))
+
+        self.control.event_callback = event_callback
+        self.control.snapshot = self.control.snapshot.model_copy(
+            update={"run_mode": "loop_with_pruning", "no_discovery_round_limit": 10}
+        )
+        for outcome in ("error", "fatal_stop"):
+            snapshot = await self.manager.complete_round(
+                self.control,
+                round_number=1,
+                valid_candidate_count=None,
+                round_outcome=outcome,
+            )
+            event_type, payload = events[-1]
+            self.assertEqual(event_type, "proof_run_round_complete")
+            self.assertEqual(payload["round_outcome"], outcome)
+            self.assertIsNone(payload["candidate_count"])
+            self.assertFalse(payload["next_round_automatic"])
+            # An errored round is not a valid empty round.
+            self.assertEqual(snapshot.consecutive_no_discovery_rounds, 0)
+
+        with self.assertRaises(ValueError):
+            await self.manager.complete_round(
+                self.control,
+                round_number=2,
+                round_outcome="finished",
+            )
+
     async def test_continuous_no_discovery_streak_completes_on_tenth_round(self):
         events = []
 

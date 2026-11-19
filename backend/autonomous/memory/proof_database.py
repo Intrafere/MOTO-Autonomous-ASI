@@ -20,6 +20,7 @@ from typing import Dict, Any, List, Mapping, Optional, Union
 
 import aiofiles
 
+from backend.shared.atomic_json import replace_file
 from backend.shared.config import system_config
 from backend.shared.installation_identity import (
     InstallationIdentityError,
@@ -29,6 +30,7 @@ from backend.shared.lean4_client import is_lean_workspace_error_text
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import (
     FailedProofCandidate,
+    MasterProofSummary,
     ProofCandidate,
     ProofPruneAggregateEntry,
     ProofPruneCommitIntent,
@@ -41,6 +43,12 @@ from backend.shared.path_safety import (
     resolve_filename_within_root,
     resolve_path_within_root,
     validate_single_path_component,
+)
+from backend.shared.master_proof_context import (
+    MASTER_PROOF_LIST_NOTICE,
+    build_solved_template,
+    render_master_proof_entry,
+    summary_from_state_payload,
 )
 from backend.shared.proof_identity import canonical_proof_identity
 from backend.shared.proof_locator import (
@@ -204,6 +212,8 @@ class ProofDatabase:
         self._index_data: Optional[Dict[str, Any]] = None
         self._mathlib_reverse_index: Dict[str, List[str]] = {}
         self._mathlib_reverse_short_index: Dict[str, List[str]] = {}
+        # Master proof state files already checked for linking: (path, mtime, size).
+        self._master_link_examined: set[tuple[str, int, int]] = set()
 
     def set_session_manager(self, session_manager) -> None:
         """Switch storage to the active session directory when available."""
@@ -279,6 +289,11 @@ class ProofDatabase:
     def _get_failed_dir(self) -> Path:
         self._refresh_runtime_root()
         return self._base_dir / "failed"
+
+    def get_master_proofs_dir(self) -> Path:
+        """Directory holding master proof scaffold state for this proof store."""
+        self._refresh_runtime_root()
+        return self._base_dir / "master_proofs"
 
     def _get_failed_candidates_path(self, source_brainstorm_id: str) -> Path:
         safe_id = validate_single_path_component(source_brainstorm_id, "brainstorm ID")
@@ -474,7 +489,7 @@ class ProofDatabase:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary_name, path)
+            replace_file(temporary_name, path)
         except Exception:
             try:
                 os.unlink(temporary_name)
@@ -636,6 +651,93 @@ class ProofDatabase:
         self._save_durable_revision_sync(self._index_data["proof_set_revision"])
         return True
 
+    def _link_verified_master_proofs_sync(self) -> bool:
+        """Mark stored proofs that were built as master proofs but predate that field.
+
+        A verified master proof keeps its scaffold state beside the proof store. A
+        record whose Lean code is exactly that verified file gains its kind and build
+        summary here, once; Lean code, hashes, and receipts are untouched.
+        """
+        directory = self.get_master_proofs_dir()
+        proofs = self._index_data.get("proofs", []) if self._index_data else []
+        if not proofs or not directory.is_dir():
+            return False
+        linked_keys = {
+            str((proof.get("master_proof") or {}).get("master_key") or "")
+            for proof in proofs
+            if proof.get("proof_kind") == "master_proof"
+        }
+        unlinked = [proof for proof in proofs if proof.get("proof_kind") != "master_proof"]
+        changed = False
+        for state_path in sorted(directory.glob("master_proof_*.json")):
+            if not unlinked:
+                break
+            if state_path.stem[len("master_proof_"):] in linked_keys:
+                continue
+            try:
+                stat = state_path.stat()
+            except OSError:
+                continue
+            signature = (str(state_path), stat.st_mtime_ns, stat.st_size)
+            if signature in self._master_link_examined:
+                continue
+            self._master_link_examined.add(signature)
+            try:
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict) or payload.get("status") != "verified":
+                continue
+            code = str(payload.get("scaffold_code") or "").strip()
+            match = next(
+                (
+                    proof for proof in unlinked
+                    if code and str(proof.get("lean_code") or "").strip() == code
+                ),
+                None,
+            )
+            if match is None:
+                continue
+            summary = summary_from_state_payload(payload)
+            match["proof_kind"] = "master_proof"
+            match["master_proof"] = summary.model_dump(mode="json")
+            match["attempt_count"] = max(
+                int(match.get("attempt_count") or 0), summary.total_attempts
+            )
+            proof_id = str(match.get("proof_id") or "")
+            if self._get_record_path(proof_id).is_file():
+                self._atomic_write_text_sync(
+                    self._get_record_path(proof_id), json.dumps(match, indent=2)
+                )
+            unlinked.remove(match)
+            changed = True
+        return changed
+
+    @staticmethod
+    def _master_template_inputs(record: Dict[str, Any]) -> tuple[str, Optional[MasterProofSummary]]:
+        summary = record.get("master_proof")
+        return (
+            str(record.get("lean_code") or "").strip(),
+            MasterProofSummary.model_validate(summary) if isinstance(summary, dict) else None,
+        )
+
+    def _warm_master_proof_templates_sync(self, records: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Build solved templates ahead of prompt assembly.
+
+        Parsing a large master proof takes a noticeable fraction of a second. Doing
+        it here, off the event loop, means the first prompt that lists the proof
+        only reads the cached template.
+        """
+        if records is None:
+            records = self._index_data.get("proofs", []) if self._index_data else []
+        for record in records:
+            if record.get("proof_kind") != "master_proof":
+                continue
+            try:
+                build_solved_template(*self._master_template_inputs(record))
+            except Exception as exc:
+                logger.debug("Could not prepare a master proof template: %s", type(exc).__name__)
+
     async def initialize(self) -> None:
         """Ensure storage exists and load the index."""
         if self._session_manager and self._session_manager.is_session_active:
@@ -717,9 +819,11 @@ class ProofDatabase:
             await asyncio.to_thread(self._load_durable_revision_sync),
         )
         reconciled = await asyncio.to_thread(self._reconcile_index_from_record_files_sync)
+        linked = await asyncio.to_thread(self._link_verified_master_proofs_sync)
         self._rebuild_reverse_indexes()
-        if reconciled or metadata_changed:
+        if reconciled or metadata_changed or linked:
             await self._save_index()
+        await asyncio.to_thread(self._warm_master_proof_templates_sync)
 
     def _ensure_index_loaded_sync(self) -> None:
         if self._index_data is not None:
@@ -743,7 +847,8 @@ class ProofDatabase:
             int(self._index_data.get("proof_set_revision", 0)),
             self._load_durable_revision_sync(),
         )
-        if self._reconcile_index_from_record_files_sync():
+        reconciled = self._reconcile_index_from_record_files_sync()
+        if self._link_verified_master_proofs_sync() or reconciled:
             self._atomic_write_text_sync(
                 self._get_index_path(),
                 json.dumps(self._index_data, indent=2),
@@ -951,6 +1056,8 @@ class ProofDatabase:
             await self._increment_proof_set_revision()
             self._rebuild_reverse_indexes()
             await self._save_index()
+            if stored_record.proof_kind == "master_proof":
+                await asyncio.to_thread(self._warm_master_proof_templates_sync, [serialized])
             return stored_record
 
     async def add_proof_if_absent(self, record: ProofRecord) -> tuple[ProofRecord, bool]:
@@ -2346,6 +2453,21 @@ class ProofDatabase:
             "",
         ]
         rendered_count = 0
+        notice_index = len(lines) - 1
+        master_rendered = False
+
+        def master_entry(record: Dict[str, Any], heading: str, source_line: str = "") -> List[str]:
+            lean_code, summary = self._master_template_inputs(record)
+            return render_master_proof_entry(
+                heading=heading,
+                proof_id=str(record.get("proof_id") or ""),
+                theorem_name=str(record.get("theorem_name") or ""),
+                theorem_statement=str(record.get("theorem_statement") or ""),
+                lean_code=lean_code,
+                summary=summary,
+                source_line=source_line,
+            )
+
         for index, proof in enumerate(novel_proofs, start=1):
             tier = proof.get("novelty_tier", "")
             tier_label = {
@@ -2375,6 +2497,12 @@ class ProofDatabase:
                     ]
                 )
                 for member in members:
+                    if member.get("proof_kind") == "master_proof":
+                        lines.extend(
+                            master_entry(member, f"GROUP MEMBER {member.get('proof_id', '')}")
+                        )
+                        master_rendered = True
+                        continue
                     lines.extend(
                         [
                             f"GROUP MEMBER {member.get('proof_id', '')}: {str(member.get('theorem_statement') or '').strip()}",
@@ -2383,6 +2511,17 @@ class ProofDatabase:
                         ]
                     )
                 lines.append("---")
+                rendered_count += 1
+            elif proof.get("proof_kind") == "master_proof":
+                lines.extend(
+                    master_entry(
+                        proof,
+                        f"PROOF {index} [{tier_label}]",
+                        f"Source: {proof.get('source_type', '')} {proof.get('source_id', '')}".strip(),
+                    )
+                )
+                lines.append("---")
+                master_rendered = True
                 rendered_count += 1
             else:
                 lines.extend(
@@ -2397,6 +2536,8 @@ class ProofDatabase:
                 rendered_count += 1
         if rendered_count == 0:
             return ""
+        if master_rendered:
+            lines.insert(notice_index, MASTER_PROOF_LIST_NOTICE)
         lines.append("=== END VERIFIED PROOFS ===")
         return "\n".join(lines)
 
@@ -2575,7 +2716,7 @@ class ProofDatabase:
                 metadata_path,
                 json.dumps(metadata, indent=2),
             )
-            await asyncio.to_thread(os.replace, temporary_run_dir, run_dir)
+            await asyncio.to_thread(replace_file, temporary_run_dir, run_dir)
 
             await asyncio.to_thread(shutil.rmtree, self._base_dir, True)
             self._base_dir.mkdir(parents=True, exist_ok=True)
@@ -2657,6 +2798,8 @@ class ProofDatabase:
                 "source_title": proof_data.get("source_title", ""),
                 "run_id": run_id,
                 "solver": proof_data.get("solver", "Lean 4"),
+                "proof_kind": proof_data.get("proof_kind", "individual"),
+                "master_proof": proof_data.get("master_proof"),
                 "novel": is_novel,
                 "novelty_tier": proof_data.get("novelty_tier", "not_novel"),
                 "novelty_reasoning": proof_data.get("novelty_reasoning", ""),

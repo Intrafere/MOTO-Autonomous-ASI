@@ -18,6 +18,8 @@ from backend.api.proxy_auth import (
     ProxyAuthError,
     hash_proxy_body,
     is_proxy_auth_allowlisted,
+    routed_path,
+    routed_query,
     validate_proxy_headers,
 )
 from backend.shared.config import system_config
@@ -58,10 +60,10 @@ def _origin_from_url(value: str) -> str:
 def _log_desktop_auth_rejection(request: Request, exc: ProxyAuthError) -> None:
     """Log stale-tab token misses without flooding desktop logs."""
     if exc.status_code != status.HTTP_401_UNAUTHORIZED:
-        logger.warning("Rejected desktop request %s %s: %s", request.method, request.url.path, exc.detail)
+        logger.warning("Rejected desktop request %s %s: %s", request.method, routed_path(request.scope), exc.detail)
         return
 
-    key = (request.method, request.url.path)
+    key = (request.method, routed_path(request.scope))
     now = time.monotonic()
     last_log_at, suppressed = _stale_desktop_tab_log_state.get(key, (0.0, 0))
 
@@ -74,7 +76,7 @@ def _log_desktop_auth_rejection(request: Request, exc: ProxyAuthError) -> None:
         "Ignored desktop request without the current MOTO tab token: %s %s. "
         "This is usually a harmless stale browser tab from an older launch; returning 401.%s",
         request.method,
-        request.url.path,
+        routed_path(request.scope),
         suffix,
     )
     _stale_desktop_tab_log_state[key] = (now, 0)
@@ -82,9 +84,9 @@ def _log_desktop_auth_rejection(request: Request, exc: ProxyAuthError) -> None:
 
 def _validate_desktop_token(request: Request, allowed_origins: list[str]) -> None:
     """Require the launcher-provided desktop API token outside public routes."""
-    if is_proxy_auth_allowlisted(request.method, request.url.path):
+    if is_proxy_auth_allowlisted(request.method, routed_path(request.scope)):
         return
-    if _is_desktop_public_export(request.method, request.url.path):
+    if _is_desktop_public_export(request.method, routed_path(request.scope)):
         return
 
     expected = (system_config.desktop_api_token or "").strip()
@@ -126,7 +128,7 @@ def _validate_generic_content_length(request: Request) -> None:
             status.HTTP_400_BAD_REQUEST,
         ) from exc
 
-    max_bytes = max(int(system_config.generic_max_request_bytes or 0), 1)
+    max_bytes = _generic_max_request_bytes()
     if content_length > max_bytes:
         raise ProxyAuthError(
             f"Request body exceeds hosted limit of {max_bytes} bytes.",
@@ -134,9 +136,40 @@ def _validate_generic_content_length(request: Request) -> None:
         )
 
 
-async def _validate_generic_body_hash(request: Request, expected_hash: str) -> str:
-    """Verify the signed body hash against the actual request body."""
-    body = await request.body()
+def _generic_max_request_bytes() -> int:
+    return max(int(system_config.generic_max_request_bytes or 0), 1)
+
+
+async def _read_generic_body(request: Request) -> bytes:
+    """Read the request body, stopping once it exceeds the hosted size limit.
+
+    A body sent without ``Content-Length`` (chunked) is not covered by the
+    header check, so the limit is enforced on the bytes actually received.
+    """
+    max_bytes = _generic_max_request_bytes()
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > max_bytes:
+            raise ProxyAuthError(
+                f"Request body exceeds hosted limit of {max_bytes} bytes.",
+                status.HTTP_413_CONTENT_TOO_LARGE,
+            )
+        chunks.append(chunk)
+    body = b"".join(chunks)
+    # Cache it the way ``Request.body()`` does so the route still receives it.
+    request._body = body
+    return body
+
+
+async def _validate_generic_body_hash(request: Request, expected_hash: str) -> None:
+    """Verify the signed body hash against the actual request body.
+
+    Call this only after the proxy signature over ``expected_hash`` is verified,
+    so an unsigned request never has its body read.
+    """
+    body = await _read_generic_body(request)
     actual_hash = hash_proxy_body(body)
     if not hmac.compare_digest(expected_hash, actual_hash):
         raise ProxyAuthError(
@@ -148,7 +181,6 @@ async def _validate_generic_body_hash(request: Request, expected_hash: str) -> s
         return {"type": "http.request", "body": body, "more_body": False}
 
     request._receive = receive
-    return actual_hash
 
 
 def setup_middleware(app: FastAPI) -> None:
@@ -178,36 +210,35 @@ def setup_middleware(app: FastAPI) -> None:
         """Require hosted proxy auth or desktop instance tokens for protected routes."""
         if system_config.generic_mode:
             try:
-                if not is_proxy_auth_allowlisted(request.method, request.url.path):
+                if not is_proxy_auth_allowlisted(request.method, routed_path(request.scope)):
                     _validate_generic_content_length(request)
 
                 body_hash = request.headers.get(PROXY_BODY_SHA256_HEADER)
-                verified_body_hash = EMPTY_BODY_SHA256
-                if (
-                    not is_proxy_auth_allowlisted(request.method, request.url.path)
+                has_signed_body = (
+                    not is_proxy_auth_allowlisted(request.method, routed_path(request.scope))
                     and request.method.upper() not in {"GET", "HEAD"}
-                    and not body_hash
-                ):
+                )
+                if has_signed_body and not body_hash:
                     raise ProxyAuthError(
                         "Missing required X-Moto body hash header.",
                         status.HTTP_401_UNAUTHORIZED,
                     )
-                if (
-                    not is_proxy_auth_allowlisted(request.method, request.url.path)
-                    and request.method.upper() not in {"GET", "HEAD"}
-                ):
-                    verified_body_hash = await _validate_generic_body_hash(request, body_hash or "")
+                # Verify the signature over the claimed body hash first, then read
+                # the body and check it against that hash. An unsigned request is
+                # rejected before any of its body is read.
                 validate_proxy_headers(
                     request.headers,
                     method=request.method,
-                    path=request.url.path,
-                    query_string=request.url.query,
-                    body_hash=verified_body_hash,
+                    path=routed_path(request.scope),
+                    query_string=routed_query(request.scope),
+                    body_hash=(body_hash or "") if has_signed_body else EMPTY_BODY_SHA256,
                     expected_instance_id=system_config.instance_id,
                     shared_secret=system_config.internal_proxy_secret or "",
                 )
+                if has_signed_body:
+                    await _validate_generic_body_hash(request, body_hash or "")
             except ProxyAuthError as exc:
-                logger.warning("Rejected generic-mode request %s %s: %s", request.method, request.url.path, exc.detail)
+                logger.warning("Rejected generic-mode request %s %s: %s", request.method, routed_path(request.scope), exc.detail)
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
         else:
             try:

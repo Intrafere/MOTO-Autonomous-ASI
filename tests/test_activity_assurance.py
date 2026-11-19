@@ -138,10 +138,14 @@ async def test_compiler_critique_validator_contract_failure_is_operational(monke
         ),
     )
 
-    with pytest.raises(RuntimeError, match="Critique validation failed"):
+    from backend.shared.model_output_contract import ModelOutputContractError
+
+    with pytest.raises(ModelOutputContractError) as raised:
         await coordinator._validate_critique(
             SimpleNamespace(submission_id="critique-1", content="critique")
         )
+    assert raised.value.role == "critique_validator"
+    assert raised.value.stage == "syntax"
 
 
 def test_fill_missing_activity_metadata_preserves_explicit_and_legacy_fields():

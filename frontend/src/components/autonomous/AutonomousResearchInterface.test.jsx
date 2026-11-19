@@ -117,8 +117,8 @@ test('keeps autonomous start and output controls available in the prompt compose
     expect.stringContaining('S.T.E.M. research or solution objective')
   );
   expect(screen.getByRole('button', { name: 'Start Research' })).toBeEnabled();
-  expect(screen.getByLabelText('Mathematical Proofs')).toBeInTheDocument();
-  expect(screen.getByLabelText('Research Papers')).toBeInTheDocument();
+  expect(screen.getByLabelText('Mathematical Proofs')).toHaveAccessibleDescription(/^Very high usage\./);
+  expect(screen.getByLabelText('Research Papers')).toHaveAccessibleDescription(/^Medium usage\./);
   expect(screen.getByLabelText('Creativity Emphasis Boost')).toBeInTheDocument();
 });
 

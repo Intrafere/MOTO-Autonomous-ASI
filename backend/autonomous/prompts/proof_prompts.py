@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from typing import Iterable, Any
 
+from backend.shared.json_key_recovery import KeySpec, ObjectSchema
 from backend.shared.lean4_client import is_lean_workspace_error_text
+from backend.shared.master_proof_context import kind_for_source_type, note_context_part
 from backend.shared.models import MathlibLemmaHint, ProofAttemptFeedback, SmtHint
 from backend.shared.prompt_feedback_budget import project_lean_feedback
 
@@ -383,8 +385,87 @@ Are there any novel proofs here to solve that directly solve the users prompt, g
 
 Return TRUE only if the answer is yes. Return FALSE if the remaining possible proof targets are merely background, routine, standard, already verified, or have no plausible path, direct or indirect, toward solving the user's prompt.
 
+PRIOR PROOF ROUND SUMMARY lists up to the five most recent rounds that attempted proofs, oldest first: each attempted target, whether Lean 4 verified it, and the novelty rating each verified proof received. A verified target is already proved; do not propose it or a restatement of it again. A verified target rated not_novel was judged a standard, known, or routine result, so do not propose it, a restatement, or a minor variant of it again; look for a genuinely different novel target instead.
+
 A target listed as failed in PRIOR PROOF ROUND SUMMARY could not be proved within its Lean 4 attempt budget. Do not propose it again unchanged. Prefer a genuinely novel piece of it that has a reasonable chance of being fully proved within the budget, or a different novel target; propose the whole target again only with a materially different formalization that gives it a reasonable chance of success.
 {prior_block}"""
+
+
+_INDIVIDUAL_BUDGET_BULLET = """- LEAN 4 ATTEMPT BUDGET: each selected target receives 5 Lean 4 attempts (3 complete-proof attempts, then 2 tactic-script attempts). Each attempt is compile-checked against Mathlib and the compiler feedback is returned for the next attempt. Every attempt must prove the selected statement in full within a single Lean file, building any theory Mathlib lacks inside that file; the formalization agent will not narrow or weaken the statement."""
+
+_INDIVIDUAL_DIRECT_BULLET = """- Direct solutions take priority whenever they have a reasonable chance of being fully proved within that budget. When a direct target would need substantial theory that Mathlib lacks, or is too large to prove in full within the budget, select its strongest genuinely novel piece that can be fully proved within the budget instead: a decisive step, reduction, obstruction, or indirect result that moves toward the full solution."""
+
+_MASTER_PROOF_OPTION_BULLET = """- MASTER PROOF OPTION: when a direct or high-impact target is too large to prove in full within that individual budget but you can see a credible multi-step route to it, you may propose it as a master proof instead of narrowing it, by setting proposal_kind to "master_proof". A master proof is first written as a Lean 4 scaffold of lemmas whose proofs are `sorry`; each `sorry` is then attempted in parallel, may be expanded into a further sub-scaffold of `sorry` lemmas as often as needed, and receives 15 Lean 4 attempts. The scaffold does not need to be fully detailed in advance: a step may be left as a larger, more general `sorry` that a later solver expands into its own sub-master-proof scaffold, so the route only needs a credible top-level decomposition rather than every fine-grained step worked out now. If any single `sorry` exhausts its attempts the whole master proof fails, so propose a master proof only when every step of the route is plausibly provable, directly or through further expansion. Set proposal_kind to "individual" for every other candidate."""
+
+_MASTER_ONLY_BUDGET_BULLET = """- LEAN 4 ATTEMPT BUDGET: every selected target is proved as a master proof, so set proposal_kind to "master_proof" for every candidate. A master proof is first written as a Lean 4 scaffold of lemmas whose proofs are `sorry`; each `sorry` is then attempted in parallel, may be expanded into a further sub-scaffold of `sorry` lemmas as often as needed, and receives 15 Lean 4 attempts. Each attempt is compile-checked against Mathlib and the compiler feedback is returned for the next attempt. The scaffold does not need to be fully detailed in advance: a step may be left as a larger, more general `sorry` that a later solver expands into its own sub-master-proof scaffold, so the route only needs a credible top-level decomposition rather than every fine-grained step worked out now. The master theorem must be proved in full exactly as selected; it will not be narrowed or weakened. If any single `sorry` exhausts its attempts the whole master proof fails."""
+
+_MASTER_ONLY_DIRECT_BULLET = """- Direct solutions take priority whenever every step of a credible route to them is plausibly provable, directly or through further expansion. When no such route to a direct target is visible, select its strongest genuinely novel piece that has one instead: a decisive step, reduction, obstruction, or indirect result that moves toward the full solution."""
+
+_MASTER_PROOF_VALIDATION_PARAGRAPH = """An entry whose proposal_kind is "master_proof" is one large theorem that will be proved through a scaffold of many supporting steps. Review it holistically: judge the novelty of the master theorem as a whole, exactly once. Its supporting steps are not proposed theorems and need no novelty of their own; never reject a master proof because steps along its route would be standard, routine, or known results.
+
+"""
+
+
+def _proof_target_budget_block(allow_single_shot_proofs: bool, allow_master_proofs: bool) -> str:
+    """Target-budget bullets naming only the proof kinds the user allows."""
+    if not allow_single_shot_proofs:
+        return f"{_MASTER_ONLY_BUDGET_BULLET}\n{_MASTER_ONLY_DIRECT_BULLET}"
+    bullets = [_INDIVIDUAL_BUDGET_BULLET, _INDIVIDUAL_DIRECT_BULLET]
+    if allow_master_proofs:
+        bullets.append(_MASTER_PROOF_OPTION_BULLET)
+    return "\n".join(bullets)
+
+
+def _proof_identification_example_kind_line(
+    allow_single_shot_proofs: bool, allow_master_proofs: bool
+) -> str:
+    if not allow_master_proofs:
+        return ""
+    kind = "individual" if allow_single_shot_proofs else "master_proof"
+    return f',\n      "proposal_kind": "{kind}"'
+
+
+# Ordered response schemas for key-label recovery. Key order matches the JSON
+# example in the matching prompt builder (tests compare them); free-text fields
+# alone are repairable.
+PROOF_IDENTIFICATION_THEOREM_SCHEMA = ObjectSchema(
+    name="proof_identification_theorem",
+    keys=(
+        KeySpec("theorem_id", aliases=("id",)),
+        KeySpec("statement", repairable=True),
+        KeySpec("formal_sketch", required=False, repairable=True),
+        KeySpec("expected_novelty_tier"),
+        KeySpec("prompt_relevance_rationale", repairable=True),
+        KeySpec("novelty_rationale", repairable=True),
+        KeySpec("why_not_standard_known_result", repairable=True),
+        KeySpec("retry_open_target_id", required=False),
+        KeySpec("proposal_kind", required=False),
+    ),
+    item_id_key="theorem_id",
+)
+
+PROOF_IDENTIFICATION_RESPONSE_SCHEMA = ObjectSchema(
+    name="proof_identification",
+    keys=(
+        KeySpec("has_provable_theorems", value_type="bool"),
+        KeySpec(
+            "theorems",
+            value_type="list_object",
+            item_schema=PROOF_IDENTIFICATION_THEOREM_SCHEMA,
+        ),
+    ),
+)
+
+PROOF_NOVELTY_RESPONSE_SCHEMA = ObjectSchema(
+    name="proof_novelty",
+    keys=(
+        KeySpec("novelty_tier"),
+        KeySpec("reasoning", repairable=True),
+        KeySpec("novelty_scope", required=False),
+        KeySpec("group_claim", required=False, repairable=True),
+        KeySpec("group_proof_ids", required=False, value_type="list"),
+    ),
+)
 
 
 def build_proof_identification_prompt(
@@ -398,8 +479,14 @@ def build_proof_identification_prompt(
     prior_round_results: str = "",
     candidate_list_rejection_feedback: str = "",
     open_proof_targets: str = "",
+    allow_single_shot_proofs: bool = True,
+    allow_master_proofs: bool = True,
 ) -> str:
     """Identify prompt-relevant theorem candidates from a brainstorm or paper."""
+    if not (allow_single_shot_proofs or allow_master_proofs):
+        raise ValueError("At least one proof kind must be allowed.")
+    target_budget_block = _proof_target_budget_block(allow_single_shot_proofs, allow_master_proofs)
+    note_context_part(kind_for_source_type(source_type), source_content)
     source_title_block = _format_source_title_block(source_type, source_title)
     open_proof_targets_block = (
         f"\n{open_proof_targets.strip()}\n" if open_proof_targets.strip() else ""
@@ -429,10 +516,13 @@ def build_proof_identification_prompt(
       "prompt_relevance_rationale": "why proving this would directly solve, solve toward, or plausibly help solve the user prompt",
       "novelty_rationale": "why this is new knowledge rather than a known-knowledge base entry",
       "why_not_standard_known_result": "why this is not merely a textbook/Mathlib/routine helper result",
-      "retry_open_target_id": ""
+      "retry_open_target_id": ""__PROPOSAL_KIND__
     }
   ]
-}"""
+}""".replace(
+        "__PROPOSAL_KIND__",
+        _proof_identification_example_kind_line(allow_single_shot_proofs, allow_master_proofs),
+    )
     return f"""You are a theorem-discovery agent for MOTO. Your mission is to find NEW OR NOVEL mathematical claims in the source below that directly or indirectly help answer, support, or advance the USER RESEARCH PROMPT and deserve formal verification in Lean 4.
 
 This is NOT a known-knowledge-base construction task. Do not collect standard facts just because they are true, useful, formalizable, or prompt-adjacent. Lean 4 verification cost is reserved for candidates that could become public, citable prompt-relevant knowledge rather than run-local firsts.
@@ -448,8 +538,7 @@ TARGET SELECTION:
 - Prefer proof targets that directly solve the prompt, rule out an impossible prompt, establish a decisive reduction, prove a new obstruction, or otherwise make major progress on the requested problem.
 - Routine helper lemmas, local facts, trivial/easy proofs, and supporting lemmas without new mathematical content are NEVER valid proof targets, even as a fallback or last resort.
 - Do not settle for a minor reformulation, local formalization, or easy-to-prove fact.
-- LEAN 4 ATTEMPT BUDGET: each selected target receives 5 Lean 4 attempts (3 complete-proof attempts, then 2 tactic-script attempts). Each attempt is compile-checked against Mathlib and the compiler feedback is returned for the next attempt. Every attempt must prove the selected statement in full within a single Lean file, building any theory Mathlib lacks inside that file; the formalization agent will not narrow or weaken the statement.
-- Direct solutions take priority whenever they have a reasonable chance of being fully proved within that budget. When a direct target would need substantial theory that Mathlib lacks, or is too large to prove in full within the budget, select its strongest genuinely novel piece that can be fully proved within the budget instead: a decisive step, reduction, obstruction, or indirect result that moves toward the full solution.
+{target_budget_block}
 - Provability never lowers the novelty bar. Aggressively pursue the most novel and consequential targets that are realistically provable, and still reject routine, standard, or easy results. Do not choose tiny safe targets merely because they are easy.
 
 WHAT TO REJECT (never extract these):
@@ -498,8 +587,10 @@ def build_proof_candidate_list_validation_prompt(
     source_id: str,
     source_title: str,
     candidates_json: str,
+    allow_master_proofs: bool = True,
 ) -> str:
     """Build the independent pre-Lean whole-list novelty review prompt."""
+    master_proof_review_block = _MASTER_PROOF_VALIDATION_PARAGRAPH if allow_master_proofs else ""
     example_json = """{
   "results": [
     {
@@ -514,7 +605,7 @@ def build_proof_candidate_list_validation_prompt(
 
 Review novelty without using private MOTO proof history or treating program-local firsts as novel. Assess every proposed theorem independently against public, standard, textbook, and Mathlib knowledge. A theorem is approvable when its mathematical content is plausibly new or novel and it may eventually lead, directly or indirectly, to a solution of the user's objective. Novel intermediate or stepping-stone results qualify; do not reject a novel theorem merely because it does not solve the objective by itself. Reject standard results, routine helpers, minor reformulations, local formalizations, proof-engineering glue, and results with no plausible path toward the user's objective.
 
-Return exactly one result for every theorem_id below, in the same order, with no duplicate, missing, or extra IDs. Use decision "approve_novel" or "reject_not_novel". Give a specific novelty reason for each result. The feedback must concisely explain what a regenerated complete list should fix; if all entries are approved, state why the list is suitable for proof attempts. Do not decide the aggregate list outcome in prose; deterministic code owns that decision.
+{master_proof_review_block}Return exactly one result for every theorem_id below, in the same order, with no duplicate, missing, or extra IDs. Use decision "approve_novel" or "reject_not_novel". Give a specific novelty reason for each result. The feedback must concisely explain what a regenerated complete list should fix; if all entries are approved, state why the list is suitable for proof attempts. Do not decide the aggregate list outcome in prose; deterministic code owns that decision.
 
 USER RESEARCH PROMPT:
 {user_prompt}
@@ -651,6 +742,7 @@ def build_proof_formalization_prompt(
     retrieved_proofs_context: str = "",
 ) -> str:
     """Build the Lean 4 formalization prompt for one theorem."""
+    note_context_part(kind_for_source_type(source_type), full_source_content)
     attempt_history = _format_attempt_history(prior_attempts)
     relevant_lemmas_block = _format_relevant_lemmas(relevant_lemmas)
     smt_hint_block = _format_smt_hint(smt_hint)
@@ -782,6 +874,7 @@ def build_proof_tactic_script_prompt(
     retrieved_proofs_context: str = "",
 ) -> str:
     """Build a tactic-oriented Lean 4 prompt for one theorem."""
+    note_context_part(kind_for_source_type(source_type), full_source_content)
     attempt_history = _format_attempt_history(prior_attempts)
     relevant_lemmas_block = _format_relevant_lemmas(relevant_lemmas)
     smt_hint_block = _format_smt_hint(smt_hint)

@@ -567,6 +567,13 @@
   border-color: rgba(34, 197, 94, 0.35);
 }
 
+.math-proof-badge.master-proof {
+  color: #9bb5ff;
+  border-color: rgba(155, 181, 255, 0.5);
+  background: rgba(111, 140, 255, 0.12);
+  font-weight: 700;
+}
+
 .math-proof-badge.known {
   color: #18cc17;
   border-color: rgba(96, 165, 250, 0.35);

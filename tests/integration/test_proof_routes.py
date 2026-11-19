@@ -1131,6 +1131,54 @@ class ManualAggregatorProofEventLogTests(IsolatedAsyncioTestCase):
         self.assertIn("10 consecutive rounds find no candidates", round_complete)
         self.assertEqual(completion, "Proof check complete: 0 verified, 0 novel")
 
+    def test_errored_round_and_check_messages_never_read_as_completed(self) -> None:
+        errored_round = proofs_route._manual_aggregator_proof_event_message(
+            "proof_run_round_complete",
+            {
+                "round_index": 1,
+                "candidate_count": None,
+                "run_mode": "loop_with_pruning",
+                "round_outcome": "error",
+                "next_round_automatic": False,
+            },
+        )
+        fatal_round = proofs_route._manual_aggregator_proof_event_message(
+            "proof_run_round_complete",
+            {"round_index": 2, "candidate_count": None, "round_outcome": "fatal_stop"},
+        )
+        # Older saved records: no outcome, no count, but a stale continuation flag.
+        legacy_round = proofs_route._manual_aggregator_proof_event_message(
+            "proof_run_round_complete",
+            {
+                "round_index": 1,
+                "candidate_count": None,
+                "run_mode": "loop_with_pruning",
+                "next_round_automatic": True,
+            },
+        )
+        errored_check = proofs_route._manual_aggregator_proof_event_message(
+            "proof_check_complete",
+            {
+                "verified_count": 0,
+                "novel_count": 0,
+                "had_error": True,
+                "message": "Proof verification encountered an error: Expecting property name",
+            },
+        )
+
+        for message in (errored_round, fatal_round, legacy_round, errored_check):
+            self.assertNotIn("found none", message)
+            self.assertNotIn("will start automatically", message)
+            self.assertNotIn("complete", message.lower())
+        self.assertIn("stopped on an error", errored_round)
+        self.assertIn("no next round will start", errored_round)
+        self.assertIn("stopped before finishing", fatal_round)
+        self.assertIn("without a usable proof discovery result", legacy_round)
+        self.assertEqual(
+            errored_check,
+            "Proof check stopped on an error: Expecting property name",
+        )
+
     def test_no_discovery_terminal_message_explains_normal_completion(self) -> None:
         message = proofs_route._manual_aggregator_proof_event_message(
             "proof_run_terminal",

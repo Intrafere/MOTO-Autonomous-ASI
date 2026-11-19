@@ -1,9 +1,11 @@
-"""Provider profiles for API-key subscription clients.
+"""Provider profiles for API-key cloud provider clients.
 
-A profile is everything provider-specific about an OpenAI-compatible
-subscription API: endpoints, key storage names, known model metadata, request
-shaping, and error classification. ``SubscriptionApiKeyClient`` supplies the
-shared transport, retry, key-lifecycle, and response-normalization logic.
+A profile is everything provider-specific about an API-key provider: endpoints,
+key storage names, known model metadata, request shaping, and error
+classification. ``SubscriptionApiKeyClient`` supplies the shared transport,
+retry, key-lifecycle, and response-normalization logic. Most providers speak an
+OpenAI-compatible wire; Claude models use the Messages API wire in
+``claude_messages``.
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ import httpx
 from backend.shared.subscription_providers.errors import SubscriptionProviderError
 from backend.shared.subscription_providers.metadata import CloudProviderMetadata
 
-WireApi = Literal["responses_then_chat", "chat_completions_stream"]
+WireApi = Literal["responses_then_chat", "chat_completions_stream", "anthropic_messages"]
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,16 @@ class ApiKeyProviderSettings:
     # "permanent": any non-truncation failure with a fallback moves the role to
     # LM Studio until reset; "non_transient_only" keeps transient failures call-only.
     generic_error_fallback: Literal["permanent", "non_transient_only"] = "permanent"
+    # "detect": the key is tried against each region and the accepting one is kept.
+    # "user": the user names the region when saving the key (for example an AWS region).
+    region_selection: Literal["detect", "user"] = "detect"
+    # Environment variables naming the default region for "user" selection.
+    region_env_var_names: Tuple[str, ...] = ()
+    # "anthropic_models": models and key validation come from the Claude Models API.
+    model_list_api: Literal["openai_models", "anthropic_models"] = "openai_models"
+    # Repair advice for an unrecoverable failure with no typed guidance; empty
+    # means the generic "check your API key in OpenRouter/OAuth" hint.
+    repair_hint: str = ""
 
     @property
     def provider_id(self) -> str:
@@ -117,6 +129,23 @@ class ApiKeyProviderProfile:
     @property
     def label(self) -> str:
         return self.settings.label
+
+    # --- wire selection ---------------------------------------------------------
+    def wire_api_for_model(self, model: str) -> WireApi:
+        """Return the wire one model is served on (a provider may serve several)."""
+        return self.settings.wire_api
+
+    def messages_base_url(self, base_url: str) -> str:
+        """Return the Messages API base URL for a region's base URL."""
+        return base_url
+
+    def alternate_chat_base_url(self, base_url: str, response: httpx.Response) -> Optional[str]:
+        """Return another Chat Completions base URL to try for this rejection, if any."""
+        return None
+
+    def finalize_model_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Adjust the model list returned to the UI (for example add known metadata)."""
+        return records
 
     # --- request shaping --------------------------------------------------------
     def normalize_reasoning_effort(self, reasoning_effort: Optional[str], *, model: str) -> Optional[str]:

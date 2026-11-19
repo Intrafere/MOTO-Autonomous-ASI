@@ -1,4 +1,5 @@
 import React from 'react';
+import { isLocalServerProvider } from '../utils/oauthProviders';
 
 const IconX = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -15,6 +16,8 @@ const IconKey = () => (
   </svg>
 );
 
+// Each notification's button opens the setup window for its provider: the
+// OpenRouter/OAuth window, or a local server's own setup (vLLM).
 export default function CodexOAuthNotificationStack({
   notifications,
   onDismiss,
@@ -67,6 +70,7 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
     : 'OAuth provider';
   const providerLabel = notification.provider_label || 'OAuth';
   const isUsageLimit = notification.reason === 'usage_limit_reached';
+  const isLocalServer = isLocalServerProvider(notification.provider);
 
   return (
     <div
@@ -109,7 +113,7 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
           </div>
           <div>
             <div style={{ fontSize: '10px', color: '#ddd6fe', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: '700' }}>
-              {isUsageLimit ? 'Provider Cooldown' : 'OAuth Needs Attention'}
+              {isUsageLimit ? 'Provider Cooldown' : (isLocalServer ? 'Local Server Needs Attention' : 'OAuth Needs Attention')}
             </div>
             <div style={{ fontSize: '14px', fontWeight: '700', lineHeight: '1.2', color: '#f5f3ff' }}>
               {providerLabel}
@@ -143,7 +147,7 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
       </div>
 
       <button
-        onClick={onOpenCloudAccess}
+        onClick={() => onOpenCloudAccess?.(notification)}
         style={{
           width: '100%',
           padding: '8px 12px',
@@ -156,7 +160,7 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
           cursor: 'pointer',
         }}
       >
-        {isUsageLimit ? 'Open Provider Settings' : 'Open OpenRouter/OAuth'}
+        {isUsageLimit ? 'Open Provider Settings' : (isLocalServer ? `Open ${providerLabel} Setup` : 'Open OpenRouter/OAuth')}
       </button>
 
       <style>{`

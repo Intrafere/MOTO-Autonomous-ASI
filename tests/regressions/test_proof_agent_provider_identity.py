@@ -388,6 +388,8 @@ async def test_post_lean_retry_waits_name_stage_workflow_over_active_owner(
         )
 
     assert result.verified_count == 1
+    # Round memory reports each verified proof's stored novelty rating.
+    assert [item.novelty_tier for item in result.results] == ["not_novel"]
     retries = [
         call.args[1]
         for call in manager_broadcast.await_args_list

@@ -235,6 +235,10 @@ def export_tree(tree: str, destination: Path, repo: Path = REPO_ROOT) -> None:
     assert process.stdout is not None
     with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
         _extract_tar(archive, destination)
+    # tarfile stops at the end-of-archive marker, but git still writes record
+    # padding after it. Drain it, or git blocks on a full pipe and never exits.
+    while process.stdout.read(1 << 16):
+        pass
     stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
     if process.wait() != 0:
         raise CodeQLRunError(f"git archive {tree} failed: {stderr.strip()}")

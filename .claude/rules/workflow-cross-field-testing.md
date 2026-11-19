@@ -81,6 +81,9 @@ support graph.
   model, provider, OpenRouter configured/upstream host) in fields and the rendered line.
   Browser evidence must verify rendered and reload behavior;
   model-only evidence cannot stand in for production event emission or persistence.
+- Desktop `moto` CLI laws (`cli_control.*`) must cover committed-start-only templates,
+  credential stripping, hosted no-write, control-file owner lifecycle, and a real start
+  route's saved template replayed through the CLI into the next real start.
 - A production-wide AST retry-wait inventory must classify actual retry waits, explicit
  non-retry polling/synchronization waits, and blocked external/tool waits; only assured sources
   routed through the production emit-and-wait seam may count as passed coverage.

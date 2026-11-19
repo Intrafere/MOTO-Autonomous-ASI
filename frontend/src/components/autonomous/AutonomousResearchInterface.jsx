@@ -7,6 +7,8 @@ import './AutonomousResearch.css';
 import LivePaperProgress from './LivePaperProgress';
 import LiveTier3Progress from './LiveTier3Progress';
 import TextFileUploader from '../TextFileUploader';
+import AllowedOutputsRow from '../AllowedOutputsRow';
+import { buildProofSettingsPayload, publishProofSettings } from '../../utils/proofRuntimeSettings';
 import '../settings-common.css';
 import { getActivityClass as getSharedActivityClass, getActivityIcon as getSharedActivityIcon } from '../../utils/activityStyles';
 import { removePromptDraft } from '../../utils/promptDraftStorage';
@@ -133,7 +135,7 @@ const AutonomousResearchInterface = ({
       alert('Please enter a research prompt');
       return;
     }
-    const mathematicalProofsAllowed = proofOutputsAvailable && (config?.allow_mathematical_proofs ?? true);
+    const mathematicalProofsAllowed = proofOutputsAvailable && (config?.allow_mathematical_proofs ?? false);
     const researchPapersAllowed = config?.allow_research_papers ?? true;
     if (!mathematicalProofsAllowed && !researchPapersAllowed) {
       alert('Please allow at least one output: Mathematical Proofs or Research Papers.');
@@ -176,15 +178,8 @@ const AutonomousResearchInterface = ({
     setProofOutputUpdating(true);
     try {
       const status = await api.getProofStatus();
-      const updatedStatus = await api.updateProofSettings({
-        enabled,
-        timeout: status.lean4_proof_timeout ?? 2000,
-        lean4_lsp_enabled: Boolean(status.lean4_lsp_enabled),
-        lean4_lsp_idle_timeout: status.lean4_lsp_idle_timeout ?? 600,
-        max_parallel_candidates: status.proof_max_parallel_candidates ?? 6,
-        smt_enabled: Boolean(status.smt_enabled),
-        smt_timeout: status.smt_timeout ?? 300,
-      });
+      const updatedStatus = await api.updateProofSettings(buildProofSettingsPayload(status, { enabled }));
+      publishProofSettings(updatedStatus);
       if (enabled) {
         const leanVersion = String(updatedStatus.lean4_version || updatedStatus.lean_version || '').trim();
         const leanVersionUnavailable = /not found|no such file|not recognized/i.test(leanVersion);
@@ -207,7 +202,7 @@ const AutonomousResearchInterface = ({
   const updateAllowedOutput = async (key, checked) => {
     const nextConfig = {
       ...config,
-      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? true,
+      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? false,
       allow_research_papers: config?.allow_research_papers ?? true,
       [key]: checked
     };
@@ -381,36 +376,25 @@ const AutonomousResearchInterface = ({
           </div>
         </div>
         <div className="prompt-composer-options">
-          <div
-            className="allowed-outputs-row"
-            title="Allowed Outputs controls which products this workflow may generate. At least one output must remain enabled."
-          >
-            <span className="allowed-outputs-label">Allowed Outputs:</span>
-            <label
-              className="allowed-output-option"
-              title="Mathematical Proofs enables Lean 4 proof verification and proof-library output for this run."
-            >
-              <input
-                type="checkbox"
-                checked={proofOutputsAvailable && Boolean(config?.allow_mathematical_proofs ?? true)}
-                onChange={(event) => updateAllowedOutput('allow_mathematical_proofs', event.target.checked)}
-                disabled={controlsLocked || proofOutputUpdating || !proofOutputsAvailable}
-              />
-              <span className="allowed-output-text">Mathematical Proofs</span>
-            </label>
-            <label
-              className="allowed-output-option"
-              title="Research Papers enables paper compilation output. When disabled, autonomous research loops through brainstorms and proof checks without writing papers."
-            >
-              <input
-                type="checkbox"
-                checked={Boolean(config?.allow_research_papers ?? true)}
-                onChange={(event) => updateAllowedOutput('allow_research_papers', event.target.checked)}
-                disabled={controlsLocked}
-              />
-              <span className="allowed-output-text">Research Papers</span>
-            </label>
-          </div>
+          <AllowedOutputsRow
+            rowTitle="Allowed Outputs controls which products this workflow may generate. At least one output must remain enabled."
+            proofOutputsAvailable={proofOutputsAvailable}
+            optionsLocked={controlsLocked}
+            getProofStatus={api?.getProofStatus}
+            updateProofSettings={api?.updateProofSettings}
+            proofs={{
+              title: 'Mathematical Proofs enables Lean 4 proof verification and proof-library output for this run.',
+              checked: proofOutputsAvailable && Boolean(config?.allow_mathematical_proofs ?? false),
+              onChange: (event) => updateAllowedOutput('allow_mathematical_proofs', event.target.checked),
+              disabled: controlsLocked || proofOutputUpdating || !proofOutputsAvailable,
+            }}
+            papers={{
+              title: 'Research Papers enables paper compilation output. When disabled, autonomous research loops through brainstorms and proof checks without writing papers.',
+              checked: Boolean(config?.allow_research_papers ?? true),
+              onChange: (event) => updateAllowedOutput('allow_research_papers', event.target.checked),
+              disabled: controlsLocked,
+            }}
+          />
           {developerModeEnabled && (
             <label className="settings-checkbox-label prompt-composer-option">
               <input
@@ -694,9 +678,9 @@ const AutonomousResearchInterface = ({
             visibleActivity.map((item, index) => (
               <div 
                 key={index} 
-                className={`activity-item ${getSharedActivityClass(item.event)}`}
+                className={`activity-item ${getSharedActivityClass(item.event, item)}`}
               >
-                <span className="activity-icon">{getSharedActivityIcon(item.event)}</span>
+                <span className="activity-icon">{getSharedActivityIcon(item.event, item)}</span>
                 <span className="activity-time">
                   {new Date(item.timestamp).toLocaleTimeString()}
                 </span>

@@ -13,11 +13,13 @@ from pathlib import Path
 from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, HTTPException, Response
 
+from backend.shared.cli_control import remember_start_request
 from backend.shared.models import (
     AutonomousResearchStartRequest,
     AutonomousResearchStatusResponse,
     AutonomousTerminalEvent,
     CritiqueRequest,
+    DirectAnswerResponse,
     PaperPruneBatchRequest,
     PaperPruneBatchResponse,
     PaperPruneBatchResult,
@@ -32,6 +34,7 @@ from backend.autonomous.memory.brainstorm_memory import brainstorm_memory, Brain
 from backend.autonomous.memory.paper_library import paper_library, PaperLibrary
 from backend.autonomous.memory.final_answer_memory import final_answer_memory, FinalAnswerMemory
 from backend.autonomous.memory.session_manager import session_manager
+from backend.autonomous.memory.direct_answer_memory import direct_answer_memory
 from backend.autonomous.memory.session_write_authority import autonomous_session_write
 from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
 from backend.aggregator.core.coordinator import coordinator
@@ -43,7 +46,6 @@ from backend.shared.config import system_config
 from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.workflow_start_guard import WorkflowLease, workflow_start_guard
-from backend.shared.response_extraction import extract_message_text
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.translation.service import translation_service
 
@@ -476,6 +478,29 @@ async def _build_scoped_research_metadata(paths: Dict[str, Path]) -> ResearchMet
     return scoped_metadata
 
 
+async def _history_scope_stores(
+    session_id: str,
+    paths: Dict[str, Path],
+) -> tuple[PaperLibrary, BrainstormMemory, ResearchMetadata, bool]:
+    """Return the paper, brainstorm, and metadata stores for one history scope.
+
+    The active session is served by the live stores. A separate metadata instance
+    would be overwritten by the live store's cached copy on its next save, and only
+    the active session's papers are in the process-current RAG index.
+    """
+    if (
+        session_id == _get_active_autonomous_session_id()
+        and Path(paper_library._base_dir).resolve() == Path(paths["papers_dir"]).resolve()
+    ):
+        return paper_library, brainstorm_memory, research_metadata, True
+    return (
+        _build_scoped_paper_library(paths),
+        _build_scoped_brainstorm_memory(paths),
+        await _build_scoped_research_metadata(paths),
+        False,
+    )
+
+
 def _resolve_validator_config(request: Optional[CritiqueRequest]) -> Dict[str, Any]:
     """Resolve critique validator settings from the request or the active coordinator."""
     validator_model = None
@@ -545,8 +570,10 @@ async def _generate_autonomous_paper_critique(
     from backend.shared.critique_prompts import (
         DEFAULT_CRITIQUE_PROMPT,
         build_critique_prompt,
-        parse_critique_response,
+        critique_contract_failure_detail,
+        generate_validated_paper_critique,
     )
+    from backend.shared.model_output_contract import ModelOutputContractError
     from backend.shared.api_client_manager import api_client_manager
     from backend.shared.models import ModelConfig, PaperCritique
     from backend.shared.utils import count_tokens
@@ -560,7 +587,13 @@ async def _generate_autonomous_paper_critique(
 
     output_reserve = config["validator_max_tokens"]
     safety_margin = int(config["validator_context_window"] * 0.1)
-    available_input = config["validator_context_window"] - output_reserve - safety_margin
+    from backend.shared.token_calibration import token_calibration
+
+    available_input = (
+        token_calibration.adjusted_context_window(config["validator_context_window"])
+        - output_reserve
+        - safety_margin
+    )
 
     if prompt_tokens > available_input:
         excess_tokens = prompt_tokens - available_input
@@ -596,24 +629,16 @@ async def _generate_autonomous_paper_critique(
         redact_log_text(config["validator_model"], 160),
     )
 
-    response = await api_client_manager.generate_completion(
-        task_id=f"paper_critique_{paper_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-        role_id="paper_critic",
-        model=config["validator_model"],
-        messages=[{"role": "user", "content": full_prompt}],
-        max_tokens=config["validator_max_tokens"],
-        temperature=0.0,
-    )
-
-    response_content = ""
-    if response.get("choices"):
-        message = response["choices"][0].get("message", {})
-        response_content = extract_message_text(message)
-
-    if not response_content:
-        raise HTTPException(status_code=500, detail="Empty response from validator model")
-
-    critique_data = parse_critique_response(response_content)
+    try:
+        critique_data = await generate_validated_paper_critique(
+            prompt=full_prompt,
+            task_id=f"paper_critique_{paper_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            model=config["validator_model"],
+            context_window=config["validator_context_window"],
+            max_output_tokens=config["validator_max_tokens"],
+        )
+    except ModelOutputContractError as exc:
+        raise HTTPException(status_code=502, detail=critique_contract_failure_detail(exc)) from exc
     critique = PaperCritique(
         critique_id=str(uuid.uuid4()),
         model_id=config["validator_model"],
@@ -1035,7 +1060,11 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
             if conflict:
                 raise HTTPException(status_code=400, detail=conflict)
 
-            if not request.allow_mathematical_proofs and not request.allow_research_papers:
+            if (
+                not request.allow_mathematical_proofs
+                and not request.allow_research_papers
+                and not request.direct_answer_enabled
+            ):
                 raise HTTPException(
                     status_code=400,
                     detail="At least one allowed output must be enabled.",
@@ -1043,7 +1072,7 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
             if system_config.generic_mode and request.proof_competition.enabled:
                 if any(route.provider != "openrouter" or route.lm_studio_fallback_id
                        for route in request.proof_competition.secondaries):
-                    raise HTTPException(status_code=400, detail="Hosted proof competitors must use OpenRouter without LM Studio fallback.")
+                    raise HTTPException(status_code=400, detail="Hosted proof competitors must use OpenRouter without a local fallback.")
             effective_allow_mathematical_proofs = bool(
                 request.allow_mathematical_proofs and not system_config.generic_mode
             )
@@ -1166,6 +1195,8 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
                 ),
             )
 
+            autonomous_coordinator.set_direct_answer_enabled(request.direct_answer_enabled)
+
             # Start in background with a retained task handle so Stop can cancel it.
             try:
                 _autonomous_workflow_lease = workflow_start_guard.commit(
@@ -1184,10 +1215,23 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
                 from backend.shared.lean4_client import start_lean4_workspace_bootstrap
                 start_lean4_workspace_bootstrap()
 
+            # A runtime limit belongs to this Start only: a Start without one
+            # clears any earlier limit, and the limit is never saved for reuse.
+            autonomous_coordinator.arm_runtime_limit(
+                request.max_runtime_seconds if autonomous_coordinator.is_active else None
+            )
+            # Direct-answer starts (`moto think`) keep their own saved settings so
+            # they never change what a plain Autonomous Research start reuses.
+            remember_start_request(
+                "think" if request.direct_answer_enabled else "autonomous",
+                request.model_copy(update={"max_runtime_seconds": None}),
+            )
             return {
                 "success": True,
                 "message": f"Autonomous research started with {num_submitters} brainstorm submitters",
-                "num_submitters": num_submitters
+                "num_submitters": num_submitters,
+                "max_runtime_seconds": request.max_runtime_seconds,
+                "direct_answer_enabled": request.direct_answer_enabled,
             }
         
     except HTTPException:
@@ -1246,6 +1290,78 @@ async def stop_autonomous_research():
                 )
 
 
+# A run that reaches its user-set maximum runtime stops the same way Stop does.
+autonomous_coordinator.runtime_limit_stop_callback = stop_autonomous_research
+
+
+async def finish_autonomous_with_direct_answer(reason: str) -> bool:
+    """End the exploration now and write the direct answer as the run's last step.
+
+    The exploration is stopped exactly like Stop (progress is kept), then the
+    same run writes its answer as a tracked task, so Start still sees it as
+    running and Stop can still cancel it. Returns False when nothing was started.
+    """
+    global _autonomous_workflow_lease
+    async with workflow_start_guard.reserve():
+        if not autonomous_coordinator.is_active or not autonomous_coordinator.direct_answer_enabled:
+            return False
+        if autonomous_coordinator.direct_answer_writing:
+            return True  # the answer is already being written
+        await autonomous_coordinator.stop(announce=False)
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="autonomous_stopped",
+        )
+        _release_autonomous_workflow_lease()
+        _autonomous_workflow_lease = workflow_start_guard.commit(AUTONOMOUS_WORKFLOW_OWNER)
+        if not autonomous_coordinator.start_direct_answer_in_background(reason):
+            _release_autonomous_workflow_lease()
+            return False
+        return True
+
+
+autonomous_coordinator.direct_answer_finish_callback = finish_autonomous_with_direct_answer
+
+
+@router.post("/direct-answer/finish")
+async def finish_with_direct_answer():
+    """Stop exploring now and answer the question from what was explored so far."""
+    if not autonomous_coordinator.is_active:
+        raise HTTPException(status_code=400, detail="Autonomous research is not running.")
+    if not autonomous_coordinator.direct_answer_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="This run was not started with a direct answer.",
+        )
+    try:
+        started = await finish_autonomous_with_direct_answer("finish_requested")
+    except Exception as e:
+        logger.error("Failed to finish with a direct answer: %s", redact_log_text(e, 1000), exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to finish with a direct answer")
+    if not started:
+        raise HTTPException(status_code=400, detail="The run ended before the answer could be started.")
+    return {
+        "success": True,
+        "message": "Exploration stopped; the direct answer is being written.",
+    }
+
+
+@router.get("/direct-answer", response_model=DirectAnswerResponse)
+async def get_direct_answer(response: Response):
+    """The newest direct answer for the current session, if one has been written."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        answer = await direct_answer_memory.latest()
+    except Exception as e:
+        logger.error(f"Failed to read the direct answer: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    return {
+        "has_answer": answer is not None,
+        "writing": autonomous_coordinator.direct_answer_writing,
+        "answer": answer,
+    }
+
+
 @router.post("/clear")
 async def clear_autonomous_research(confirm: bool = False):
     """Serialize clear against pending top-level lifecycle transitions."""
@@ -1276,6 +1392,7 @@ async def _clear_autonomous_research_impl(confirm: bool = False):
         
         try:
             await autonomous_coordinator.clear_all_data()
+            await direct_answer_memory.clear_latest()
             await assistant_proof_search_coordinator.stop_all(
                 broadcast=True,
                 reason="autonomous_cleared",
@@ -1314,6 +1431,25 @@ async def _clear_autonomous_research_impl(confirm: bool = False):
             status_code=500, 
             detail="Failed to clear autonomous research data"
         )
+
+
+async def _direct_answer_status() -> Optional[dict]:
+    """Compact direct-answer state for status; None when this session has no part in it."""
+    answer = await direct_answer_memory.latest()
+    enabled = autonomous_coordinator.is_active and autonomous_coordinator.direct_answer_enabled
+    if answer is None and not enabled:
+        return None
+    return {
+        "enabled": enabled,
+        "state": (
+            "writing" if autonomous_coordinator.direct_answer_writing
+            else "ready" if answer is not None else "pending"
+        ),
+        "answer_id": answer.get("answer_id") if answer else None,
+        "reason": answer.get("reason") if answer else None,
+        "exploration_complete": bool(answer.get("exploration_complete")) if answer else False,
+        "created_at": answer.get("created_at") if answer else None,
+    }
 
 
 @router.get("/prompt")
@@ -1452,8 +1588,10 @@ async def get_autonomous_status(response: Response):
             "tier3_status": tier3_status,
             "stats": stats,
             "terminal_event": terminal_event,
+            "runtime_limit": autonomous_coordinator.get_runtime_limit(),
+            "direct_answer": await _direct_answer_status(),
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to get autonomous status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1705,8 +1843,12 @@ async def delete_pruned_history_papers(session_id: str, confirm: bool = False):
                 detail="Must confirm deletion with confirm=true"
             )
         paths = _resolve_history_session_paths(session_id)
-        scoped_paper_library = _build_scoped_paper_library(paths)
-        scoped_research_metadata = await _build_scoped_research_metadata(paths)
+        (
+            scoped_paper_library,
+            _scoped_brainstorm_memory,
+            scoped_research_metadata,
+            _is_active_session,
+        ) = await _history_scope_stores(session_id, paths)
         pruned_papers = await scoped_paper_library._list_pruned_history_papers_from_directory(
             paths["papers_dir"],
             session_id,
@@ -2388,9 +2530,12 @@ async def delete_history_paper(session_id: str, paper_id: str, confirm: bool = F
             )
 
         paths = _resolve_history_session_paths(session_id)
-        scoped_paper_library = _build_scoped_paper_library(paths)
-        scoped_brainstorm_memory = _build_scoped_brainstorm_memory(paths)
-        scoped_research_metadata = await _build_scoped_research_metadata(paths)
+        (
+            scoped_paper_library,
+            scoped_brainstorm_memory,
+            scoped_research_metadata,
+            is_active_session,
+        ) = await _history_scope_stores(session_id, paths)
         await _ensure_history_paper_is_visible(
             scoped_paper_library,
             session_id=session_id,
@@ -2403,6 +2548,9 @@ async def delete_history_paper(session_id: str, paper_id: str, confirm: bool = F
             scoped_brainstorm_memory=scoped_brainstorm_memory,
             scoped_research_metadata=scoped_research_metadata,
             paper_id=paper_id,
+            # Paper IDs repeat across sessions; another session's paper is not in
+            # the active run's RAG index.
+            remove_from_rag=is_active_session,
         )
         translation_service.note_outputs_changed("autonomous_paper_pruned")
         return result
@@ -3230,7 +3378,11 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
         # Calculate available input tokens
         output_reserve = validator_max_tokens
         safety_margin = int(validator_context_window * 0.1)
-        available_input = validator_context_window - output_reserve - safety_margin
+        from backend.shared.token_calibration import token_calibration
+
+        available_input = (
+            token_calibration.adjusted_context_window(validator_context_window) - output_reserve - safety_margin
+        )
         
         # Check if content fits in context window
         if prompt_tokens > available_input:
@@ -3245,11 +3397,6 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
                     f"A complete and honest review requires direct context injection - please select a validator with a larger context window."
                 )
             )
-        
-        # Build messages for API call
-        messages = [
-            {"role": "user", "content": full_prompt}
-        ]
         
         # Configure the paper_critic role with the validator settings BEFORE making the API call
         # This ensures routing goes to the correct provider (OpenRouter vs LM Studio)
@@ -3277,28 +3424,23 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
             redact_log_text(validator_model, 160),
         )
         
-        response = await api_client_manager.generate_completion(
-            task_id=f"final_answer_critique_{answer_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            role_id="paper_critic",
-            model=validator_model,
-            messages=messages,
-            max_tokens=validator_max_tokens,
-            temperature=0.0
+        from backend.shared.critique_prompts import (
+            critique_contract_failure_detail,
+            generate_validated_paper_critique,
         )
-        
-        # Parse the response - extract from OpenAI-compatible response structure
-        response_content = ""
-        if response.get("choices"):
-            message = response["choices"][0].get("message", {})
-            response_content = extract_message_text(message)
-        
-        if not response_content:
-            raise HTTPException(status_code=500, detail="Empty response from validator model")
-        
-        # Parse with lenient fallback for truncated critique responses
-        from backend.shared.critique_prompts import parse_critique_response
-        critique_data = parse_critique_response(response_content)
-        
+        from backend.shared.model_output_contract import ModelOutputContractError
+
+        try:
+            critique_data = await generate_validated_paper_critique(
+                prompt=full_prompt,
+                task_id=f"final_answer_critique_{answer_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                model=validator_model,
+                context_window=validator_context_window,
+                max_output_tokens=validator_max_tokens,
+            )
+        except ModelOutputContractError as exc:
+            raise HTTPException(status_code=502, detail=critique_contract_failure_detail(exc)) from exc
+
         # Create critique object with correct field names
         critique = PaperCritique(
             critique_id=str(uuid.uuid4()),

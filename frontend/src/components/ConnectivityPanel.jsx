@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { getSyntheticLibPresentation } from '../utils/syntheticLibPresentation';
-import { AUTO_TRANSLATE_NAME } from '../hooks/useAutoTranslate';
+import { AUTO_TRANSLATE_NAME, useAutoTranslate } from '../hooks/useAutoTranslate';
+import UsageLevelBadge from './UsageLevelBadge';
 
 const PENDING_STATUSES = new Set([
   'starting',
@@ -40,7 +41,10 @@ function ConnectivityRow({
   checkboxVariant = 'check',
   disabled = false,
   title = '',
+  usageFeatureId = '',
+  usageContext,
 }) {
+  const usageId = useId();
   return (
     <div className="connectivity-row">
       {checkbox && checkboxVariant === 'x' && (
@@ -66,10 +70,21 @@ function ConnectivityRow({
         className="connectivity-row__button"
         onClick={onOpen}
         aria-haspopup="dialog"
+        aria-describedby={usageFeatureId ? usageId : undefined}
         title={title || label}
       >
         <span className="connectivity-label">{label}</span>
-        <StatusPill status={status} />
+        {/* The usage badge sits left of the status pill so every row's pill
+            stays right-aligned. It is hidden from the button's name and read
+            as its description instead. */}
+        <span className="connectivity-row__indicators">
+          {usageFeatureId && (
+            <span aria-hidden="true" className="connectivity-row__usage">
+              <UsageLevelBadge id={usageId} compact featureId={usageFeatureId} context={usageContext} />
+            </span>
+          )}
+          <StatusPill status={status} />
+        </span>
       </button>
     </div>
   );
@@ -83,6 +98,7 @@ export default function ConnectivityPanel({
   onModeChange,
   onOpenOpenRouterOAuth,
   onOpenLmStudio,
+  onOpenVllm,
   onOpenSyntheticLib4,
   onOpenAgentMemory,
   onOpenWolfram,
@@ -93,6 +109,7 @@ export default function ConnectivityPanel({
   anyWorkflowRunning = false,
 }) {
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const { status: translateStatus } = useAutoTranslate();
   const isStarting = !connectivityStatus;
   const inference = connectivityStatus?.inference || {};
   const skills = connectivityStatus?.skills || {};
@@ -100,6 +117,8 @@ export default function ConnectivityPanel({
   const lmStudioStatus = capabilities?.lmStudioEnabled === false
     ? 'inactive'
     : (inference.lm_studio?.status || (isStarting ? 'starting' : 'inactive'));
+  const vllmEnabled = !capabilities?.genericMode && capabilities?.vllmAvailable !== false;
+  const vllmStatus = inference.vllm?.status || (isStarting ? 'starting' : 'inactive');
   const memoryStatus = skills.agent_conversation_memory || {};
   const wolframStatus = skills.wolfram_alpha || {};
   const autoTranslateStatus = skills.auto_translate || {};
@@ -157,6 +176,14 @@ export default function ConnectivityPanel({
               onOpen={onOpenLmStudio}
               title="Inspect LM Studio server and model readiness"
             />
+            {vllmEnabled && (
+              <ConnectivityRow
+                label="vLLM"
+                status={vllmStatus}
+                onOpen={onOpenVllm}
+                title="Set up vLLM servers for chat models and RAG embeddings"
+              />
+            )}
           </section>
 
           <section className="connectivity-section">
@@ -190,6 +217,7 @@ export default function ConnectivityPanel({
               disabled={anyWorkflowRunning}
               onToggle={onToggleWolfram}
               onOpen={onOpenWolfram}
+              usageFeatureId="skills.wolfram_alpha"
               title={anyWorkflowRunning ? 'Stop the active workflow before changing run-level feature toggles' : 'Configure Wolfram Alpha App ID and tool availability'}
             />
             <ConnectivityRow
@@ -200,6 +228,7 @@ export default function ConnectivityPanel({
               disabled={anyWorkflowRunning}
               onToggle={onToggleAgentMemory}
               onOpen={onOpenAgentMemory}
+              usageFeatureId="skills.session_history_memory"
               title={anyWorkflowRunning ? 'Stop the active workflow before changing run-level feature toggles' : 'Configure local proof-history memory for Assistant workflow-memory search'}
             />
             {/* Translation runs beside workflows as a background service, so its
@@ -211,6 +240,11 @@ export default function ConnectivityPanel({
               checked={autoTranslateStatus.enabled}
               onToggle={onToggleAutoTranslate}
               onOpen={onOpenAutoTranslate}
+              usageFeatureId="translation.auto_translate"
+              usageContext={{
+                batch: translateStatus?.batch_translation === true,
+                translateAll: Boolean(translateStatus?.translate_all?.requested),
+              }}
               title="Translate papers, proofs, and other outputs into your chosen languages with Top-p Exploration"
             />
           </section>

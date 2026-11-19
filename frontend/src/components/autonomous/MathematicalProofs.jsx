@@ -20,8 +20,11 @@ import {
   getNoveltyGroupAnchorIds,
   getNoveltyGroupSize,
   getProofLiveContextRiskWarnings,
+  formatMasterProofBadge,
   getProofTranslationParts,
+  isMasterProof,
 } from '../../utils/proofPresentation';
+import MasterProofDetails from './MasterProofDetails';
 
 function formatDate(isoString) {
   if (!isoString) {
@@ -1160,6 +1163,9 @@ function MathematicalProofs({
                       <span className={`math-proof-badge ${getTierBadge(proof).badgeClass}`}>
                         {getTierBadge(proof).label}
                       </span>
+                      {isMasterProof(proof) && (
+                        <span className="math-proof-badge master-proof">{formatMasterProofBadge(proof)}</span>
+                      )}
                       <span className="math-proof-source">
                         {proof.source_type} {proof.source_id}
                       </span>
@@ -1300,6 +1306,11 @@ function MathematicalProofs({
                         </button>
                       )}
                     </div>
+
+                    <MasterProofDetails
+                      proof={proof}
+                      loadBundle={(target) => api.getMasterProofBundle(target.proof_id, proofScope)}
+                    />
 
                     {proof.theorem_name && (
                       <div className="math-proof-detail-block">

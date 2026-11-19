@@ -2,14 +2,13 @@
 Paper Critique Prompts Module.
 
 Contains the default critique prompt and helper functions for building
-critique requests to the validator model. Also provides lenient parsing
-for critique responses that may be truncated by max_tokens limits.
+critique requests to the validator model, plus the strict critique reply parser.
 """
-import json
-import re
-import logging
+from typing import Optional
 
-logger = logging.getLogger(__name__)
+from backend.shared.json_key_recovery import KeySpec, ObjectSchema, recover_key_labels
+from backend.shared.json_parser import parse_json
+from backend.shared.model_output_contract import ModelOutputContractError, OutputRepair
 
 # Default critique prompt that can be customized by users
 DEFAULT_CRITIQUE_PROMPT = """You are an expert academic reviewer providing an honest, thorough critique of a research paper.
@@ -92,150 +91,186 @@ def get_default_critique_prompt() -> str:
     return DEFAULT_CRITIQUE_PROMPT
 
 
-def parse_critique_response(response_content: str) -> dict:
-    """
-    Parse a critique LLM response with lenient fallback for truncated JSON.
-    
-    Critique responses are especially prone to truncation because reasoning models
-    burn tokens on internal thinking before the JSON, and the full_critique field
-    (the last and longest field) often gets cut off right before the closing '}'.
-    
-    Strategy:
-    1. Try strict parse_json() first
-    2. If truncated, try repairing by appending closing characters
-    3. If still fails, extract ratings and feedback via regex
-    
-    Returns:
-        Parsed critique dict with all expected fields
-    """
-    from backend.shared.json_parser import parse_json, sanitize_json_response
+CRITIQUE_RATING_KEYS = ("novelty_rating", "correctness_rating", "impact_rating")
+CRITIQUE_TEXT_KEYS = ("novelty_feedback", "correctness_feedback", "impact_feedback", "full_critique")
 
-    # Step 1: Try strict parsing
+# Ordered as CRITIQUE_JSON_SCHEMA asks for them. Only the free-text fields may
+# be relabeled; ratings never are.
+CRITIQUE_RESPONSE_SCHEMA = ObjectSchema(
+    name="paper_critique",
+    keys=(
+        KeySpec("novelty_rating", value_type="int"),
+        KeySpec("novelty_feedback", repairable=True),
+        KeySpec("correctness_rating", value_type="int"),
+        KeySpec("correctness_feedback", repairable=True),
+        KeySpec("impact_rating", value_type="int"),
+        KeySpec("impact_feedback", repairable=True),
+        KeySpec("full_critique", repairable=True),
+    ),
+    allow_extra=frozenset({"solution_path_update"}),
+)
+
+
+def parse_critique_response(
+    response_content: str,
+    *,
+    role: str = "paper_critic",
+    repairs: Optional[list] = None,
+) -> dict:
+    """Parse a critique reply strictly against ``CRITIQUE_JSON_SCHEMA``.
+
+    When the caller passes ``repairs`` (and publishes it as Live Activity), the
+    shared parser may apply its guarded visible normalizations and one
+    mislabeled free-text field may be relabeled by schema-aware key recovery;
+    without it the reply must match exactly. Nothing is ever filled in: a
+    truncated, malformed, or incomplete reply raises ``ModelOutputContractError``
+    so the caller retries or fails visibly instead of storing fabricated ratings
+    or placeholder text.
+    """
+    applied: list[OutputRepair] = []
+    collect = repairs is not None
     try:
-        return parse_json(response_content)
-    except Exception as strict_err:
-        logger.info(f"Strict critique parse failed ({strict_err}), attempting truncation repair")
+        data = parse_json(response_content, repairs=applied if collect else None)
+    except Exception as exc:
+        raise ModelOutputContractError.syntax(exc, role=role) from exc
 
-    # Step 2: Try repairing truncated JSON
-    # Common case: model wrote all content but ran out of tokens before closing '}'
-    try:
-        sanitized = sanitize_json_response(response_content)
-    except (ValueError, Exception):
-        # sanitize_json_response raises ValueError on truncation - that's expected
-        # Fall through to repair attempts using raw content
-        sanitized = _strip_to_json(response_content)
+    if isinstance(data, list):
+        if len(data) != 1 or not isinstance(data[0], dict):
+            raise ModelOutputContractError(
+                "The critique must be one JSON object",
+                role=role,
+                stage="shape",
+                repairs_applied=applied,
+            )
+        data = data[0]
+    if not isinstance(data, dict):
+        raise ModelOutputContractError(
+            "The critique must be one JSON object",
+            role=role,
+            stage="shape",
+            repairs_applied=applied,
+        )
 
-    repaired = _try_repair_json(sanitized)
-    if repaired is not None:
-        logger.info("Critique JSON repaired after truncation - recovered all fields")
-        return repaired
+    if collect:
+        data, key_repairs = recover_key_labels(data, CRITIQUE_RESPONSE_SCHEMA)
+        applied.extend(key_repairs)
+        repairs.extend(applied)
 
-    # Step 3: Regex extraction fallback
-    logger.warning("Critique JSON repair failed, falling back to regex extraction")
-    return _regex_extract_critique(response_content)
-
-
-def _strip_to_json(raw: str) -> str:
-    """Strip thinking tokens, markdown, and prefixes to get to the JSON content."""
-    content = raw.strip()
-
-    # Strip <think>...</think>
-    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
-    content = re.sub(r'</think\s*>', '', content, flags=re.IGNORECASE).strip()
-    content = re.sub(r'<think\s*>', '', content, flags=re.IGNORECASE).strip()
-
-    # Strip markdown code blocks
-    if content.startswith('```'):
-        lines = content.split('\n')
-        if len(lines) > 2:
-            closing = -1
-            for i in range(1, len(lines)):
-                if lines[i].strip() == '```':
-                    closing = i
-                    break
-            if closing > 0:
-                content = '\n'.join(lines[1:closing]).strip()
-
-    # Strip prefix before first '{'
-    brace = content.find('{')
-    if brace > 0:
-        content = content[brace:]
-
-    return content
-
-
-def _try_repair_json(content: str):
-    """
-    Attempt to repair truncated critique JSON by appending missing closing characters.
-    Only repairs simple truncation (missing '}', or string cut off mid-value).
-    """
-    if not content or '{' not in content:
-        return None
-
-    # Try progressively more aggressive repairs
-    repairs = [
-        '}',        # Missing only closing brace
-        '"}',       # String value ended, missing quote + brace  
-        '..."}',    # Truncated mid-word in last string value
+    missing = [
+        key for key in (*CRITIQUE_RATING_KEYS, *CRITIQUE_TEXT_KEYS) if key not in data
     ]
+    invalid = [
+        key
+        for key in CRITIQUE_RATING_KEYS
+        if key in data
+        and not (
+            isinstance(data[key], int)
+            and not isinstance(data[key], bool)
+            and 1 <= data[key] <= 10
+        )
+    ]
+    invalid.extend(
+        key
+        for key in CRITIQUE_TEXT_KEYS
+        if key in data and not (isinstance(data[key], str) and data[key].strip())
+    )
+    if missing or invalid:
+        known = {spec.name for spec in CRITIQUE_RESPONSE_SCHEMA.keys}
+        unknown = [
+            key
+            for key in data
+            if key not in known and key not in CRITIQUE_RESPONSE_SCHEMA.allow_extra
+        ]
+        raise ModelOutputContractError(
+            "The critique did not match the required JSON format "
+            "(ratings must be integers 1-10 and feedback must be non-empty text)",
+            role=role,
+            stage="missing_key" if missing else "invalid_value",
+            missing_keys=missing,
+            unknown_keys=unknown,
+            invalid_fields=invalid,
+            repairs_applied=applied,
+        )
+    return data
 
-    for suffix in repairs:
-        candidate = content.rstrip() + suffix
-        try:
-            result = json.loads(candidate)
-            if isinstance(result, dict) and result.get("novelty_rating"):
-                return result
-        except (json.JSONDecodeError, ValueError):
-            continue
 
-    # More aggressive: find last complete key-value pair and close from there
-    # Handles case where truncation happened mid-field-value
-    last_complete = content.rfind('","')
-    if last_complete > 0:
-        truncated = content[:last_complete + 1] + '}'
-        try:
-            result = json.loads(truncated)
-            if isinstance(result, dict) and result.get("novelty_rating"):
-                return result
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.debug("Failed last-resort critique JSON extraction: %s", exc)
-
-    return None
+# The JSON shape shown in the one bounded contract retry (the prompt's own schema block).
+CRITIQUE_RESPONSE_SHAPE = CRITIQUE_JSON_SCHEMA.split("OUTPUT FORMAT (respond ONLY with valid JSON):", 1)[1].split("\n\n", 1)[0].strip()
 
 
-def _regex_extract_critique(raw: str) -> dict:
+async def generate_validated_paper_critique(
+    *,
+    prompt: str,
+    task_id: str,
+    model: str,
+    context_window: int,
+    max_output_tokens: int,
+    role_id: str = "paper_critic",
+) -> dict:
+    """Ask the configured critic role for a critique and parse it strictly.
+
+    A reply that does not match the critique contract gets exactly one bounded
+    retry that names the problem; a second failure raises the typed
+    ``ModelOutputContractError`` (chained to the first). Provider failures
+    propagate unchanged. Applied normalizations are published as
+    ``model_output_normalized`` activity.
     """
-    Last-resort extraction of critique fields from raw text via regex.
-    Ratings appear early in the JSON and are almost always present even in
-    heavily truncated responses.
-    """
-    def extract_rating(field: str) -> int:
-        m = re.search(rf'"{field}"\s*:\s*(\d+)', raw)
-        if m:
-            val = int(m.group(1))
-            return val if 1 <= val <= 10 else 0
-        return 0
+    from backend.autonomous.agents.output_contract import (
+        build_contract_retry_messages,
+        response_text,
+    )
+    from backend.shared.api_client_manager import api_client_manager
+    from backend.shared.config import rag_config
+    from backend.shared.model_output_contract import report_model_output_normalizations
 
-    def extract_string(field: str) -> str:
-        m = re.search(rf'"{field}"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, re.DOTALL)
-        return m.group(1) if m else ""
+    response = await api_client_manager.generate_completion(
+        task_id=task_id,
+        role_id=role_id,
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=max_output_tokens,
+        temperature=0.0,
+    )
+    content = response_text(response)
+    report_task_id = task_id
+    repairs: list = []
+    try:
+        critique = parse_critique_response(content, role=role_id, repairs=repairs)
+    except ModelOutputContractError as first_error:
+        report_task_id = f"{task_id}_retry"
+        response = await api_client_manager.generate_completion(
+            task_id=report_task_id,
+            role_id=role_id,
+            model=model,
+            messages=build_contract_retry_messages(
+                prompt=prompt,
+                failed_output=content,
+                error=first_error,
+                response_noun="critique",
+                response_shape=CRITIQUE_RESPONSE_SHAPE,
+                max_input_tokens=rag_config.get_available_input_tokens(
+                    context_window, max_output_tokens
+                ),
+            ),
+            max_tokens=max_output_tokens,
+            temperature=0.0,
+        )
+        repairs = []
+        try:
+            critique = parse_critique_response(
+                response_text(response), role=role_id, repairs=repairs
+            )
+        except ModelOutputContractError as retry_error:
+            raise retry_error from first_error
+    await report_model_output_normalizations(
+        role_id, repairs, task_id=report_task_id, model=model
+    )
+    return critique
 
-    novelty = extract_rating("novelty_rating")
-    correctness = extract_rating("correctness_rating")
-    impact = extract_rating("impact_rating")
 
-    result = {
-        "novelty_rating": novelty,
-        "novelty_feedback": extract_string("novelty_feedback") or ("Unable to parse structured response" if novelty == 0 else ""),
-        "correctness_rating": correctness,
-        "correctness_feedback": extract_string("correctness_feedback") or ("Unable to parse structured response" if correctness == 0 else ""),
-        "impact_rating": impact,
-        "impact_feedback": extract_string("impact_feedback") or ("Unable to parse structured response" if impact == 0 else ""),
-        "full_critique": extract_string("full_critique") or raw,
-    }
-
-    recovered = sum(1 for k in ["novelty_rating", "correctness_rating", "impact_rating"] if result[k] > 0)
-    logger.info(f"Regex extraction recovered {recovered}/3 ratings: N={novelty}, C={correctness}, I={impact}")
-
-    return result
-
+def critique_contract_failure_detail(error: ModelOutputContractError) -> str:
+    """User-facing detail for a critique that still broke its contract after the retry."""
+    return (
+        "The validator model's critique did not match the required JSON format "
+        f"after one retry ({error.field_summary or error.stage}). No critique was saved."
+    )

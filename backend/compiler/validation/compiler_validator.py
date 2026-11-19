@@ -9,6 +9,10 @@ from backend.shared.api_client_manager import RetryableProviderError, api_client
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.models import CompilerSubmission, CompilerValidationResult
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
+from backend.shared.model_output_contract import (
+    ModelOutputContractError,
+    report_model_output_normalizations,
+)
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
 from backend.compiler.memory.paper_memory import (
@@ -353,8 +357,39 @@ def find_with_normalized_hyphens(needle: str, haystack: str) -> Tuple[int, str]:
     return (-1, "")
 
 
-class ValidatorContractError(ValueError):
-    """Raised only when model output violates the validator JSON contract."""
+class ValidatorContractError(ModelOutputContractError):
+    """Raised only when model output violates the validator JSON contract.
+
+    It is operational, never a semantic rejection: the compiler re-validates the
+    same submission instead of writing it into submitter rejection feedback.
+    """
+
+    def __init__(self, summary: str, **kwargs: Any) -> None:
+        kwargs.setdefault("role", "compiler_validator")
+        super().__init__(summary, **kwargs)
+
+
+class ValidatorPromptTooLargeError(ValueError):
+    """The assembled validator prompt cannot fit the validator's input budget.
+
+    The submission under review is mandatory direct context, so this follows the
+    compiler's context-overflow lifecycle rather than becoming a rejection.
+    """
+
+    def __init__(self, *, required_tokens: int, available_tokens: int, subject: str = "submission") -> None:
+        self.required_tokens = required_tokens
+        self.available_tokens = available_tokens
+        super().__init__(
+            f"Compiler validator prompt too large for {subject} validation "
+            f"({required_tokens} tokens > {available_tokens} tokens available)"
+        )
+
+
+def _contract_error_from(error: BaseException) -> ModelOutputContractError:
+    """Return a model-safe contract error for any parse or shape failure."""
+    if isinstance(error, ModelOutputContractError):
+        return error
+    return ModelOutputContractError.syntax(error, role="compiler_validator")
 
 
 class CompilerValidator:
@@ -427,25 +462,79 @@ class CompilerValidator:
         an otherwise valid primary decision.
         """
         if not isinstance(parsed, dict):
-            raise ValidatorContractError("Validation response must be a JSON object")
+            raise ValidatorContractError(
+                "Validation response must be a JSON object",
+                stage="shape",
+            )
+
+        def field_stage(field: str) -> str:
+            return "invalid_value" if field in parsed else "missing_key"
 
         decision = parsed.get("decision")
         if decision not in {"accept", "reject"}:
             raise ValidatorContractError(
-                "decision must be exactly 'accept' or 'reject'"
+                "decision must be exactly 'accept' or 'reject'",
+                stage=field_stage("decision"),
+                invalid_fields=("decision",),
             )
 
         reasoning = parsed.get("reasoning")
         if not isinstance(reasoning, str) or not reasoning.strip():
-            raise ValidatorContractError("reasoning must be a non-empty string")
+            raise ValidatorContractError(
+                "reasoning must be a non-empty string",
+                stage=field_stage("reasoning"),
+                invalid_fields=("reasoning",),
+            )
 
         if require_checks:
             for field in ("coherence_check", "rigor_check", "placement_check"):
                 if type(parsed.get(field)) is not bool:
-                    raise ValidatorContractError(f"{field} must be a boolean")
+                    raise ValidatorContractError(
+                        f"{field} must be a boolean",
+                        stage=field_stage(field),
+                        invalid_fields=(field,),
+                    )
 
         return parsed
     
+    async def _parse_primary_validation(
+        self,
+        response: str,
+        *,
+        require_checks: bool,
+        task_id: str,
+    ) -> Dict[str, Any]:
+        """Parse one validator reply and publish any visible normalization."""
+        if not str(response or "").strip():
+            raise ValidatorContractError("The validation response was empty", stage="syntax")
+        repairs: list = []
+        parsed = parse_json(response, repairs=repairs)
+        result = self._validate_primary_validation_contract(
+            parsed,
+            require_checks=require_checks,
+        )
+        # Published only once the reply is accepted.
+        await report_model_output_normalizations(self.role_id, repairs, task_id=task_id)
+        return result
+
+    @staticmethod
+    def _final_contract_error(
+        summary: str,
+        cause: ModelOutputContractError,
+    ) -> ValidatorContractError:
+        """Name the failed fields of the last attempt on the terminal error."""
+        return ValidatorContractError(
+            f"{summary} ({cause.summary.rstrip('.')})" if cause.summary else summary,
+            stage=cause.stage,
+            item_path=cause.item_path,
+            item_id=cause.item_id,
+            missing_keys=cause.missing_keys,
+            unknown_keys=cause.unknown_keys,
+            invalid_fields=cause.invalid_fields,
+            problems=cause.problems,
+            repairs_applied=cause.repairs_applied,
+        )
+
     async def _parse_json_with_retry(
         self, 
         response: str, 
@@ -454,6 +543,7 @@ class CompilerValidator:
         retry_count: int = 0,
         *,
         require_checks: bool = True,
+        task_id: str = "",
     ) -> Dict[str, Any]:
         """
         Parse JSON with a single conversational retry on failure.
@@ -465,8 +555,9 @@ class CompilerValidator:
         Flow:
         1. Attempt parse via parse_json()
         2. If fails: ask LLM to reformat via conversation (single attempt)
-        3. If still invalid: raise a contract error for structured rejection
-        
+        3. If still invalid: raise ``ValidatorContractError``. That is an
+           operational failure the caller re-validates, never a rejection.
+
         Args:
             response: LLM response to parse
             original_prompt: Original prompt that generated response
@@ -476,24 +567,27 @@ class CompilerValidator:
         Returns:
             Parsed and structurally valid primary response dict
         """
+        task_id = task_id or self.get_current_task_id()
         # First attempt: try to parse JSON directly
         try:
-            parsed = parse_json(response)
-            return self._validate_primary_validation_contract(
-                parsed,
+            return await self._parse_primary_validation(
+                response,
                 require_checks=require_checks,
+                task_id=task_id,
             )
-            
-        except Exception as parse_error:
+
+        except Exception as first_error:
+            parse_error = _contract_error_from(first_error)
             logger.warning(f"CompilerValidator: JSON parse failed, attempting single retry: {parse_error}")
-            
+
             # If already in a retry, fail closed instead of inferring a decision
             # from malformed prose.
             if retry_count > 0:
-                raise ValidatorContractError(
-                    "Validation JSON contract remained invalid after retry"
-                ) from parse_error
-            
+                raise self._final_contract_error(
+                    "Validation JSON contract remained invalid after retry",
+                    parse_error,
+                ) from first_error
+
             # Build retry prompt asking for reformatted JSON. Keep failed-output
             # context, but sanitize it before any replay in prompt or assistant turn.
             max_failed_output_chars = 2000  # ~500 tokens - enough for error context
@@ -514,8 +608,8 @@ class CompilerValidator:
             
             # Single retry using api_client_manager (supports boost/fallback)
             try:
-                retry_task_id = f"{self.get_current_task_id()}_retry"
-                
+                retry_task_id = f"{task_id}_retry"
+
                 # Calculate if conversation fits in context window
                 from backend.shared.config import system_config, rag_config
                 prompt_tokens = count_tokens(original_prompt)
@@ -556,32 +650,43 @@ class CompilerValidator:
                 if not retry_response.get("choices"):
                     logger.error("CompilerValidator: Retry request returned no choices")
                     raise ValidatorContractError(
-                        "Validation JSON retry returned no choices"
+                        "Validation JSON retry returned no choices",
+                        stage="syntax",
                     )
-                
+
                 message = retry_response["choices"][0]["message"]
                 retry_output = extract_message_text(message)
-                
+
                 try:
-                    parsed = parse_json(retry_output)
-                    parsed = self._validate_primary_validation_contract(
-                        parsed,
+                    parsed = await self._parse_primary_validation(
+                        retry_output,
                         require_checks=require_checks,
+                        task_id=retry_task_id,
                     )
                     logger.info("CompilerValidator: Retry succeeded!")
                     return parsed
                 except Exception as retry_parse_error:
                     logger.warning(f"CompilerValidator: Retry parse failed: {retry_parse_error}")
-                    raise ValidatorContractError(
-                        "Validation JSON contract remained invalid after bounded retry"
+                    raise self._final_contract_error(
+                        "Validation JSON contract remained invalid after bounded retry",
+                        _contract_error_from(retry_parse_error),
                     ) from retry_parse_error
-                    
+
             except RetryableProviderError:
                 raise
             except Exception as retry_error:
                 logger.error(f"CompilerValidator: Retry request failed - {retry_error}")
                 raise
     
+    @staticmethod
+    def _response_text(response: Dict[str, Any]) -> str:
+        """Return the reply text, or "" when the reply carried no message."""
+        choices = response.get("choices") if isinstance(response, dict) else None
+        if not choices or not choices[0].get("message"):
+            logger.error("CompilerValidator: LLM returned empty response structure")
+            return ""
+        return extract_message_text(choices[0]["message"])
+
     def _handle_protected_marker_old_string(
         self,
         submission: CompilerSubmission,
@@ -1130,15 +1235,12 @@ class CompilerValidator:
                 f"Compiler validator: Assembled prompt ({actual_prompt_tokens} tokens) exceeds context window "
                 f"({max_allowed_tokens} tokens after safety margin). This indicates a context allocation bug."
             )
-            return CompilerValidationResult(
-                submission_id=submission.submission_id,
-                decision="reject",
-                reasoning=f"Internal error: Prompt too large ({actual_prompt_tokens} tokens > {max_allowed_tokens} max)",
-                summary="Internal context overflow error",
-                json_valid=False,
-                validation_stage="internal_error"
+            raise ValidatorPromptTooLargeError(
+                required_tokens=actual_prompt_tokens,
+                available_tokens=max_allowed_tokens,
+                subject=submission.mode,
             )
-        
+
         logger.debug(f"Compiler validator prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
         
         # Generate task ID for tracking
@@ -1161,23 +1263,11 @@ class CompilerValidator:
                 max_tokens=system_config.compiler_validator_max_output_tokens  # User-configurable
             )
             
-            # Check for empty response
-            if not response.get("choices") or not response["choices"][0].get("message"):
-                logger.error("CompilerValidator: LLM returned empty response structure")
-                return CompilerValidationResult(
-                    submission_id=submission.submission_id,
-                    decision="reject",
-                    reasoning="Validation LLM returned empty response (no choices)",
-                    summary="LLM empty response",
-                    json_valid=False,
-                    validation_stage="llm_validation"
-                )
-            
-            # Extract content from either 'content' or 'reasoning' field
-            # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
-            message = response["choices"][0]["message"]
-            llm_output = extract_message_text(message)
-            
+            # An empty reply is a contract failure: it takes the same bounded
+            # retry as malformed JSON. Some reasoning models put the JSON in a
+            # 'reasoning' field, which extract_message_text also reads.
+            llm_output = self._response_text(response)
+
             # Parse JSON response with retry logic
             try:
                 validation_data = await self._parse_json_with_retry(
@@ -1185,25 +1275,17 @@ class CompilerValidator:
                     prompt,
                     "",  # system_prompt not used in this call
                     0,  # initial retry count
+                    task_id=task_id,
                 )
             except ValidatorContractError as contract_error:
                 logger.warning(
-                    "CompilerValidator: rejecting structurally invalid validation response: %s",
+                    "CompilerValidator: validator reply broke its JSON contract after "
+                    "one retry; returning it to the coordinator for re-validation: %s",
                     contract_error,
                 )
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
-                return CompilerValidationResult(
-                    submission_id=submission.submission_id,
-                    decision="reject",
-                    reasoning=f"Invalid validator JSON contract: {contract_error}",
-                    summary="Invalid validator JSON contract",
-                    coherence_check=False,
-                    rigor_check=False,
-                    placement_check=False,
-                    json_valid=False,
-                    validation_stage="llm_validation",
-                )
+                raise
             # Extract validation decision
             decision = validation_data.get("decision", "reject")
             reasoning = validation_data.get("reasoning", "No reasoning provided")
@@ -1281,9 +1363,7 @@ class CompilerValidator:
             
             return result
             
-        except FreeModelExhaustedError:
-            raise
-        except RetryableProviderError:
+        except (FreeModelExhaustedError, RetryableProviderError, ValidatorContractError):
             raise
         except Exception as e:
             if api_client_manager.is_provider_failure(e):
@@ -1329,15 +1409,12 @@ class CompilerValidator:
         
         if actual_prompt_tokens > max_allowed_tokens:
             logger.error(f"Brainstorm validation prompt too large: {actual_prompt_tokens} > {max_allowed_tokens}")
-            return CompilerValidationResult(
-                submission_id=str(uuid.uuid4()),
-                decision="reject",
-                reasoning=f"Internal error: Brainstorm validation prompt too large ({actual_prompt_tokens} tokens)",
-                summary="Internal context overflow error",
-                json_valid=False,
-                validation_stage="internal_error"
+            raise ValidatorPromptTooLargeError(
+                required_tokens=actual_prompt_tokens,
+                available_tokens=max_allowed_tokens,
+                subject="brainstorm operation",
             )
-        
+
         task_id = self.get_current_task_id()
         self.task_sequence += 1
         
@@ -1354,22 +1431,8 @@ class CompilerValidator:
                 max_tokens=system_config.compiler_validator_max_output_tokens
             )
             
-            if not response.get("choices") or not response["choices"][0].get("message"):
-                logger.error("CompilerValidator: Brainstorm validation LLM returned empty response")
-                if self.task_tracking_callback:
-                    self.task_tracking_callback("completed", task_id)
-                return CompilerValidationResult(
-                    submission_id=str(uuid.uuid4()),
-                    decision="reject",
-                    reasoning="Validation LLM returned empty response (no choices)",
-                    summary="LLM empty response",
-                    json_valid=False,
-                    validation_stage="llm_validation"
-                )
-            
-            message = response["choices"][0]["message"]
-            llm_output = extract_message_text(message)
-            
+            llm_output = self._response_text(response)
+
             try:
                 validation_data = await self._parse_json_with_retry(
                     llm_output,
@@ -1377,25 +1440,17 @@ class CompilerValidator:
                     "",
                     0,
                     require_checks=False,
+                    task_id=task_id,
                 )
             except ValidatorContractError as contract_error:
                 logger.warning(
-                    "CompilerValidator: rejecting structurally invalid brainstorm validation: %s",
+                    "CompilerValidator: brainstorm validation reply broke its JSON "
+                    "contract after one retry; returning it for re-validation: %s",
                     contract_error,
                 )
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
-                return CompilerValidationResult(
-                    submission_id=str(uuid.uuid4()),
-                    decision="reject",
-                    reasoning=f"Invalid validator JSON contract: {contract_error}",
-                    summary="Invalid validator JSON contract",
-                    coherence_check=False,
-                    rigor_check=False,
-                    placement_check=False,
-                    json_valid=False,
-                    validation_stage="llm_validation",
-                )
+                raise
             from backend.shared.solution_path.integration import enqueue_optional_update
             decision = validation_data.get("decision", "reject")
             await enqueue_optional_update(
@@ -1423,9 +1478,7 @@ class CompilerValidator:
             logger.info(f"Brainstorm operation validation: {decision}")
             return result
             
-        except FreeModelExhaustedError:
-            raise
-        except RetryableProviderError:
+        except (FreeModelExhaustedError, RetryableProviderError, ValidatorContractError):
             raise
         except Exception as e:
             if api_client_manager.is_provider_failure(e):

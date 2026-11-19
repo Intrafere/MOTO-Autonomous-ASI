@@ -18,6 +18,7 @@ describe('ProofCheckModeModal', () => {
     expect(screen.getByText(/10 consecutive rounds find no candidates/i)).toBeTruthy();
     expect(screen.getByText(/Each empty round is reported in Live Activity/i)).toBeTruthy();
     expect(screen.getByText(/until you press Stop/i)).toBeTruthy();
+    expect(screen.getAllByText(/^(High|Very high)$/).map((node) => node.textContent)).toEqual(['High', 'Very high']);
     await user.click(screen.getByRole('radio', { name: /Run Rounds on Loop With Pruning/ }));
     await user.click(screen.getByRole('button', { name: 'Start proof check' }));
 

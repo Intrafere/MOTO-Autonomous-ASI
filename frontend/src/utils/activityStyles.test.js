@@ -9,7 +9,15 @@ import {
   formatContextOverflowActivityMessage,
   formatEmptyProofDiscoveryMessage,
   formatHungConnectionMessage,
+  MASTER_PROOF_EXPANSION_EVENT,
+  formatMasterProofExpansionMessage,
+  MODEL_OUTPUT_NORMALIZED_EVENT,
+  formatModelOutputNormalizedMessage,
+  formatMasterProofMessage,
+  masterProofCountNote,
   formatProofRunEventMessage,
+  formatProofCheckCompleteText,
+  isProofCheckErrorEvent,
   formatProviderRetryCooldownMessage,
   formatProviderUsageLimitActivityMessage,
   formatProviderUsageLimitResumedMessage,
@@ -25,6 +33,7 @@ import {
   shouldAddRejectionFeedbackNotice,
   withRouteIdentity,
 } from './activityStyles';
+import { formatMasterProofBadge, isMasterProof } from './proofPresentation';
 
 test('context overflow activity identifies the effective or configured model', () => {
   expect(formatContextOverflowActivityMessage({
@@ -50,6 +59,40 @@ test('context overflow activity identifies the effective or configured model', (
   })).toBe('Proof formalization skipped. Configured route: configured/model via openrouter.');
 });
 
+test('context overflow activity states attempted and allowed token counts', () => {
+  expect(formatContextOverflowActivityMessage({
+    message: 'Research stopped.',
+    required_tokens: 152340,
+    available_tokens: 120000,
+    context_window: 131072,
+    output_reserve: 11072,
+    configured_model: 'local/model',
+    configured_provider: 'lm_studio',
+  })).toBe(
+    'Research stopped. Tried to inject about 152,340 tokens, but only 120,000 tokens of input fit '
+    + '(model context window 131,072 tokens, 11,072 tokens reserved for output). '
+    + 'Configured route: local/model via lm_studio.'
+  );
+
+  expect(formatContextOverflowActivityMessage({
+    message: 'Proof stopped.',
+    prompt_tokens: 50000,
+    max_input_tokens: 30000,
+  })).toBe('Proof stopped. Tried to inject about 50,000 tokens, but only 30,000 tokens of input fit.');
+
+  expect(formatContextOverflowActivityMessage({
+    message: 'Research stopped.',
+    context_window: 32768,
+  })).toBe('Research stopped. Model context window 32,768 tokens.');
+
+  // A message that already states the counts is not repeated.
+  expect(formatContextOverflowActivityMessage({
+    message: 'Formalization deferred: requires 50,000 input tokens but the budget is 30,000.',
+    prompt_tokens: 50000,
+    max_input_tokens: 30000,
+  })).toBe('Formalization deferred: requires 50,000 input tokens but the budget is 30,000.');
+});
+
 test('proof context overflow uses fatal activity styling without implying workflow stop', () => {
   expect(getActivityClass('proof_context_overflow')).toBe('activity-reject');
 });
@@ -57,6 +100,25 @@ test('proof context overflow uses fatal activity styling without implying workfl
 test('proof truncation recovery exhaustion uses its dedicated warning activity style', () => {
   expect(getActivityIcon('proof_truncation_recovery_exhausted')).toBe('⚠');
   expect(getActivityClass('proof_truncation_recovery_exhausted')).toBe('activity-reject');
+});
+
+test('master proof progress is styled by kind and names the proof and feedback', () => {
+  expect(getActivityIcon('master_proof_progress')).toBe('M');
+  expect(getActivityClass('master_proof_progress', { data: { kind: 'sorry_closed' } })).toBe('activity-success');
+  expect(getActivityClass('master_proof_progress', { data: { kind: 'scaffold_change_rejected' } })).toBe('activity-reject');
+  expect(getActivityClass('master_proof_progress', { data: { kind: 'attempt_started' } })).toBe('activity-info');
+  expect(formatMasterProofMessage({
+    proof_label: 'B',
+    kind: 'attempt_failed',
+    message: 'Master proof obligation `step`: attempt 2 of 15 failed.',
+    lean_was_run: false,
+    error_summary: 'SUBMISSION REJECTED: statement changed.',
+  })).toBe('Proof B - Master proof obligation `step`: attempt 2 of 15 failed. Lean 4 was not run. Feedback: SUBMISSION REJECTED: statement changed.');
+  expect(formatMasterProofMessage({
+    kind: 'scaffold_change_rejected',
+    message: 'Validator rejected the scaffold change proposed for `step`.',
+    validator_feedback: 'No gain.',
+  })).toBe('Proof - Validator rejected the scaffold change proposed for `step`. Validator feedback: No gain.');
 });
 
 test('proof candidate-list Validator events have visible activity styles', () => {
@@ -248,6 +310,66 @@ test('formats detailed continuous round activity with no-discovery progress', ()
     terminal_reason: 'consecutive_no_discovery_limit',
     no_discovery_round_limit: 10,
   })).toContain('completed after 10 consecutive rounds');
+});
+
+test('errored proof rounds and checks never read as completed or continuing', () => {
+  const errored = {
+    run_mode: 'loop_with_pruning',
+    current_round: 1,
+    candidate_count: null,
+    round_outcome: 'error',
+    next_round_automatic: false,
+  };
+  const fatal = { current_round: 2, candidate_count: null, round_outcome: 'fatal_stop' };
+  // Older saved records carry no outcome and a stale continuation flag.
+  const legacy = {
+    run_mode: 'loop_with_pruning',
+    current_round: 1,
+    candidate_count: null,
+    no_discovery_round_limit: 10,
+    next_round_automatic: true,
+  };
+  const messages = [errored, fatal, legacy].map((data) => (
+    formatProofRunEventMessage('proof_run_round_complete', data)
+  ));
+  messages.forEach((message) => {
+    expect(message).not.toContain('found none');
+    expect(message).not.toContain('will start automatically');
+  });
+  expect(messages[0]).toBe(
+    'Round 1 stopped on an error before proof discovery finished, so no next round will start. '
+    + 'The error checkpoint is kept.'
+  );
+  expect(messages[1]).toContain('Round 2 stopped before finishing');
+  expect(messages[2]).toBe('Round 1 ended without a usable proof discovery result.');
+
+  const checkError = {
+    verified_count: 0,
+    novel_count: 0,
+    total_candidates: 0,
+    had_error: true,
+    message: 'Proof verification encountered an error: Expecting property name enclosed in double quotes',
+  };
+  expect(formatProofCheckCompleteText(checkError, {
+    label: 'Proof round 1',
+    detail: checkError.message,
+    includeTotal: true,
+  })).toBe('Proof round 1 stopped on an error: Expecting property name enclosed in double quotes');
+  const legacyCheckError = { ...checkError, had_error: undefined };
+  expect(isProofCheckErrorEvent(legacyCheckError)).toBe(true);
+  expect(formatProofCheckCompleteText({ ...checkError, verified_count: 2, novel_count: 1 }, {
+    detail: 'formalization error: boom',
+  })).toBe('Proof check stopped on an error after 2 verified, 1 novel: formalization error: boom');
+  expect(formatProofCheckCompleteText({ verified_count: 1, novel_count: 0 }, {
+    label: 'Proof round 3',
+  })).toBe('Proof round 3 complete: 1 verified, 0 novel');
+
+  expect(getActivityIcon('proof_check_complete', { data: checkError })).toBe('!');
+  expect(getActivityClass('proof_check_complete', { data: checkError })).toBe('activity-warning');
+  expect(getActivityIcon('proof_check_complete', { data: { verified_count: 1 } })).toBe('✓');
+  expect(getActivityIcon('proof_run_round_complete', { data: errored })).toBe('!');
+  expect(getActivityClass('proof_run_round_complete', { data: errored })).toBe('activity-warning');
+  expect(getActivityClass('proof_run_round_complete', { data: { candidate_count: 0 } })).toBe('activity-info');
 });
 
 test('dedupes proof activity by notification or run identity while preserving scope', () => {
@@ -591,6 +713,12 @@ describe('provider route identity', () => {
         `${codexIdentity} OpenAI Codex usage limit reached for compiler_writer. `
         + 'Using LM Studio fallback (local-test-model) until reset.'
       );
+    expect(formatProviderUsageLimitActivityMessage({
+      ...codexData, fallback_model: 'Qwen/Qwen2.5', fallback_provider: 'vllm',
+    })).toBe(
+      `${codexIdentity} OpenAI Codex usage limit reached for compiler_writer. `
+      + 'Using vLLM fallback (Qwen/Qwen2.5) until reset.'
+    );
     expect(formatProviderUsageLimitResumedMessage(codexData)).toBe(
       `${codexIdentity} OpenAI Codex usage limit ended for compiler_writer; provider work resumed.`
     );
@@ -655,4 +783,80 @@ describe('provider route identity', () => {
     expect(formatSolutionPathEventMessage('solution_path_updated', { revision: 2 }))
       .toBe('Main Submitter 1 approved solution path revision 2.');
   });
+});
+
+test('proof list lines say how many candidates are master proofs', () => {
+  expect(masterProofCountNote({})).toBe('');
+  expect(masterProofCountNote({ master_proof_count: 6 }, 'proposed')).toBe(', 6 of them master proofs');
+  expect(masterProofCountNote({ master_proof_count: 1 })).toBe(' (1 as master proof, each built from several steps)');
+});
+
+test('a stored master proof is recognised by its kind and reports its steps', () => {
+  const master = { proof_kind: 'master_proof', master_proof: { steps: [{ name: 'a' }, { name: 'b' }] } };
+  expect(isMasterProof(master)).toBe(true);
+  expect(formatMasterProofBadge(master)).toBe('Master proof · 2 steps');
+  expect(formatMasterProofBadge({ proof_kind: 'master_proof' })).toBe('Master proof');
+  expect(isMasterProof({ proof_kind: 'individual', solver: 'Lean 4' })).toBe(false);
+  expect(isMasterProof({})).toBe(false);
+});
+
+test('master proof expansion activity keeps the backend sentence and is informational', () => {
+  expect(getActivityIcon(MASTER_PROOF_EXPANSION_EVENT)).toBe('⤢');
+  expect(getActivityClass(MASTER_PROOF_EXPANSION_EVENT, { data: {} })).toBe('activity-info');
+  expect(formatMasterProofExpansionMessage({
+    message: 'Master proof expansion: the model viewed master proof `m` and carried 2 declarations into its task.',
+  })).toBe('Master proof expansion: the model viewed master proof `m` and carried 2 declarations into its task.');
+});
+
+describe('model output normalization activity', () => {
+  const routeIdentity = '[Autonomous · Proof formalization · gemma-3 via LM Studio]';
+  const payload = {
+    event_id: 'model_output_normalized:abc123',
+    role_id: 'autonomous_proof_identification',
+    workflow_mode: 'autonomous',
+    route_identity: routeIdentity,
+    repairs: [{ kind: 'key_label', item_path: 'theorems[2]', from_key: 'novelty_rationally', to_key: 'novelty_rationale' }],
+    repair_count: 1,
+    message: `${routeIdentity} Accepted gemma-3's mislabeled field 'novelty_rationally' as 'novelty_rationale' (theorems[2] 'lemma_b').`,
+    activity_outcome: 'normalized',
+    activity_severity: 'info',
+  };
+
+  test('shows the backend sentence with the route identity exactly once', () => {
+    const message = formatModelOutputNormalizedMessage(payload);
+    expect(message).toBe(payload.message);
+    expect(message.split(routeIdentity)).toHaveLength(2);
+    const unprefixed = formatModelOutputNormalizedMessage({
+      ...payload,
+      message: "Accepted gemma-3's mislabeled field 'novelty_rationally' as 'novelty_rationale'.",
+    });
+    expect(unprefixed.startsWith(`${routeIdentity} Accepted`)).toBe(true);
+  });
+
+  test('falls back to a counted summary when no sentence arrived', () => {
+    expect(formatModelOutputNormalizedMessage({ ...payload, message: '' }))
+      .toBe(`${routeIdentity} Accepted model output for autonomous_proof_identification after 1 normalization.`);
+    expect(formatModelOutputNormalizedMessage({ role_id: 'agg_val', repair_count: 2 }))
+      .toBe('Accepted model output for agg_val after 2 normalizations.');
+  });
+
+  test('is informational, neither success nor error', () => {
+    expect(MODEL_OUTPUT_NORMALIZED_EVENT).toBe('model_output_normalized');
+    expect(getActivityIcon(MODEL_OUTPUT_NORMALIZED_EVENT, { data: payload })).toBe('ℹ');
+    expect(getActivityClass(MODEL_OUTPUT_NORMALIZED_EVENT, { data: payload })).toBe('activity-info');
+  });
+});
+
+test('a proof check stopped by a model-output contract failure renders as an error', () => {
+  const contractFailure = {
+    verified_count: 0,
+    novel_count: 0,
+    had_error: true,
+    message: "Proof verification encountered an error: 2 of 3 theorem entries were invalid; theorems[1] 'lemma_b': missing required field 'novelty_rationale'. No Lean work was attempted.",
+  };
+  const text = formatProofCheckCompleteText(contractFailure, { detail: contractFailure.message });
+  expect(text).toBe("Proof check stopped on an error: 2 of 3 theorem entries were invalid; theorems[1] 'lemma_b': missing required field 'novelty_rationale'. No Lean work was attempted.");
+  expect(text).not.toContain('complete:');
+  expect(getActivityClass('proof_check_complete', { data: contractFailure })).toBe('activity-warning');
+  expect(getActivityIcon('proof_check_complete', { data: contractFailure })).toBe('!');
 });

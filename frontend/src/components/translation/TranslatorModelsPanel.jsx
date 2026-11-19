@@ -62,7 +62,6 @@ export default function TranslatorModelsPanel({
   savedSettings,
   capabilities,
   credentialStatusRefreshToken = 0,
-  developerModeEnabled = false,
   onSaveRoles,
 }) {
   const idPrefix = useId();
@@ -330,7 +329,6 @@ export default function TranslatorModelsPanel({
     hasOpenRouterKey,
     lmStudioEnabled,
     isRunning: saving,
-    developerModeEnabled,
     showSupercharge: false,
   };
 

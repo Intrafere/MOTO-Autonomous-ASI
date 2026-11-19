@@ -2,7 +2,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from backend.aggregator.core import chroma_cache as chroma_cache_module
 from backend.aggregator.core.chroma_cache import (
     complete_chroma_cache_rebuild,
     maintain_chroma_cache_directory,
@@ -135,6 +137,54 @@ class ChromaCacheCleanupTests(unittest.TestCase):
 
             self.assertTrue((chroma_dir / "old.cache").exists())
             self.assertFalse(quarantine.exists())
+
+    def test_quarantine_waits_for_files_windows_still_holds_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            chroma_dir = data_root / "chroma_db"
+            chroma_dir.mkdir()
+            (chroma_dir / "chroma.sqlite3").write_text("cache", encoding="utf-8")
+
+            real_replace = Path.replace
+            refusals = [PermissionError(5, "Access is denied")] * 2
+
+            def replace_after_release(path: Path, target):
+                if path == chroma_dir.resolve() and refusals:
+                    raise refusals.pop()
+                return real_replace(path, target)
+
+            with mock.patch.object(Path, "replace", replace_after_release), mock.patch.object(
+                chroma_cache_module.time, "sleep"
+            ) as sleep:
+                fresh, quarantine = quarantine_chroma_cache(chroma_dir, data_root)
+
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(list(fresh.iterdir()), [])
+            self.assertTrue((quarantine / "chroma.sqlite3").exists())
+            self.assertTrue((data_root / "chroma_db.rebuild.json").exists())
+
+    def test_quarantine_gives_up_cleanly_when_files_stay_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            chroma_dir = data_root / "chroma_db"
+            chroma_dir.mkdir()
+            (chroma_dir / "chroma.sqlite3").write_text("cache", encoding="utf-8")
+
+            def always_refuse(path: Path, target):
+                raise PermissionError(5, "Access is denied")
+
+            with mock.patch.object(Path, "replace", always_refuse), mock.patch.object(
+                chroma_cache_module.time, "sleep"
+            ) as sleep:
+                with self.assertRaises(PermissionError):
+                    quarantine_chroma_cache(chroma_dir, data_root)
+
+            self.assertEqual(
+                sleep.call_count,
+                len(chroma_cache_module._QUARANTINE_RENAME_RETRY_DELAYS_SECONDS),
+            )
+            self.assertTrue((chroma_dir / "chroma.sqlite3").exists())
+            self.assertFalse((data_root / "chroma_db.rebuild.json").exists())
 
 
 if __name__ == "__main__":

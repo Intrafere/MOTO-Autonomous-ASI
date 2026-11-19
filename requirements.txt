@@ -21,6 +21,9 @@ tiktoken>=0.5.2
 keyring>=25.6.0
 truststore>=0.10.0,<1.0
 
+# Claude Messages API (Claude API and Amazon Bedrock role providers)
+anthropic>=2.0,<3.0
+
 # PDF generation (headless Chromium via Playwright - full rendering fidelity)
 playwright>=1.40.0
 

@@ -1,0 +1,40 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "value_position_refused",
+    "array_position_refused"
+  ],
+  "faked_dependencies": [
+    "model reply supplied as a fixed string"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "stray characters in value or array-element position are never removed",
+  "real_components": [
+    "backend/shared/json_parser.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_parser_never_repairs_value_positions",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:664f2b27ab0f0a75fb01b51f246f4c5870857048c3c0d6dd07f5647f06e50dc6",
+  "test_file": "tests/unit/test_json_parser_repairs.py",
+  "test_selectors": [
+    "tests/unit/test_json_parser_repairs.py::test_value_and_array_positions_are_never_repaired"
+  ]
+}

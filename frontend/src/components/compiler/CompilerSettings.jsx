@@ -19,14 +19,19 @@ import { refreshOpenRouterCredentialState } from '../../utils/credentialProvider
 import useCloudAccessProviders from '../../hooks/useCloudAccessProviders';
 import CloudProviderModelErrors from '../CloudProviderModelErrors';
 import CloudReasoningControl from '../CloudReasoningControl';
+import TokenCountNote from '../TokenCountNote';
 import {
   chooseCloudAccessProvider,
+  isCloudSubscriptionProvider,
   isCloudAccessProvider,
 } from '../../utils/oauthProviders';
+import LocalServerProviderButtons from '../LocalServerProviderButtons';
+import LocalFallbackOptions from '../LocalFallbackOptions';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
 import ProofStrengthBadge from '../ProofStrengthBadge';
+import UsageLevelBadge from '../UsageLevelBadge';
 import RawSettingsEditor from '../RawSettingsEditor';
 import '../autonomous/AutonomousResearch.css';
 import '../settings-common.css';
@@ -881,6 +886,17 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               >
                 LM Studio
               </button>
+              <LocalServerProviderButtons
+                provider={provider}
+                statusByProvider={oauthStatusByProvider}
+                onSelect={(providerId) => {
+                  setProvider(providerId);
+                  setModel('');
+                  setOpenrouterProv(null);
+                  setOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
+                  setFallback(null);
+                }}
+              />
               <button
                 type="button"
                 onClick={() => {
@@ -910,12 +926,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   }
                 }}
                 disabled={configuredOAuthProviders.length === 0}
-                className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
+                className={`provider-toggle-btn${isCloudSubscriptionProvider(provider) ? ' active-or-orange' : ''}`}
                 title={configuredOAuthProviders.length === 0 ? 'Set up a cloud provider login or API key first' : 'Use a configured cloud provider'}
               >
                 Cloud
               </button>
-              {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
+              {isCloudSubscriptionProvider(provider) && configuredOAuthProviders.length > 1 && (
                 <select
                   value={provider}
                   onChange={(event) => {
@@ -1050,20 +1066,23 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           />
         )}
 
-        {/* LM Studio Fallback (if cloud provider) */}
+        {/* Local fallback: an LM Studio or vLLM model (not for LM Studio roles) */}
         {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
           <div className="settings-row">
-            <label className="label--muted">LM Studio Fallback (optional)</label>
+            <label className="label--muted">Local Fallback (optional)</label>
             <select
               value={fallback || ''}
               onChange={(e) => setFallback(e.target.value || null)}
             >
-              <option value="">No fallback</option>
-              {lmStudioModels.map(m => (
-                <option key={m.id} value={m.id}>{m.id}</option>
-              ))}
+              <LocalFallbackOptions
+                lmStudioModels={lmStudioModels}
+                modelsFor={cloudProviders.modelsFor}
+                provider={effectiveProvider}
+                modelId={model}
+                value={fallback}
+              />
             </select>
-            <small className="settings-hint">Used if cloud provider access fails or credits run out</small>
+            <small className="settings-hint">An LM Studio or vLLM model used if this role's provider fails or credits run out</small>
           </div>
         )}
 
@@ -1080,6 +1099,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             max={50000000}
             step={1024}
           />
+          <TokenCountNote provider={effectiveProvider} modelId={model} contextWindow={contextSize} />
         </div>
 
         <div className="settings-row">
@@ -1097,26 +1117,25 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           />
         </div>
 
-        {developerModeEnabled && (
-          <div className="settings-row settings-row--inline-checkbox">
-            <label className="settings-checkbox-label settings-checkbox-label--supercharge">
-              <input
-                type="checkbox"
-                checked={Boolean(superchargeEnabled)}
-                onChange={(e) => setSuperchargeEnabled(e.target.checked)}
-              />
-              <HelpTooltip
-                label="Learn about Supercharge"
-                buttonContent="Supercharge"
-                buttonClassName="help-tooltip-btn--text"
-                popupClassName="help-tooltip-popup--fixed"
-                useFixedPosition
-              >
-                {SUPERCHARGE_TOOLTIP}
-              </HelpTooltip>
-            </label>
-          </div>
-        )}
+        <div className="settings-row settings-row--inline-checkbox">
+          <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+            <input
+              type="checkbox"
+              checked={Boolean(superchargeEnabled)}
+              onChange={(e) => setSuperchargeEnabled(e.target.checked)}
+            />
+            <HelpTooltip
+              label="Learn about Supercharge"
+              buttonContent="Supercharge"
+              buttonClassName="help-tooltip-btn--text"
+              popupClassName="help-tooltip-popup--fixed"
+              useFixedPosition
+            >
+              {SUPERCHARGE_TOOLTIP}
+            </HelpTooltip>
+          </label>
+          <UsageLevelBadge featureId="roles.supercharge" />
+        </div>
         </fieldset>
       </div>
     );

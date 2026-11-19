@@ -29,16 +29,27 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_STOP_MESSAGE,
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
+    context_overflow_token_payload,
 )
 from backend.shared.lean4_client import (
     LEAN_WORKSPACE_REPAIR_REQUIRED_REASON,
     LeanWorkspaceRepairRequiredError,
 )
 from backend.shared.provider_errors import ProviderContextLengthError, ProviderRepairRequiredError
-from backend.shared.provider_route_identity import merge_route_identity
+from backend.shared.provider_route_identity import merge_route_identity, with_route_identity
+from backend.shared.model_output_contract import (
+    ModelOutputContractError,
+    report_model_output_normalizations,
+    wait_after_repeated_contract_failure,
+)
 from backend.compiler.agents.writer_submitter import WritingSubmitter
 from backend.compiler.agents.high_param_submitter import HighParamSubmitter
-from backend.compiler.validation.compiler_validator import CompilerValidator, normalize_unicode_hyphens, find_with_normalized_hyphens
+from backend.compiler.validation.compiler_validator import (
+    CompilerValidator,
+    ValidatorPromptTooLargeError,
+    find_with_normalized_hyphens,
+    normalize_unicode_hyphens,
+)
 from backend.compiler.memory.outline_memory import outline_memory, OUTLINE_ANCHOR
 from backend.compiler.memory.paper_memory import (
     paper_memory, 
@@ -275,15 +286,15 @@ class CompilerCoordinator:
             validator_provider: Provider for validator ("lm_studio" or "openrouter")
             validator_openrouter_provider: OpenRouter host provider for validator
             validator_openrouter_reasoning_effort: OpenRouter reasoning effort for validator
-            validator_lm_studio_fallback: LM Studio fallback model for validator
+            validator_lm_studio_fallback: Local fallback (LM Studio model or `vllm::<model>`) for validator
             writer_provider: Provider for writing submitter
             writer_openrouter_provider: OpenRouter host provider for writing submitter
             writer_openrouter_reasoning_effort: OpenRouter reasoning effort for writing submitter
-            writer_lm_studio_fallback: LM Studio fallback model for writing submitter
+            writer_lm_studio_fallback: Local fallback (LM Studio model or `vllm::<model>`) for writing submitter
             high_param_provider: Provider for Rigor & Proofs submitter
             high_param_openrouter_provider: OpenRouter host provider for Rigor & Proofs submitter
             high_param_openrouter_reasoning_effort: OpenRouter reasoning effort for Rigor & Proofs submitter
-            high_param_lm_studio_fallback: LM Studio fallback model for Rigor & Proofs submitter
+            high_param_lm_studio_fallback: Local fallback (LM Studio model or `vllm::<model>`) for Rigor & Proofs submitter
             critique_submitter_*: Deprecated compatibility aliases mirrored from Rigor & Proofs
         """
         logger.info("Initializing compiler coordinator...")
@@ -883,17 +894,17 @@ class CompilerCoordinator:
             }.items()
             if value
         }
+        role_config = api_client_manager.get_role_config(config_role_id)
         payload = {
             "workflow_mode": self._workflow_mode(),
             "role_id": role_id,
-            **context_overflow_model_payload(
-                api_client_manager.get_role_config(config_role_id)
-            ),
+            **context_overflow_model_payload(role_config),
             **feedback_route_payload,
             "mode": mode or self.current_mode,
             "reason": CONTEXT_OVERFLOW_STOP_REASON,
             "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
             "error_detail": str(error),
+            **context_overflow_token_payload(error, config=role_config),
             "resolution": CONTEXT_OVERFLOW_RESOLUTION,
         }
         payload = fill_missing_activity_metadata(
@@ -916,6 +927,143 @@ class CompilerCoordinator:
         logger.error("Compiler context overflow in %s: %s", role_id, error)
         await self._broadcast("context_overflow_error", self.fatal_error_payload)
     
+    async def _report_model_output_contract_failure(
+        self,
+        error: ModelOutputContractError,
+        *,
+        role_id: str,
+        mode: str,
+        next_step: str,
+        retry_attempt: int,
+        submission_id: str = "",
+    ) -> None:
+        """Publish a model-output contract failure as operational activity.
+
+        It is never a semantic rejection: nothing is written to submitter
+        rejection feedback or the rejection log, and it is not a provider wait.
+        Each occurrence carries its own ``event_id`` and the consecutive
+        ``retry_attempt`` so repeated failures stay distinct in Live Activity.
+        """
+        fields = api_client_manager.route_identity_for_role(
+            role_id,
+            workflow_mode=self._workflow_mode(),
+        )
+        detail = error.field_summary or error.stage
+        message = with_route_identity(
+            f"The reply did not match its JSON format after one retry ({detail}); "
+            f"{next_step}. This is not a rejection.",
+            fields,
+        )
+        logger.warning("Compiler %s contract failure (%s): %s", role_id, mode, error)
+        payload = merge_route_identity(
+            {
+                "event_id": f"compiler_warning:{uuid.uuid4().hex}",
+                "mode": mode,
+                "role_id": role_id,
+                "submission_id": submission_id,
+                "retry_attempt": retry_attempt,
+                "warning": message,
+                "message": message,
+                "reason": "model_output_contract_failure",
+                "contract_stage": error.stage,
+                "error_summary": str(error),
+                "validation_stage": "parse_error",
+                "current_mode": self.current_mode,
+            },
+            fields,
+        )
+        await self._broadcast("compiler_warning", payload)
+
+    async def _report_optional_operation_skipped(self, error: Exception, *, mode: str) -> None:
+        """Publish that an optional operation was skipped because its validation cannot fit."""
+        fields = api_client_manager.route_identity_for_role(
+            "compiler_validator",
+            workflow_mode=self._workflow_mode(),
+        )
+        message = with_route_identity(
+            "The optional brainstorm operation was skipped because its validation prompt "
+            "does not fit the validator's context window; paper writing continues. "
+            "This is not a rejection.",
+            fields,
+        )
+        logger.warning("Compiler skipped optional %s operation: %s", mode, error)
+        await self._broadcast(
+            "compiler_warning",
+            merge_route_identity(
+                {
+                    "mode": mode,
+                    "role_id": "compiler_validator",
+                    "warning": message,
+                    "message": message,
+                    "reason": "optional_operation_context_overflow",
+                    "error_summary": str(error),
+                    "current_mode": self.current_mode,
+                },
+                fields,
+            ),
+        )
+
+    async def _wait_after_repeated_contract_failure(
+        self,
+        role_id: str,
+        consecutive_failures: int,
+    ) -> None:
+        """Stop-aware, never-capped backoff after repeated contract failures."""
+        await wait_after_repeated_contract_failure(
+            role_id,
+            consecutive_failures,
+            should_stop=lambda: not self.is_running,
+            workflow_mode=self._workflow_mode(),
+        )
+
+    async def _validate_until_decided(
+        self,
+        validate: Callable[[], Any],
+        *,
+        mode: str,
+        submission_id: str = "",
+        optional_operation: bool = False,
+    ) -> Optional[CompilerValidationResult]:
+        """Return the validator's decision on one submission, or None when stopped.
+
+        ``optional_operation`` marks an operation the workflow can do without
+        (a retroactive brainstorm operation). If its validation prompt cannot
+        fit, the operation is skipped with operational activity instead of
+        stopping the run; mandatory submissions keep the context-overflow
+        lifecycle.
+
+        A validator reply that still breaks its JSON contract after the
+        validator's own bounded retry is operational: the same submission is
+        validated again (the compiler's one-submission queue is requeued), never
+        rejected. Repeated failures back off (stop-aware, never capped). A prompt
+        that cannot fit follows the context-overflow lifecycle.
+        """
+        consecutive_failures = 0
+        while True:
+            try:
+                return await validate()
+            except (ValidatorPromptTooLargeError, ProviderContextLengthError) as exc:
+                if optional_operation:
+                    await self._report_optional_operation_skipped(exc, mode=mode)
+                    return None
+                await self._handle_context_overflow(exc, role_id="compiler_validator", mode=mode)
+                return None
+            except ModelOutputContractError as exc:
+                consecutive_failures += 1
+                await self._report_model_output_contract_failure(
+                    exc,
+                    role_id="compiler_validator",
+                    mode=mode,
+                    submission_id=submission_id,
+                    next_step="validating the same submission again",
+                    retry_attempt=consecutive_failures,
+                )
+                await self._wait_after_repeated_contract_failure(
+                    "compiler_validator", consecutive_failures
+                )
+                if not self.is_running:
+                    return None
+
     async def _main_workflow(self) -> None:
         """Main compiler workflow loop."""
         logger.info("Compiler workflow started")
@@ -1364,11 +1512,17 @@ INVALID:
                 continue
             
             # Validate outline with LLM validator
-            result = await self.validator.validate_submission(
-                submission,
-                current_paper="",
-                current_outline=submission.content
+            result = await self._validate_until_decided(
+                lambda: self.validator.validate_submission(
+                    submission,
+                    current_paper="",
+                    current_outline=submission.content,
+                ),
+                mode="outline_create",
+                submission_id=submission.submission_id,
             )
+            if result is None:
+                return
             
             # Store feedback in rolling window (regardless of accept/reject)
             # CRITICAL: Include outline content when accepted so model can see its own work
@@ -1632,11 +1786,17 @@ INVALID:
             
             # Validator reviews
             current_outline = await outline_memory.get_outline()
-            result = await self.validator.validate_submission(
-                submission,
-                current_paper="",
-                current_outline=current_outline
+            result = await self._validate_until_decided(
+                lambda: self.validator.validate_submission(
+                    submission,
+                    current_paper="",
+                    current_outline=current_outline,
+                ),
+                mode="construction",
+                submission_id=submission.submission_id,
             )
+            if result is None:
+                return
             
             if result.decision == "accept":
                 # Accept initial portion - initialize with placeholders
@@ -2117,11 +2277,17 @@ INVALID:
         current_paper = await paper_memory.get_paper()
         current_outline = await outline_memory.get_outline()
         
-        result = await self.validator.validate_submission(
-            submission,
-            current_paper=current_paper,
-            current_outline=current_outline
+        result = await self._validate_until_decided(
+            lambda: self.validator.validate_submission(
+                submission,
+                current_paper=current_paper,
+                current_outline=current_outline,
+            ),
+            mode=submission.mode,
+            submission_id=submission.submission_id,
         )
+        if result is None:
+            return False, None
         
         if result.decision == "accept":
             # Update paper. For phase-section creation, prefer placeholder replacement
@@ -2301,9 +2467,15 @@ INVALID:
                 )
                 return
 
-            result = await self.validator.validate_brainstorm_operation(
-                brainstorm_op, brainstorm_content
+            result = await self._validate_until_decided(
+                lambda: self.validator.validate_brainstorm_operation(
+                    brainstorm_op, brainstorm_content
+                ),
+                mode="brainstorm_retroactive",
+                optional_operation=True,
             )
+            if result is None:
+                return
             
             if result.decision == "accept":
                 success = False
@@ -2518,11 +2690,17 @@ INVALID:
         current_paper = await paper_memory.get_paper()
         current_outline = await outline_memory.get_outline()
         
-        result = await self.validator.validate_submission(
-            submission,
-            current_paper=current_paper,
-            current_outline=current_outline
+        result = await self._validate_until_decided(
+            lambda: self.validator.validate_submission(
+                submission,
+                current_paper=current_paper,
+                current_outline=current_outline,
+            ),
+            mode="outline_update",
+            submission_id=submission.submission_id,
         )
+        if result is None:
+            return False
         
         if result.decision == "accept":
             # Update outline (use _apply_edit for line-based additions)
@@ -2655,11 +2833,17 @@ INVALID:
         current_paper = await paper_memory.get_paper()
         current_outline = await outline_memory.get_outline()
         
-        result = await self.validator.validate_submission(
-            submission,
-            current_paper=current_paper,
-            current_outline=current_outline
+        result = await self._validate_until_decided(
+            lambda: self.validator.validate_submission(
+                submission,
+                current_paper=current_paper,
+                current_outline=current_outline,
+            ),
+            mode="review",
+            submission_id=submission.submission_id,
         )
+        if result is None:
+            return False
         
         if result.decision == "accept":
             # Apply edit
@@ -2818,7 +3002,28 @@ INVALID:
             if self.high_param_submitter:
                 source_context, source_label = await self._load_rigor_source_material_context()
                 self.high_param_submitter.set_source_material_context(source_context, source_label)
-            lean_result = await self.high_param_submitter.submit_rigor_lean_theorem()
+            contract_failures = 0
+            while True:
+                try:
+                    lean_result = await self.high_param_submitter.submit_rigor_lean_theorem()
+                    break
+                except ModelOutputContractError as exc:
+                    # The reply broke its JSON contract after one retry. It is
+                    # not a decline the model chose: report it as operational
+                    # activity and regenerate (paced, stop-aware, never capped).
+                    contract_failures += 1
+                    await self._report_model_output_contract_failure(
+                        exc,
+                        role_id="compiler_high_param",
+                        mode="rigor",
+                        next_step="regenerating the theorem discovery",
+                        retry_attempt=contract_failures,
+                    )
+                    await self._wait_after_repeated_contract_failure(
+                        "compiler_high_param", contract_failures
+                    )
+                    if not self.is_running:
+                        return False
         except ValueError as exc:
             if (
                 "mandatory full source context" in str(exc).lower()
@@ -2937,11 +3142,17 @@ INVALID:
             current_paper = await paper_memory.get_paper()
             current_outline = await outline_memory.get_outline()
 
-            result = await self.validator.validate_submission(
-                submission,
-                current_paper=current_paper,
-                current_outline=current_outline,
+            result = await self._validate_until_decided(
+                lambda: self.validator.validate_submission(
+                    submission,
+                    current_paper=current_paper,
+                    current_outline=current_outline,
+                ),
+                mode="rigor",
+                submission_id=submission.submission_id,
             )
+            if result is None:
+                return False
 
             if result.decision == "accept":
                 updated_paper = self._apply_edit(current_paper, submission)
@@ -3621,7 +3832,8 @@ INVALID:
         rejection_count = 0
         consecutive_rejections = 0
         total_attempts = 0  # Track all attempts (accepted + rejected + declines)
-        
+        consecutive_submitter_contract_failures = 0
+
         while self.is_running and self.in_critique_phase:
             # Retry activity names the role whose step failed: the Rigor & Proofs
             # critique generator, or the critique validator while it validates.
@@ -3685,32 +3897,35 @@ INVALID:
                     existing_critiques=existing_critiques
                 )
                 
-                if submission is None:
-                    logger.warning("Critique generation returned None - retrying")
-                    await api_client_manager.emit_and_wait_for_retry(
-                        {
-                            "provider": "unknown",
-                            "provider_label": "Compiler critique submitter",
-                            "workflow_mode": self._workflow_mode(),
-                            "role_id": failing_role_id,
-                            "retry_attempt": total_attempts + 1,
-                            "retry_after_seconds": 5,
-                            "reason": "empty_critique_retry",
-                        },
-                        role_id=failing_role_id,
-                        should_stop=lambda: not self.is_running,
-                    )
-                    continue
-
                 logger.info(f"Critique generated: {submission.submission_id}")
+                consecutive_submitter_contract_failures = 0
 
                 # Validate critique using critique-specific validator prompts.
+                # A validator reply that breaks its contract after one retry
+                # is operational: the same critique is validated again.
                 failing_role_id = "critique_validator"
-                validation_result = await self._validate_critique(submission)
+                validation_result = None
+                validator_contract_failures = 0
+                while validation_result is None:
+                    try:
+                        validation_result = await self._validate_critique(submission)
+                    except ModelOutputContractError as contract_error:
+                        validator_contract_failures += 1
+                        await self._report_model_output_contract_failure(
+                            contract_error,
+                            role_id="critique_validator",
+                            mode="critique",
+                            submission_id=submission.submission_id,
+                            next_step="validating the same critique again",
+                            retry_attempt=validator_contract_failures,
+                        )
+                        await self._wait_after_repeated_contract_failure(
+                            "critique_validator", validator_contract_failures
+                        )
+                        if not self.is_running:
+                            break
                 if validation_result is None:
-                    raise RuntimeError(
-                        "Critique validation returned no decision after contract validation."
-                    )
+                    break
                 failing_role_id = self.critique_submitter.role_id
 
                 # Handle decline submissions differently
@@ -3803,9 +4018,27 @@ INVALID:
                 # Brief delay between critiques
                 await asyncio.sleep(3)
                 
+            except ModelOutputContractError as contract_error:
+                # The critique reply broke its JSON contract after one retry:
+                # not an attempt, not a rejection, and not a provider wait.
+                consecutive_submitter_contract_failures += 1
+                await self._report_model_output_contract_failure(
+                    contract_error,
+                    role_id=self.critique_submitter.role_id,
+                    mode="critique",
+                    next_step="generating a new critique",
+                    retry_attempt=consecutive_submitter_contract_failures,
+                )
+                await self._wait_after_repeated_contract_failure(
+                    self.critique_submitter.role_id,
+                    consecutive_submitter_contract_failures,
+                )
             except Exception as e:
                 if api_client_manager.is_provider_failure(e):
                     raise
+                if isinstance(e, ValueError) and _classify_submitter_error(e)[0] == "Context overflow":
+                    await self._handle_context_overflow(e, role_id=failing_role_id, mode="critique")
+                    return
                 logger.error(f"Error in critique aggregation loop: {e}", exc_info=True)
                 await api_client_manager.emit_and_wait_for_retry(
                     {
@@ -3895,8 +4128,8 @@ INVALID:
             
             # Parse response, with one bounded same-role JSON repair.
             try:
-                data = parse_json(response_text)
-            except Exception as parse_error:
+                data = await self._parse_critique_validation(response_text, task_id=task_id)
+            except ModelOutputContractError as parse_error:
                 safe = sanitize_model_output_for_retry_context(
                     response_text, max_chars=2000
                 )
@@ -3920,24 +4153,12 @@ INVALID:
                     max_tokens=self.validator_max_tokens,
                 )
                 retry_message = retry.get("choices", [{}])[0].get("message", {})
-                data = parse_json(extract_message_text(retry_message))
-            
-            if data is None:
-                raise ValueError("Critique validator returned no parsed JSON object")
-            
-            # Handle array responses
-            if isinstance(data, list):
-                logger.warning("Validator returned array - using first element")
-                if not data:
-                    raise ValueError("Critique validator returned an empty JSON array")
-                data = data[0]
+                data = await self._parse_critique_validation(
+                    extract_message_text(retry_message),
+                    task_id=f"{task_id}_retry",
+                )
             from backend.shared.solution_path.integration import enqueue_optional_update
-            critique_decision = str(data.get("decision", "reject")).lower()
-            reasoning = data.get("reasoning")
-            if critique_decision not in {"accept", "reject"}:
-                raise ValueError("Critique validator returned an invalid decision")
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                raise ValueError("Critique validator returned empty reasoning")
+            critique_decision = data["decision"]
             await enqueue_optional_update(
                 data,
                 self.solution_path_manager,
@@ -3952,19 +4173,69 @@ INVALID:
             # Create ValidationResult
             result = ValidationResult(
                 submission_id=submission.submission_id,
-                decision=data.get("decision", "reject"),
-                reasoning=data.get("reasoning", ""),
+                decision=critique_decision,
+                reasoning=data["reasoning"],
                 summary=data.get("summary", ""),
                 timestamp=datetime.now()
             )
             
             return result
             
+        except ModelOutputContractError:
+            raise
         except Exception as e:
             if _is_rigor_model_call_failure(e):
                 raise
             logger.error(f"Error validating critique: {e}", exc_info=True)
             raise RuntimeError(f"Critique validation failed: {e}") from e
+
+    @staticmethod
+    def _critique_validation_contract(data: Any) -> Dict[str, Any]:
+        """Check the critique validator's primary decision fields."""
+        role = "critique_validator"
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            logger.warning("Validator returned array - using first element")
+            data = data[0]
+        if not isinstance(data, dict):
+            raise ModelOutputContractError(
+                "The critique validation must be one JSON object", role=role, stage="shape"
+            )
+        decision = data.get("decision")
+        if not isinstance(decision, str) or decision.strip().lower() not in {"accept", "reject"}:
+            raise ModelOutputContractError(
+                "decision must be exactly 'accept' or 'reject'",
+                role=role,
+                stage="invalid_value" if "decision" in data else "missing_key",
+                invalid_fields=("decision",),
+            )
+        reasoning = data.get("reasoning")
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            raise ModelOutputContractError(
+                "reasoning must be a non-empty string",
+                role=role,
+                stage="invalid_value" if "reasoning" in data else "missing_key",
+                invalid_fields=("reasoning",),
+            )
+        data["decision"] = decision.strip().lower()
+        return data
+
+    async def _parse_critique_validation(self, response_text: str, *, task_id: str) -> Dict[str, Any]:
+        """Parse one critique-validator reply; raise ``ModelOutputContractError``."""
+        if not str(response_text or "").strip():
+            raise ModelOutputContractError(
+                "The critique validation response was empty",
+                role="critique_validator",
+                stage="syntax",
+            )
+        repairs: list = []
+        try:
+            data = parse_json(response_text, repairs=repairs)
+        except Exception as exc:
+            raise ModelOutputContractError.syntax(exc, role="critique_validator") from exc
+        result = self._critique_validation_contract(data)
+        # Published only once the reply is accepted.
+        await report_model_output_normalizations("critique_validator", repairs, task_id=task_id)
+        return result
     
     async def _perform_critique_cleanup(self) -> None:
         """

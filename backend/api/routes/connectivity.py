@@ -12,9 +12,9 @@ from pydantic import BaseModel
 from backend.api.routes.cloud_access import get_cloud_access_status
 from backend.shared.boost_manager import boost_manager
 from backend.shared.config import rag_config, system_config
-from backend.shared.embedding_readiness import check_lm_studio_embedding_ready
+from backend.shared.embedding_readiness import check_lm_studio_embedding_ready, check_vllm_availability
 from backend.shared.lm_studio_client import lm_studio_client
-from backend.shared.subscription_providers.metadata import CLOUD_PROVIDER_IDS
+from backend.shared.subscription_providers.metadata import CLOUD_PROVIDER_IDS, LOCAL_SERVER_PROVIDER_IDS
 from backend.shared.proof_search.search_service import proof_search_service
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.runtime_settings import (
@@ -73,6 +73,32 @@ async def _lm_studio_status() -> dict[str, Any]:
     }
 
 
+async def _vllm_status() -> dict[str, Any]:
+    inactive = {
+        "status": "inactive",
+        "active": False,
+        "configured": False,
+        "available": False,
+        "model_count": 0,
+        "models": [],
+        "has_usable_chat_model": False,
+        "has_embedding_model": False,
+        "embedding_ready": False,
+    }
+    if system_config.generic_mode:
+        return {**inactive, "message": "vLLM is disabled in hosted/generic mode."}
+    try:
+        availability = await check_vllm_availability(embedding_timeout_seconds=3.0)
+    except Exception as exc:
+        logger.warning("Connectivity vLLM status failed: %s", type(exc).__name__)
+        return {**inactive, "message": "vLLM status is unavailable."}
+    active = bool(
+        availability.get("available")
+        and (availability.get("has_usable_chat_model") or availability.get("embedding_ready"))
+    )
+    return {"status": "ACTIVE" if active else "inactive", "active": active, **availability}
+
+
 async def _openrouter_oauth_status() -> dict[str, Any]:
     try:
         cloud_status = await get_cloud_access_status()
@@ -84,6 +110,7 @@ async def _openrouter_oauth_status() -> dict[str, Any]:
     oauth_configured = any(
         bool((providers.get(provider_id) or {}).get("configured"))
         for provider_id in CLOUD_PROVIDER_IDS
+        if provider_id not in LOCAL_SERVER_PROVIDER_IDS
     )
     active = openrouter_configured or oauth_configured
     return {
@@ -299,9 +326,10 @@ def _workflow_is_active() -> bool:
 @router.get("/status")
 async def get_connectivity_status() -> dict[str, Any]:
     """Return non-secret provider and optional-skill connectivity state."""
-    openrouter_oauth, lm_studio, syntheticlib4, agent_memory = await asyncio.gather(
+    openrouter_oauth, lm_studio, vllm, syntheticlib4, agent_memory = await asyncio.gather(
         _openrouter_oauth_status(),
         _lm_studio_status(),
+        _vllm_status(),
         _syntheticlib4_status(),
         _agent_conversation_memory_status(),
     )
@@ -311,6 +339,7 @@ async def get_connectivity_status() -> dict[str, Any]:
         "inference": {
             "openrouter_oauth": openrouter_oauth,
             "lm_studio": lm_studio,
+            "vllm": vllm,
         },
         "skills": {
             "syntheticlib4": syntheticlib4,

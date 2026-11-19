@@ -27,6 +27,8 @@ class RuntimeSettingsError(RuntimeError):
 _PROOF_BOOL_FIELDS = {
     "lean4_lsp_enabled",
     "smt_enabled",
+    "proof_single_shot_enabled",
+    "proof_master_proofs_enabled",
 }
 
 _PROOF_INT_FIELDS = {
@@ -131,6 +133,8 @@ def _proof_settings_from_config() -> Dict[str, Any]:
         "lean4_proof_timeout": int(system_config.lean4_proof_timeout),
         "lean4_lsp_idle_timeout": int(system_config.lean4_lsp_idle_timeout),
         "proof_max_parallel_candidates": int(system_config.proof_max_parallel_candidates),
+        "proof_single_shot_enabled": bool(system_config.proof_single_shot_enabled),
+        "proof_master_proofs_enabled": bool(system_config.proof_master_proofs_enabled),
         "smt_enabled": bool(system_config.smt_enabled),
         "smt_timeout": int(system_config.smt_timeout),
     }
@@ -214,6 +218,25 @@ def set_subscription_endpoint_region(provider_id: str, region_id: str) -> None:
     _write_settings(payload)
 
 
+_VLLM_KEY = "vllm"
+
+
+def get_vllm_runtime_settings() -> Dict[str, Any]:
+    """Return the persisted non-secret vLLM settings (server URLs and embedding choice)."""
+    settings = _read_settings().get(_VLLM_KEY)
+    return dict(settings) if isinstance(settings, dict) else {}
+
+
+def save_vllm_runtime_settings(payload: Dict[str, Any] | None) -> None:
+    """Persist (or with ``None``, remove) the vLLM settings; the API key never goes here."""
+    settings = _read_settings()
+    if payload:
+        settings[_VLLM_KEY] = dict(payload)
+    else:
+        settings.pop(_VLLM_KEY, None)
+    _write_settings(settings)
+
+
 _AUTO_TRANSLATE_KEY = "auto_translate"
 
 
@@ -272,6 +295,13 @@ def apply_persisted_runtime_settings() -> None:
                         field,
                         _coerce_bool(proof_settings[field], bool(getattr(system_config, field))),
                     )
+            if not (
+                system_config.proof_single_shot_enabled
+                or system_config.proof_master_proofs_enabled
+            ):
+                # A hand-edited file cannot turn every proof kind off.
+                system_config.proof_single_shot_enabled = True
+                system_config.proof_master_proofs_enabled = True
             stored_version = _coerce_int(
                 proof_settings.get("settings_version"),
                 1,

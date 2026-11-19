@@ -967,6 +967,22 @@ export const autonomousAPI = {
     return response.json();
   },
 
+  async getMasterProofBundle(proofId, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/${encodeURIComponent(proofId)}/master-proof`, scope)}`);
+    if (!response.ok) {
+      await throwFromResponse(response, `Failed to get the master proof for ${proofId}`);
+    }
+    return response.json();
+  },
+
+  async getLibraryMasterProofBundle(sessionId, proofId, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/library/${encodeURIComponent(sessionId)}/${encodeURIComponent(proofId)}/master-proof`, scope)}`);
+    if (!response.ok) {
+      await throwFromResponse(response, `Failed to get the archived master proof for ${proofId}`);
+    }
+    return response.json();
+  },
+
   async getProofLibrary(category = 'novel', scope = 'autonomous') {
     const normalizedCategory = typeof category === 'boolean'
       ? (category ? 'novel' : 'all')
@@ -1647,6 +1663,33 @@ export const workflowAPI = {
     if (!response.ok) throw new Error('Failed to get token stats');
     return response.json();
   },
+
+  // Each model's measured token-count ratio against MOTO's estimate
+  async getTokenCalibration() {
+    const response = await fetch(`${API_BASE}/token-calibration`);
+    if (!response.ok) throw new Error('Failed to get token count checks');
+    return response.json();
+  },
+
+  async setTokenCalibrationAdjustEnabled(enabled) {
+    const response = await fetch(`${API_BASE}/token-calibration/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adjust_enabled: Boolean(enabled) }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to update token count checks');
+    return response.json();
+  },
+
+  async resetTokenCalibration(provider = null, model = null) {
+    const response = await fetch(`${API_BASE}/token-calibration/reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(provider && model ? { provider, model } : {}),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to reset token count checks');
+    return response.json();
+  },
 };
 
 export const connectivityAPI = {
@@ -2017,12 +2060,13 @@ export const cloudAccessAPI = {
     return response.json();
   },
 
-  async setProviderApiKey(providerId, apiKey) {
+  // `region` applies only to providers whose endpoint region the user chooses.
+  async setProviderApiKey(providerId, apiKey, region = '') {
     const provider = requireCloudProvider(providerId);
     const response = await fetch(`${API_BASE}/cloud-access/${provider.apiSlug}/api-key`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey }),
+      body: JSON.stringify(region ? { api_key: apiKey, region } : { api_key: apiKey }),
     });
     if (!response.ok) await throwFromResponse(response, `Failed to save ${provider.label} API key`);
     return response.json();
@@ -2041,6 +2085,62 @@ export const cloudAccessAPI = {
     const provider = requireCloudProvider(providerId);
     const response = await fetch(`${API_BASE}/cloud-access/${provider.apiSlug}/usage`);
     if (!response.ok) await throwFromResponse(response, `Failed to get ${provider.label} usage`);
+    return response.json();
+  },
+};
+
+// vLLM local-server setup (Inference Connectivity). The API key travels only in
+// request bodies and is never returned by any of these routes.
+async function postVllm(path, body, fallbackMessage) {
+  const response = await fetch(`${API_BASE}/cloud-access/vllm/${path}`, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) await throwFromResponse(response, fallbackMessage);
+  return response.json();
+}
+
+function vllmRequestBody({ servers = [], apiKey = '', embeddingModel = '' } = {}) {
+  return {
+    servers,
+    embedding_model: embeddingModel || '',
+    ...(apiKey ? { api_key: apiKey } : {}),
+  };
+}
+
+export const vllmAPI = {
+  async getStatus() {
+    const response = await fetch(`${API_BASE}/cloud-access/vllm/status`, { cache: 'no-store' });
+    if (!response.ok) await throwFromResponse(response, 'Failed to get vLLM status');
+    return response.json();
+  },
+
+  async getAvailability({ refresh = false } = {}) {
+    const response = await fetch(
+      `${API_BASE}/cloud-access/vllm/availability${refresh ? '?refresh=true' : ''}`,
+      { cache: 'no-store' },
+    );
+    if (!response.ok) await throwFromResponse(response, 'Failed to check the vLLM servers');
+    return response.json();
+  },
+
+  async test(options) {
+    return postVllm('test', vllmRequestBody(options), 'Failed to check the vLLM servers');
+  },
+
+  async saveConfig({ clearApiKey = false, ...options } = {}) {
+    return postVllm(
+      'config',
+      { ...vllmRequestBody(options), clear_api_key: Boolean(clearApiKey) },
+      'Failed to save the vLLM setup',
+    );
+  },
+
+  async clear() {
+    const response = await fetch(`${API_BASE}/cloud-access/vllm`, { method: 'DELETE' });
+    if (!response.ok) await throwFromResponse(response, 'Failed to remove the vLLM setup');
     return response.json();
   },
 };

@@ -110,6 +110,17 @@ class RAGConfig(BaseSettings):
                 "Configured context window is too small for the selected max output tokens and safety buffer."
             )
 
+        # A model verified to count more tokens than MOTO's estimate has its window
+        # treated as proportionally smaller. The budget is never raised, and a window
+        # too small to shrink keeps its configured budget.
+        from backend.shared.token_calibration import token_calibration
+
+        measured_window = token_calibration.adjusted_context_window(context_window)
+        if measured_window < context_window:
+            measured_input = measured_window - output_reserve - buffer
+            if measured_input > 0:
+                return measured_input
+
         return available_input
     
     def get_prompt_assembly_overhead_estimate(self) -> int:
@@ -323,6 +334,18 @@ class SystemConfig(BaseSettings):
             "MOTO_PROOF_MAX_PARALLEL_CANDIDATES",
             "PROOF_MAX_PARALLEL_CANDIDATES",
         ),
+    )
+
+    # Which kinds of proof the shared proof stage may propose. Single-shot
+    # proofs get the individual Lean attempt budget; master proofs are solved
+    # as a scaffold of `sorry` obligations. At least one stays enabled.
+    proof_single_shot_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("MOTO_PROOF_SINGLE_SHOT_ENABLED", "PROOF_SINGLE_SHOT_ENABLED"),
+    )
+    proof_master_proofs_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("MOTO_PROOF_MASTER_PROOFS_ENABLED", "PROOF_MASTER_PROOFS_ENABLED"),
     )
 
     # Optional SMT / Z3 integration foundation (Build 4)

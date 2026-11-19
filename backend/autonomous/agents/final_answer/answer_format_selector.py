@@ -13,7 +13,7 @@ is not needed to decide short-form vs long-form — that's a structural question
 the research landscape, not a content-deep analysis.
 """
 import logging
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Tuple
 
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
@@ -21,8 +21,10 @@ from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
 )
-from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text
+from backend.shared.model_output_contract import (
+    ModelOutputContractError,
+    is_model_output_contract_error,
+)
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
 from backend.shared.models import AnswerFormatSelection, CertaintyAssessment
@@ -33,11 +35,49 @@ from backend.autonomous.prompts.final_answer_prompts import (
     build_format_validation_prompt
 )
 from backend.autonomous.memory.final_answer_memory import final_answer_memory
+from backend.autonomous.agents.output_contract import (
+    ContractFailurePacer,
+    json_object,
+    parse_with_contract_retry,
+    never_stop,
+    report_model_output_contract_failure,
+    require_choice,
+    require_text,
+    response_text,
+)
 
 logger = logging.getLogger(__name__)
 
+_SELECTION_SHAPE = """{
+  "answer_format": "short_form | long_form",
+  "reasoning": "string"
+}"""
+
+_VALIDATION_SHAPE = """{
+  "decision": "accept | reject",
+  "reasoning": "string"
+}"""
+
+
+def _parse_validation(data: Any, *, role: str) -> Tuple[str, str, Dict[str, Any]]:
+    data = json_object(data, role=role)
+    decision = require_choice(data, "decision", ("accept", "reject"), role=role)
+    return decision, require_text(data, "reasoning", role=role), data
+
+
+def _parse_selection(data: Any, *, role: str) -> AnswerFormatSelection:
+    data = json_object(data, role=role)
+    return AnswerFormatSelection(
+        answer_format=require_choice(
+            data, "answer_format", ("short_form", "long_form"), role=role
+        ),
+        reasoning=require_text(data, "reasoning", role=role),
+    )
+
 
 def _is_tier3_model_call_failure(exc: Exception) -> bool:
+    if is_model_output_contract_error(exc):
+        return False
     message = str(exc or "").lower()
     return (
         isinstance(exc, RetryableProviderError)
@@ -83,6 +123,8 @@ class AnswerFormatSelector:
         self.task_sequence: int = 0
         self.role_id = "autonomous_format_selector"
         self.task_tracking_callback: Optional[Callable] = None
+        # Bound to the owning workflow's stop state so contract backoff ends on Stop.
+        self.should_stop: Callable[[], bool] = never_stop
     
     def set_task_tracking_callback(self, callback: Callable) -> None:
         """Set callback for task tracking (workflow panel integration)."""
@@ -135,31 +177,74 @@ class AnswerFormatSelector:
         
         attempt = 0
         rejection_entries = tuple((await final_answer_memory.get_rejections("format"))[-5:])
-        
+        # A selection whose validator reply was unusable is validated again rather
+        # than regenerated or recorded as a rejection.
+        pending_selection: Optional[AnswerFormatSelection] = None
+        contract_pacer = ContractFailurePacer(self.should_stop)
+
         while attempt < self.MAX_RETRIES:
             attempt += 1
             logger.info(f"AnswerFormatSelector: Selection attempt {attempt}/{self.MAX_RETRIES}")
-            
+
             # Generate selection
-            selection = await self._generate_selection(
-                user_research_prompt,
-                certainty_assessment,
-                all_papers,
-                rejection_entries
-            )
-            
+            selection = pending_selection
+            pending_selection = None
+            if selection is None:
+                try:
+                    selection = await self._generate_selection(
+                        user_research_prompt,
+                        certainty_assessment,
+                        all_papers,
+                        rejection_entries
+                    )
+                except ModelOutputContractError as exc:
+                    await report_model_output_contract_failure(
+                        self.role_id,
+                        exc,
+                        model=self.submitter_model,
+                        outcome="No answer format was proposed; format selection runs again.",
+                    )
+                    await contract_pacer.after_failure(self.role_id)
+                    if self.should_stop():
+                        return None
+                    # A contract failure is operational: it never uses up one of the
+                    # fixed tries, so re-asks continue until a usable reply or Stop.
+                    attempt -= 1
+                    continue
+                contract_pacer.reset()
+
             if selection is None:
                 logger.error(f"AnswerFormatSelector: Failed to generate selection (attempt {attempt})")
                 continue
-            
+
             # Validate selection
-            is_valid, feedback = await self._validate_selection(
-                user_research_prompt,
-                certainty_assessment,
-                all_papers,
-                selection
-            )
-            
+            try:
+                is_valid, feedback = await self._validate_selection(
+                    user_research_prompt,
+                    certainty_assessment,
+                    all_papers,
+                    selection
+                )
+            except ModelOutputContractError as exc:
+                await report_model_output_contract_failure(
+                    f"{self.role_id}_validator",
+                    exc,
+                    model=self.validator_model,
+                    outcome=(
+                        "The answer format was not judged and will be validated again; "
+                        "no rejection was recorded."
+                    ),
+                )
+                pending_selection = selection
+                await contract_pacer.after_failure(f"{self.role_id}_validator")
+                if self.should_stop():
+                    return None
+                # A contract failure is operational: it never uses up one of the
+                # fixed tries, so re-asks continue until a usable reply or Stop.
+                attempt -= 1
+                continue
+            contract_pacer.reset()
+
             if is_valid:
                 logger.info(f"AnswerFormatSelector: Format validated: {selection.answer_format}")
                 await final_answer_memory.set_answer_format(selection)
@@ -250,35 +335,23 @@ class AnswerFormatSelector:
             
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
-            
-            if not response:
-                return None
-            
-            # Extract content
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return None
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
-            
-            answer_format = data.get("answer_format")
-            reasoning = data.get("reasoning")
-            if answer_format not in {"short_form", "long_form"}:
-                raise ValueError(
-                    "Format selection requires answer_format to be exactly "
-                    "'short_form' or 'long_form'"
-                )
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                raise ValueError("Format selection requires non-empty reasoning")
-            
-            return AnswerFormatSelection(
-                answer_format=answer_format,
-                reasoning=reasoning.strip(),
+
+            return await parse_with_contract_retry(
+                response_text(response),
+                lambda parsed: _parse_selection(parsed, role=self.role_id),
+                prompt=prompt,
+                task_id=task_id,
+                role_id=self.role_id,
+                model=self.submitter_model,
+                context_window=self.context_window,
+                max_output_tokens=self.max_output_tokens,
+                response_noun="answer format selection",
+                response_shape=_SELECTION_SHAPE,
             )
-            
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_tier3_model_call_failure(e):
@@ -298,6 +371,10 @@ class AnswerFormatSelector:
         
         Returns:
             Tuple of (is_valid, feedback_if_rejected)
+
+        Raises:
+            ModelOutputContractError: the validator reply did not match its JSON
+                contract after one bounded retry (not a semantic rejection).
         """
         try:
             # Build validation prompt
@@ -340,25 +417,21 @@ class AnswerFormatSelector:
             
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
-            
-            if not response:
-                return False, "Empty response from validator"
-            
-            # Extract content
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return False, "No content in validator response"
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
+
+            validator_role = f"{self.role_id}_validator"
+            decision, reasoning, data = await parse_with_contract_retry(
+                response_text(response),
+                lambda parsed: _parse_validation(parsed, role=validator_role),
+                prompt=prompt,
+                task_id=task_id,
+                role_id=validator_role,
+                model=self.validator_model,
+                context_window=self.validator_context_window,
+                max_output_tokens=self.validator_max_output_tokens,
+                response_noun="validation decision",
+                response_shape=_VALIDATION_SHAPE,
+            )
             from backend.shared.solution_path.integration import enqueue_optional_update
-            decision = data.get("decision")
-            reasoning = data.get("reasoning")
-            if decision not in {"accept", "reject"}:
-                return False, "Validator response requires decision to be exactly accept or reject"
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                return False, "Validator response requires non-empty reasoning"
             await enqueue_optional_update(
                 data,
                 getattr(self, "solution_path_manager", None),
@@ -368,9 +441,11 @@ class AnswerFormatSelector:
                 source_decision=decision,
             )
             
-            return decision == "accept", reasoning.strip()
-            
+            return decision == "accept", reasoning
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_tier3_model_call_failure(e):

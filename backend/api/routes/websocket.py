@@ -9,7 +9,12 @@ import json
 import secrets
 import time
 
-from backend.api.proxy_auth import ProxyAuthError, validate_proxy_headers
+from backend.api.proxy_auth import (
+    ProxyAuthError,
+    routed_path,
+    routed_query,
+    validate_proxy_headers,
+)
 from backend.shared.activity import normalize_activity_payload
 from backend.shared.config import system_config
 
@@ -98,8 +103,8 @@ async def websocket_endpoint(websocket: WebSocket):
             validate_proxy_headers(
                 websocket.headers,
                 method="GET",
-                path=websocket.url.path,
-                query_string=websocket.url.query,
+                path=routed_path(websocket.scope),
+                query_string=routed_query(websocket.scope),
                 body=b"",
                 expected_instance_id=system_config.instance_id,
                 shared_secret=system_config.internal_proxy_secret or "",

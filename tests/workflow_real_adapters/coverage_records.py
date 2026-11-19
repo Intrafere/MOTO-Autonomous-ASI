@@ -357,6 +357,91 @@ BUILD_E_REAL_COVERAGE = (
     ),
 )
 
+CLI_TEST_FILE = "tests/workflow_real_adapters/test_cli_control_routes.py"
+CLI_ROUTE_FAKES = (
+    "aggregator coordinator, solution-path registry, providers, embeddings, and RAG seams",
+)
+CLI_CONTROL_REAL_COVERAGE = (
+    InteractionCoverage(
+        scenario_id="real_start_template_replays_through_cli_into_next_start",
+        fields=("cli_control_surface", "runtime_exclusivity", "workflow_filesystem_state", "websocket_api_contracts"),
+        invariants=(
+            "cli_control.start_template_only_after_committed_start",
+            "cli_control.start_template_credentials_stripped",
+            "cli_control.template_replays_into_valid_start",
+        ),
+        adapter="real_route",
+        result="passed",
+        test_file=CLI_TEST_FILE,
+        evidence=("committed_start_saves_template", "credential_free_template", "cli_replay_accepted_by_route"),
+        runner="pytest",
+        test_selectors=(
+            _node("test_cli_control_routes.py", "test_real_start_template_replays_through_cli_into_the_next_real_start"),
+        ),
+        asserted_invariants=(
+            "cli_control.start_template_only_after_committed_start",
+            "cli_control.start_template_credentials_stripped",
+            "cli_control.template_replays_into_valid_start",
+        ),
+        real_components=("backend/api/routes/aggregator.py", "backend/shared/cli_control.py", "moto_cli.py"),
+        faked_dependencies=CLI_ROUTE_FAKES,
+        observed_transition=(
+            "real Aggregator start saves a template; the CLI builds the next request from it; "
+            "the real route accepts that request and saves the new prompt"
+        ),
+    ),
+    InteractionCoverage(
+        scenario_id="real_conflicting_start_saves_no_cli_template",
+        fields=("cli_control_surface", "runtime_exclusivity", "workflow_filesystem_state"),
+        invariants=("cli_control.start_template_only_after_committed_start",),
+        adapter="real_route",
+        result="passed",
+        test_file=CLI_TEST_FILE,
+        evidence=("http_400_conflict", "no_template_written"),
+        runner="pytest",
+        test_selectors=(_node("test_cli_control_routes.py", "test_real_conflicting_start_saves_no_template"),),
+        asserted_invariants=("cli_control.start_template_only_after_committed_start",),
+        real_components=("backend/api/routes/aggregator.py", "backend/shared/cli_control.py"),
+        faked_dependencies=CLI_ROUTE_FAKES,
+        observed_transition="real Aggregator start rejected by an active Compiler leaves no CLI start template",
+    ),
+    InteractionCoverage(
+        scenario_id="real_hosted_start_writes_no_cli_artifacts",
+        fields=("cli_control_surface", "websocket_api_contracts", "workflow_filesystem_state"),
+        invariants=("cli_control.hosted_writes_no_artifacts",),
+        adapter="real_route",
+        result="passed",
+        test_file=CLI_TEST_FILE,
+        evidence=("hosted_mode", "no_template", "no_control_file"),
+        runner="pytest",
+        test_selectors=(_node("test_cli_control_routes.py", "test_real_hosted_start_writes_no_cli_artifacts"),),
+        asserted_invariants=("cli_control.hosted_writes_no_artifacts",),
+        real_components=("backend/api/routes/aggregator.py", "backend/shared/cli_control.py"),
+        faked_dependencies=CLI_ROUTE_FAKES,
+        observed_transition="a committed hosted Aggregator start and control-file publish write no CLI artifacts",
+    ),
+    InteractionCoverage(
+        scenario_id="focused_cli_control_file_ready_and_owner_removed",
+        fields=("cli_control_surface", "runtime_exclusivity", "workflow_filesystem_state"),
+        invariants=("cli_control.control_file_owner_lifecycle",),
+        adapter="focused_production",
+        result="passed",
+        test_file=CLI_TEST_FILE,
+        evidence=("published_after_ready", "cli_discovery_reads_file", "foreign_file_kept", "owner_removed"),
+        runner="pytest",
+        test_selectors=(
+            _node("test_cli_control_routes.py", "test_control_file_published_when_ready_and_removed_only_by_owner"),
+        ),
+        asserted_invariants=("cli_control.control_file_owner_lifecycle",),
+        real_components=("backend/api/main.py", "backend/shared/cli_control.py", "moto_cli.py"),
+        faked_dependencies=("backend process lifetime (driven directly instead of through uvicorn)",),
+        observed_transition=(
+            "the lifespan publishes the control file after ready work; CLI discovery reads it; "
+            "cleanup keeps another process's file and removes its own"
+        ),
+    ),
+)
+
 _UNLINKED_REAL_ADAPTER_COVERAGE = (
     ROUTE_CONFLICT_COVERAGE
     + PROOF_ROUTE_COVERAGE
@@ -366,6 +451,7 @@ _UNLINKED_REAL_ADAPTER_COVERAGE = (
     + BUILD_E_REAL_COVERAGE
     + BUILD_07_REAL_ADAPTER_COVERAGE
     + HIGH_VALUE_GAP_COVERAGE
+    + CLI_CONTROL_REAL_COVERAGE
 )
 
 

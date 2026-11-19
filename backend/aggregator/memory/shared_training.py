@@ -368,9 +368,43 @@ class SharedTrainingMemory:
                 return content
             return f"{content.rstrip()}\n\n{self.proof_appendix}\n" if content.strip() else self.proof_appendix
 
+    async def _load_unloaded_submissions_locked(self) -> None:
+        """Load accepted submissions from disk when memory holds none. Caller holds the lock.
+
+        Another mode can hand this singleton back pointed at a database whose
+        submissions were never loaded into memory. A save that only means to
+        change the proof appendix would then rewrite the file without them.
+        A read failure propagates so the caller never saves over an unread file.
+        """
+        if self.insights or not self.file_path.exists():
+            return
+        async with aiofiles.open(self.file_path, 'r', encoding='utf-8') as f:
+            content = await f.read()
+        content, _ = self._split_proof_appendix(content)
+        parsed_insights = self._parse_formatted_file(content) if content.strip() else []
+        if not parsed_insights:
+            return
+        self.insights = parsed_insights
+        self.submission_count = max(
+            (insight.get('number', 0) for insight in parsed_insights),
+            default=0,
+        )
+        logger.info(
+            "Loaded %s accepted submission(s) from disk before a proof appendix save",
+            len(parsed_insights),
+        )
+
+    async def clear_proof_appendix(self) -> None:
+        """Remove the proof appendix while keeping every accepted submission."""
+        async with self._lock:
+            await self._load_unloaded_submissions_locked()
+            self.proof_appendix = ""
+            await self._save()
+
     async def append_proofs_section(self, proofs_data) -> bool:
         """Append Lean-verified proof records without converting them into submissions."""
         async with self._lock:
+            await self._load_unloaded_submissions_locked()
             proofs = proofs_data if isinstance(proofs_data, list) else [proofs_data]
             existing_appendix = self.proof_appendix or PROOF_APPENDIX_HEADER
             existing_ids = set(re.findall(r"(?m)^Proof ID:\s*(.+?)\s*$", existing_appendix))
@@ -562,15 +596,11 @@ async def clear_manual_shared_training_proof_appendix() -> None:
         paths_match = current_path == manual_path
 
     if paths_match:
-        async with shared_training_memory._lock:
-            shared_training_memory.proof_appendix = ""
-            await shared_training_memory._save()
+        await shared_training_memory.clear_proof_appendix()
         return
 
     scoped_memory = SharedTrainingMemory()
     scoped_memory.file_path = manual_path
     await scoped_memory.initialize()
-    async with scoped_memory._lock:
-        scoped_memory.proof_appendix = ""
-        await scoped_memory._save()
+    await scoped_memory.clear_proof_appendix()
 

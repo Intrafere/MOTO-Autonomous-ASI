@@ -22,7 +22,6 @@ export default function BoostControlModal({
   isOpen,
   onClose,
   capabilities,
-  developerModeEnabled = false,
 }) {
   const [apiKey, setApiKey] = useState('');
   const [boostModel, setBoostModel] = useState('');
@@ -616,9 +615,7 @@ export default function BoostControlModal({
             <ul>
               <li>Click tasks in the MOTO Workflow panel to toggle boost</li>
               <li>Boosted tasks use your selected OpenRouter model and optional host provider</li>
-              {developerModeEnabled && (
-                <li>Supercharge is enabled per role in each settings panel; when Boost also applies, all 5 Supercharge calls use this Boost model</li>
-              )}
+              <li>Supercharge is enabled per role in each settings panel; when Boost also applies, all 5 Supercharge calls use this Boost model</li>
               <li>
                 {lmStudioEnabled
                   ? 'If boost credits or provider capacity fail, the task falls back to its primary model path for that call'

@@ -1,0 +1,102 @@
+.master-proof-details {
+  margin-top: 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: 10px;
+  border: 1px solid rgba(155, 181, 255, 0.35);
+  background: rgba(111, 140, 255, 0.06);
+}
+
+.master-proof-details__summary,
+.master-proof-details__hint,
+.master-proof-details__status {
+  margin: 0.4rem 0 0.7rem;
+  color: var(--text-secondary, #c7c9d9);
+  line-height: 1.5;
+}
+
+.master-proof-details__error {
+  margin: 0.4rem 0 0.7rem;
+  color: #fca5a5;
+}
+
+.master-proof-details__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+
+.master-proof-details__template pre,
+.master-proof-details__code,
+.master-proof-details__signature {
+  margin: 0.35rem 0 0;
+  padding: 0.6rem 0.7rem;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-default, #374151);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 28rem;
+  overflow: auto;
+}
+
+.master-proof-details__signature {
+  max-height: 9rem;
+  color: var(--text-secondary, #c7c9d9);
+}
+
+.master-proof-details__steps {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.master-proof-details__step {
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid rgba(30, 255, 28, 0.2);
+  background: rgba(30, 255, 28, 0.03);
+  min-width: 0;
+}
+
+.master-proof-details__step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.7rem;
+}
+
+.master-proof-details__solved {
+  color: #1eff1c;
+  font-weight: 700;
+}
+
+.master-proof-details__step-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.master-proof-details__step-meta {
+  color: var(--text-secondary, #c7c9d9);
+  font-size: 0.82rem;
+}
+
+.master-proof-details__toggle {
+  margin-left: auto;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid rgba(155, 181, 255, 0.5);
+  background: transparent;
+  color: #9bb5ff;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.master-proof-details__toggle:hover,
+.master-proof-details__toggle:focus-visible {
+  background: rgba(111, 140, 255, 0.15);
+}

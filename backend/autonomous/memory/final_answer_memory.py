@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from datetime import datetime
 import aiofiles
 
+from backend.shared.atomic_json import atomic_write_text
 from backend.shared.config import system_config
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.path_safety import (
@@ -247,7 +248,25 @@ class FinalAnswerMemory:
                 logger.info(f"Loaded Tier 3 state: status={self._state.status}")
         except Exception as e:
             logger.error(f"Failed to load final answer state: {e}")
+            await self._preserve_unreadable_state_file()
             self._state = FinalAnswerState()
+
+    async def _preserve_unreadable_state_file(self) -> None:
+        """Move an unreadable state file aside before defaults replace it.
+
+        The next save would otherwise overwrite it; a `.corrupt-<timestamp>`
+        sibling keeps the prior Tier 3 progress recoverable.
+        """
+        path = self._state_path
+        backup_path = path.with_name(
+            f"{path.name}.corrupt-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        )
+        try:
+            await asyncio.to_thread(path.replace, backup_path)
+        except OSError as exc:
+            logger.error("Could not preserve unreadable final answer state file: %s", exc)
+            return
+        logger.error("Unreadable final answer state file preserved as %s", backup_path.name)
     
     async def _save_state(self) -> None:
         """Save state to file."""
@@ -266,8 +285,7 @@ class FinalAnswerMemory:
             
             data = serialize_datetimes(data)
             
-            async with aiofiles.open(self._state_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(data, indent=2))
+            await asyncio.to_thread(atomic_write_text, self._state_path, json.dumps(data, indent=2))
         except Exception as e:
             logger.error(f"Failed to save final answer state: {e}")
     
@@ -375,8 +393,7 @@ class FinalAnswerMemory:
                         if isinstance(v, datetime):
                             ch[k] = v.isoformat()
                 
-                async with aiofiles.open(self._volume_path, 'w', encoding='utf-8') as f:
-                    await f.write(json.dumps(vol_data, indent=2))
+                await asyncio.to_thread(atomic_write_text, self._volume_path, json.dumps(vol_data, indent=2))
             except Exception as e:
                 logger.error(f"Failed to save volume organization file: {e}")
             
@@ -516,8 +533,7 @@ class FinalAnswerMemory:
                 rejections.append(entry)
                 rejections = rejections[-10:]
                 
-                async with aiofiles.open(self._rejections_path, 'w', encoding='utf-8') as f:
-                    await f.write(json.dumps(rejections, indent=2))
+                await asyncio.to_thread(atomic_write_text, self._rejections_path, json.dumps(rejections, indent=2))
                 
                 logger.info(f"Tier 3 rejection logged: phase={phase}")
             except Exception as e:
@@ -801,14 +817,12 @@ class FinalAnswerMemory:
         async with self._lock:
             # Save paper content
             paper_path = self._get_chapter_paper_path(chapter_order)
-            async with aiofiles.open(paper_path, 'w', encoding='utf-8') as f:
-                await f.write(content)
+            await asyncio.to_thread(atomic_write_text, paper_path, content)
             
             # Save outline if provided
             if outline:
                 outline_path = self._get_chapter_outline_path(chapter_order)
-                async with aiofiles.open(outline_path, 'w', encoding='utf-8') as f:
-                    await f.write(outline)
+                await asyncio.to_thread(atomic_write_text, outline_path, outline)
             
             logger.info(f"Saved chapter {chapter_order} paper ({len(content)} chars)")
     
@@ -849,20 +863,17 @@ class FinalAnswerMemory:
             # Copy paper content
             content = await paper_library.get_paper_content(paper_id)
             if content:
-                async with aiofiles.open(archive_paths["content"], 'w', encoding='utf-8') as f:
-                    await f.write(content)
+                await asyncio.to_thread(atomic_write_text, archive_paths["content"], content)
             
             # Copy abstract
             abstract = await paper_library.get_abstract(paper_id)
             if abstract:
-                async with aiofiles.open(archive_paths["abstract"], 'w', encoding='utf-8') as f:
-                    await f.write(abstract)
+                await asyncio.to_thread(atomic_write_text, archive_paths["abstract"], abstract)
             
             # Copy outline
             outline = await paper_library.get_outline(paper_id)
             if outline:
-                async with aiofiles.open(archive_paths["outline"], 'w', encoding='utf-8') as f:
-                    await f.write(outline)
+                await asyncio.to_thread(atomic_write_text, archive_paths["outline"], outline)
             
             # Copy metadata
             metadata = await paper_library.get_metadata(paper_id)
@@ -872,8 +883,7 @@ class FinalAnswerMemory:
                     if isinstance(value, datetime):
                         metadata_data[key] = value.isoformat()
                 
-                async with aiofiles.open(archive_paths["metadata"], 'w', encoding='utf-8') as f:
-                    await f.write(json.dumps(metadata_data, indent=2))
+                await asyncio.to_thread(atomic_write_text, archive_paths["metadata"], json.dumps(metadata_data, indent=2))
             
             logger.info(f"Archived paper {paper_id} to final answer source_papers")
             return True
@@ -902,8 +912,7 @@ class FinalAnswerMemory:
             # Copy brainstorm database
             content = await brainstorm_memory.get_database_content(topic_id)
             if content:
-                async with aiofiles.open(archive_paths["content"], 'w', encoding='utf-8') as f:
-                    await f.write(content)
+                await asyncio.to_thread(atomic_write_text, archive_paths["content"], content)
             
             # Copy metadata
             metadata = await brainstorm_memory.get_metadata(topic_id)
@@ -913,8 +922,7 @@ class FinalAnswerMemory:
                     if isinstance(value, datetime):
                         metadata_data[key] = value.isoformat()
                 
-                async with aiofiles.open(archive_paths["metadata"], 'w', encoding='utf-8') as f:
-                    await f.write(json.dumps(metadata_data, indent=2))
+                await asyncio.to_thread(atomic_write_text, archive_paths["metadata"], json.dumps(metadata_data, indent=2))
             
             logger.info(f"Archived brainstorm {topic_id} to final answer source_brainstorms")
             return True
@@ -1246,8 +1254,7 @@ class FinalAnswerMemory:
         
         # Save to file
         try:
-            async with aiofiles.open(self._final_volume_path, 'w', encoding='utf-8') as f:
-                await f.write(final_text)
+            await asyncio.to_thread(atomic_write_text, self._final_volume_path, final_text)
             logger.info(f"Final volume assembled: {len(final_text)} chars")
         except Exception as e:
             logger.error(f"Failed to save final volume: {e}")
@@ -1332,8 +1339,7 @@ class FinalAnswerMemory:
         # Save to file
         try:
             short_form_path = self._base_dir / "final_short_form_paper.txt"
-            async with aiofiles.open(short_form_path, 'w', encoding='utf-8') as f:
-                await f.write(final_text)
+            await asyncio.to_thread(atomic_write_text, short_form_path, final_text)
             logger.info(f"Short-form final answer assembled: {len(final_text)} chars")
         except Exception as e:
             logger.error(f"Failed to save short-form final answer: {e}")

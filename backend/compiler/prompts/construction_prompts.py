@@ -11,6 +11,7 @@ PHASE ORDER (enforced):
 from typing import Optional
 
 from backend.shared.config import system_config
+from backend.shared.master_proof_context import note_context_part
 
 
 CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES:
@@ -1075,6 +1076,7 @@ If it is NOT present, you MUST write it now.
     # This prevents model from confusing outline text with paper text
     if current_paper and current_paper.strip():
         parts.append(f"CURRENT DOCUMENT PROGRESS:\n{current_paper}")
+        note_context_part("papers", current_paper)
     else:
         parts.append("CURRENT DOCUMENT PROGRESS:\n(EMPTY - no content written yet)")
     parts.append("\n\n")
@@ -1100,6 +1102,7 @@ If it is NOT present, you MUST write it now.
     parts.append("\n---\n")
     
     if brainstorm_content:
+        note_context_part("brainstorms", brainstorm_content)
         parts.append(f"BRAINSTORM DATABASE (optional source material; editable via brainstorm_operation):\n{brainstorm_content}")
         parts.append("\n---\n")
     

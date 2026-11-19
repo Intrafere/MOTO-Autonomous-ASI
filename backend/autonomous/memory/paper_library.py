@@ -22,7 +22,7 @@ from backend.shared.path_safety import (
 )
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.paper_proofs import analyze_paper_content, paper_metric_fields, strip_paper_proofs
-from backend.shared.atomic_json import atomic_write_text
+from backend.shared.atomic_json import atomic_write_text, replace_file
 from backend.autonomous.memory.session_write_authority import autonomous_session_write
 
 logger = logging.getLogger(__name__)
@@ -479,7 +479,7 @@ class PaperLibrary:
                     handle.write(payload)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temp_name, metadata_path)
+                replace_file(temp_name, metadata_path)
             except BaseException:
                 try:
                     os.unlink(temp_name)

@@ -173,6 +173,7 @@ def _run_zip_update_sync(state_lines: list) -> None:
         collect_preserved_relatives,
         sync_snapshot_into_install,
         restore_snapshot_from_backup,
+        _CopyJournal,
         load_local_manifest,
         fetch_remote_manifest,
         fetch_branch_head_fallback,
@@ -213,7 +214,10 @@ def _run_zip_update_sync(state_lines: list) -> None:
     archive_path = work_root / "update.zip"
     backup_root = Path(tempfile.mkdtemp(prefix="moto-update-backup-"))
 
-    journal = None
+    # The overlay records each change here as it goes, so a failure partway
+    # through can still be rolled back from the backups.
+    journal = _CopyJournal()
+    keep_backup = False
     try:
         _download_archive(remote_manifest, archive_path)
         state_lines.append("Download complete. Extracting...")
@@ -224,7 +228,9 @@ def _run_zip_update_sync(state_lines: list) -> None:
 
         active_instances = cleanup_launcher_state()
         preserved_relatives = collect_preserved_relatives(os.environ, active_instances)
-        journal = sync_snapshot_into_install(extracted_source, _REPO_ROOT, preserved_relatives, backup_root)
+        sync_snapshot_into_install(
+            extracted_source, _REPO_ROOT, preserved_relatives, backup_root, journal
+        )
         _write_installed_manifest(remote_manifest)
 
         state_lines.append(
@@ -235,18 +241,24 @@ def _run_zip_update_sync(state_lines: list) -> None:
 
     except Exception:
         state_lines.append("Update failed mid-apply, restoring previous state...")
+        changed = journal.created_files or journal.overwritten_files or journal.overwritten_directories
         try:
-            if journal is not None:
+            if changed:
                 restore_snapshot_from_backup(_REPO_ROOT, backup_root, journal)
                 state_lines.append("Rollback complete — previous install restored.")
             else:
                 state_lines.append("Failure occurred before file overlay — no rollback needed.")
         except Exception as rb_exc:
-            state_lines.append(f"Rollback also failed: {rb_exc}")
+            # Keep the backups: they are the only copy of the replaced files.
+            keep_backup = True
+            state_lines.append(
+                f"Rollback also failed: {rb_exc}. The replaced files are kept in {backup_root}."
+            )
         raise
     finally:
         cleanup_path(work_root)
-        cleanup_path(backup_root)
+        if not keep_backup:
+            cleanup_path(backup_root)
 
 
 async def _run_zip_update() -> None:

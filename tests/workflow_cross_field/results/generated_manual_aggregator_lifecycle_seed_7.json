@@ -1,7 +1,7 @@
 {
   "action_ids": [
     "start_manual_aggregator",
-    "attempt_conflicting_start",
+    "cli_start_while_workflow_active",
     "accept_manual_aggregator_submission",
     "clear_manual_aggregator_state"
   ],
@@ -16,6 +16,7 @@
     "final_phase": "idle"
   },
   "evidence": [
+    "cli_rejected_start_no_template",
     "manual_aggregator_accept",
     "manual_aggregator_clear",
     "start_blocked"
@@ -34,16 +35,17 @@
     "runtime.single_active_workflow"
   ],
   "observed_fields": [
+    "cli_control_surface",
     "prompt_context",
     "runtime_exclusivity",
-    "websocket_api_contracts",
     "workflow_filesystem_state"
   ],
   "observed_transition": "seeded model planner reached the declared target",
   "real_components": [],
   "replay": [
     "start_manual_aggregator()",
-    "start_manual_compiler()",
+    "cli_start_manual_aggregator()",
+    "start_manual_aggregator()",
     "accept_manual_aggregator_submission()",
     "clear()"
   ],

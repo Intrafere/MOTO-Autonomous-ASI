@@ -103,7 +103,7 @@ def test_new_solver_surfaces_receive_only_budgeted_advisory_path():
     proof_identification = _source(
         "backend/autonomous/agents/proof_identification_agent.py",
         "ProofIdentificationAgent",
-        "identify_candidates",
+        "_identify_candidates",
     )
 
     for source in (

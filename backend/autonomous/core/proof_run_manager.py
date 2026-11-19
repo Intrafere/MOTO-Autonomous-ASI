@@ -50,6 +50,12 @@ DEDICATED_TERMINAL_REASONS = {
 }
 CONTINUOUS_NO_DISCOVERY_ROUND_LIMIT = 10
 NO_DISCOVERY_LIMIT_TERMINAL_REASON = "consecutive_no_discovery_limit"
+ROUND_OUTCOME_COMPLETED = "completed"
+ROUND_OUTCOME_ERROR = "error"
+ROUND_OUTCOME_FATAL_STOP = "fatal_stop"
+ROUND_OUTCOMES = frozenset(
+    {ROUND_OUTCOME_COMPLETED, ROUND_OUTCOME_ERROR, ROUND_OUTCOME_FATAL_STOP}
+)
 
 
 class ProofRunSourceInvalidError(RuntimeError):
@@ -655,8 +661,17 @@ class ProofRunManager:
         reference: str = "",
         candidate_checkpoint_reference: str = "",
         proof_set_revision: Optional[int] = None,
+        round_outcome: str = ROUND_OUTCOME_COMPLETED,
     ) -> ProofRunSnapshot:
-        """Persist only bounded round metadata; candidate payloads stay external."""
+        """Persist only bounded round metadata; candidate payloads stay external.
+
+        ``round_outcome`` says how the round ended: ``completed`` (discovery
+        finished validly), ``error`` (an error checkpoint was kept), or
+        ``fatal_stop`` (the run must stop). Only a completed round can lead to
+        an automatic next round.
+        """
+        if round_outcome not in ROUND_OUTCOMES:
+            raise ValueError(f"Unknown proof round outcome: {round_outcome!r}")
         consecutive_no_discovery_rounds = (
             control.snapshot.consecutive_no_discovery_rounds
         )
@@ -702,8 +717,10 @@ class ProofRunManager:
                 ),
                 "no_discovery_round_limit": snapshot.no_discovery_round_limit,
                 "round_summary": summary[:4000],
+                "round_outcome": round_outcome,
                 "next_round_automatic": (
-                    control.snapshot.run_mode == "loop_with_pruning"
+                    round_outcome == ROUND_OUTCOME_COMPLETED
+                    and control.snapshot.run_mode == "loop_with_pruning"
                     and not control.stop_event.is_set()
                     and not control.snapshot.terminal_reason
                 ),

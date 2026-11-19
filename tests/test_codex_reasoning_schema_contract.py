@@ -12,7 +12,7 @@ ROLE_MODELS = [
     models.ModelConfig, models.SubmitterConfig, models.ProofRoleConfigSnapshot,
     models.ProofRoleRuntimeConfig, models.LeanOJRoleConfig,
 ]
-MAX_PROVIDERS = ["openai_codex_oauth", "kimi_code"]
+MAX_PROVIDERS = ["openai_codex_oauth", "kimi_code", "claude_api", "amazon_bedrock"]
 OTHER_PROVIDERS = ["lm_studio", "openrouter", "xai_grok_oauth", "sakana_fugu"]
 LEGACY_EFFORTS = ["auto", "xhigh", "high", "medium", "low", "minimal", "none"]
 
@@ -33,7 +33,7 @@ def test_role_max_is_limited_to_providers_that_accept_it(model, provider):
         assert instance.openrouter_reasoning_effort == "max"
         assert model.model_validate(instance.model_dump()).openrouter_reasoning_effort == "max"
     else:
-        with pytest.raises(ValidationError, match="supported only by kimi_code, openai_codex_oauth"):
+        with pytest.raises(ValidationError, match="supported only by amazon_bedrock, claude_api, kimi_code, openai_codex_oauth"):
             model.model_validate(data)
 
 
@@ -142,4 +142,4 @@ def test_competitor_nested_snapshot_and_start():
 def test_contract_version_matches_manifest():
     from backend.shared.build_info import _DEFAULT_BUILD_INFO
     manifest = json.loads((Path(__file__).resolve().parents[1] / "moto-update-manifest.json").read_text())
-    assert manifest["api_contract_version"] == _DEFAULT_BUILD_INFO["api_contract_version"] == "build6-v123"
+    assert manifest["api_contract_version"] == _DEFAULT_BUILD_INFO["api_contract_version"] == "build6-v125"

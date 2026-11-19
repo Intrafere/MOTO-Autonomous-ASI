@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useId } from 'react';
+import UsageLevelBadge from '../UsageLevelBadge';
 import { api, openRouterAPI } from '../../services/api';
 import {
   computeCloudProviderAutoSettings,
@@ -18,11 +19,15 @@ import {
 import { refreshOpenRouterCredentialState } from '../../utils/credentialProviderRefresh';
 import {
   chooseCloudAccessProvider,
+  isCloudSubscriptionProvider,
   isCloudAccessProvider,
 } from '../../utils/oauthProviders';
+import LocalServerProviderButtons from '../LocalServerProviderButtons';
+import LocalFallbackOptions from '../LocalFallbackOptions';
 import useCloudAccessProviders from '../../hooks/useCloudAccessProviders';
 import CloudProviderModelErrors from '../CloudProviderModelErrors';
 import CloudReasoningControl from '../CloudReasoningControl';
+import TokenCountNote from '../TokenCountNote';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
@@ -98,6 +103,12 @@ function AggregatorModelSelector({
             >
               LM Studio
             </button>
+            <LocalServerProviderButtons
+              provider={provider}
+              statusByProvider={oauthStatusByProvider}
+              disabled={isRunning}
+              onSelect={onProviderChange}
+            />
             <button
               type="button"
               onClick={() => hasOpenRouterKey && onProviderChange('openrouter')}
@@ -115,12 +126,12 @@ function AggregatorModelSelector({
                 }
               }}
               disabled={configuredOAuthProviders.length === 0}
-              className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
+              className={`provider-toggle-btn${isCloudSubscriptionProvider(provider) ? ' active-or-orange' : ''}`}
               title={configuredOAuthProviders.length === 0 ? 'Set up a cloud provider login or API key first' : 'Use a configured cloud provider'}
             >
               Cloud
             </button>
-            {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
+            {isCloudSubscriptionProvider(provider) && configuredOAuthProviders.length > 1 && (
               <select
                 value={provider}
                 onChange={(event) => onProviderChange(event.target.value)}
@@ -219,23 +230,26 @@ function AggregatorModelSelector({
         />
       )}
 
-      {/* LM Studio Fallback (only for cloud providers) */}
+      {/* Local fallback: an LM Studio or vLLM model (not for LM Studio roles) */}
       {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
         <div className="settings-row">
           <label className="label--muted">
-            LM Studio Fallback (optional)
+            Local Fallback (optional)
           </label>
           <select
             value={lmStudioFallbackId || ''}
             onChange={(e) => onFallbackChange(e.target.value || null)}
           >
-            <option value="">No fallback</option>
-            {lmStudioModels.map(model => (
-              <option key={model.id} value={model.id}>{model.id}</option>
-            ))}
+            <LocalFallbackOptions
+              lmStudioModels={lmStudioModels}
+              modelsFor={(providerId) => oauthModelsByProvider[providerId] || []}
+              provider={effectiveProvider}
+              modelId={modelId}
+              value={lmStudioFallbackId}
+            />
           </select>
           <small className="settings-hint" style={{ marginTop: '0.25rem' }}>
-            Used if cloud provider access fails or credits run out
+            An LM Studio or vLLM model used if this role's provider fails or credits run out
           </small>
         </div>
       )}
@@ -257,6 +271,7 @@ export default function AggregatorSettings({
   const [modelProviders, setModelProviders] = useState({}); // { modelId: { providers: [], endpoints: [] } }
   const [loading, setLoading] = useState(true);
   const [saveMessage, setSaveMessage] = useState('');
+  const submitterUsageId = useId();
   const [numSubmitters, setNumSubmitters] = useState(
     config.submitterConfigs?.length || 3
   );
@@ -1113,6 +1128,7 @@ export default function AggregatorSettings({
               </label>
               <select
                 aria-label="Number of Submitters"
+                aria-describedby={submitterUsageId}
                 value={numSubmitters}
                 onChange={(e) => handleNumSubmittersChange(e.target.value)}
               >
@@ -1120,6 +1136,11 @@ export default function AggregatorSettings({
                   <option key={count} value={count}>{count}</option>
                 ))}
               </select>
+              <UsageLevelBadge
+                id={submitterUsageId}
+                featureId="brainstorm.submitter_count"
+                context={{ count: numSubmitters }}
+              />
               {numSubmitters > 1 && (
                 <button
                   type="button"
@@ -1180,6 +1201,7 @@ export default function AggregatorSettings({
                       max="50000000"
                       step="1024"
                     />
+                    <TokenCountNote provider={cfg.provider} modelId={cfg.modelId} contextWindow={cfg.contextWindow} />
                   </div>
 
                   <div className="settings-row">
@@ -1194,26 +1216,25 @@ export default function AggregatorSettings({
                     />
                   </div>
 
-                  {developerModeEnabled && (
-                    <div className="settings-row settings-row--inline-checkbox">
-                      <label className="settings-checkbox-label settings-checkbox-label--supercharge">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(cfg.superchargeEnabled)}
-                          onChange={(e) => updateSubmitterConfig(cfg.submitterId, 'superchargeEnabled', e.target.checked)}
-                        />
-                        <HelpTooltip
-                          label="Learn about Supercharge"
-                          buttonContent="Supercharge"
-                          buttonClassName="help-tooltip-btn--text"
-                          popupClassName="help-tooltip-popup--fixed"
-                          useFixedPosition
-                        >
-                          {SUPERCHARGE_TOOLTIP}
-                        </HelpTooltip>
-                      </label>
-                    </div>
-                  )}
+                  <div className="settings-row settings-row--inline-checkbox">
+                    <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(cfg.superchargeEnabled)}
+                        onChange={(e) => updateSubmitterConfig(cfg.submitterId, 'superchargeEnabled', e.target.checked)}
+                      />
+                      <HelpTooltip
+                        label="Learn about Supercharge"
+                        buttonContent="Supercharge"
+                        buttonClassName="help-tooltip-btn--text"
+                        popupClassName="help-tooltip-popup--fixed"
+                        useFixedPosition
+                      >
+                        {SUPERCHARGE_TOOLTIP}
+                      </HelpTooltip>
+                    </label>
+                    <UsageLevelBadge featureId="roles.supercharge" />
+                  </div>
               </div>
                 );
               })()
@@ -1279,6 +1300,11 @@ export default function AggregatorSettings({
                   max="50000000"
                   step="1024"
                 />
+                <TokenCountNote
+                  provider={validatorProvider}
+                  modelId={config.validatorModel}
+                  contextWindow={config.validatorContextSize}
+                />
               </div>
 
               <div className="settings-row">
@@ -1307,29 +1333,28 @@ export default function AggregatorSettings({
                 />
               </div>
 
-              {developerModeEnabled && (
-                <div className="settings-row settings-row--inline-checkbox">
-                  <label className="settings-checkbox-label settings-checkbox-label--supercharge">
-                    <input
-                      type="checkbox"
-                      checked={validatorSuperchargeEnabled}
-                      onChange={(e) => {
-                        setValidatorSuperchargeEnabled(e.target.checked);
-                        setConfig({ ...config, validatorSuperchargeEnabled: e.target.checked });
-                      }}
-                    />
-                    <HelpTooltip
-                      label="Learn about Supercharge"
-                      buttonContent="Supercharge"
-                      buttonClassName="help-tooltip-btn--text"
-                      popupClassName="help-tooltip-popup--fixed"
-                      useFixedPosition
-                    >
-                      {SUPERCHARGE_TOOLTIP}
-                    </HelpTooltip>
-                  </label>
-                </div>
-              )}
+              <div className="settings-row settings-row--inline-checkbox">
+                <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+                  <input
+                    type="checkbox"
+                    checked={validatorSuperchargeEnabled}
+                    onChange={(e) => {
+                      setValidatorSuperchargeEnabled(e.target.checked);
+                      setConfig({ ...config, validatorSuperchargeEnabled: e.target.checked });
+                    }}
+                  />
+                  <HelpTooltip
+                    label="Learn about Supercharge"
+                    buttonContent="Supercharge"
+                    buttonClassName="help-tooltip-btn--text"
+                    popupClassName="help-tooltip-popup--fixed"
+                    useFixedPosition
+                  >
+                    {SUPERCHARGE_TOOLTIP}
+                  </HelpTooltip>
+                </label>
+                <UsageLevelBadge featureId="roles.supercharge" />
+              </div>
             </div>
           </div>
 
@@ -1419,6 +1444,11 @@ export default function AggregatorSettings({
                     max="50000000"
                     step="1024"
                   />
+                  <TokenCountNote
+                    provider={config.assistantProvider || validatorProvider}
+                    modelId={config.assistantModel || config.validatorModel || ''}
+                    contextWindow={config.assistantContextSize || config.validatorContextSize}
+                  />
                 </div>
                 <div className="settings-row">
                   <label>Max Output Tokens</label>
@@ -1431,26 +1461,25 @@ export default function AggregatorSettings({
                     step="1000"
                   />
                 </div>
-                {developerModeEnabled && (
-                  <div className="settings-row settings-row--inline-checkbox">
-                    <label className="settings-checkbox-label settings-checkbox-label--supercharge">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(config.assistantSuperchargeEnabled)}
-                        onChange={(e) => setConfig({ ...config, assistantSuperchargeEnabled: e.target.checked })}
-                      />
-                      <HelpTooltip
-                        label="Learn about Supercharge"
-                        buttonContent="Supercharge"
-                        buttonClassName="help-tooltip-btn--text"
-                        popupClassName="help-tooltip-popup--fixed"
-                        useFixedPosition
-                      >
-                        {SUPERCHARGE_TOOLTIP}
-                      </HelpTooltip>
-                    </label>
-                  </div>
-                )}
+                <div className="settings-row settings-row--inline-checkbox">
+                  <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(config.assistantSuperchargeEnabled)}
+                      onChange={(e) => setConfig({ ...config, assistantSuperchargeEnabled: e.target.checked })}
+                    />
+                    <HelpTooltip
+                      label="Learn about Supercharge"
+                      buttonContent="Supercharge"
+                      buttonClassName="help-tooltip-btn--text"
+                      popupClassName="help-tooltip-popup--fixed"
+                      useFixedPosition
+                    >
+                      {SUPERCHARGE_TOOLTIP}
+                    </HelpTooltip>
+                  </label>
+                  <UsageLevelBadge featureId="roles.supercharge" />
+                </div>
               </fieldset>
             </div>
           </div>

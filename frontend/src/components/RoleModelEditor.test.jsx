@@ -38,7 +38,6 @@ function renderEditor(overrides = {}) {
     hasOpenRouterKey: true,
     lmStudioEnabled: true,
     isRunning: false,
-    developerModeEnabled: false,
     ...overrides,
     onChange,
   };
@@ -82,6 +81,104 @@ test('provider toggles: OpenRouter needs a key and Cloud needs a configured prov
   expect(screen.getByRole('button', { name: 'LM Studio' })).toHaveClass('active-lm');
   fireEvent.click(screen.getByRole('button', { name: 'LM Studio' }));
   expect(onChange).not.toHaveBeenCalled();
+});
+
+test('vLLM has its own provider button beside LM Studio, separate from Cloud', () => {
+  const { onChange, unmount } = renderEditor({
+    config: { provider: 'lm_studio', modelId: 'lm-one', contextWindow: 8192, maxOutputTokens: 2000 },
+  });
+  const notSetUp = screen.getByRole('button', { name: 'vLLM' });
+  expect(notSetUp).toBeDisabled();
+  expect(notSetUp).toHaveAttribute('title', 'Add your vLLM server in Inference Connectivity first');
+  expect(screen.getByRole('button', { name: 'Cloud' })).toBeDisabled();
+  unmount();
+
+  const vllmModels = [{ id: 'Qwen/Qwen2.5', name: 'Qwen/Qwen2.5', context_length: 32768 }];
+  const statusByProvider = { vllm: { configured: true } };
+  renderEditor({
+    onChange,
+    config: { provider: 'lm_studio', modelId: 'lm-one', contextWindow: 8192, maxOutputTokens: 2000 },
+    cloudProviders: {
+      statusByProvider,
+      configuredProviders: getConfiguredCloudAccessProviders(statusByProvider),
+      modelsFor: (id) => (id === 'vllm' ? vllmModels : []),
+    },
+  });
+  const vllmButton = screen.getByRole('button', { name: 'vLLM' });
+  expect(vllmButton).toBeEnabled();
+  // A configured vLLM server does not enable or activate the Cloud button.
+  expect(screen.getByRole('button', { name: 'Cloud' })).toBeDisabled();
+  fireEvent.click(vllmButton);
+  expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({
+    provider: 'vllm',
+    modelId: '',
+    openrouterProvider: null,
+  }));
+});
+
+test('a vLLM role lists detected vLLM models with their context windows', () => {
+  const vllmModels = [{ id: 'Qwen/Qwen2.5', name: 'Qwen/Qwen2.5', context_length: 32768 }];
+  const statusByProvider = { vllm: { configured: true } };
+  const { container } = renderEditor({
+    config: { provider: 'vllm', modelId: '', contextWindow: 8192, maxOutputTokens: 2000 },
+    cloudProviders: {
+      statusByProvider,
+      configuredProviders: getConfiguredCloudAccessProviders(statusByProvider),
+      modelsFor: (id) => (id === 'vllm' ? vllmModels : []),
+    },
+  });
+  expect(screen.getByRole('button', { name: 'vLLM' })).toHaveClass('active-lm');
+  expect(screen.getByRole('button', { name: 'Cloud' })).not.toHaveClass('active-or-orange');
+  expect(screen.queryByTitle('Select cloud provider')).not.toBeInTheDocument();
+  expect(screen.getByRole('option', { name: 'Qwen/Qwen2.5 (33K)' })).toBeInTheDocument();
+  // No reasoning-effort control for a local server; the local fallback stays available.
+  expect(rowFor(container, 'Reasoning Effort')).toBeNull();
+  expect(screen.getByLabelText('Local Fallback')).toBeInTheDocument();
+});
+
+test('the local fallback lists LM Studio models and vLLM models tagged with their server', () => {
+  const vllmModels = [{ id: 'Qwen/Qwen2.5', context_length: 32768 }, { id: 'other/model' }];
+  const statusByProvider = { vllm: { configured: true } };
+  const cloudProviders = {
+    statusByProvider,
+    configuredProviders: getConfiguredCloudAccessProviders(statusByProvider),
+    modelsFor: (id) => (id === 'vllm' ? vllmModels : []),
+  };
+  const { container, onChange, unmount } = renderEditor({
+    config: { provider: 'openrouter', modelId: 'openrouter/alpha', lmStudioFallbackId: null, contextWindow: 8192, maxOutputTokens: 2000 },
+    cloudProviders,
+  });
+  const fallbackSelect = selectFor(container, 'Local Fallback');
+  expect(within(fallbackSelect).getAllByRole('option').map((option) => [option.value, option.textContent])).toEqual([
+    ['', 'No fallback'],
+    ['lm-one', 'lm-one'],
+    ['lm-two', 'lm-two'],
+    ['vllm::Qwen/Qwen2.5', 'vLLM: Qwen/Qwen2.5'],
+    ['vllm::other/model', 'vLLM: other/model'],
+  ]);
+  fireEvent.change(fallbackSelect, { target: { value: 'vllm::Qwen/Qwen2.5' } });
+  expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({
+    provider: 'openrouter',
+    lmStudioFallbackId: 'vllm::Qwen/Qwen2.5',
+  }));
+  unmount();
+
+  // A vLLM role never offers its own model as its fallback, and a saved vLLM fallback
+  // stays selected while that server's model list is unavailable.
+  const own = renderEditor({
+    config: { provider: 'vllm', modelId: 'Qwen/Qwen2.5', lmStudioFallbackId: 'vllm::other/model', contextWindow: 8192, maxOutputTokens: 2000 },
+    cloudProviders,
+  });
+  const ownValues = within(selectFor(own.container, 'Local Fallback')).getAllByRole('option').map((option) => option.value);
+  expect(ownValues).toEqual(['', 'lm-one', 'lm-two', 'vllm::other/model']);
+  own.unmount();
+
+  const offline = renderEditor({
+    config: { provider: 'openrouter', modelId: 'openrouter/alpha', lmStudioFallbackId: 'vllm::Qwen/Qwen2.5', contextWindow: 8192, maxOutputTokens: 2000 },
+  });
+  const offlineSelect = selectFor(offline.container, 'Local Fallback');
+  expect(offlineSelect).toHaveValue('vllm::Qwen/Qwen2.5');
+  expect(within(offlineSelect).getByRole('option', { name: 'vLLM: Qwen/Qwen2.5 (configured)' })).toBeInTheDocument();
 });
 
 test('provider toggles switch providers and clear the stale model', () => {
@@ -182,17 +279,17 @@ test('OpenRouter host and reasoning rows stay hidden until a model is chosen', (
   expect(rowFor(container, 'Reasoning Effort')).toBeNull();
 });
 
-test('LM Studio fallback row appears only for non-LM providers when LM Studio is enabled', () => {
+test('local fallback row appears only for non-LM providers when LM Studio is enabled', () => {
   const lmView = renderEditor({
     config: { provider: 'lm_studio', modelId: 'lm-one', contextWindow: 8192, maxOutputTokens: 2000 },
   });
-  expect(rowFor(lmView.container, 'LM Studio Fallback')).toBeNull();
+  expect(rowFor(lmView.container, 'Local Fallback')).toBeNull();
   lmView.unmount();
 
   const { container, onChange } = renderEditor({
     config: { provider: 'openrouter', modelId: 'openrouter/alpha', lmStudioFallbackId: null, contextWindow: 8192, maxOutputTokens: 2000 },
   });
-  const fallbackSelect = selectFor(container, 'LM Studio Fallback');
+  const fallbackSelect = selectFor(container, 'Local Fallback');
   expect(fallbackSelect).toHaveValue('');
   expect(within(fallbackSelect).getAllByRole('option').map((option) => option.value)).toEqual(['', 'lm-one', 'lm-two']);
   fireEvent.change(fallbackSelect, { target: { value: 'lm-two' } });
@@ -212,22 +309,18 @@ test('generic mode shows the OpenRouter-only hint, OpenRouter models, and no fal
   expect(screen.queryByRole('button', { name: 'Cloud' })).not.toBeInTheDocument();
   const modelSelect = selectFor(container, 'Model');
   expect(within(modelSelect).getAllByRole('option').map((option) => option.value)).toEqual(['', 'openrouter/alpha', 'openrouter/free']);
-  expect(rowFor(container, 'LM Studio Fallback')).toBeNull();
+  expect(rowFor(container, 'Local Fallback')).toBeNull();
 });
 
-test('Supercharge is developer-only and never rendered when showSupercharge is false', () => {
-  const hidden = renderEditor({ developerModeEnabled: false });
-  expect(screen.queryByRole('button', { name: 'Learn about Supercharge' })).not.toBeInTheDocument();
-  hidden.unmount();
-
-  const shown = renderEditor({ developerModeEnabled: true });
+test('Supercharge shows without developer mode and is never rendered when showSupercharge is false', () => {
+  const shown = renderEditor();
   const checkbox = shown.container.querySelector('.settings-checkbox-label--supercharge input[type="checkbox"]');
   expect(checkbox).not.toBeNull();
   fireEvent.click(checkbox);
   expect(shown.onChange).toHaveBeenLastCalledWith(expect.objectContaining({ superchargeEnabled: true }));
   shown.unmount();
 
-  const suppressed = renderEditor({ developerModeEnabled: true, showSupercharge: false });
+  const suppressed = renderEditor({ showSupercharge: false });
   expect(suppressed.container.querySelector('.settings-checkbox-label--supercharge')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Learn about Supercharge' })).not.toBeInTheDocument();
 });
@@ -251,7 +344,6 @@ test('context window and max output inputs report parsed integers', () => {
 test('running or disabled roles lock every control', () => {
   const running = renderEditor({
     isRunning: true,
-    developerModeEnabled: true,
     config: { provider: 'openrouter', modelId: 'openrouter/alpha', contextWindow: 8192, maxOutputTokens: 2000 },
   });
   const runningCard = running.container.querySelector('.submitter-config-section');
@@ -260,7 +352,7 @@ test('running or disabled roles lock every control', () => {
   expect(Array.from(runningCard.querySelectorAll('select, input')).every((node) => node.disabled)).toBe(true);
   running.unmount();
 
-  const disabled = renderEditor({ disabled: true, developerModeEnabled: true });
+  const disabled = renderEditor({ disabled: true });
   const disabledCard = disabled.container.querySelector('.submitter-config-section');
   expect(disabledCard).toHaveAttribute('aria-disabled', 'true');
   expect(disabledCard).not.toHaveClass('role-config-card--openrouter-orange');

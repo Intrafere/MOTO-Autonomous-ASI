@@ -5,14 +5,14 @@ import { buildCloudProvidersView } from '../../hooks/useCloudAccessProviders';
 
 const NO_CLOUD_PROVIDERS = buildCloudProvidersView({});
 
-function Harness({ model = 'primary', developerModeEnabled = false, isRunning = false, lmStudioEnabled = true }) {
+function Harness({ model = 'primary', isRunning = false, lmStudioEnabled = true }) {
   const [competition, setCompetition] = useState({ enabled: false, secondaries: [] });
   return <><ProofCompetitionSettings
     localConfig={{ high_param_provider: 'lm_studio', high_param_model: model,
       high_param_context_window: 64000, high_param_max_tokens: 8000, proof_competition: competition }}
     onChange={setCompetition} lmStudioModels={[{ id: 'primary' }, { id: 'changed' }]}
     openRouterModels={[]} cloudProviders={NO_CLOUD_PROVIDERS}
-    modelProviders={{}} lmStudioEnabled={lmStudioEnabled} isRunning={isRunning} developerModeEnabled={developerModeEnabled}
+    modelProviders={{}} lmStudioEnabled={lmStudioEnabled} isRunning={isRunning}
   /><output data-testid="state">{JSON.stringify(competition)}</output></>;
 }
 
@@ -35,8 +35,11 @@ test('opt-in reveals locked derived primary and ordered add/remove controls', ()
   const primary = screen.getByText('Primary proof model (mirrors Rigor & Proofs)').closest('.submitter-config-section');
   expect(within(primary).getAllByRole('spinbutton').every(input => input.disabled)).toBe(true);
   expect(screen.getByText('Secondary proof model 1')).toBeTruthy();
+  const competitionBadge = () => document.querySelector('[aria-label="Proof model competition"] .usage-level-badge');
+  expect(competitionBadge()).toHaveAttribute('data-usage-level', 'medium');
   fireEvent.click(screen.getByText('+ Add secondary proof model'));
   expect(screen.getByText('Secondary proof model 2')).toBeTruthy();
+  expect(competitionBadge()).toHaveAttribute('data-usage-level', 'high');
   fireEvent.click(screen.getByLabelText('Remove secondary proof model 1'));
   expect(screen.queryByText('Secondary proof model 2')).toBeNull();
   view.rerender(<Harness model="changed" />);
@@ -52,12 +55,13 @@ test('competition help explains fallback and hosted controls omit local provider
   expect(screen.getByText(/Each model gets up to five proof attempts/).textContent).toMatch(/private failure feedback/);
 });
 
-test('running locks competition and Supercharge remains developer-only', () => {
+test('running locks competition and Supercharge shows without developer mode', () => {
   const view = render(<Harness />);
   fireEvent.click(screen.getByLabelText('Duplicate role to compete against other AI(s)'));
-  expect(screen.queryByText('Supercharge')).toBeNull();
-  view.rerender(<Harness developerModeEnabled isRunning />);
   expect(screen.getAllByText('Supercharge')).toHaveLength(2);
+  view.rerender(<Harness isRunning />);
+  expect(screen.getAllByText('Supercharge')).toHaveLength(2);
+  expect(document.querySelectorAll('[data-usage-level="very_high"]')).toHaveLength(2);
   expect(screen.getByLabelText('Duplicate role to compete against other AI(s)').disabled).toBe(true);
   expect(screen.getByText('+ Add secondary proof model').disabled).toBe(true);
 });

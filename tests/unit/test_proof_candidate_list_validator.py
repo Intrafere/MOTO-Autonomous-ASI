@@ -9,6 +9,14 @@ from backend.autonomous.agents.proof_candidate_list_validator import (
 from backend.autonomous.prompts.proof_prompts import (
     build_proof_candidate_list_validation_prompt,
 )
+from backend.shared.model_error_utils import (
+    is_non_retryable_model_error,
+    is_transient_model_call_error,
+)
+from backend.shared.model_output_contract import (
+    ModelOutputContractError,
+    is_model_output_contract_error,
+)
 from backend.shared.models import ProofCandidate
 
 
@@ -234,6 +242,44 @@ class ProofCandidateListValidatorAsyncTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(generate.await_count, 2)
+
+    async def test_repair_exhaustion_is_a_typed_model_output_contract_error(self):
+        secret = "MODEL-AUTHORED-TEXT-SHOULD-NOT-ECHO"
+        bad = {
+            "results": [
+                {"theorem_id": candidate.theorem_id, "decision": secret, "feedback": "x"}
+                for candidate in self.candidates
+            ],
+            "feedback": "f",
+        }
+        generate = AsyncMock(side_effect=[self._response(bad), self._response(bad)])
+        with patch(
+            "backend.autonomous.agents.proof_candidate_list_validator."
+            "api_client_manager.generate_completion",
+            new=generate,
+        ):
+            with self.assertRaises(ModelOutputContractError) as raised:
+                await self.validator.validate(
+                    user_prompt="Solve.",
+                    source_type="paper",
+                    source_id="paper-1",
+                    source_title="Paper",
+                    candidates=self.candidates,
+                )
+
+        error = raised.exception
+        self.assertIsInstance(error, ProofCandidateListContractError)
+        self.assertTrue(is_model_output_contract_error(error))
+        self.assertEqual(error.role, self.validator.role_id)
+        self.assertEqual(error.stage, "invalid_value")
+        self.assertIn("results.0.decision", error.invalid_fields)
+        self.assertNotIn(secret, str(error))
+        self.assertIsInstance(error.__cause__, ProofCandidateListContractError)
+        # The repair prompt carries the typed error, never the model's text.
+        repair_prompt = generate.await_args_list[1].kwargs["messages"][-1]["content"]
+        self.assertNotIn(secret, repair_prompt)
+        self.assertFalse(is_non_retryable_model_error(error))
+        self.assertFalse(is_transient_model_call_error(error))
 
     async def test_provider_failure_propagates_without_repair(self):
         generate = AsyncMock(side_effect=RuntimeError("transport failed"))

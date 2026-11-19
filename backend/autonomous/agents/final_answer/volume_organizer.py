@@ -15,7 +15,7 @@ assessment. Full paper content is not needed to plan volume structure — that's
 high-level organizational decision based on what each paper covers.
 """
 import logging
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Tuple
 
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
@@ -23,8 +23,11 @@ from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
 )
-from backend.shared.json_parser import parse_json
-from backend.shared.response_extraction import extract_message_text
+from backend.shared.model_output_contract import (
+    ItemContractProblem,
+    ModelOutputContractError,
+    is_model_output_contract_error,
+)
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
 from backend.shared.models import (
@@ -39,11 +42,165 @@ from backend.autonomous.prompts.final_answer_prompts import (
     build_volume_validation_prompt
 )
 from backend.autonomous.memory.final_answer_memory import final_answer_memory
+from backend.autonomous.agents.output_contract import (
+    ContractFailurePacer,
+    json_object,
+    parse_with_contract_retry,
+    never_stop,
+    report_model_output_contract_failure,
+    require_bool,
+    require_choice,
+    require_text,
+    response_text,
+)
 
 logger = logging.getLogger(__name__)
 
 
+_ORGANIZATION_SHAPE = """{
+  "volume_title": "string",
+  "chapters": [
+    {
+      "chapter_type": "existing_paper | gap_paper | introduction | conclusion",
+      "paper_id": "string or null",
+      "title": "string",
+      "order": 1,
+      "description": "string"
+    }
+  ],
+  "outline_complete": true | false,
+  "reasoning": "string"
+}"""
+
+_VALIDATION_SHAPE = """{
+  "decision": "accept | reject",
+  "reasoning": "string"
+}"""
+
+_CHAPTER_TYPES = {"existing_paper", "introduction", "conclusion", "gap_paper"}
+
+
+def _chapter_problem(index: int, data: Dict[str, Any]) -> Optional[ItemContractProblem]:
+    """Return the contract problems of one model-authored chapter, if any."""
+    path = f"chapters[{index}]"
+    if not isinstance(data, dict):
+        return ItemContractProblem(item_path=path, detail="not a JSON object")
+    missing: List[str] = []
+    invalid: List[str] = []
+    for key in ("chapter_type", "title", "order"):
+        if data.get(key) is None:
+            missing.append(key)
+    if "chapter_type" not in missing and data.get("chapter_type") not in _CHAPTER_TYPES:
+        invalid.append("chapter_type")
+    title = data.get("title")
+    if "title" not in missing and (not isinstance(title, str) or not title.strip()):
+        invalid.append("title")
+    order = data.get("order")
+    if "order" not in missing and (type(order) is not int or order < 1):
+        invalid.append("order")
+    if data.get("status", "pending") not in {"pending", "writing", "complete"}:
+        invalid.append("status")
+    if not isinstance(data.get("description", ""), str):
+        invalid.append("description")
+    paper_id = data.get("paper_id")
+    if data.get("chapter_type") == "existing_paper" and (
+        not isinstance(paper_id, str) or not paper_id.strip()
+    ):
+        (missing if paper_id is None else invalid).append("paper_id")
+    if not missing and not invalid:
+        return None
+    return ItemContractProblem(
+        item_path=path,
+        missing_keys=tuple(missing),
+        invalid_fields=tuple(invalid),
+    )
+
+
+def _parse_organization(data: Any, *, role: str) -> VolumeOrganization:
+    data = json_object(data, role=role)
+    volume_title = require_text(data, "volume_title", role=role)
+    outline_complete = require_bool(data, "outline_complete", role=role)
+    reasoning = require_text(data, "reasoning", role=role)
+    chapter_items = data.get("chapters")
+    if chapter_items is None:
+        raise ModelOutputContractError(
+            "The response is missing a required field",
+            role=role,
+            stage="missing_key",
+            missing_keys=("chapters",),
+        )
+    if not isinstance(chapter_items, list) or not chapter_items:
+        raise ModelOutputContractError(
+            "A field must be a non-empty list of chapter objects",
+            role=role,
+            stage="invalid_value",
+            invalid_fields=("chapters",),
+        )
+    problems = [
+        problem
+        for index, item in enumerate(chapter_items)
+        if (problem := _chapter_problem(index, item)) is not None
+    ]
+    if problems:
+        raise ModelOutputContractError.from_item_problems(
+            role=role,
+            item_noun_plural="chapter entries",
+            total=len(chapter_items),
+            problems=problems,
+        )
+    chapters = [
+        VolumeChapter(
+            chapter_type=item["chapter_type"],
+            paper_id=item["paper_id"].strip() if isinstance(item.get("paper_id"), str) else None,
+            title=item["title"].strip(),
+            order=item["order"],
+            status=item.get("status", "pending"),
+            description=str(item.get("description", "")).strip(),
+        )
+        for item in chapter_items
+    ]
+    intro_count = sum(ch.chapter_type == "introduction" for ch in chapters)
+    conclusion_count = sum(ch.chapter_type == "conclusion" for ch in chapters)
+    if intro_count != 1 or conclusion_count != 1:
+        raise ModelOutputContractError(
+            "Volume organization requires exactly one introduction and one conclusion chapter",
+            role=role,
+            stage="invalid_value",
+            invalid_fields=("chapters",),
+        )
+    orders = [ch.order for ch in chapters]
+    if sorted(orders) != list(range(1, len(chapters) + 1)):
+        raise ModelOutputContractError(
+            "Volume chapter orders must be unique and contiguous from 1",
+            role=role,
+            stage="invalid_value",
+            invalid_fields=("order",),
+        )
+    ordered = sorted(chapters, key=lambda chapter: chapter.order)
+    if ordered[0].chapter_type != "introduction" or ordered[-1].chapter_type != "conclusion":
+        raise ModelOutputContractError(
+            "Volume organization must place the introduction first and the conclusion last",
+            role=role,
+            stage="invalid_value",
+            invalid_fields=("order",),
+        )
+    return VolumeOrganization(
+        volume_title=volume_title,
+        chapters=ordered,
+        outline_complete=outline_complete,
+        revision_reasoning=reasoning,
+    )
+
+
+def _parse_validation(data: Any, *, role: str) -> Tuple[str, str, Dict[str, Any]]:
+    data = json_object(data, role=role)
+    decision = require_choice(data, "decision", ("accept", "reject"), role=role)
+    return decision, require_text(data, "reasoning", role=role), data
+
+
 def _is_tier3_model_call_failure(exc: Exception) -> bool:
+    if is_model_output_contract_error(exc):
+        return False
     message = str(exc or "").lower()
     return (
         isinstance(exc, RetryableProviderError)
@@ -90,6 +247,8 @@ class VolumeOrganizer:
         self.task_sequence: int = 0
         self.role_id = "autonomous_volume_organizer"
         self.task_tracking_callback: Optional[Callable] = None
+        # Bound to the owning workflow's stop state so contract backoff ends on Stop.
+        self.should_stop: Callable[[], bool] = never_stop
     
     def set_task_tracking_callback(self, callback: Callable) -> None:
         """Set callback for task tracking (workflow panel integration)."""
@@ -137,32 +296,75 @@ class VolumeOrganizer:
         current_volume: Dict[str, Any] = None
         rejection_entries = tuple((await final_answer_memory.get_rejections("volume"))[-5:])
         validator_feedback = ""
-        
+        # An organization whose validator reply was unusable is validated again
+        # rather than regenerated or recorded as a rejection.
+        pending_organization: Optional[VolumeOrganization] = None
+        contract_pacer = ContractFailurePacer(self.should_stop)
+
         while iteration < self.MAX_ITERATIONS:
             iteration += 1
             logger.info(f"VolumeOrganizer: Iteration {iteration}/{self.MAX_ITERATIONS}")
-            
+
             # Generate or refine organization
-            organization = await self._generate_organization(
-                user_research_prompt,
-                certainty_assessment,
-                all_papers,
-                current_volume,
-                rejection_entries,
-                validator_feedback
-            )
-            
+            organization = pending_organization
+            pending_organization = None
+            if organization is None:
+                try:
+                    organization = await self._generate_organization(
+                        user_research_prompt,
+                        certainty_assessment,
+                        all_papers,
+                        current_volume,
+                        rejection_entries,
+                        validator_feedback
+                    )
+                except ModelOutputContractError as exc:
+                    await report_model_output_contract_failure(
+                        self.role_id,
+                        exc,
+                        model=self.submitter_model,
+                        outcome="No volume organization was proposed; organization runs again.",
+                    )
+                    await contract_pacer.after_failure(self.role_id)
+                    if self.should_stop():
+                        return None
+                    # A contract failure is operational: it never uses up one of the
+                    # fixed tries, so re-asks continue until a usable reply or Stop.
+                    iteration -= 1
+                    continue
+                contract_pacer.reset()
+
             if organization is None:
                 logger.error(f"VolumeOrganizer: Failed to generate organization (iteration {iteration})")
                 continue
-            
+
             # Validate organization
-            is_valid, feedback = await self._validate_organization(
-                user_research_prompt,
-                all_papers,
-                organization
-            )
-            
+            try:
+                is_valid, feedback = await self._validate_organization(
+                    user_research_prompt,
+                    all_papers,
+                    organization
+                )
+            except ModelOutputContractError as exc:
+                await report_model_output_contract_failure(
+                    f"{self.role_id}_validator",
+                    exc,
+                    model=self.validator_model,
+                    outcome=(
+                        "The volume organization was not judged and will be validated again; "
+                        "no rejection was recorded."
+                    ),
+                )
+                pending_organization = organization
+                await contract_pacer.after_failure(f"{self.role_id}_validator")
+                if self.should_stop():
+                    return None
+                # A contract failure is operational: it never uses up one of the
+                # fixed tries, so re-asks continue until a usable reply or Stop.
+                iteration -= 1
+                continue
+            contract_pacer.reset()
+
             if is_valid:
                 # Check if submitter marked outline as complete
                 if organization.outline_complete:
@@ -270,94 +472,22 @@ class VolumeOrganizer:
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
             
-            if not response:
-                return None
-            
-            # Extract content
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return None
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
-            volume_title = data.get("volume_title")
-            outline_complete = data.get("outline_complete")
-            reasoning = data.get("reasoning")
-            chapter_items = data.get("chapters")
-            if not isinstance(volume_title, str) or not volume_title.strip():
-                raise ValueError("Volume organization requires a non-empty volume_title")
-            if type(outline_complete) is not bool:
-                raise ValueError("Volume organization requires outline_complete to be a boolean")
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                raise ValueError("Volume organization requires non-empty reasoning")
-            if not isinstance(chapter_items, list) or not chapter_items:
-                raise ValueError("Volume organization requires a non-empty chapters list")
-
-            chapters = []
-            for index, ch in enumerate(chapter_items, start=1):
-                if not isinstance(ch, dict):
-                    raise ValueError(f"Volume chapter {index} must be an object")
-                chapter_type = ch.get("chapter_type")
-                title = ch.get("title")
-                order = ch.get("order")
-                status = ch.get("status", "pending")
-                description = ch.get("description", "")
-                paper_id = ch.get("paper_id")
-                if chapter_type not in {
-                    "existing_paper", "introduction", "conclusion", "gap_paper"
-                }:
-                    raise ValueError(f"Volume chapter {index} has invalid chapter_type")
-                if not isinstance(title, str) or not title.strip():
-                    raise ValueError(f"Volume chapter {index} requires a non-empty title")
-                if type(order) is not int or order < 1:
-                    raise ValueError(f"Volume chapter {index} requires a positive integer order")
-                if status not in {"pending", "writing", "complete"}:
-                    raise ValueError(f"Volume chapter {index} has invalid status")
-                if not isinstance(description, str):
-                    raise ValueError(f"Volume chapter {index} description must be a string")
-                if chapter_type == "existing_paper" and (
-                    not isinstance(paper_id, str) or not paper_id.strip()
-                ):
-                    raise ValueError(
-                        f"Existing-paper chapter {index} requires a non-empty paper_id"
-                    )
-                chapter = VolumeChapter(
-                    chapter_type=chapter_type,
-                    paper_id=paper_id.strip() if isinstance(paper_id, str) else None,
-                    title=title.strip(),
-                    order=order,
-                    status=status,
-                    description=description.strip(),
-                )
-                chapters.append(chapter)
-            
-            intro_count = sum(ch.chapter_type == "introduction" for ch in chapters)
-            conclusion_count = sum(ch.chapter_type == "conclusion" for ch in chapters)
-            if intro_count != 1 or conclusion_count != 1:
-                raise ValueError(
-                    "Volume organization requires exactly one introduction and one conclusion"
-                )
-            orders = [ch.order for ch in chapters]
-            if sorted(orders) != list(range(1, len(chapters) + 1)):
-                raise ValueError("Volume chapter orders must be unique and contiguous from 1")
-            ordered = sorted(chapters, key=lambda chapter: chapter.order)
-            if (
-                ordered[0].chapter_type != "introduction"
-                or ordered[-1].chapter_type != "conclusion"
-            ):
-                raise ValueError(
-                    "Volume organization must place introduction first and conclusion last"
-                )
-            
-            return VolumeOrganization(
-                volume_title=volume_title.strip(),
-                chapters=ordered,
-                outline_complete=outline_complete,
-                revision_reasoning=reasoning.strip(),
+            return await parse_with_contract_retry(
+                response_text(response),
+                lambda parsed: _parse_organization(parsed, role=self.role_id),
+                prompt=prompt,
+                task_id=task_id,
+                role_id=self.role_id,
+                model=self.submitter_model,
+                context_window=self.context_window,
+                max_output_tokens=self.max_output_tokens,
+                response_noun="volume organization",
+                response_shape=_ORGANIZATION_SHAPE,
             )
-            
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_tier3_model_call_failure(e):
@@ -411,6 +541,10 @@ class VolumeOrganizer:
         
         Returns:
             Tuple of (is_valid, feedback)
+
+        Raises:
+            ModelOutputContractError: the validator reply did not match its JSON
+                contract after one bounded retry (not a semantic rejection).
         """
         try:
             # Build validation prompt
@@ -452,33 +586,35 @@ class VolumeOrganizer:
             
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
-            
-            if not response:
-                return False, "Empty response from validator"
-            
-            # Extract content
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = extract_message_text(message)
-            if not content:
-                return False, "No content in validator response"
-            
-            # Parse JSON using central utility
-            data = parse_json(content)
+
+            validator_role = f"{self.role_id}_validator"
+            decision, reasoning, data = await parse_with_contract_retry(
+                response_text(response),
+                lambda parsed: _parse_validation(parsed, role=validator_role),
+                prompt=prompt,
+                task_id=task_id,
+                role_id=validator_role,
+                model=self.validator_model,
+                context_window=self.validator_context_window,
+                max_output_tokens=self.validator_max_output_tokens,
+                response_noun="validation decision",
+                response_shape=_VALIDATION_SHAPE,
+            )
             from backend.shared.solution_path.integration import enqueue_optional_update
-            decision = data.get("decision", "reject")
             await enqueue_optional_update(
                 data,
                 getattr(self, "solution_path_manager", None),
-                proposer_role=f"{self.role_id}_validator",
+                proposer_role=validator_role,
                 source_task_id=task_id,
                 source_phase="volume_organization_validation",
-                source_decision=decision if decision in {"accept", "reject"} else None,
+                source_decision=decision,
             )
-            reasoning = data.get("reasoning", "No reasoning provided")
-            
+
             return decision == "accept", reasoning
-            
+
         except FreeModelExhaustedError:
+            raise
+        except ModelOutputContractError:
             raise
         except Exception as e:
             if _is_tier3_model_call_failure(e):

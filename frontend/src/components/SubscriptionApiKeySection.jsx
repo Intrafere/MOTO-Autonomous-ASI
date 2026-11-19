@@ -63,11 +63,17 @@ export default function SubscriptionApiKeySection({
   const provider = getCloudAccessProvider(providerId);
   const apiKeyConfig = provider?.apiKey || {};
   const [apiKey, setApiKey] = useState('');
+  const [selectedRegion, setSelectedRegion] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [usage, setUsage] = useState({ loading: false, data: null, error: '' });
   const usageRequestRef = useRef(0);
   const configured = Boolean(status?.configured);
+  // Providers whose endpoint region the user chooses (Amazon Bedrock) report the choices.
+  const regionOptions = status?.region_selection === 'user' && Array.isArray(status.region_options)
+    ? status.region_options
+    : [];
+  const region = selectedRegion || status?.region || status?.default_region || regionOptions[0]?.id || '';
   const success = Boolean(
     !genericMode
     && configured
@@ -115,7 +121,9 @@ export default function SubscriptionApiKeySection({
     setMessage('');
     onError('');
     try {
-      const result = await cloudAccessAPI.setProviderApiKey(providerId, apiKey.trim());
+      const result = regionOptions.length > 0
+        ? await cloudAccessAPI.setProviderApiKey(providerId, apiKey.trim(), region)
+        : await cloudAccessAPI.setProviderApiKey(providerId, apiKey.trim());
       onStatusChange(result.status || { configured: true });
       const models = Array.isArray(result.models) ? result.models : [];
       let modelsReady = models.length > 0;
@@ -145,7 +153,15 @@ export default function SubscriptionApiKeySection({
     try {
       await cloudAccessAPI.clearProviderApiKey(providerId);
       setApiKey('');
-      onStatusChange({ configured: false });
+      // Keep the region choices so a new key can be saved without reopening the dialog.
+      onStatusChange(regionOptions.length > 0
+        ? {
+          configured: false,
+          region_selection: 'user',
+          region_options: regionOptions,
+          default_region: status?.default_region || region,
+        }
+        : { configured: false });
       onModelsStatusChange({ checking: false, count: null, error: '' });
       setMessage(`${label} API key cleared.`);
       if (onCloudAccessChanged) {
@@ -253,6 +269,32 @@ export default function SubscriptionApiKeySection({
           </small>
         )}
       </div>
+
+      {regionOptions.length > 0 && (
+        <div style={{ marginTop: '1rem' }}>
+          <label
+            htmlFor={`${apiKeyConfig.inputId}-region`}
+            style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}
+          >
+            {label} Region
+          </label>
+          <select
+            id={`${apiKeyConfig.inputId}-region`}
+            className="input-dark"
+            value={region}
+            onChange={(event) => setSelectedRegion(event.target.value)}
+            disabled={genericMode || loading}
+            style={{ fontSize: '0.95rem' }}
+          >
+            {regionOptions.map((option) => (
+              <option key={option.id} value={option.id}>{option.label}</option>
+            ))}
+          </select>
+          <small className="hint-text hint-text--dim">
+            The key is checked and used in this region. To change the region, save the key again.
+          </small>
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
         <button

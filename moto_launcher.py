@@ -124,11 +124,17 @@ def cprint(message: str, colour: str = RESET) -> None:
     print(f"{colour}{message}{RESET}")
 
 
+def launcher_is_noninteractive() -> bool:
+    """True when `moto launch` runs the launcher for an agent or script."""
+    return os.environ.get("MOTO_LAUNCHER_NONINTERACTIVE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def exit_with_pause(code: int = 0) -> None:
-    print()
-    cprint("Press Enter to close...", YELLOW)
-    with contextlib.suppress(EOFError):
-        input()
+    if not launcher_is_noninteractive():
+        print()
+        cprint("Press Enter to close...", YELLOW)
+        with contextlib.suppress(EOFError):
+            input()
     sys.exit(code)
 
 
@@ -696,6 +702,8 @@ def new_instance_id() -> str:
 
 
 def clear_console() -> None:
+    if launcher_is_noninteractive():
+        return
     os.system("cls" if sys.platform == "win32" else "clear")
 
 
@@ -1247,6 +1255,12 @@ def handle_available_updates(launcher_args: list[str]) -> bool:
             cprint(f"[Update] {result.install_state.reason}", YELLOW)
         write_update_notice(result)
         cprint("[Update] Update notice saved — the app will show an in-app banner.", YELLOW)
+        print()
+        return True
+
+    if launcher_is_noninteractive():
+        cprint("[Update] Non-interactive launch: leaving the update for the in-app banner.", YELLOW)
+        write_update_notice(result)
         print()
         return True
 
@@ -2517,7 +2531,7 @@ def check_lm_studio() -> None:
         cprint("NOTE: LM Studio is not detected on http://127.0.0.1:1234", CYAN)
         cprint("================================================================", CYAN)
         print()
-        cprint("This is OK! You have two options for AI models:", YELLOW)
+        cprint("This is OK! You have other options for AI models:", YELLOW)
         print()
         cprint("  Option 1: LM Studio (Local)", YELLOW)
         cprint("    - Download from: https://lmstudio.ai/", WHITE)
@@ -2526,6 +2540,10 @@ def check_lm_studio() -> None:
         cprint("  Option 2: OpenRouter (Cloud API)", YELLOW)
         cprint("    - Get an API key from: https://openrouter.ai/", WHITE)
         cprint("    - Configure in Settings tab after launch", WHITE)
+        print()
+        cprint("  Option 3: vLLM (Local server)", YELLOW)
+        cprint("    - Start vLLM on a port other than 8000 (see https://docs.vllm.ai/)", WHITE)
+        cprint("    - Add the server address under Inference Connectivity after launch", WHITE)
         print()
         cprint("The system will still start with isolated instance settings.", GREEN)
     print()
@@ -2815,9 +2833,36 @@ def start_services(
         except OSError as exc:
             cprint(f"Warning: could not persist last-instance record: {exc}", YELLOW)
 
-    cprint("Opening browser...", GREEN)
-    webbrowser.open(frontend_url)
+    if os.environ.get("MOTO_LAUNCHER_NO_BROWSER", "").strip().lower() in {"1", "true", "yes", "on"}:
+        cprint(f"Browser not opened (requested). The app is at {frontend_url}", GREEN)
+    else:
+        cprint("Opening browser...", GREEN)
+        webbrowser.open(frontend_url)
     return backend_service, frontend_service
+
+
+def ensure_cli_command() -> None:
+    """Make the `moto` terminal command available (best effort, never fatal).
+
+    Shims go in a MOTO-owned folder appended to the user PATH, so existing
+    commands keep priority; `moto` is skipped when another program already uses
+    that name, leaving the `moto-asi` alias. Opt out with MOTO_SKIP_CLI_INSTALL=1.
+    """
+    if os.environ.get("MOTO_SKIP_CLI_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    try:
+        from moto_cli import install_cli
+
+        result = install_cli()
+    except Exception as exc:  # The app works without the terminal command.
+        cprint(f"Note: could not set up the `moto` terminal command ({type(exc).__name__}).", YELLOW)
+        return
+    for command, reason in result.get("skipped", {}).items():
+        cprint(f"Terminal command '{command}' was not installed: {reason}. Use 'moto-asi' instead.", YELLOW)
+    if result.get("path_updated"):
+        cprint("Terminal commands installed: open a new terminal and type `moto --help`.", GREEN)
+    elif result.get("installed") and not result.get("on_path"):
+        cprint(f"Terminal commands are in {result['bin_dir']}; add that folder to PATH to use `moto`.", YELLOW)
 
 
 def print_success_footer(
@@ -2892,6 +2937,7 @@ def main() -> int:
         check_secure_keyring()
         verify_instance_ports(runtime)
         backend_service, frontend_service = start_services(runtime, env, frontend_url, backend_url, npm_cmd)
+        ensure_cli_command()
         print_success_footer(runtime, frontend_url, vulnerability_warning, backend_service, frontend_service)
         return 0
     except Exception as exc:

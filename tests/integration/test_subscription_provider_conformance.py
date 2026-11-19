@@ -38,12 +38,14 @@ from backend.shared.subscription_providers.errors import (
 from backend.shared.subscription_providers.metadata import (
     API_KEY_SUBSCRIPTION_PROVIDER_IDS,
     CLOUD_PROVIDERS,
+    REGISTRY_CLIENT_PROVIDER_IDS,
     get_cloud_provider,
 )
 from backend.shared.subscription_providers.registry import (
     get_api_key_subscription_client,
     provider_adapter_registry,
 )
+from tests.integration.claude_messages_support import bridged_messages_client, messages_response
 
 _CLIENT_MODULE = "backend.shared.subscription_providers.api_key_client"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -51,7 +53,10 @@ SECRET = "sk-conformance-secret-0123456789abcdef"
 
 
 def _success_response(client: SubscriptionApiKeyClient, text: str = "ok") -> httpx.Response:
-    if client.settings.wire_api == "chat_completions_stream":
+    wire_api = client.profile.wire_api_for_model(client.settings.default_model)
+    if wire_api == "anthropic_messages":
+        return messages_response(text)
+    if wire_api == "chat_completions_stream":
         chunks = [
             {"id": "c", "model": "m", "choices": [{"index": 0, "delta": {"content": text}}]},
             {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
@@ -100,6 +105,8 @@ class SubscriptionProviderConformanceTests(IsolatedAsyncioTestCase):
         client._persisted_region_checked = True
         client._region_id = client.settings.regions[0].region_id
         client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        # Providers on the Messages API wire reach the same handler through the SDK.
+        client.messages_http_client = bridged_messages_client(handler)
         return client
 
     def manager_for(self, provider_id: str, *, fallback: str | None = None) -> APIClientManager:
@@ -125,10 +132,12 @@ class SubscriptionProviderConformanceTests(IsolatedAsyncioTestCase):
         )
 
     def test_every_metadata_api_key_provider_is_registered_with_an_adapter(self) -> None:
+        # Local servers (vLLM) register an adapter too; tests/integration/test_vllm_provider.py covers them.
         self.assertEqual(
             set(provider_adapter_registry.provider_ids()),
-            set(API_KEY_SUBSCRIPTION_PROVIDER_IDS),
+            set(REGISTRY_CLIENT_PROVIDER_IDS),
         )
+        self.assertLessEqual(set(API_KEY_SUBSCRIPTION_PROVIDER_IDS), set(REGISTRY_CLIENT_PROVIDER_IDS))
 
     def test_frontend_registry_mirrors_backend_metadata(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "utils" / "oauthProviders.js").read_text(encoding="utf-8")

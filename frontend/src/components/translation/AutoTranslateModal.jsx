@@ -3,6 +3,7 @@ import { translationAPI } from '../../services/api';
 import useModalDialogFocus from '../../hooks/useModalDialogFocus';
 import { AUTO_TRANSLATE_NAME, ORIGINAL_LANGUAGE, useAutoTranslate } from '../../hooks/useAutoTranslate';
 import TranslationHelp from './TranslationHelp';
+import UsageLevelBadge from '../UsageLevelBadge';
 import TranslationLanguagePicker from './TranslationLanguagePicker';
 import TranslatorModelsPanel from './TranslatorModelsPanel';
 import TranslationProgressPanel from './TranslationProgressPanel';
@@ -392,6 +393,7 @@ function AutoTranslateDialog({
   const [controlBusy, setControlBusy] = useState(false);
   const [controlError, setControlError] = useState('');
   const batchHelpId = useId();
+  const translateUsageId = useId();
   const modesHelpId = useId();
   const defaultLanguageId = useId();
   const defaultLanguageHelpId = useId();
@@ -715,10 +717,16 @@ function AutoTranslateDialog({
               <input
                 type="checkbox"
                 checked={enabled}
+                aria-describedby={translateUsageId}
                 onChange={(event) => runControl(event.target.checked ? 'enable' : 'disable')}
               />
               Enable {AUTO_TRANSLATE_NAME}
             </label>
+            <UsageLevelBadge
+              id={translateUsageId}
+              featureId="translation.auto_translate"
+              context={{ batch: batchChecked, translateAll: Boolean(status?.translate_all?.requested) }}
+            />
             <div className="auto-translate-service__actions">
               {controlBusy && <span className="auto-translate-hint" role="status">Updating…</span>}
               {enabled && (
@@ -872,7 +880,6 @@ function AutoTranslateDialog({
                 savedSettings={savedSettings}
                 capabilities={capabilities}
                 credentialStatusRefreshToken={credentialStatusRefreshToken}
-                developerModeEnabled={developerModeEnabled}
                 onSaveRoles={saveRoles}
               />
             ))}

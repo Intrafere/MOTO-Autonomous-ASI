@@ -22,6 +22,7 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.rag_lock import rag_operation_lock
 from backend.shared.utils import count_tokens
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.master_proof_context import EPHEMERAL_RAG_SOURCE_PREFIX
 from backend.aggregator.ingestion.pipeline import ingestion_pipeline
 from backend.aggregator.core.chroma_cache import (
     abort_chroma_cache_rebuild,
@@ -802,12 +803,16 @@ class RAGManager:
         exclude_set = {source for source in (exclude_sources or []) if source}
         include_set = {source for source in (include_sources or []) if source}
         prefixes = tuple(prefix for prefix in (include_source_prefixes or []) if prefix)
-        if not exclude_set and not include_set and not prefixes:
-            return chunks
 
         scoped = []
         for chunk in chunks:
             if chunk.source_file in exclude_set:
+                continue
+            if (
+                chunk.source_file.startswith(EPHEMERAL_RAG_SOURCE_PREFIX)
+                and chunk.source_file not in include_set
+            ):
+                # One-off sources belong to a single retrieval that names them.
                 continue
             if not include_set and not prefixes:
                 scoped.append(chunk)

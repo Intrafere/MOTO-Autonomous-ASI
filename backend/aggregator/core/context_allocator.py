@@ -8,6 +8,7 @@ from pathlib import Path
 
 from backend.shared.config import rag_config
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.master_proof_context import note_context_part
 from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
 from backend.shared.utils import count_tokens
 from backend.aggregator.core.rag_manager import rag_manager
@@ -95,6 +96,18 @@ class ContextAllocator:
             context_window=context_window,
             output_reserve=output_reserve,
         )
+
+    @staticmethod
+    def _note_droppable_direct_parts(direct_parts: List[str]) -> None:
+        """Record direct brainstorm and file context for master proof expansion.
+
+        If a model later expands a master proof, this context can make room for it.
+        """
+        for part in direct_parts:
+            if part.startswith("[SHARED TRAINING]"):
+                note_context_part("brainstorms", part)
+            elif part.startswith("[FILE: "):
+                note_context_part("papers", part)
 
     @staticmethod
     def _remove_direct_part(direct_parts: List[str], content: str) -> bool:
@@ -372,6 +385,7 @@ class ContextAllocator:
             logger.debug("Submitter: All content fits in direct injection - no RAG needed")
         
         direct_content = "\n\n".join(direct_parts)
+        self._note_droppable_direct_parts(direct_parts)
         
         return {
             "direct": direct_content,
@@ -586,6 +600,7 @@ class ContextAllocator:
             logger.debug("Validator: All content fits in direct injection - no RAG needed")
         
         direct_content = "\n\n".join(direct_parts)
+        self._note_droppable_direct_parts(direct_parts)
         
         return {
             "direct": direct_content,
@@ -772,6 +787,7 @@ class ContextAllocator:
             logger.info("Cleanup: All content fits in direct injection - no RAG needed")
         
         direct_content = "\n\n".join(direct_parts)
+        self._note_droppable_direct_parts(direct_parts)
         
         return {
             "direct": direct_content,

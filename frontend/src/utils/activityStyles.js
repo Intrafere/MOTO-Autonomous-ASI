@@ -1,3 +1,7 @@
+import { getCloudAccessProvider } from './oauthProviders';
+
+const cloudAccessProviderLabelOrNull = (providerId) => getCloudAccessProvider(providerId)?.label || null;
+
 export const CONTEXT_OVERFLOW_STOP_MESSAGE = 'Research stopped. Some required source content must be injected directly to preserve answer quality, and it reached the maximum context size for the selected model. Start a new session with a condensed prompt, or choose a model with a higher context limit.';
 
 export const REJECTION_FEEDBACK_NOTICE = 'Validator feedback was provided for this rejection. Rejections are normal, and extended rejection streaks can be expected on difficult problems.';
@@ -23,8 +27,59 @@ export const formatHungConnectionMessage = (data = {}) => {
   );
 };
 
+const positiveTokenCount = (...values) => {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return Math.round(number);
+  }
+  return null;
+};
+
+const formatTokens = (count) => `${count.toLocaleString('en-US')} tokens`;
+
+// States how much context MOTO tried to send and how much the model allowed.
+// Proof payloads name the same counts prompt_tokens / max_input_tokens.
+export const formatContextOverflowTokenSummary = (data = {}, message = '') => {
+  const required = positiveTokenCount(data.required_tokens, data.prompt_tokens);
+  const available = positiveTokenCount(
+    data.available_tokens,
+    data.max_input_tokens,
+    data.available_input_tokens,
+  );
+  const contextWindow = positiveTokenCount(data.context_window);
+  const outputReserve = positiveTokenCount(data.output_reserve);
+  if (!required && !available && !contextWindow) return '';
+  const text = String(message || '');
+  const mentions = (count) => Boolean(count) && (
+    text.includes(count.toLocaleString('en-US')) || text.includes(String(count))
+  );
+  if (mentions(required) && (!available || mentions(available))) return '';
+
+  let summary = '';
+  if (required && available) {
+    summary = `Tried to inject about ${formatTokens(required)}, but only ${formatTokens(available)} of input fit`;
+  } else if (required) {
+    summary = `Tried to inject about ${formatTokens(required)}`;
+  } else if (available) {
+    summary = `Input budget was ${formatTokens(available)}`;
+  }
+  const limits = [];
+  if (contextWindow) limits.push(`model context window ${formatTokens(contextWindow)}`);
+  if (outputReserve) limits.push(`${formatTokens(outputReserve)} reserved for output`);
+  if (limits.length) {
+    summary = summary
+      ? `${summary} (${limits.join(', ')})`
+      : limits.join(', ').replace(/^model/, 'Model');
+  }
+  return summary ? `${summary}.` : '';
+};
+
 export const formatContextOverflowActivityMessage = (data = {}) => {
-  const message = data.message || CONTEXT_OVERFLOW_STOP_MESSAGE;
+  const baseMessage = data.message || CONTEXT_OVERFLOW_STOP_MESSAGE;
+  const tokenSummary = formatContextOverflowTokenSummary(data, baseMessage);
+  const message = tokenSummary
+    ? `${baseMessage}${/[.!?]$/.test(baseMessage.trim()) ? ' ' : '. '}${tokenSummary}`
+    : baseMessage;
   const configuredModel = data.configured_model || '';
   const configuredProvider = data.configured_provider || '';
   const effectiveModel = data.effective_model || data.model || '';
@@ -196,6 +251,41 @@ export const formatEmptyProofDiscoveryMessage = (prefix = 'Proof discovery') => 
   + 'so no Lean proof attempts were needed.'
 );
 
+const PROOF_STAGE_ERROR_PREFIX = 'Proof verification encountered an error:';
+
+// Older saved activity has no had_error flag; the stage's error text marks it.
+export const isProofCheckErrorEvent = (data = {}) => (
+  data.had_error === true
+  || String(data.message || '').trim().startsWith(PROOF_STAGE_ERROR_PREFIX)
+);
+
+/**
+ * Text for a proof_check_complete event. `label` is the round or check name,
+ * `detail` the caller's already-compacted message text. An errored check never
+ * reads as a completed one.
+ */
+export const formatProofCheckCompleteText = (data = {}, { label = 'Proof check', detail = '', includeTotal = false } = {}) => {
+  const verified = Number(data.verified_count || 0);
+  const novel = Number(data.novel_count || 0);
+  const hasTotal = includeTotal && data.total_candidates !== undefined && data.total_candidates !== null;
+  const counts = hasTotal
+    ? `${verified}/${data.total_candidates} candidates verified, ${novel} novel`
+    : `${verified} verified, ${novel} novel`;
+  const text = String(detail || '').trim();
+  if (isProofCheckErrorEvent(data)) {
+    const reason = text.startsWith(PROOF_STAGE_ERROR_PREFIX)
+      ? text.slice(PROOF_STAGE_ERROR_PREFIX.length).trim()
+      : text;
+    const kept = verified > 0 ? ` after ${counts}` : '';
+    return `${label} stopped on an error${kept}${reason ? `: ${reason}` : '.'}`;
+  }
+  return `${label} complete: ${counts}${text ? ` - ${text}` : ''}`;
+};
+
+const hasRoundCandidateCount = (value) => (
+  value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) >= 0
+);
+
 const parseProviderResetTime = (data = {}) => {
   const raw = data.cooldown_until ?? data.resets_at;
   const numeric = Number(raw);
@@ -215,6 +305,12 @@ export const shouldShowProviderUsageLimitPopup = (data = {}, nowMs = Date.now())
   isProviderUsageLimitActive(data, nowMs) && !data.fallback_model
 );
 
+// The backend names the provider serving a role's local fallback; older events
+// name none, which always meant LM Studio.
+const fallbackProviderName = (data = {}) => (
+  cloudAccessProviderLabelOrNull(data.fallback_provider) || 'LM Studio'
+);
+
 export const formatProviderUsageLimitActivityMessage = (
   data = {},
   fallbackProviderLabel = 'Provider',
@@ -228,7 +324,7 @@ export const formatProviderUsageLimitActivityMessage = (
   if (data.fallback_model) {
     return withRouteIdentity(
       `${providerLabel} usage limit reached for ${roleId}. `
-        + `Using LM Studio fallback (${data.fallback_model}) until reset.${resetText}`,
+        + `Using ${fallbackProviderName(data)} fallback (${data.fallback_model}) until reset.${resetText}`,
       data,
     );
   }
@@ -280,6 +376,107 @@ export const formatProofRunEventMessage = (event = '', data = {}) => (
   withRouteIdentity(formatProofRunEventBase(event, data), data)
 );
 
+// Says how many candidates in a proof list are master proofs, so a list of separate
+// master proofs is not mistaken for the steps of one.
+export const masterProofCountNote = (data = {}, wording = 'as') => {
+  const masters = Number(data.master_proof_count || 0);
+  if (!masters) return '';
+  const noun = masters === 1 ? 'master proof' : 'master proofs';
+  return wording === 'proposed'
+    ? `, ${masters} of them ${noun}`
+    : ` (${masters} as ${noun}, each built from several steps)`;
+};
+
+export const MASTER_PROOF_EVENT = 'master_proof_progress';
+
+// A model asked to view a verified master proof's hidden Lean code for its task.
+export const MASTER_PROOF_EXPANSION_EVENT = 'master_proof_context_expanded';
+
+export const formatMasterProofExpansionMessage = (data = {}) => withRouteIdentity(
+  data.message || 'Master proof expansion: the model viewed a verified master proof.',
+  data,
+);
+
+// A model reply MOTO accepted after a visible, guarded normalization (a
+// mislabeled field or stray characters in its JSON). The backend composes the
+// sentence; the fallback only covers payloads that arrive without one.
+export const MODEL_OUTPUT_NORMALIZED_EVENT = 'model_output_normalized';
+
+export const formatModelOutputNormalizedMessage = (data = {}) => {
+  const composed = String(data.message || data.activity_message || '').trim();
+  if (composed) return withRouteIdentity(composed, data);
+  const count = Number(data.repair_count) || (Array.isArray(data.repairs) ? data.repairs.length : 0);
+  const role = data.role_id || 'a role';
+  const subject = count === 1 ? 'normalization' : 'normalizations';
+  return withRouteIdentity(
+    `Accepted model output for ${role} after ${count > 0 ? `${count} ${subject}` : 'a normalization'}.`,
+    data,
+  );
+};
+
+// A role's reply still broke its JSON format after its bounded retry. It is
+// operational (no decision was recorded), never a semantic rejection or a
+// provider error; the backend says what happens next.
+export const MODEL_OUTPUT_CONTRACT_FAILED_EVENT = 'model_output_contract_failed';
+export const VALIDATOR_OUTPUT_CONTRACT_FAILED_EVENT = 'validator_output_contract_failed';
+export const MODEL_OUTPUT_CONTRACT_EVENTS = [
+  MODEL_OUTPUT_CONTRACT_FAILED_EVENT,
+  VALIDATOR_OUTPUT_CONTRACT_FAILED_EVENT,
+];
+
+export const formatModelOutputContractFailedMessage = (data = {}) => {
+  const composed = String(data.message || data.activity_message || '').trim();
+  if (composed) return withRouteIdentity(composed, data);
+  const role = data.role_id || 'A role';
+  return withRouteIdentity(
+    `${role} returned output that did not match its required JSON format; no decision was recorded.`,
+    data,
+  );
+};
+
+// An internal error stopped a batch validation before any decision. The
+// submissions were restored for one-at-a-time validation; it is not a model
+// output format problem, a provider error, or a rejection.
+export const VALIDATOR_BATCH_INTERRUPTED_EVENT = 'validator_batch_interrupted';
+
+export const formatValidatorBatchInterruptedMessage = (data = {}) => {
+  const composed = String(data.message || data.activity_message || '').trim();
+  if (composed) return withRouteIdentity(composed, data);
+  const errorType = data.error_type ? ` (${data.error_type})` : '';
+  return withRouteIdentity(
+    `Batch validation stopped on an internal error${errorType} before any decision; the submissions are validated again one at a time. This is not a rejection.`,
+    data,
+  );
+};
+
+// The proof framing gate either decided, or (unresolved) could not be read and
+// framing stays on for the run until the gate is asked again on resume.
+export const formatProofFramingDecidedMessage = (data = {}, runNoun = 'research run') => {
+  if (data.unresolved) {
+    return withRouteIdentity(
+      String(data.message || '').trim()
+        || `The proof framing decision could not be read; proof framing is on for this ${runNoun} and will be asked again on resume.`,
+      data,
+    );
+  }
+  return data.is_proof_amenable
+    ? `Submitter 1 (Main Submitter) chose proof framing for this ${runNoun}`
+    : `Submitter 1 (Main Submitter) did not choose proof framing for this ${runNoun}`;
+};
+
+const MASTER_PROOF_SUCCESS_KINDS = ['scaffold_accepted', 'sorry_closed', 'sorry_expanded', 'scaffold_changed', 'completed'];
+const MASTER_PROOF_REJECT_KINDS = ['attempt_failed', 'failed', 'scaffold_change_rejected', 'scaffold_change_unreviewed'];
+
+export const formatMasterProofMessage = (data = {}) => {
+  const label = data.proof_label ? `Proof ${data.proof_label}` : 'Proof';
+  const base = data.message || 'Master proof update.';
+  const feedback = data.validator_feedback ? ` Validator feedback: ${data.validator_feedback}` : '';
+  const detail = data.kind === 'attempt_failed' && data.error_summary
+    ? ` ${data.lean_was_run === false ? 'Lean 4 was not run. ' : ''}Feedback: ${data.error_summary}`
+    : '';
+  return `${label} - ${base}${feedback}${detail}`;
+};
+
 const formatProofRunEventBase = (event = '', data = {}) => {
   if (data.message) return data.message;
   const round = Number(data.proof_round_index || data.round_index || data.current_round || 0);
@@ -291,8 +488,17 @@ const formatProofRunEventBase = (event = '', data = {}) => {
     case 'proof_run_round_started':
       return `${roundLabel} started. Proof discovery will identify prompt-relevant candidates, Lean 4 will verify each attempted proof, and accepted proofs may trigger a non-blocking pruning review.`;
     case 'proof_run_round_complete': {
+      if (data.round_outcome === 'error') {
+        return `${roundLabel} stopped on an error before proof discovery finished, so no next round will start. The error checkpoint is kept.`;
+      }
+      if (data.round_outcome === 'fatal_stop') {
+        return `${roundLabel} stopped before finishing and the proof run is ending; see the stop reason in the activity.`;
+      }
+      const hasCandidateCount = hasRoundCandidateCount(data.candidate_count);
+      if (!hasCandidateCount && data.round_outcome !== 'completed') {
+        return `${roundLabel} ended without a usable proof discovery result.`;
+      }
       const candidateCount = Number(data.candidate_count);
-      const hasCandidateCount = Number.isFinite(candidateCount) && candidateCount >= 0;
       const noDiscoveryStreak = Number(data.consecutive_no_discovery_rounds || 0);
       const noDiscoveryLimit = Number(data.no_discovery_round_limit || 0);
       const streakText = (
@@ -366,7 +572,16 @@ const formatProofRunEventBase = (event = '', data = {}) => {
   }
 };
 
-export const getActivityIcon = (event = '') => {
+const isFailedProofRoundEvent = (event = '', data = {}) => (
+  (event === 'proof_check_complete' && isProofCheckErrorEvent(data))
+  || (
+    event === 'proof_run_round_complete'
+    && (data.round_outcome === 'error' || data.round_outcome === 'fatal_stop')
+  )
+);
+
+export const getActivityIcon = (event = '', item = {}) => {
+  if (isFailedProofRoundEvent(event, item?.data || item || {})) return '!';
   switch (event) {
     case 'solution_path_activated':
       return '◇';
@@ -429,6 +644,15 @@ export const getActivityIcon = (event = '') => {
       return '◎';
     case 'hung_connection_alert':
       return '⧗';
+    case MASTER_PROOF_EXPANSION_EVENT:
+      return '⤢';
+    case MODEL_OUTPUT_NORMALIZED_EVENT:
+      return 'ℹ';
+    case MODEL_OUTPUT_CONTRACT_FAILED_EVENT:
+    case VALIDATOR_OUTPUT_CONTRACT_FAILED_EVENT:
+    case VALIDATOR_BATCH_INTERRUPTED_EVENT:
+    case 'compiler_warning':
+      return '⚠';
     case 'oauth_provider_usage_limited':
       return '⏳';
     case 'provider_retry_cooldown':
@@ -546,6 +770,8 @@ export const getActivityIcon = (event = '') => {
       return 'Z';
     case 'proof_attempt_started':
       return '>';
+    case 'master_proof_progress':
+      return 'M';
     case 'proof_lean_accepted':
       return '>';
     case 'proof_novelty_assessment_started':
@@ -650,6 +876,17 @@ export const getActivityIcon = (event = '') => {
 
 export const getActivityClass = (event = '', item = {}) => {
   const data = item?.data || item || {};
+  if (event === MASTER_PROOF_EVENT) {
+    if (MASTER_PROOF_SUCCESS_KINDS.includes(data.kind)) return 'activity-success';
+    if (MASTER_PROOF_REJECT_KINDS.includes(data.kind)) return 'activity-reject';
+    return 'activity-info';
+  }
+  if (isFailedProofRoundEvent(event, data)) {
+    return 'activity-warning';
+  }
+  if (event === 'proof_framing_decided' && data.unresolved) {
+    return 'activity-warning';
+  }
   if (event === 'leanoj_path_validated') {
     return data.validated === false ? 'activity-reject' : 'activity-success';
   }
@@ -663,6 +900,18 @@ export const getActivityClass = (event = '', item = {}) => {
   }
 
   if (event === 'hung_connection_alert') {
+    return 'activity-warning';
+  }
+
+  if (event === MASTER_PROOF_EXPANSION_EVENT || event === MODEL_OUTPUT_NORMALIZED_EVENT) {
+    return 'activity-info';
+  }
+
+  if (
+    MODEL_OUTPUT_CONTRACT_EVENTS.includes(event)
+    || event === VALIDATOR_BATCH_INTERRUPTED_EVENT
+    || event === 'compiler_warning'
+  ) {
     return 'activity-warning';
   }
 

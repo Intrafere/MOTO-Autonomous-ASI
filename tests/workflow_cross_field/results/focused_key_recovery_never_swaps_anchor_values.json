@@ -1,0 +1,39 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "anchor_values_untouched"
+  ],
+  "faked_dependencies": [
+    "parsed objects supplied by the test"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "exact-edit anchor fields are never relabeled",
+  "real_components": [
+    "backend/shared/json_key_recovery.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_key_recovery_never_swaps_anchor_values",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:c5af21d5f8631e719f7f303220565da708c910a6d7add253fadec84d3865e952",
+  "test_file": "tests/unit/test_json_key_recovery.py",
+  "test_selectors": [
+    "tests/unit/test_json_key_recovery.py::test_swapped_anchor_values_are_never_relabeled"
+  ]
+}

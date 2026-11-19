@@ -323,3 +323,69 @@ async def get_token_stats() -> Dict[str, Any]:
     from backend.shared.token_tracker import token_tracker
     return {"success": True, **token_tracker.get_stats()}
 
+
+
+class TokenCalibrationWindow(BaseModel):
+    configured: int
+    effective: int
+
+
+class TokenCalibrationModel(BaseModel):
+    provider: str
+    model: str
+    state: Literal["measuring", "matches", "counts_more"]
+    samples: int
+    samples_required: int
+    ratio: float | None = None
+    applied: bool = False
+    context_windows: List[TokenCalibrationWindow] = Field(default_factory=list)
+    updated_at: float | None = None
+
+
+class TokenCalibrationResponse(BaseModel):
+    success: bool = True
+    adjust_enabled: bool = True
+    samples_required: int
+    minimum_sample_tokens: int
+    models: List[TokenCalibrationModel] = Field(default_factory=list)
+
+
+class TokenCalibrationSettingsRequest(BaseModel):
+    adjust_enabled: bool
+
+
+class TokenCalibrationResetRequest(BaseModel):
+    provider: str | None = Field(default=None, max_length=120)
+    model: str | None = Field(default=None, max_length=400)
+
+
+@router.get("/api/token-calibration", response_model=TokenCalibrationResponse)
+async def get_token_calibration() -> TokenCalibrationResponse:
+    """Return each model's measured token-count ratio from in-memory state."""
+    from backend.shared.token_calibration import token_calibration
+
+    return TokenCalibrationResponse(**token_calibration.snapshot())
+
+
+@router.post("/api/token-calibration/settings", response_model=TokenCalibrationResponse)
+async def update_token_calibration_settings(
+    request: TokenCalibrationSettingsRequest,
+) -> TokenCalibrationResponse:
+    """Turn the verified context-window adjustment on or off; measuring continues either way."""
+    from backend.shared.token_calibration import token_calibration
+
+    token_calibration.set_adjust_enabled(request.adjust_enabled)
+    await token_calibration.save()
+    return TokenCalibrationResponse(**token_calibration.snapshot())
+
+
+@router.post("/api/token-calibration/reset", response_model=TokenCalibrationResponse)
+async def reset_token_calibration(request: TokenCalibrationResetRequest) -> TokenCalibrationResponse:
+    """Discard one model's measurements, or all of them when no model is named."""
+    from backend.shared.token_calibration import token_calibration
+
+    if (request.provider is None) != (request.model is None):
+        raise HTTPException(status_code=400, detail="Name both provider and model, or neither.")
+    token_calibration.reset(request.provider, request.model)
+    await token_calibration.save()
+    return TokenCalibrationResponse(**token_calibration.snapshot())

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { cloudAccessAPI, openRouterAPI } from '../services/api';
 import {
   CLOUD_ACCESS_PROVIDERS,
+  CLOUD_SUBSCRIPTION_PROVIDERS,
   OPENAI_CODEX_PROVIDER,
   XAI_GROK_PROVIDER,
   chooseDefaultCloudAccessProvider,
@@ -86,7 +87,7 @@ export default function OpenRouterApiKeyModal({
   const configuredProvidersKey = configuredOAuthProviders.map((provider) => provider.id).join('|');
   // Hosted mode lists every provider (disabled) so the desktop-only notice stays visible.
   const selectableProviders = genericMode
-    ? CLOUD_ACCESS_PROVIDERS
+    ? CLOUD_SUBSCRIPTION_PROVIDERS
     : getAvailableCloudAccessProviders(capabilities);
   const codexOAuthSuccess = Boolean(
     !genericMode

@@ -1,0 +1,42 @@
+{
+  "adapter": "focused_production",
+  "artifact_type": "result",
+  "asserted_invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "blocked_dependencies": [],
+  "diagnostics": {},
+  "evidence": [
+    "model_output_normalized_broadcast",
+    "route_identity_prefix",
+    "unique_event_id"
+  ],
+  "faked_dependencies": [
+    "WebSocket broadcaster"
+  ],
+  "fields": [
+    "model_output_contract",
+    "websocket_api_contracts",
+    "prompt_context"
+  ],
+  "invariants": [
+    "model_output.normalizations_visible_and_guarded"
+  ],
+  "observed_transition": "an applied repair is broadcast as route-identified model_output_normalized activity",
+  "real_components": [
+    "backend/shared/model_output_contract.py",
+    "backend/shared/api_client_manager.py"
+  ],
+  "replay": [],
+  "result": "passed",
+  "runner": "pytest",
+  "scenario_id": "focused_normalization_activity_route_identified",
+  "schema_version": 2,
+  "seed": null,
+  "source": "real_adapter",
+  "source_identity": "workflow-source-v1:864c46d445eea80de5959c808b39b35483f75d342a1c230448ee586adb71419e",
+  "test_file": "tests/unit/test_model_output_contract.py",
+  "test_selectors": [
+    "tests/unit/test_model_output_contract.py::test_report_helper_broadcasts_route_identified_activity"
+  ]
+}

@@ -8,11 +8,13 @@ from typing import Any, Optional
 from backend.autonomous.prompts.proof_prompts import LEAN4_COMMON_PITFALLS
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.config import system_config
+from backend.shared.json_key_recovery import KeySpec, ObjectSchema, recover_key_labels
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import get_lean4_client, raise_for_lean_workspace_failure
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import is_non_retryable_model_error
+from backend.shared.model_output_contract import report_model_output_normalizations
 from backend.shared.models import LeanCompileReceipt, ProofAttemptFeedback
 from backend.shared.prompt_feedback_budget import project_lean_feedback
 
@@ -25,6 +27,30 @@ NOVEL_PROOF_TIERS = {
     "novel_variant",
     "novel_formulation",
 }
+# The Lean-proof submission variant, in the order of the Aggregator and LeanOJ
+# submitter prompt examples. ``submission_type`` and ``lean_code`` select the
+# variant and are never relabeled, so recovery cannot turn an idea into a proof.
+BRAINSTORM_LEAN_PROOF_SCHEMA = ObjectSchema(
+    name="brainstorm_lean_proof",
+    keys=(
+        KeySpec("submission_type", required=False, aliases=("type",)),
+        KeySpec(
+            "theorem_statement",
+            repairable=True,
+            aliases=("theorem_or_lemma", "submission"),
+        ),
+        KeySpec("formal_sketch", required=False, repairable=True, aliases=("proof_sketch",)),
+        KeySpec("expected_novelty_tier"),
+        KeySpec("prompt_relevance_rationale", repairable=True),
+        KeySpec("novelty_rationale", repairable=True),
+        KeySpec("why_not_standard_known_result", repairable=True),
+        KeySpec("theorem_name", required=False),
+        KeySpec("lean_code"),
+        KeySpec("reasoning", required=False, repairable=True),
+    ),
+)
+
+
 @dataclass
 class BrainstormProofGateResult:
     """Result of checking a proof candidate before normal brainstorm validation."""
@@ -266,7 +292,14 @@ async def verify_brainstorm_proof_candidate(
     allowed_baseline: str = "",
     max_attempts: int = 5,
 ) -> BrainstormProofGateResult:
-    """Lean-check a brainstorm proof candidate before it reaches the validator."""
+    """Lean-check a brainstorm proof candidate before it reaches the validator.
+
+    Callers route here only after ``is_lean_proof_submission`` chose the Lean
+    variant; one mislabeled free-text field may then be relabeled visibly.
+    """
+    key_repairs: list = []
+    if is_lean_proof_submission(parsed):
+        parsed, key_repairs = recover_key_labels(parsed, BRAINSTORM_LEAN_PROOF_SCHEMA)
     theorem_statement = str(parsed.get("theorem_statement") or parsed.get("theorem_or_lemma") or parsed.get("submission") or "").strip()
     formal_sketch = str(parsed.get("formal_sketch") or parsed.get("proof_sketch") or "").strip()
     theorem_name = str(parsed.get("theorem_name") or "").strip()
@@ -310,6 +343,9 @@ async def verify_brainstorm_proof_candidate(
             failure_feedback=metadata_rejection,
             attempts=[],
         )
+    # Relabels are published only once the gate's required-field checks
+    # accepted the reply and it is forwarded to Lean.
+    await report_model_output_normalizations(role_id, key_repairs, task_id=task_id_prefix)
 
     attempts: list[ProofAttemptFeedback] = []
     current = {

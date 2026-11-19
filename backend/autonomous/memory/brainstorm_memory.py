@@ -30,6 +30,28 @@ _FORMATTED_SUBMISSION_PATTERN = re.compile(
     r"={80}\s*\n"
     r".*?(?=^={80}\s*\nSUBMISSION #\d+\s*\||\Z)"
 )
+_PROOF_APPENDIX_HEADER_PATTERN = re.compile(
+    r"(?m)^=== PROOFS GENERATED FROM THIS BRAINSTORM(?: \(Lean 4 Verified\))? ===\s*$"
+)
+_SUBMISSION_HEADER_PATTERN = re.compile(r"(?m)^={80}\s*\nSUBMISSION #\d+\s*\|")
+
+
+def split_brainstorm_proof_appendix(content: str) -> tuple[str, str]:
+    """Return ``(accepted submissions text, proof appendix)`` for a brainstorm database.
+
+    The proof appendix belongs after every accepted submission. Submissions that
+    an earlier build wrote after the appendix are returned with the submissions
+    text, in front of it, so they are neither hidden with the proofs nor lost.
+    """
+    match = _PROOF_APPENDIX_HEADER_PATTERN.search(content or "")
+    if not match:
+        return content or "", ""
+    body, appendix = content[:match.start()], content[match.start():]
+    misplaced = _SUBMISSION_HEADER_PATTERN.search(appendix)
+    if misplaced:
+        body = f"{body.rstrip()}\n\n{appendix[misplaced.start():]}"
+        appendix = appendix[:misplaced.start()]
+    return body, appendix.strip()
 
 
 def project_brainstorm_content_for_model(
@@ -363,12 +385,9 @@ class BrainstormMemory:
             async with aiofiles.open(db_path, 'r', encoding='utf-8') as f:
                 content = await f.read()
             if strip_proofs and content:
-                match = re.search(
-                    r"(?m)^=== PROOFS GENERATED FROM THIS BRAINSTORM(?: \(Lean 4 Verified\))? ===\s*$",
-                    content,
-                )
-                if match and match.start() > 0:
-                    content = content[:match.start()].rstrip()
+                submissions_text, proof_appendix = split_brainstorm_proof_appendix(content)
+                if proof_appendix and submissions_text.strip():
+                    content = submissions_text.rstrip()
             return content
         except Exception as e:
             logger.error(
@@ -638,10 +657,14 @@ class BrainstormMemory:
                 return None
     
     async def _parse_submissions_unlocked(self, db_path: Path) -> List[Dict[str, Any]]:
-        """Parse submissions from a brainstorm database file. Caller must hold lock."""
+        """Parse submissions from a brainstorm database file. Caller must hold lock.
+
+        The proof appendix is not part of any submission and is left out.
+        """
         async with aiofiles.open(db_path, 'r', encoding='utf-8') as f:
             content = await f.read()
-        
+        content, _ = split_brainstorm_proof_appendix(content)
+
         if not content.strip():
             return []
         
@@ -668,7 +691,12 @@ class BrainstormMemory:
         return submissions
     
     async def _write_submissions_unlocked(self, db_path: Path, submissions: List[Dict[str, Any]]) -> None:
-        """Write submissions back to a brainstorm database file. Caller must hold lock."""
+        """Write submissions back to a brainstorm database file. Caller must hold lock.
+
+        The file's proof appendix is kept unchanged after the submissions.
+        """
+        async with aiofiles.open(db_path, 'r', encoding='utf-8') as f:
+            _, proof_appendix = split_brainstorm_proof_appendix(await f.read())
         formatted_sections = []
         separator = '=' * 80
         
@@ -677,6 +705,12 @@ class BrainstormMemory:
             formatted_sections.append(section)
         
         full_content = '\n\n'.join(formatted_sections)
+        if proof_appendix:
+            full_content = (
+                f"{full_content.rstrip()}\n\n{proof_appendix}\n"
+                if full_content.strip()
+                else f"{proof_appendix}\n"
+            )
         await asyncio.to_thread(atomic_write_text, db_path, full_content)
     
     # ========================================================================

@@ -99,6 +99,94 @@
       "title": "Provider retry activity is missing, ambiguous, unsafe, or ephemeral"
     },
     {
+      "description": "A rejected start leaves a reusable template, a template keeps a credential, hosted mode writes CLI artifacts, a control file is published early or removed by another process, or a template saved by one start no longer replays into the next.",
+      "existing_scenarios": [
+        "cli_template_chain_exclusive_start_and_hosted_boundary",
+        "focused_cli_control_file_ready_and_owner_removed",
+        "generated_cli_start_template_chain_seed_29",
+        "generated_cli_start_template_chain_seed_7",
+        "real_conflicting_start_saves_no_cli_template",
+        "real_hosted_start_writes_no_cli_artifacts",
+        "real_start_template_replays_through_cli_into_next_start"
+      ],
+      "gap_score": 21,
+      "missing_isolated_artifacts": [
+        "real_route:cli_control.control_file_owner_lifecycle",
+        "focused_production:cli_control.hosted_writes_no_artifacts",
+        "focused_production:cli_control.start_template_credentials_stripped",
+        "focused_production:cli_control.start_template_only_after_committed_start",
+        "focused_production:cli_control.template_replays_into_valid_start"
+      ],
+      "priority": "critical",
+      "rank": 2,
+      "required_adapters": [
+        "model",
+        "real_route",
+        "focused_production"
+      ],
+      "required_fields": [
+        "cli_control_surface",
+        "runtime_exclusivity",
+        "workflow_filesystem_state",
+        "websocket_api_contracts"
+      ],
+      "risk_id": "risk.cli_control_surface_drift",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "cli_template_chain_exclusive_start_and_hosted_boundary",
+            "generated_cli_start_template_chain_seed_29",
+            "generated_cli_start_template_chain_seed_7"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_route",
+          "missing_invariants": [
+            "cli_control.control_file_owner_lifecycle"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_conflicting_start_saves_no_cli_template",
+            "real_hosted_start_writes_no_cli_artifacts",
+            "real_start_template_replays_through_cli_into_next_start"
+          ],
+          "status": "uncovered"
+        },
+        {
+          "adapter": "focused_production",
+          "missing_invariants": [
+            "cli_control.hosted_writes_no_artifacts",
+            "cli_control.start_template_credentials_stripped",
+            "cli_control.start_template_only_after_committed_start",
+            "cli_control.template_replays_into_valid_start"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "focused_cli_control_file_ready_and_owner_removed"
+          ],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "cli_control.start_template_only_after_committed_start",
+        "cli_control.start_template_credentials_stripped",
+        "cli_control.hosted_writes_no_artifacts",
+        "cli_control.control_file_owner_lifecycle",
+        "cli_control.template_replays_into_valid_start"
+      ],
+      "title": "Terminal/agent control drifts from the app's start, hosted, and credential rules"
+    },
+    {
       "description": "Hosted mode reaches proof settings or another desktop-only route or behavior.",
       "existing_scenarios": [
         "real_hosted_proof_settings_returns_desktop_unavailable"
@@ -110,7 +198,7 @@
         "real_route:api.hosted_desktop_only_routes_unavailable"
       ],
       "priority": "critical",
-      "rank": 2,
+      "rank": 3,
       "required_adapters": [
         "model",
         "real_route"
@@ -164,7 +252,7 @@
         "real_coordinator:runtime.parent_action_fences_child_outputs"
       ],
       "priority": "critical",
-      "rank": 3,
+      "rank": 4,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -222,7 +310,7 @@
         "real_coordinator:events.continuous_manual_overflow_terminal_after_drain"
       ],
       "priority": "critical",
-      "rank": 4,
+      "rank": 5,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -294,7 +382,7 @@
         "real_coordinator:provider.stop_resume_preserves_pause"
       ],
       "priority": "critical",
-      "rank": 5,
+      "rank": 6,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -360,7 +448,7 @@
         "real_coordinator:prompt.validator_excludes_assistant_memory"
       ],
       "priority": "high",
-      "rank": 6,
+      "rank": 7,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -418,7 +506,7 @@
         "real_coordinator:prompt.proof_source_context_required"
       ],
       "priority": "high",
-      "rank": 7,
+      "rank": 8,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -475,7 +563,7 @@
         "real_coordinator:state.pruned_papers_excluded_from_context"
       ],
       "priority": "high",
-      "rank": 8,
+      "rank": 9,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -523,7 +611,7 @@
         "real_coordinator:proof_runtime.no_smt_when_disabled"
       ],
       "priority": "critical",
-      "rank": 9,
+      "rank": 10,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -583,7 +671,7 @@
         "real_coordinator:outputs.at_least_one_output_enabled"
       ],
       "priority": "critical",
-      "rank": 10,
+      "rank": 11,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -639,7 +727,7 @@
         "model:assistant.non_blocking_retrieval"
       ],
       "priority": "medium",
-      "rank": 11,
+      "rank": 12,
       "required_adapters": [
         "model"
       ],
@@ -673,7 +761,7 @@
         "model:assistant.stagnant_pack_backoff_not_shutdown"
       ],
       "priority": "medium",
-      "rank": 12,
+      "rank": 13,
       "required_adapters": [
         "model"
       ],
@@ -709,7 +797,7 @@
         "real_coordinator:proof_loop.continuous_explicit_ownership"
       ],
       "priority": "medium",
-      "rank": 13,
+      "rank": 14,
       "required_adapters": [
         "model",
         "real_route",
@@ -771,7 +859,7 @@
         "real_coordinator:proof_pruning.artifacts_and_future_memory_preserved"
       ],
       "priority": "medium",
-      "rank": 14,
+      "rank": 15,
       "required_adapters": [
         "model",
         "focused_production",
@@ -833,7 +921,7 @@
         "real_coordinator:proof_pruning.commit_lifecycle_fenced"
       ],
       "priority": "medium",
-      "rank": 15,
+      "rank": 16,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -886,7 +974,7 @@
         "real_coordinator:proof_pruning.context_overflow_truthful"
       ],
       "priority": "medium",
-      "rank": 16,
+      "rank": 17,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -939,7 +1027,7 @@
         "real_coordinator:proof_pruning.no_prune_is_valid"
       ],
       "priority": "medium",
-      "rank": 17,
+      "rank": 18,
       "required_adapters": [
         "model",
         "focused_production",
@@ -999,7 +1087,7 @@
         "real_coordinator:proof_pruning.occurrence_scope_isolated"
       ],
       "priority": "medium",
-      "rank": 18,
+      "rank": 19,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -1052,7 +1140,7 @@
         "real_coordinator:proof_pruning.owning_run_context_excludes_pruned"
       ],
       "priority": "medium",
-      "rank": 19,
+      "rank": 20,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -1106,7 +1194,7 @@
         "real_coordinator:proof_pruning.review_non_blocking"
       ],
       "priority": "medium",
-      "rank": 20,
+      "rank": 21,
       "required_adapters": [
         "model",
         "focused_production",
@@ -1167,7 +1255,7 @@
         "real_coordinator:proof_pruning.semantic_distinct_review_preserves_unique_routes"
       ],
       "priority": "medium",
-      "rank": 21,
+      "rank": 22,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -1221,7 +1309,7 @@
         "real_coordinator:proof_pruning.validator_gates_automatic_mutation"
       ],
       "priority": "medium",
-      "rank": 22,
+      "rank": 23,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -1271,7 +1359,7 @@
         "model:proof_runtime.truncation_is_attempt_failure"
       ],
       "priority": "medium",
-      "rank": 23,
+      "rank": 24,
       "required_adapters": [
         "model"
       ],
@@ -1308,7 +1396,7 @@
         "model:runtime.child_tasks_count_as_active"
       ],
       "priority": "medium",
-      "rank": 24,
+      "rank": 25,
       "required_adapters": [
         "model",
         "real_route"
@@ -1356,7 +1444,7 @@
         "model:state.completed_brainstorm_no_replay_handoff"
       ],
       "priority": "medium",
-      "rank": 25,
+      "rank": 26,
       "required_adapters": [
         "model"
       ],
@@ -1393,7 +1481,7 @@
         "model:state.runtime_roots_are_active_roots"
       ],
       "priority": "medium",
-      "rank": 26,
+      "rank": 27,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -1439,7 +1527,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "high",
-      "rank": 27,
+      "rank": 28,
       "required_adapters": [
         "model"
       ],
@@ -1474,7 +1562,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 28,
+      "rank": 29,
       "required_adapters": [
         "model"
       ],
@@ -1511,7 +1599,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 29,
+      "rank": 30,
       "required_adapters": [
         "focused_production"
       ],
@@ -1554,7 +1642,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "high",
-      "rank": 30,
+      "rank": 31,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -1608,7 +1696,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "high",
-      "rank": 31,
+      "rank": 32,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -1659,7 +1747,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "high",
-      "rank": 32,
+      "rank": 33,
       "required_adapters": [
         "model"
       ],
@@ -1694,7 +1782,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 33,
+      "rank": 34,
       "required_adapters": [
         "model"
       ],
@@ -1731,7 +1819,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "medium",
-      "rank": 34,
+      "rank": 35,
       "required_adapters": [
         "model"
       ],
@@ -1771,7 +1859,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "medium",
-      "rank": 35,
+      "rank": 36,
       "required_adapters": [
         "model"
       ],
@@ -1810,7 +1898,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "medium",
-      "rank": 36,
+      "rank": 37,
       "required_adapters": [
         "model"
       ],
@@ -1849,7 +1937,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "medium",
-      "rank": 37,
+      "rank": 38,
       "required_adapters": [
         "model"
       ],
@@ -1887,7 +1975,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "medium",
-      "rank": 38,
+      "rank": 39,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -1932,8 +2020,11 @@
       "existing_scenarios": [
         "browser_autonomous_start_stop_preserves_single_ui_owner",
         "browser_mode_switching_preserves_in_memory_default_and_developer_gate",
+        "cli_template_chain_exclusive_start_and_hosted_boundary",
         "generated_autonomous_paper_checkpoint_seed_29",
         "generated_autonomous_paper_checkpoint_seed_7",
+        "generated_cli_start_template_chain_seed_29",
+        "generated_cli_start_template_chain_seed_7",
         "generated_leanoj_durable_lifecycle_seed_29",
         "generated_leanoj_durable_lifecycle_seed_7",
         "generated_manual_aggregator_lifecycle_seed_29",
@@ -1949,7 +2040,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "medium",
-      "rank": 39,
+      "rank": 40,
       "required_adapters": [
         "model",
         "real_route",
@@ -1970,8 +2061,11 @@
             "passed"
           ],
           "scenario_ids": [
+            "cli_template_chain_exclusive_start_and_hosted_boundary",
             "generated_autonomous_paper_checkpoint_seed_29",
             "generated_autonomous_paper_checkpoint_seed_7",
+            "generated_cli_start_template_chain_seed_29",
+            "generated_cli_start_template_chain_seed_7",
             "generated_leanoj_durable_lifecycle_seed_29",
             "generated_leanoj_durable_lifecycle_seed_7",
             "generated_manual_aggregator_lifecycle_seed_29",
@@ -2022,7 +2116,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 40,
+      "rank": 41,
       "required_adapters": [
         "model"
       ],
@@ -2050,6 +2144,99 @@
       "title": "LeanOJ child overrides parent control"
     },
     {
+      "description": "A broken model reply becomes a semantic rejection, provider wait, default decision, or vague error that hides the bad item and field, or a repair touches protected, truncated, or value content, invents content, or happens without visible activity.",
+      "existing_scenarios": [
+        "focused_aggregator_batch_contract_failure_restored",
+        "focused_aggregator_batch_reasoning_relabel_reported",
+        "focused_aggregator_validator_contract_failure_requeued",
+        "focused_compiler_critique_contract_failure_not_provider_wait",
+        "focused_compiler_validator_contract_failure_revalidates",
+        "focused_completion_self_validation_fallback_labeled",
+        "focused_contract_errors_never_provider_classified",
+        "focused_identification_normalization_published_without_retry",
+        "focused_key_recovery_never_swaps_anchor_values",
+        "focused_key_recovery_protected_keys_never_repairable",
+        "focused_key_recovery_relabels_observed_misspellings",
+        "focused_normalization_activity_rendered_once",
+        "focused_normalization_activity_route_identified",
+        "focused_normalization_activity_routed_in_frontend",
+        "focused_parser_drops_stray_key_characters_and_reports",
+        "focused_parser_never_repairs_truncated_output",
+        "focused_parser_never_repairs_value_positions",
+        "focused_proof_check_complete_reports_contract_stage",
+        "focused_proof_framing_gate_unresolved_defaults_on",
+        "focused_proof_identification_contract_error_names_item_and_field",
+        "focused_rigor_discovery_protected_decision_never_relabeled",
+        "focused_topic_validator_contract_failure_not_rejection",
+        "model_current_product_law_families"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 42,
+      "required_adapters": [
+        "model",
+        "focused_production"
+      ],
+      "required_fields": [
+        "model_output_contract",
+        "provider_pause_resume",
+        "websocket_api_contracts",
+        "prompt_context"
+      ],
+      "risk_id": "risk.model_output_contract_mislabeled",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "model_current_product_law_families"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "focused_production",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "focused_aggregator_batch_contract_failure_restored",
+            "focused_aggregator_batch_reasoning_relabel_reported",
+            "focused_aggregator_validator_contract_failure_requeued",
+            "focused_compiler_critique_contract_failure_not_provider_wait",
+            "focused_compiler_validator_contract_failure_revalidates",
+            "focused_completion_self_validation_fallback_labeled",
+            "focused_contract_errors_never_provider_classified",
+            "focused_identification_normalization_published_without_retry",
+            "focused_key_recovery_never_swaps_anchor_values",
+            "focused_key_recovery_protected_keys_never_repairable",
+            "focused_key_recovery_relabels_observed_misspellings",
+            "focused_normalization_activity_rendered_once",
+            "focused_normalization_activity_route_identified",
+            "focused_normalization_activity_routed_in_frontend",
+            "focused_parser_drops_stray_key_characters_and_reports",
+            "focused_parser_never_repairs_truncated_output",
+            "focused_parser_never_repairs_value_positions",
+            "focused_proof_check_complete_reports_contract_stage",
+            "focused_proof_framing_gate_unresolved_defaults_on",
+            "focused_proof_identification_contract_error_names_item_and_field",
+            "focused_rigor_discovery_protected_decision_never_relabeled",
+            "focused_topic_validator_contract_failure_not_rejection"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "model_output.contract_failure_not_semantic",
+        "model_output.normalizations_visible_and_guarded"
+      ],
+      "title": "Malformed model output is mislabeled as a decision or silently rewritten"
+    },
+    {
       "description": "A secondary formalizer starts early, after success, or shares attempt authority.",
       "existing_scenarios": [
         "model_current_product_law_families"
@@ -2057,7 +2244,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "high",
-      "rank": 41,
+      "rank": 43,
       "required_adapters": [
         "model"
       ],
@@ -2092,7 +2279,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "high",
-      "rank": 42,
+      "rank": 44,
       "required_adapters": [
         "model"
       ],
@@ -2127,7 +2314,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 43,
+      "rank": 45,
       "required_adapters": [
         "model"
       ],
@@ -2170,7 +2357,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 44,
+      "rank": 46,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -2228,7 +2415,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 45,
+      "rank": 47,
       "required_adapters": [
         "model",
         "real_coordinator"
@@ -2276,7 +2463,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 46,
+      "rank": 48,
       "required_adapters": [
         "model"
       ],
@@ -2311,7 +2498,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 47,
+      "rank": 49,
       "required_adapters": [
         "model"
       ],
@@ -2346,7 +2533,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "medium",
-      "rank": 48,
+      "rank": 50,
       "required_adapters": [
         "model"
       ],
@@ -2381,7 +2568,7 @@
       "gap_score": 0,
       "missing_isolated_artifacts": [],
       "priority": "critical",
-      "rank": 49,
+      "rank": 51,
       "required_adapters": [
         "model"
       ],

@@ -52,6 +52,11 @@ KNOWN_EXERCISE_TOKENS = frozenset(
         "provider_retry_secret_redacted",
         "provider_retry_reload_visible",
         "provider_error_route_identity",
+        "cli_template_saved_after_commit",
+        "cli_rejected_start_no_template",
+        "cli_template_replayed",
+        "cli_hosted_no_artifacts",
+        "cli_control_file_owner_removed",
     }
 )
 

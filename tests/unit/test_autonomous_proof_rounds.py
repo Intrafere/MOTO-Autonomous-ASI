@@ -673,29 +673,20 @@ class AutonomousProofFramingBoundaryTests(unittest.IsolatedAsyncioTestCase):
         coordinator._run_proof_framing_gate.assert_awaited_once_with()
         coordinator._topic_exploration_phase.assert_not_awaited()
 
-    async def test_gate_model_and_parse_failures_use_inactive_fallback_with_reason(self):
-        for fake_api, expected_reason in (
-            (_FakeAPIClientManager(error=RuntimeError("provider unavailable")), "provider unavailable"),
-            (
-                _FakeAPIClientManager(
-                    response={"choices": [{"message": {"content": "not valid json"}}]}
-                ),
-                "Proof framing gate failed:",
-            ),
-        ):
-            with self.subTest(expected_reason=expected_reason):
-                coordinator_module.research_metadata = _FakeResearchMetadata()
-                coordinator_module.api_client_manager = fake_api
-                coordinator = self._gate_coordinator()
+    async def test_gate_provider_failure_propagates_without_persisting_a_decision(self):
+        # Provider failures belong to the shared provider recovery path; the gate
+        # must not swallow them into an inactive framing decision. Contract
+        # failures are covered in test_autonomous_output_contracts.
+        coordinator_module.api_client_manager = _FakeAPIClientManager(
+            error=RuntimeError("provider unavailable")
+        )
+        coordinator = self._gate_coordinator()
 
-                await coordinator._run_proof_framing_gate()
+        with self.assertRaises(RuntimeError):
+            await coordinator._run_proof_framing_gate()
 
-                self.assertFalse(coordinator._proof_framing_active)
-                self.assertEqual(coordinator._proof_framing_context, "")
-                self.assertIn(expected_reason, coordinator._proof_framing_reasoning)
-                persisted = coordinator_module.research_metadata.proof_framing_states[-1]
-                self.assertFalse(persisted["active"])
-                self.assertEqual(persisted["reasoning"], coordinator._proof_framing_reasoning)
+        self.assertEqual(coordinator_module.research_metadata.proof_framing_states, [])
+        self.assertTrue(coordinator._proof_framing_gate_pending)
 
     async def test_disabled_proof_outputs_skip_gate_model_call(self):
         fake_api = _FakeAPIClientManager()

@@ -15,57 +15,58 @@ afterEach(() => {
 
 describe('release highlights', () => {
   it('remembers acknowledgement independently for each version', () => {
-    expect(hasSeenRelease('1.1.09')).toBe(false);
-    markReleaseSeen('1.1.09');
-    expect(hasSeenRelease('1.1.09')).toBe(true);
     expect(hasSeenRelease('1.1.10')).toBe(false);
+    markReleaseSeen('1.1.10');
+    expect(hasSeenRelease('1.1.10')).toBe(true);
+    expect(hasSeenRelease('1.1.11')).toBe(false);
   });
 
   it('shows readable highlights, a safe GitHub link, and dismiss controls', () => {
     const onClose = vi.fn();
-    render(<WhatsNewModal version="1.1.10" onClose={onClose} />);
+    render(<WhatsNewModal version="1.1.11" onClose={onClose} />);
     expect(screen.getByRole('dialog').getAttribute('aria-modal')).toBe('true');
-    expect(screen.getByRole('heading', { name: 'What’s New with MOTO v1.1.10?' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'What’s New with MOTO v1.1.11?' })).toBeTruthy();
     expect(screen.getByRole('link', { name: /Explore MOTO on GitHub/ }).getAttribute('href')).toBe(MOTO_GITHUB_URL);
     fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it('leads 1.1.10 with the translation feature and ends with the SyntheticLib announcement', () => {
-    render(<WhatsNewModal version="1.1.10" onClose={() => {}} />);
-    const headings = screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent);
-    expect(headings).toEqual(['New: Foreign Language Translation w/ Top-p', 'Research quality', 'Reliability']);
-    const feature = screen.getByRole('heading', { name: headings[0] }).closest('section');
+  it('leads 1.1.11 with master proofs, illustrates the scaffold accessibly, then the moto command and fixes', () => {
+    render(<WhatsNewModal version="1.1.11" onClose={() => {}} />);
+    const headings = screen.getAllByRole('heading', { level: 3 });
+    expect(headings.map((heading) => heading.textContent)).toEqual([
+      'New: Master Proofs',
+      'The moto command',
+      'More ways to run models',
+      'Supercharge for everyone',
+      'Token count checks',
+      'Usage indicators',
+      'Best free model',
+      'Fixes',
+    ]);
+    const headline = headings[0];
+    const feature = headline.closest('section');
     expect(feature.className).toContain('whats-new-section--feature');
-    expect(within(feature).getByText(/flawless, not just fluent/).tagName).toBe('STRONG');
-    expect(within(feature).getByText(/In academic research/)).toBeTruthy();
-    expect(within(feature).getByText(/In business/)).toBeTruthy();
-    expect(within(feature).getByRole('link', { name: 'Top-p Exploration' }).getAttribute('href'))
-      .toBe('https://intrafere.com/structured-brainstorming-validated-feedback/');
-    expect(screen.getByText('crash-safely').closest('li').textContent).toMatch(/^Papers, outlines/);
-    expect(screen.getByText(/runs out of memory/)).toBeTruthy();
-    expect(screen.queryByText(/is now third/)).toBeNull();
+    // The moto command is the secondary feature: no highlight and no illustration.
+    const secondary = headings[1].closest('section');
+    expect(secondary.className).not.toContain('whats-new-section--feature');
+    expect(within(secondary).queryByRole('figure')).toBeNull();
+    expect(within(secondary).getByText('moto-asi').tagName).toBe('STRONG');
+    expect(within(feature).getByText(/go after the whole theorem/).tagName).toBe('STRONG');
+    const figure = within(feature).getByRole('figure', { name: /same Lean 4 proof system/ });
+    expect(within(figure).getByText('Normal proof')).toBeTruthy();
+    expect(within(figure).getByText('Master proof')).toBeTruthy();
+    const steps = within(figure).getByRole('list', { name: 'Steps of the big theorem' });
+    expect(within(steps).getAllByRole('listitem')).toHaveLength(3);
+    // The same proof box appears once for the normal proof and once per step.
+    expect(within(steps).getAllByText('Lean 4 proof')).toHaveLength(3);
+    expect(within(figure).getAllByText('Lean 4 proof')).toHaveLength(4);
+    expect(within(figure).getAllByText('✓ Verified')).toHaveLength(2);
+    expect(document.getElementById('whats-new-summary').textContent).toMatch(/^Introducing Master Proofs/);
+    expect(screen.getAllByRole('figure')).toHaveLength(1);
     expect(screen.queryByText(/\*\*/)).toBeNull();
-    expect(screen.queryByText(/\]\(/)).toBeNull();
-    expect(screen.getByRole('dialog').lastElementChild.lastElementChild.textContent)
-      .toBe("Stay tuned for SyntheticLib's imminent launch!");
-  });
-
-  it('illustrates the Top-p translation loop accessibly inside the feature section', () => {
-    render(<WhatsNewModal version="1.1.10" onClose={() => {}} />);
-    const figure = screen.getByRole('figure', { name: /translator model and a separate validator model/ });
-    expect(figure.closest('section').className).toContain('whats-new-section--feature');
-    const loop = within(figure).getByRole('img', { name: /Top-p Exploration loop/ });
-    const markerRefs = [...loop.querySelectorAll('[marker-end]')].map((path) => path.getAttribute('marker-end'));
-    expect(markerRefs).toHaveLength(2);
-    for (const ref of markerRefs) {
-      const markerId = ref.match(/^url\(#([A-Za-z0-9_-]+)\)$/)[1];
-      expect(loop.querySelector(`marker[id="${markerId}"]`)).not.toBeNull();
-    }
-    const languages = within(within(figure).getByRole('list', { name: 'Example languages' })).getAllByRole('listitem');
-    expect(languages.map((item) => item.getAttribute('lang'))).toEqual(['zh', 'hi', 'es', 'ar', 'fr', 'en', null]);
-    expect(within(figure).getByText('العربية').getAttribute('dir')).toBe('rtl');
-    expect(within(figure).getByText(/Math and Lean stay exact/)).toBeTruthy();
+    expect(screen.getByText("Stay tuned for SyntheticLib's imminent launch!")).toBeTruthy();
+    expect(releaseNotes['1.1.10']).toBeUndefined();
   });
 
   it('renders a section intro and ignores an unknown graphic name', () => {
@@ -111,7 +112,7 @@ describe('release highlights', () => {
     document.body.appendChild(trigger);
     trigger.focus();
     const onClose = vi.fn();
-    const { unmount } = render(<WhatsNewModal version="1.1.10" onClose={onClose} />);
+    const { unmount } = render(<WhatsNewModal version="1.1.11" onClose={onClose} />);
     const close = screen.getByRole('button', { name: "Close What's New" });
     expect(document.activeElement).toBe(close);
     fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
@@ -128,7 +129,7 @@ describe('release highlights', () => {
     const alreadyInert = document.createElement('div');
     alreadyInert.inert = true;
     document.body.append(background, alreadyInert);
-    const { unmount } = render(<WhatsNewModal version="1.1.10" onClose={() => {}} />);
+    const { unmount } = render(<WhatsNewModal version="1.1.11" onClose={() => {}} />);
     expect(background.inert).toBe(true);
     background.focus();
     expect(document.activeElement).toBe(screen.getByRole('button', { name: "Close What's New" }));
@@ -148,7 +149,7 @@ describe('release highlights', () => {
   it('does not show stale highlights for an unknown version', () => {
     render(<WhatsNewModal version="9.0.0" onClose={() => {}} />);
     expect(screen.queryByText('Manage more with fewer clicks')).toBeNull();
-    expect(screen.queryByText("Stay tuned for SyntheticLib's imminent launch!")).toBeNull();
+    expect(screen.queryByText('New: Master Proofs')).toBeNull();
     expect(screen.getByText(/Visit the project on GitHub/)).toBeTruthy();
   });
 
